@@ -1,6 +1,7 @@
 """Phase 0 entrypoint: start the stream, land every frame, record every gap.
 
     python -m navanax.cli ingest            # run the consumer
+    python -m navanax.cli ingest --supervised   # ...under launchd (see docs/04 §8)
     python -m navanax.cli status            # ingestion health
     python -m navanax.cli verify            # re-verify landing-zone checksums
     python -m navanax.cli normalize         # one landing-zone -> store pass
@@ -53,6 +54,18 @@ def _config(root: Path) -> tuple[dict, list[str]]:
     return cfg, slugs
 
 
+class SingleInstanceError(RuntimeError):
+    """Another ingest process already holds the landing-zone lock.
+
+    A distinct type, not a bare RuntimeError. `cmd_ingest` used to catch
+    RuntimeError around the whole run, so ANY RuntimeError raised from deep in
+    the stream -- hours into a session -- was reported to the operator as
+    "another navanax ingest is already running" and told him to stop a process
+    that does not exist. The exit code was right (non-zero) and the message was
+    a lie, which is the worse half.
+    """
+
+
 @contextmanager
 def _single_instance(lock_path: Path):
     """Refuse to start a second ingest process against the same landing zone.
@@ -98,7 +111,7 @@ def _single_instance(lock_path: Path):
             else:
                 fh.seek(0)
                 holder = fh.read().strip() or "an unknown process"
-                raise RuntimeError(
+                raise SingleInstanceError(
                     f"another navanax ingest is already running against this "
                     f"landing zone ({holder}).\n"
                     f"  Two writers on one landing zone silently LOSE manifest "
@@ -147,12 +160,59 @@ def _install_shutdown_handlers(loop, task, consumer) -> None:
             pass  # Windows, or not the main thread: Ctrl-C still works
 
 
+# The exit-code contract `ingest` owes a supervisor (launchd KeepAlive, or any
+# other). Tested in tests/selftest.py; documented in docs/04_ENVIRONMENTS.md §8.
+#
+#   0  clean stop -- SIGTERM, SIGHUP or Ctrl-C. Final frame flushed.
+#   2  configuration: empty watchlist, or no usable OPENSEA_API_KEY in .env
+#   3  refused: the compressor failed its round-trip check on this machine
+#   4  refused: another ingest process holds this landing zone's lock
+#   5  fatal error during the run (e.g. the landing zone became unwritable)
+#
+# Every non-zero code means "did not record". Under KeepAlive launchd restarts
+# after ThrottleInterval regardless of which one it was, and the restart records
+# the downtime as a gap (StreamConsumer.record_downtime_gap, BUG-20260909-009),
+# so a restart loop is visible in the gap register rather than invisible.
+EXIT_OK = 0
+EXIT_CONFIG = 2
+EXIT_CODEC = 3
+EXIT_ALREADY_RUNNING = 4
+EXIT_FATAL = 5
+
+
+def _supervised_setup() -> None:
+    """Minimal adjustments for running under a supervisor rather than a Terminal.
+
+    Two things, both about the log file being readable:
+
+    1. Line buffering. stdout to a FILE is block-buffered by default, so the
+       log stays empty for minutes and `tail` on it shows nothing -- which
+       looks exactly like a job that never started.
+    2. A run banner. launchd appends to one log file across every restart. With
+       no boundary marker you cannot tell one 3-second crash loop from one
+       healthy 12-hour run, and the restart count is the number that matters.
+
+    There is no colour to strip: the CLI has never emitted any.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):  # pragma: no cover - non-TextIO stream
+            pass
+    print("=" * 70)
+    print(f"navanax ingest (supervised)  pid={os.getpid()}  "
+          f"started={datetime.now(timezone.utc).isoformat(timespec='seconds')}")
+    print("=" * 70)
+
+
 def cmd_ingest(args) -> int:
+    if getattr(args, "supervised", False):
+        _supervised_setup()
     root = Path(args.root)
     cfg, slugs = _config(root)
     if not slugs:
         print("watchlist is empty -- nothing to subscribe to", file=sys.stderr)
-        return 2
+        return EXIT_CONFIG
     # BUG-20260909-001: read .env, which is what every message tells the user to fill in.
     try:
         key = require("OPENSEA_API_KEY", path=root / ".env")
@@ -160,7 +220,7 @@ def cmd_ingest(args) -> int:
         print(f"{exc}\n\n  The stream is unmetered but still needs a key.\n"
               f"  Get one: https://docs.opensea.io/reference/api-keys",
               file=sys.stderr)
-        return 2
+        return EXIT_CONFIG
 
     run_id = new_run_id()
     lz = cfg["landing"]
@@ -172,7 +232,7 @@ def cmd_ingest(args) -> int:
         verify_codec_roundtrip(get_codec(lz.get("codec", "zstd"), lz.get("codec_level")))
     except Exception as exc:  # noqa: BLE001 - any failure here means do not ingest
         print(f"REFUSING TO INGEST\n\n{exc}", file=sys.stderr)
-        return 3
+        return EXIT_CODEC
 
     writer = LandingZoneWriter(
         root / lz["root"], run_id,
@@ -211,11 +271,28 @@ def cmd_ingest(args) -> int:
                 consumer.stop()
                 writer.close()
                 print(json.dumps(consumer.stats.as_dict(), indent=2))
-    except RuntimeError as exc:
+    except SingleInstanceError as exc:
         print(f"REFUSING TO INGEST\n\n{exc}", file=sys.stderr)
         writer.close()
-        return 4
-    return 0
+        return EXIT_ALREADY_RUNNING
+    except Exception as exc:  # noqa: BLE001 - a supervisor needs a code, not a traceback alone
+        # Reached when the run itself dies -- most plausibly LandingZoneWriteError,
+        # which stream.run() re-raises deliberately because reconnecting cannot
+        # fix a local disk. Print the traceback (the log file is the only place
+        # the operator will ever see it) AND return a code, so KeepAlive
+        # restarts and the next start records the downtime as a gap.
+        import traceback
+        print(f"FATAL: ingestion stopped -- {type(exc).__name__}: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        try:
+            writer.close()
+        except Exception as close_exc:  # noqa: BLE001 - never mask the original cause
+            # A close failure here is usually the SAME fault (disk, unmounted
+            # volume). Say both, and let the first one stand as the reason.
+            print(f"  (also: closing the landing-zone writer failed -- "
+                  f"{type(close_exc).__name__}: {close_exc})", file=sys.stderr)
+        return EXIT_FATAL
+    return EXIT_OK
 
 
 def cmd_status(args) -> int:
@@ -342,7 +419,12 @@ def main(argv=None) -> int:
     ap.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("ingest").set_defaults(fn=cmd_ingest)
+    i = sub.add_parser("ingest")
+    i.add_argument("--supervised", action="store_true",
+                   help="running under launchd or another supervisor: line-buffer the "
+                        "output so the log file is live, and print a run banner so one "
+                        "restart can be told from the next")
+    i.set_defaults(fn=cmd_ingest)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     v = sub.add_parser("verify")
     v.add_argument("--shallow", action="store_true",

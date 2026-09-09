@@ -430,9 +430,41 @@ surprisingly good result. The fixes came with 30 new assertions, including
 the zero-match filter, the retried 429, and a screener-vs-live-book
 agreement check on one store with cancelled, expired and filled orders.
 
+### Round 12 — the standing book (PR-2 / PR-4)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-049 | S1 | P0 | fixed | `bid_lifetimes` cross-produced bids against cancels — `n = 38,286` was a count of *pairs*, not of bids |
+| BUG-20260909-050 | S1 | P0 | fixed | The `dead` predicate ignored `order_revalidate` and `quantity`, and never matched a NULL-`valid_ts` terminator |
+| BUG-20260909-051 | S1 | P0 | fixed | Trait-offer criteria were parsed by nothing, so every trait offer was blanket-excluded under every filter |
+
+All three were found by **reading**, not by running: quant-research raised 049
+and 050 as T1 and T3, the data-engineer proposal raised 051, and the tech-lead
+fact-check confirmed each against the source before any code was written. None
+of them could have been found by running the suite, because the suite was green
+and the fixtures contained no duplicate terminator, no revalidate (1 frame in
+85,775), no untimed cancel and no quantity above 1. **Rarity is what made them
+invisible**, and rarity is not the same as harmlessness: a revalidate that is
+never seen is depth missing from the book, and an untimed cancel is a price on
+the screen that cannot be hit.
+
+The root fix is one relation. `order_lives` — one row per `order_hash`, with
+`t_place`, `t_term`, `exit_reason`, `quantity`, `placement_seen` — replaces the
+**four** different notions of "ended" that were live in `metrics.py`
+(`cancel_count` counted two event types, `bid_lifetimes` one, and the `dead`
+subquery listed three, in two copies). `standing_sql()` is now the only
+predicate, and the live book, the screener and the bid-lifetime panel all read
+it.
+
+Two numbers in this log are now known to be wrong and are kept for the record:
+**median bid life 9 s, n = 38,286** (Round 9) came from the defective estimator
+and is biased in both directions at once. When the panel is rebuilt on real
+data the median may move **either** way. That is the expected consequence of two
+known defects — not a discovery, and not a new bug.
+
 ### Still open
 
-**None.** All 48 logged bugs are fixed.
+**None.** All 51 logged bugs are fixed.
 
 ### The lesson
 

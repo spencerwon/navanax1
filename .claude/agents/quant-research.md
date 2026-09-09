@@ -2,6 +2,7 @@
 name: quant-research
 description: Defines metrics, builds statistical models (hedonic trait pricing, hierarchical shrinkage, survival, state-space), registers signal hypotheses, and designs backtests. Use for anything involving statistical judgment or market analysis. Never validates its own work.
 model: opus
+effort: high
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

@@ -28,6 +28,8 @@ python -m navanax.cli verify    # re-verify landing-zone checksums (S0a on misma
 python3 tests/selftest.py       # stdlib-only self-test, no dependencies needed
 ```
 
+**Running unattended (macOS):** double-click `autostart-install.command` and the recorder, dashboard and daily trait job start at login and restart themselves after a crash — see [`docs/04_ENVIRONMENTS.md` §8](docs/04_ENVIRONMENTS.md#8-running-unattended) for what it installs, where the logs go, the exit-code contract, and the sleep caveat launchd cannot fix.
+
 ## The six things that shape every decision here
 
 1. **Stream-first, REST-rationed.** The free tier allows **120 REST reads/hour**, shared account-wide — one every thirty seconds. (600 was an unsourced assumption repeated across seven documents until one live response falsified it: BUG-20260909-003. The 120 came from `x-ratelimit-limit` on a real reply, and even that arrived on a Cloudflare cache HIT, so it is a measurement with a caveat rather than ground truth.) The WebSocket stream is unmetered. So the stream is the primary path and REST is a budgeted resource behind a governor every call passes through. *Priority ordering between classes is currently emergent from reserve floors rather than a queue — BUG-20260909-016.*

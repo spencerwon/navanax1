@@ -38,8 +38,50 @@ One row per market event, structure only — what OpenSea said, when it said it,
 | `implied_ethusd` | `usd / eth` — the rate OpenSea used, kept so a second provider can be checked against it later (REQ-D-25) |
 | `price_basis` | **how** `price_eth` was derived — see §3.1 |
 | `expiration_at`, `quantity`, `tx_hash`, `payment_symbol` | lifecycle and settlement |
+| `criteria_n`, `criteria_numeric_n` | how many criteria this order bids on — see §3.2. `NULL` = not a criteria-bearing order; `0` on a `trait_offer` = we saw one and could not read its criteria |
 
 Frames that do not parse go to the `unparsed` table with the reason. Nothing is dropped; the raw bytes are still in the landing zone.
+
+### 3.2 `order_criteria` — what a trait offer bids on
+
+A `trait_offer` names the traits it will buy. Measured shape (FACTS 2026-09-09, 39 offers in 40 minutes): `trait_criteria: {trait_type, trait_name}` (the single form, often null), `trait_criteria_list: [{trait_type, trait_name}, …]` (an **AND** across entries — 16 of 39 offers had only this form), and `numeric_trait_criteria_list` (ranges).
+
+One row per criterion, keyed `(run, seq, idx)` — the `events` primary key plus position, because `order_hash` is nullable. A side table, not a JSON column: a blob cannot be joined against `traits(collection, trait_type, value, token_id)`, and that join is what every match needs. `kind` is `string` or `numeric`. Values are stored **verbatim and stripped, never case-folded** — the same rule `traits.py` applies, so a casing mismatch between OpenSea's `trait_name` and the metadata's `value` stays visible instead of silently matching nothing. `MetricEngine.criteria_coverage()` reports every criterion with no matching trait value, with its count, and alerts.
+
+Under a redundant stream (two connections, one event) the same offer arrives with two `(run, seq)` pairs and therefore **two sets of criteria rows**. The match still resolves correctly — it joins on `(run, seq)` — but any count *over* `order_criteria` doubles. Count over `events`, not over criteria rows.
+
+### 3.3 `order_lives` — the standing book, one row per order
+
+The relation that answers *"was this order live at time τ?"*, folded from `events` at the end of every `sync()` and rebuilt once, automatically, on a store an earlier version wrote. It is a **DERIVATION** (docs/06 §4.2): deterministic, no thresholds, no imputation.
+
+| column | meaning |
+|---|---|
+| `t_place` / `t_place_observed` | when the order was placed — market time and our time |
+| `t_term`, `exit_reason`, `exit_source` | when and how it ended; `exit_reason ∈ {cancelled, invalidated, filled, expired, censored, unknown}` |
+| `expiration_ts` | carried from the placement; the standing predicate honours it separately |
+| `quantity` | carried from the placement — a collection offer good for 5 is **five units of depth** |
+| `placement_seen` | `0` = an orphan: a termination whose placement we never saw |
+| `revalidated`, `terminations_seen` | a revalidate re-opened it; how many terminator rows named this hash |
+| `event_type`, `scope_kind`, `token_id`, `maker`, `price_eth/usd` | identity, from the placement |
+| `criteria_n`, `criteria_numeric_n`, `method_version` | criteria carried from the placement; which fold rules made this row |
+
+The rules, none of them optional:
+
+- **One life per `order_hash`.** Two cancel rows are one termination, terminated by the **first**. Before this, `bid_lifetimes` cross-produced them and its `n` was a count of bid × cancel *pairs* (BUG-049).
+- **`order_invalidate` followed by a later `order_revalidate` is not a termination.** The order re-opened (BUG-050).
+- **A terminator with `valid_ts IS NULL` is `unknown`** — excluded from the book *and counted*, never left standing forever (BUG-050).
+- **Expiry is inferred, never observed.** With no terminator seen and an expiration on the order, the life ends at `expiration_ts` with `exit_source='derived'`. **No row is ever written to `events`** — the market record only holds what OpenSea sent.
+- **A termination with no placement is an orphan.** Excluded from durations, counted as `orphan_rate`. `t_place` is never imputed.
+
+`metrics.standing_sql(alias, now_ts)` is the single predicate built on it, and the live book, the screener and bid lifetimes all use it. Before `order_lives` there were **three** different definitions of "ended" in `metrics.py` and a fourth in `cancel_count`.
+
+**A reader sees the last fold.** Only the normalizer writes here (docs/07 §1), and it refolds every touched order on every pass, so a read is at most one sync behind.
+
+### 3.4 Re-folding
+
+The criteria only exist in the raw frames, and the raw frames live in the **landing zone**, not here (docs/07 §1.2). So `_migrate` adds `criteria_n` / `criteria_numeric_n` to an existing store but cannot fill them — they stay `NULL`, which fails the `criteria_n > 0` guard, so a pre-migration trait offer matches nothing until a re-fold. That is the safe direction.
+
+`Normalizer.refold_criteria()` re-parses in place *if* the store holds raw frames. It does not, so the method **refuses and names the recipe** rather than silently doing nothing. The recipe is `Normalizer.reset_for_refold()` followed by `sync()`: it deletes `events`, `order_criteria`, `order_lives`, `unparsed` and `watermarks` — every one reconstructible — and then re-reads the landing zone. It does **not** touch the landing zone (append-only, irreplaceable, docs/07 §4) and does **not** touch `tokens` / `traits`, which came from metered REST reads and would cost ~97 of the 120/hour budget to refetch. `events` is `INSERT OR IGNORE` on `(run, seq)` and `order_criteria` is `INSERT OR REPLACE` on `(run, seq, idx)`, so the re-fold is idempotent even if interrupted.
 
 ### 3.1 The price rule, and why it exists
 
@@ -68,7 +110,9 @@ Metrics available now (all *observed* quantities — no fair value, no smoothing
 | `sale_price`, `volume`, `sales_count` | median / sum / count of `item_sold` |
 | `listing_count`, `bid_count`, `cancel_count`, `event_count` | counts |
 
-Non-series views: the **live book** (orders placed, not since cancelled/invalidated/filled, unexpired — lifecycle by `order_hash`), the **sales tape**, **makers** (who is generating the flow), **bid lifetimes** (placed → cancelled, same order; percentiles only above n = 30, REQ-F-19), and the **event mix**.
+Non-series views, all reading the one standing-book relation (§3.3): the **live book** (`standing_sql` at `now`, with **depth in units** — a quantity-5 offer is five), the **sales tape**, **makers** (who is generating the flow), **bid lifetimes** (one life per order, ended durations plus the censored, `unknown`-terminator and **orphan** counts; percentiles only above n = 30, REQ-F-19), and the **event mix**.
+
+Bid lifetimes still *counts* censoring rather than modelling it, so the percentiles are biased short; Kaplan–Meier with competing risks reads these same rows and is a later PR. The median may move in **either** direction from the old number (9 s), because the old estimator was biased short by dropped censoring and long by the cross-product join — a large change is the expected consequence of two known defects, not a discovery.
 
 `wash_filter` is always `raw` and the response says so: no wash-trade filter exists yet, and the page must not imply one.
 
@@ -86,13 +130,43 @@ Double-click **`traits.command`** once per collection; it reports pages, tokens,
 
 Values are stored **verbatim**: `"Blue"` and `"blue"` are two values until a human says otherwise. That is structure, not judgement.
 
-**Filters.** The sidebar lists every trait type with every value and its count. Selections are **AND across types, OR within a type**: `Background:Blue|Red;Eyes:Laser` means (Blue or Red) and Laser. The same filter (`traits=` on the API) applies to the price charts, the live book, the tape and the screener. Three kinds of event meet a filter: **token-level** events (listings, item bids, sales, cancels) must match every clause; **collection offers** carry no token and pass, because they are bids on every token; **trait offers** also carry no token but bid on criteria the store does not yet hold, so they are **excluded** under any filter rather than counted under one they may not match (BUG-045).
+**Filters.** The sidebar lists every trait type with every value and its count. Selections are **AND across types, OR within a type**: `Background:Blue|Red;Eyes:Laser` means (Blue or Red) and Laser. The same filter (`traits=` on the API) applies to the price charts, the live book, the tape and the screener. Three kinds of event meet a filter: **token-level** events (listings, item bids, sales, cancels) must match every clause; **collection offers** carry no token and pass, because they are bids on every token (their criteria set is empty, so it is trivially satisfied); **trait offers** carry no token either, and are matched on their stored criteria by the rule below.
 
-**A filtered spread has two different legs.** `immediacy_cost` under a trait filter is a *trait-filtered* lowest ask minus the *collection-wide* highest collection offer — the only standing bid those tokens actually have. The response carries a `legs` field naming this and the page prints it as a warning line under the chart. Whether that leg should instead refuse to compute is an open product decision for the Operator (see §5).
+**The trait-offer matching rule (replaces the BUG-045 blanket exclusion; BUG-051).** Let **C** be the offer's criteria — an AND, so it will buy any token holding *all* of them — and **F** the filter. `S(C)` is the offer's reach, `S(F)` the filter's tokens.
+
+> A trait offer counts as bid depth for F — verdict **COVERS** — iff `S(F) ⊆ S(C)`: the offer will buy **any** token the filter selects.
+
+Note the direction; the intuitive one is backwards. What makes an offer count is not that it is *confined* to the filter. Structurally the rule is:
+
+```
+criteria_n > 0  AND  criteria_numeric_n = 0  AND  every criterion in C is guaranteed by F
+```
+
+and a criterion `(t, v)` is *guaranteed* only when F has a clause on `t` whose sole permitted value is `v`. A filter of `Background:Blue|Red` guarantees nothing about Background, so an offer requiring Blue is **PARTIAL**, not COVERS.
+
+**`criteria_n > 0` is the whole safety of this rule and it is one line from being a disaster.** An unparsed trait offer has no `order_criteria` rows, which makes the `NOT EXISTS` in the match *vacuously true* — the offer would match **every filter and every token**, silently, plausibly, and in the direction that manufactures an edge. The guard is what stops it, and there is a named property test on it: *a trait offer with `criteria_n = 0` matches nothing*, checked against every shape of filter.
+
+Numeric criteria cannot be evaluated against the string `traits` table, so their verdict is **UNKNOWN** — and UNKNOWN is not TRUE. They are excluded and counted, exactly as `unparsed` works.
+
+Five verdicts, **never summed into one number**:
+
+| verdict | condition | treatment |
+|---|---|---|
+| **COVERS** | `S(F) ⊆ S(C)` | counts as bid depth for the filter |
+| **PARTIAL** | overlaps but does not cover | reported separately, **always with `\|S(F) ∩ S(C)\|` and `\|S(F)\|`** — never a bare count |
+| **DISJOINT** | no overlap | excluded, on evidence |
+| **UNKNOWN** | numeric criteria present | excluded and counted |
+| **UNPARSED** | `criteria_n = 0` | excluded and counted — the loud-failure marker |
+
+`MetricEngine.trait_offer_verdicts()` returns all five. Allocating a fraction of a PARTIAL offer's quantity as depth (say `qty × |S(F)∩S(C)| / |S(C)|`) models the offerer as indifferent among the tokens in reach — a **judgement**, so it belongs in ANALYSIS with its assumption declared, never in this layer (docs/06 §4).
+
+The structural rule is deliberately **conservative**: it decides COVERS from F and C alone, without consulting `traits`. An offer whose reach happens to contain `S(F)` for reasons the filter does not state is reported PARTIAL rather than COVERS. That errs toward under-counting depth, which is the safe direction.
+
+**A filtered spread has two different legs.** `immediacy_cost` under a trait filter is a *trait-filtered* lowest ask minus the *collection-wide* highest collection offer. Trait offers do **not** enter that leg even now that their criteria are stored: `collection_bid` is collection offers by definition, and a bid leg that maxes over item bids, COVERing trait offers and collection offers is a **different metric** and a later PR. The COVER rule changes the metrics whose event set already includes `trait_offer` — `bid_count` and `event_count`. The response carries a `legs` field naming all of this and the page prints it as a warning line under the chart. Whether that leg should instead refuse to compute is an open product decision for the Operator (see §5).
 
 **Holes, zeros and gaps.** Every series is returned on the **full bucket grid** of its range (BUG-044). A price bucket with no observation is `null` — a hole on the chart, never bridged. A count or volume bucket with no event while the recorder was listening is `0`: zero sales in an hour we watched is a fact. Any bucket overlapping an **ingestion gap** from the landing-zone manifest is `null` for every metric, counts included — we were not listening, so we do not know (REQ-F-15); the basis reports `gap_masked_buckets`. Grids over 20,000 buckets are refused with a message rather than thinned.
 
-**Screener.** Every token matching the filter with its traits, the **lowest standing ask**, the **highest standing item bid** (placed, not cancelled or invalidated or sold, not expired — the same lifecycle join as the live book) and its **last sale**. Sortable on every column — token, name, every trait type, and the three prices — with "no value" always at the bottom in either direction. Paged at 50. An unknown sort column falls back to `token_id`; sort is applied in Python, never interpolated into SQL.
+**Screener.** Every token matching the filter with its traits, the **lowest standing ask**, the **highest standing item bid** (`standing_sql` over `order_lives` — the same one predicate as the live book, §3.3) and its **last sale**. Sortable on every column — token, name, every trait type, and the three prices — with "no value" always at the bottom in either direction. Paged at 50. An unknown sort column falls back to `token_id`; sort is applied in Python, never interpolated into SQL.
 
 ## 4b. The page — the design rules
 
@@ -119,4 +193,4 @@ Set by the Operator on 2026-09-09; pinned by `test_ui_contract` so they cannot r
 
 ## 6. Files
 
-`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/rest.py` · `src/navanax/traits.py` · `src/navanax/ui/index.html` · `dashboard.command` · `traits.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`, `test_traits_pipeline`, `test_screener_sort_and_filter`, `test_trait_filtered_metrics`, `test_series_gap_masking`, `test_rest_client_accounting`, `test_ui_contract`) — fixtures are **real frames** from the 2026-09-09 capture.
+`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/rest.py` · `src/navanax/traits.py` · `src/navanax/ui/index.html` · `dashboard.command` · `traits.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`, `test_traits_pipeline`, `test_screener_sort_and_filter`, `test_trait_filtered_metrics`, `test_series_gap_masking`, `test_rest_client_accounting`, `test_ui_contract`, `test_order_lives_primitive`, `test_bid_lifetimes_censoring_and_orphans`, `test_order_criteria_parsing_and_migration`, `test_trait_offer_matching_rule`) — fixtures are **real frames** from the 2026-09-09 capture.

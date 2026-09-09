@@ -17,6 +17,15 @@ happened. No fair value, no smoothing, no wash filtering (wash_filter is
 always `raw` and the response says so). Those are assumptions and live in the
 layer above (docs/06 §4).
 
+"Is this order still live?" is asked in three places here -- the live book, the
+screener and the bid-lifetime panel -- and it is answered in exactly one:
+`standing_sql()`, over the `order_lives` relation the normalizer folds
+(docs/08 §3.3). Before that relation existed each of the three carried its own
+terminator list and none of them handled a revalidate, an untimed terminator or
+a duplicate cancel (BUG-049, BUG-050). A trait offer's criteria are matched by
+`criteria_cover_sql()` and the guard in its docstring is load-bearing
+(BUG-051).
+
 `immediacy_cost` (REQ-F-13a, methodology §3.2): lowest ask minus highest
 COLLECTION offer in the interval. Undefined -- returned as null, never
 substituted -- when either side is absent. "No bid at any price" is the most
@@ -240,6 +249,83 @@ def token_filter_sql(collection: str, traits: dict[str, list[str]], alias: str =
 
 
 # ---------------------------------------------------------------------------
+# trait offers under a filter -- the COVERS rule (dataeng §4.3)
+# ---------------------------------------------------------------------------
+def criteria_cover_sql(alias: str, traits: dict[str, list[str]]) -> tuple[str, list[Any]]:
+    """True iff the criteria-bearing order at `alias` COVERS the filter F.
+
+    C is the offer's criteria set, an AND: it bids on any token holding all of
+    them. F is the filter, OR within a trait type and AND across types.
+
+        COVERS  <=>  S(F) subset of S(C)  -- the offer will buy ANY token the
+                     filter selects, so it is bid depth for that filter.
+
+    Note the direction: what makes an offer count is not that it is confined to
+    the filter, it is that it will buy anything the filter picks. Structurally
+    that means every criterion (t, v) in C must be GUARANTEED by F -- F must
+    have a clause on `t` whose only permitted value is `v`. A filter of
+    `Background: Blue|Red` guarantees nothing about Background, so an offer
+    requiring Blue is PARTIAL, not COVERS.
+
+    **The guard is the whole safety of this rule.** An unparsed trait offer has
+    no `order_criteria` rows, which makes the NOT EXISTS vacuously true and the
+    offer would match every filter and every token -- silently, plausibly, and
+    in the direction that manufactures an edge (BUG-051). `criteria_n > 0` is
+    what stops it. Numeric criteria cannot be evaluated against the string
+    `traits` table, so their verdict is UNKNOWN, and UNKNOWN is not TRUE:
+    `criteria_numeric_n = 0` excludes them here and
+    `MetricEngine.trait_offer_verdicts` counts them.
+    """
+    pairs = [(t, list(dict.fromkeys(vs))[0]) for t, vs in traits.items() if len(set(vs)) == 1]
+    args: list[Any] = []
+    inner = ""
+    if pairs:
+        guard = " OR ".join("(c.trait_type = ? AND c.value = ?)" for _ in pairs)
+        for t, v in pairs:
+            args += [t, v]
+        inner = f" AND COALESCE({guard}, 0) = 0"
+    sql = (f"({alias}.criteria_n > 0 AND COALESCE({alias}.criteria_numeric_n, 0) = 0"
+           f" AND NOT EXISTS (SELECT 1 FROM order_criteria c"
+           f" WHERE c.run = {alias}.run AND c.seq = {alias}.seq AND c.kind = 'string'{inner}))")
+    return sql, args
+
+
+def criteria_covers(criteria: list[tuple[str, str]], traits: dict[str, list[str]]) -> bool:
+    """The same rule in Python, for the verdict report. `criteria` is [(type, value)]."""
+    if not criteria:
+        return False           # C = {} on a criteria-bearing order is the loud-failure marker
+    single = {t: list(set(vs))[0] for t, vs in traits.items() if len(set(vs)) == 1}
+    return all(single.get(t) == v for t, v in criteria)
+
+
+def standing_sql(alias: str, now_ts: float) -> tuple[str, list[Any]]:
+    """SQL predicate: the order named by `alias`.order_hash was STANDING at `now_ts`.
+
+    One definition, used by `live_book`, `screener` and `bid_lifetimes`. Before
+    `order_lives` there were three (metrics.py had a `dead` subquery in two
+    places and a third, different, terminator list in `cancel_count`), and none
+    of them handled a revalidate, a NULL-`valid_ts` terminator or a duplicate
+    cancel (BUG-050).
+
+        standing(h, t)  <=>  t_place <= t
+                             AND exit_reason <> 'unknown'
+                             AND (t_term IS NULL OR t_term > t)
+                             AND (expiration_ts IS NULL OR expiration_ts > t)
+
+    `unknown` is a life whose terminator we saw but cannot place in time. It is
+    excluded from the book AND counted, never silently standing forever.
+    """
+    return (f"""EXISTS (SELECT 1 FROM order_lives ol
+                        WHERE ol.order_hash = {alias}.order_hash
+                          AND ol.placement_seen = 1
+                          AND ol.t_place IS NOT NULL AND ol.t_place <= ?
+                          AND ol.exit_reason <> 'unknown'
+                          AND (ol.t_term IS NULL OR ol.t_term > ?)
+                          AND (ol.expiration_ts IS NULL OR ol.expiration_ts > ?))""",
+            [now_ts, now_ts, now_ts])
+
+
+# ---------------------------------------------------------------------------
 # the engine
 # ---------------------------------------------------------------------------
 class MetricEngine:
@@ -262,13 +348,20 @@ class MetricEngine:
         tf, targs = token_filter_sql(collection, traits or {})
         # Under a trait filter, three kinds of event exist:
         #   token-level (listing, item bid, sale, cancel...) -> must match every clause;
-        #   collection_offer (no token_id) -> a bid on EVERY token, so it passes;
-        #   trait_offer (no token_id) -> a bid on SOME trait we do not yet store
-        #     the criteria for, so it is EXCLUDED rather than counted under a
-        #     filter it may not match (BUG-044).
+        #   collection_offer (no token_id) -> a bid on EVERY token (C = {}), so it passes;
+        #   trait_offer (no token_id) -> passes iff its STORED criteria COVER the
+        #     filter (dataeng §4.3). Until 2026-09-09 the criteria were parsed by
+        #     nothing and every trait offer was excluded under every filter
+        #     (BUG-045); that blanket rule is now an evidence-based verdict, and
+        #     the offers it still excludes -- unparsed (criteria_n = 0) and
+        #     numeric-criteria -- are counted by trait_offer_verdicts (BUG-051).
         if tf and not (spec["types"] and set(spec["types"]) <= {"collection_offer"}):
             clauses = tf[len(" AND "):]                     # "A AND B AND C"
-            where.append(f"((e.token_id IS NULL AND e.event_type = 'collection_offer') OR ({clauses}))")
+            cover, cargs = criteria_cover_sql("e", traits or {})
+            where.append(f"((e.token_id IS NULL AND e.event_type = 'collection_offer')"
+                         f" OR (e.event_type = 'trait_offer' AND {cover})"
+                         f" OR ({clauses}))")
+            args.extend(cargs)
             args.extend(targs)
         sql = f"SELECT e.valid_ts, e.{col} FROM events e WHERE {' AND '.join(where)} ORDER BY e.valid_ts"
         groups: dict[float, list[float]] = {}
@@ -331,8 +424,13 @@ class MetricEngine:
                 # leg is the collection-wide offer, because a collection offer is
                 # the only standing bid those tokens have. Said out loud, every time.
                 legs = {"floor_ask": "trait-filtered: lowest ask on tokens matching the filter",
-                        "collection_bid": "collection-wide: collection offers carry no token and apply to every token; "
-                                          "trait offers are excluded (criteria not stored)"}
+                        "collection_bid": "collection-wide: collection offers carry no token and apply to every "
+                                          "token. Trait offers do NOT enter this leg -- `collection_bid` is "
+                                          "collection offers by definition, and a trait-offer bid leg is a "
+                                          "separate metric. Where a metric does include trait offers (bid_count, "
+                                          "event_count) they are now matched by the COVER rule on their stored "
+                                          "criteria; offers with no parsed criteria or with numeric criteria are "
+                                          "excluded and counted (MetricEngine.trait_offer_verdicts)"}
         else:
             g = self._bucketed(metric, collection, denomination, start, end, ispec, traits)
             empty = 0.0 if spec["agg"] in ("COUNT", "SUM") else None
@@ -389,30 +487,31 @@ class MetricEngine:
         now_dt = now or datetime.now(timezone.utc)
         now_iso = now_dt.isoformat().replace("+00:00", "Z")
         now_ts = now_dt.timestamp()
-        # INDEXED BY: the planner otherwise picks the (event_type, valid_ts)
-        # index for the correlated side and scans every cancellation per order.
-        dead = """NOT EXISTS (SELECT 1 FROM events d INDEXED BY ix_events_lifecycle
-                      WHERE d.order_hash = e.order_hash
-                      AND d.event_type IN ('item_cancelled','order_invalidate','item_sold')
-                      AND d.valid_ts >= e.valid_ts)"""
+        standing, sargs = standing_sql("e", now_ts)
         base = f"""SELECT e.valid_at, e.event_type, e.token_id, e.price_eth, e.price_usd,
-                          e.maker, e.expiration_at, e.order_hash
+                          e.maker, e.expiration_at, e.order_hash,
+                          (SELECT ol.quantity FROM order_lives ol WHERE ol.order_hash = e.order_hash)
                    FROM events e
                    WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL
-                     AND (e.expiration_ts IS NULL OR e.expiration_ts > ?) AND {dead}"""
+                     AND {standing}"""
         tf, targs = token_filter_sql(collection, traits or {})
 
         def rows(etype: str, order: str) -> list[dict[str, Any]]:
             extra = tf if etype != "collection_offer" else ""
             cur = self.conn.execute(base + extra + f" ORDER BY e.price_eth {order} LIMIT ?",
-                                    (collection, etype, now_ts, *(targs if extra else []), limit))
+                                    (collection, etype, *sargs, *(targs if extra else []), limit))
             keys = ("valid_at", "event_type", "token_id", "price_eth", "price_usd",
-                    "maker", "expiration_at", "order_hash")
+                    "maker", "expiration_at", "order_hash", "quantity")
             return [dict(zip(keys, r, strict=True)) for r in cur]
-        return {"as_of": now_iso,
+        book = {"as_of": now_iso,
                 "asks": rows("item_listed", "ASC"),
                 "item_bids": rows("item_received_bid", "DESC"),
                 "collection_offers": rows("collection_offer", "DESC")}
+        # Depth is units, not rows: a collection offer good for 5 is five units
+        # (quant T3b). Carried from the placement by order_lives.
+        book["depth"] = {k: sum(max(1, int(r["quantity"] or 1)) for r in v)
+                         for k, v in book.items() if isinstance(v, list)}
+        return book
 
     def tape(self, collection: str, limit: int = 50, traits: dict[str, list[str]] | None = None) -> list[dict[str, Any]]:
         tf, targs = token_filter_sql(collection, traits or {})
@@ -437,24 +536,135 @@ class MetricEngine:
         rows = [dict(zip(("maker", "events", "bids", "cancels", "listings"), r, strict=True)) for r in cur]
         return {"total_events_with_maker": total, "top": rows}
 
-    def bid_lifetimes(self, collection: str, start: float, end: float) -> dict[str, Any]:
-        """Seconds from bid placed to the same order being cancelled.
+    def bid_lifetimes(self, collection: str, start: float, end: float,
+                      kind: str = "item_received_bid") -> dict[str, Any]:
+        """How long a bid stands, read off `order_lives`: ONE life per order.
 
-        A direct observation of how long liquidity actually stands. Reported
-        with its count (REQ-F-19); percentiles only above a minimum n.
+        The old version joined `events` to `events` with no first-termination
+        restriction, so an order with two cancel rows produced a cross product
+        and `n` was a count of bid x cancel PAIRS, not of bids (BUG-049). It
+        also dropped every bid still standing at window end, which biases the
+        percentiles short in the opposite direction -- so the net sign of the
+        old error is unknown and the new median may move EITHER way. A large
+        change here is the expected consequence of two known defects, not a
+        discovery.
+
+        Reported with its counts (project rule 4): ended, still-standing
+        (censored), untimed terminators (unknown), and the orphan rate -- the
+        share of terminations in the window whose placement we never saw, which
+        is the direct estimator of how left-truncated this book still is
+        (quant metric 12). Percentiles above a minimum n only (REQ-F-19).
+
+        The estimator is still naive: censored lives are counted, not modelled.
+        Kaplan-Meier with competing risks is PR-8 and reads these same rows.
         """
-        cur = self.conn.execute(
-            """SELECT c.valid_ts - b.valid_ts
-               FROM events b JOIN events c INDEXED BY ix_events_lifecycle ON c.order_hash = b.order_hash
-               WHERE b.collection = ? AND b.event_type = 'item_received_bid'
-                 AND c.event_type = 'item_cancelled' AND c.valid_ts >= b.valid_ts
-                 AND b.valid_ts >= ? AND b.valid_ts < ?""", (collection, start, end))
-        d = sorted(x for (x,) in cur if x is not None)
+        ended: list[float] = []
+        censored = unknown = at_risk = 0
+        for t_place, t_term, reason in self.conn.execute(
+                """SELECT t_place, t_term, exit_reason FROM order_lives
+                   WHERE collection = ? AND event_type = ? AND placement_seen = 1
+                     AND t_place IS NOT NULL AND t_place >= ? AND t_place < ?""",
+                (collection, kind, start, end)):
+            at_risk += 1
+            if reason == "censored":
+                censored += 1
+            elif reason == "unknown":
+                unknown += 1
+            elif t_term is not None:
+                ended.append(t_term - t_place)
+        d = sorted(ended)
         n = len(d)
+
         def pct(p: float) -> float | None:
             return d[min(n - 1, int(p * n))] if n else None
+        terms, orphans = self.conn.execute(
+            """SELECT COUNT(*), SUM(placement_seen = 0) FROM order_lives
+               WHERE collection = ? AND exit_source = 'observed' AND t_term IS NOT NULL
+                 AND t_term >= ? AND t_term < ?""", (collection, start, end)).fetchone()
+        orphans = orphans or 0
         return {"n": n, "p10_s": pct(0.10), "median_s": pct(0.5), "p90_s": pct(0.9),
-                "min_n_for_percentiles": 30, "percentiles_reliable": n >= 30}
+                "min_n_for_percentiles": 30, "percentiles_reliable": n >= 30,
+                "kind": kind, "orders_at_risk": at_risk,
+                "censored_n": censored, "unknown_terminator_n": unknown,
+                "terminations_in_window": terms, "orphan_terminations": orphans,
+                "orphan_rate": (orphans / terms) if terms else None,
+                "censoring": "counted, not modelled -- percentiles are biased short by "
+                             "the censored lives (PR-8 replaces this with Kaplan-Meier)"}
+
+    def criteria_coverage(self, collection: str) -> dict[str, Any]:
+        """Every distinct (trait_type, value) in `order_criteria` should exist in `traits`.
+
+        If OpenSea's `trait_name` casing or spelling differs from the metadata's
+        `value`, every match silently returns nothing -- a wrong answer that
+        looks like a quiet market. Values are stored verbatim on both sides
+        precisely so this check can see the difference; the check is what makes
+        the difference visible instead of invisible (dataeng §4.2).
+        """
+        pairs = self.conn.execute(
+            """SELECT DISTINCT c.trait_type, c.value FROM order_criteria c
+               JOIN events e ON e.run = c.run AND e.seq = c.seq
+               WHERE e.collection = ? AND c.kind = 'string'""", (collection,)).fetchall()
+        missing = [(t, v) for t, v in pairs if not self.conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM traits WHERE collection=? AND trait_type=? AND value=?)",
+            (collection, t, v)).fetchone()[0]]
+        return {"collection": collection, "distinct_criteria": len(pairs),
+                "matched": len(pairs) - len(missing), "missing": len(missing),
+                "missing_pairs": [{"trait_type": t, "value": v} for t, v in missing[:50]],
+                "alert": bool(missing),
+                "note": ("a criterion with no matching trait value can never match a token; "
+                         "if this is non-zero the trait table is incomplete or the casing differs")}
+
+    def trait_offer_verdicts(self, collection: str, traits: dict[str, list[str]] | None,
+                             start: float, end: float) -> dict[str, Any]:
+        """COVERS / PARTIAL / DISJOINT / UNKNOWN / UNPARSED for a filter. Never summed.
+
+        Three verdicts are mutually exclusive and must never be added into one
+        depth number (dataeng §4.3): a PARTIAL offer is reported with
+        |S(F) n S(C)| and |S(F)|, never as a bare count. Allocating a fraction
+        of a PARTIAL offer's quantity as depth models the offerer as
+        indifferent among the tokens in reach -- a judgement, and so it belongs
+        in ANALYSIS with its assumption declared, never here (docs/06 §4).
+        """
+        traits = traits or {}
+        tf, targs = token_filter_sql(collection, traits, alias="t")
+        s_f = {r[0] for r in self.conn.execute(
+            f"SELECT t.token_id FROM tokens t WHERE t.collection = ?{tf}", (collection, *targs))}
+        covers = disjoint = unknown = unparsed = 0
+        partial: list[dict[str, Any]] = []
+        for run, seq, oh, price, qty, cn, cnn in self.conn.execute(
+                """SELECT run, seq, order_hash, price_eth, quantity, criteria_n, criteria_numeric_n
+                   FROM events WHERE collection = ? AND event_type = 'trait_offer'
+                     AND valid_ts >= ? AND valid_ts < ?""", (collection, start, end)):
+            if cn is None or cn == 0:
+                unparsed += 1                       # the loud-failure marker: matches nothing
+                continue
+            if (cnn or 0) > 0:
+                unknown += 1                        # numeric criteria: UNKNOWN is not TRUE
+                continue
+            crit = self.conn.execute(
+                "SELECT trait_type, value FROM order_criteria WHERE run=? AND seq=? AND kind='string'",
+                (run, seq)).fetchall()
+            if criteria_covers(list(crit), traits):
+                covers += 1
+                continue
+            s_c: set[str] | None = None
+            for t, v in crit:
+                got = {r[0] for r in self.conn.execute(
+                    "SELECT token_id FROM traits WHERE collection=? AND trait_type=? AND value=?",
+                    (collection, t, v))}
+                s_c = got if s_c is None else (s_c & got)
+            overlap = len(s_f & (s_c or set()))
+            if overlap:
+                partial.append({"order_hash": oh, "price_eth": price, "quantity": qty,
+                                "criteria": [{"trait_type": t, "value": v} for t, v in crit],
+                                "overlap_tokens": overlap, "filter_tokens": len(s_f)})
+            else:
+                disjoint += 1
+        return {"collection": collection, "trait_filter": traits, "filter_tokens": len(s_f),
+                "covers": covers, "partial_n": len(partial), "partial": partial,
+                "disjoint": disjoint, "unknown_numeric": unknown, "unparsed": unparsed,
+                "note": "COVERS is the only verdict counted as bid depth; the four others are "
+                        "reported separately and are never summed into it"}
 
     def screener(self, collection: str, *, traits: dict[str, list[str]] | None = None,
                  sort: str = "token_id", direction: str = "asc", page: int = 0, page_size: int = 50,
@@ -475,14 +685,12 @@ class MetricEngine:
         for tid, tt, v in self.conn.execute("SELECT token_id, trait_type, value FROM traits WHERE collection = ?", (collection,)):
             if tid in ids:
                 tr.setdefault(tid, {})[tt] = v
-        dead = """NOT EXISTS (SELECT 1 FROM events d INDEXED BY ix_events_lifecycle
-                    WHERE d.order_hash = e.order_hash AND d.event_type IN ('item_cancelled','order_invalidate','item_sold')
-                      AND d.valid_ts >= e.valid_ts)"""
+        standing, sargs = standing_sql("e", now_ts)      # one definition, shared with live_book
         live = f"""SELECT e.token_id, MIN(e.{col}), MAX(e.{col}) FROM events e
                    WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL AND e.token_id IS NOT NULL
-                     AND (e.expiration_ts IS NULL OR e.expiration_ts > ?) AND {dead} GROUP BY e.token_id"""
-        ask = {t: lo for t, lo, _ in self.conn.execute(live, (collection, "item_listed", now_ts))}
-        bid = {t: hi for t, _, hi in self.conn.execute(live, (collection, "item_received_bid", now_ts))}
+                     AND {standing} GROUP BY e.token_id"""
+        ask = {t: lo for t, lo, _ in self.conn.execute(live, (collection, "item_listed", *sargs))}
+        bid = {t: hi for t, _, hi in self.conn.execute(live, (collection, "item_received_bid", *sargs))}
         last_sale: dict[str, tuple[float, str]] = {}
         for t, p, at in self.conn.execute(
                 f"""SELECT token_id, {col}, valid_at FROM events WHERE collection = ? AND event_type = 'item_sold'

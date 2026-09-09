@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -1777,6 +1778,24 @@ REAL_COLL_OFFER = ["1", None, "collection:argonauts", "collection_offer", {
                 "order_hash": "0xco11ec7i0n0ffer0000000000000000000000000",
                 "payment_token": {"decimals": 18, "eth_price": "0.348", "symbol": "WETH", "usd_price": "866.1"},
                 "quantity": 1}}]
+# A trait offer in the shape the stream actually sends (FACTS 2026-09-09: 39 of
+# them in 40 minutes). `trait_criteria` is the single form and may be null;
+# `trait_criteria_list` is an AND across entries and 16 of 39 had ONLY that form;
+# `numeric_trait_criteria_list` carries ranges we cannot evaluate against the
+# string traits table. Criteria here are patched per-test; this is the shape.
+REAL_TRAIT_OFFER = ["1", None, "collection:argonauts", "trait_offer", {
+    "event_type": "trait_offer", "version": 1, "sent_at": "2026-09-09T10:19:31.402000Z",
+    "payload": {"base_price": "410000000000000000", "chain": "ethereum",
+                "collection": {"slug": "argonauts"},
+                "event_timestamp": "2026-09-09T10:19:31.000000Z",
+                "expiration_date": "2026-09-10T10:19:31.000000Z",
+                "maker": {"address": "0xtra170ffer00000000000000000000000000000"},
+                "order_hash": "0x7ra170ffer000000000000000000000000000001",
+                "payment_token": {"decimals": 18, "eth_price": "0.41", "symbol": "WETH",
+                                  "usd_price": "1020.5"},
+                "quantity": 1, "item": None,
+                "trait_criteria": {"trait_type": "Print", "trait_name": "Unclaimed"},
+                "trait_criteria_list": [{"trait_type": "Print", "trait_name": "Unclaimed"}]}}]
 # Real, from the same capture: the first Argonauts sale and listing ever recorded.
 REAL_LISTING = ["1", None, "collection:argonauts", "item_listed", {
     "event_type": "item_listed", "sent_at": "2026-09-09T10:27:22.000000Z",
@@ -1907,7 +1926,7 @@ def test_metric_engine_contract(tmp: Path) -> None:
     """The MetricRequest tuple (docs/06 §3): intervals from config, transforms,
     immediacy undefined when either side is missing, basis on every response."""
     from navanax.metrics import MetricEngine, apply_transform, bucket_of, load_intervals
-    from navanax.normalize import Normalizer
+    from navanax.normalize import Normalizer, refresh_order_lives
 
     iv = load_intervals(ROOT / "config" / "intervals.yaml")
     check("metrics: every interval Spencer listed is in config, not code",
@@ -1942,6 +1961,9 @@ def test_metric_engine_contract(tmp: Path) -> None:
         n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})",
                        tuple(row.get(c) for c in COLS))
     n.conn.commit()
+    # These rows were inserted straight into `events`; in production sync() folds
+    # order_lives on every pass. The standing book is read from that relation now.
+    refresh_order_lives(n.conn)
     eng = MetricEngine(n.conn, iv, "America/Chicago")
     now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
 
@@ -2284,7 +2306,7 @@ def test_screener_sort_and_filter(tmp: Path) -> None:
     """REQ-F-07: single and multi-trait filters (AND across types, OR within a type),
     every column sortable, nulls last, live prices from the store."""
     from navanax.metrics import MetricEngine, load_intervals, parse_trait_filter, token_filter_sql
-    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event, refresh_order_lives
     from navanax.traits import ensure_schema
 
     f = parse_trait_filter("Background:Blue|Red;Eyes:Laser")
@@ -2311,6 +2333,7 @@ def test_screener_sort_and_filter(tmp: Path) -> None:
     row["price_usd"] = 1250.0
     n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})", tuple(row.get(c) for c in COLS))
     n.conn.commit()
+    refresh_order_lives(n.conn)          # sync() does this on every pass in production
     eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
     now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
 
@@ -2351,6 +2374,7 @@ def test_screener_sort_and_filter(tmp: Path) -> None:
     n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", "1", "Level", "5"))
     n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", "2", "Level", "Unranked"))
     n.conn.commit()
+    refresh_order_lives(n.conn)
     r = eng.screener("argonauts", sort="lowest_ask", now=now)
     asks = {x["token_id"]: x["lowest_ask"] for x in r["rows"]}
     check("screener: cancelled, expired and filled asks are NOT standing; only token 1's survives",
@@ -2420,6 +2444,815 @@ def test_ui_contract() -> None:
           all(c in html.split("const esc=")[1].split("\n")[0] for c in ("&amp;", "&lt;", "&gt;", "&quot;", "&#39;")))
     check("ui: the basis line prints the bucket alignment and, under a filter, which leg is filtered",
           "bucket_alignment" in html and "b.legs" in html)
+
+
+# ===========================================================================
+# Unattended running: launchd LaunchAgents (PR-1).
+#
+# launchctl does not exist off macOS, so nothing here loads a job. What CAN be
+# tested anywhere -- and is where the real risk lies -- is that the generated
+# property lists are valid XML with the right keys, and that `ingest` honours
+# the exit-code contract a supervisor depends on. A malformed plist does not
+# fail loudly: launchd simply never runs the job, and a recorder that silently
+# never started is indistinguishable from a quiet market.
+# ===========================================================================
+def _launchd():
+    sys.path.insert(0, str(ROOT / "tools"))
+    import launchd  # noqa: PLC0415 - deliberately late: tools/ is not a package
+    return launchd
+
+
+def test_launchd_plists_are_valid_and_correct(tmp: Path) -> None:
+    import plistlib
+    ld = _launchd()
+    proj = tmp / "proj"
+    (proj / "src").mkdir(parents=True, exist_ok=True)
+
+    parsed = {}
+    for label in ld.ALL_LABELS:
+        raw = ld.render(label, proj, python="/usr/bin/python3")
+        try:
+            parsed[label] = plistlib.loads(raw)
+            ok = True
+        except Exception as exc:  # noqa: BLE001 - the point of the assertion
+            ok, parsed[label] = False, {}
+            check(f"launchd: {label} plist parses as XML", False, str(exc))
+        if ok:
+            check(f"launchd: {label} plist parses as XML", True)
+
+    rec = parsed[ld.RECORDER]
+    check("launchd: recorder Label matches the filename it is installed under",
+          rec.get("Label") == "com.navanax.recorder")
+    check("launchd: recorder runs `navanax.cli ingest --supervised`",
+          rec.get("ProgramArguments") ==
+          ["/usr/bin/python3", "-m", "navanax.cli", "ingest", "--supervised"],
+          repr(rec.get("ProgramArguments")))
+    check("launchd: recorder has KeepAlive true -- a crash is restarted",
+          rec.get("KeepAlive") is True)
+    check("launchd: recorder has RunAtLoad true -- it starts at login",
+          rec.get("RunAtLoad") is True)
+    check("launchd: recorder throttles restarts to ~10s, so a failing job cannot hot-loop",
+          rec.get("ThrottleInterval") == 10, repr(rec.get("ThrottleInterval")))
+    check("launchd: recorder ExitTimeOut exceeds the default, so SIGTERM has time to flush the final frame",
+          isinstance(rec.get("ExitTimeOut"), int) and rec["ExitTimeOut"] >= 30,
+          repr(rec.get("ExitTimeOut")))
+    check("launchd: recorder WorkingDirectory is the ABSOLUTE project path",
+          rec.get("WorkingDirectory") == str(proj.resolve())
+          and Path(rec["WorkingDirectory"]).is_absolute(), repr(rec.get("WorkingDirectory")))
+    check("launchd: recorder log path is absolute and under data/logs/",
+          rec.get("StandardOutPath") == str(proj.resolve() / "data" / "logs" / "recorder.log")
+          and rec.get("StandardErrorPath") == rec.get("StandardOutPath"),
+          repr(rec.get("StandardOutPath")))
+    env = rec.get("EnvironmentVariables") or {}
+    # launchd agents do NOT read .zprofile: whatever PATH is here is the whole PATH.
+    for needed in ("/Library/Frameworks/Python.framework/Versions/3.14/bin",
+                   "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"):
+        check(f"launchd: recorder PATH covers {needed}", needed in env.get("PATH", ""),
+              env.get("PATH", ""))
+    check("launchd: recorder output is unbuffered, or the log looks empty for minutes",
+          env.get("PYTHONUNBUFFERED") == "1")
+    check("launchd: no API key is written into the plist -- the CLI reads .env itself",
+          not any("OPENSEA" in k or "KEY" in k.upper() for k in env),
+          ", ".join(env))
+
+    dash = parsed[ld.DASHBOARD]
+    check("launchd: dashboard runs with --no-browser (nothing to open at login)",
+          "--no-browser" in (dash.get("ProgramArguments") or []))
+    check("launchd: dashboard is pinned to port 8765",
+          dash.get("ProgramArguments", [])[-2:] == ["--port", "8765"],
+          repr(dash.get("ProgramArguments")))
+    check("launchd: dashboard has KeepAlive and RunAtLoad",
+          dash.get("KeepAlive") is True and dash.get("RunAtLoad") is True)
+
+    tr = parsed[ld.TRAITS]
+    check("launchd: traits runs the `traits` command",
+          tr.get("ProgramArguments", [])[-1] == "traits", repr(tr.get("ProgramArguments")))
+    check("launchd: traits is scheduled daily at 03:30 local",
+          tr.get("StartCalendarInterval") == {"Hour": 3, "Minute": 30},
+          repr(tr.get("StartCalendarInterval")))
+    check("launchd: traits also RunAtLoad, so it does not wait until 03:30 to start",
+          tr.get("RunAtLoad") is True)
+    # The one that would quietly drain the metered REST budget forever.
+    check("launchd: traits has NO KeepAlive -- it is a job that is SUPPOSED to finish, "
+          "and restarting it in a loop would drain the 120/hr REST bucket",
+          "KeepAlive" not in tr, repr(tr.get("KeepAlive")))
+
+    ka = parsed[ld.KEEPAWAKE]
+    check("launchd: keepawake runs Apple's caffeinate with -i (no idle sleep) and "
+          "-s (only on AC power)",
+          ka.get("ProgramArguments") == ["/usr/bin/caffeinate", "-i", "-s"],
+          repr(ka.get("ProgramArguments")))
+    check("launchd: keepawake is NOT part of the autostart set -- changing when the "
+          "Mac sleeps is opt-in",
+          ld.KEEPAWAKE not in ld.AUTOSTART_LABELS
+          and set(ld.AUTOSTART_LABELS) == {ld.RECORDER, ld.DASHBOARD, ld.TRAITS})
+
+    # Every installed job writes to its own log, or a tail shows the wrong process.
+    logs = [parsed[lbl]["StandardOutPath"] for lbl in ld.ALL_LABELS]
+    check("launchd: every job logs to a DISTINCT file", len(set(logs)) == len(logs))
+
+
+def test_launchd_render_cli(tmp: Path) -> None:
+    """The .command files shell out to this; a broken CLI means no plist at all."""
+    import plistlib
+    import subprocess
+    out = tmp / "agents" / "com.navanax.recorder.plist"
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "launchd.py"), "render",
+         "com.navanax.recorder", "--root", str(tmp), "--out", str(out)],
+        capture_output=True, text=True, timeout=60)
+    check("launchd cli: `render --out` exits 0 and creates the parent directory",
+          r.returncode == 0 and out.exists(), r.stderr[:300])
+    if out.exists():
+        try:
+            d = plistlib.loads(out.read_bytes())
+            check("launchd cli: the written file parses", d.get("Label") == "com.navanax.recorder")
+        except Exception as exc:  # noqa: BLE001
+            check("launchd cli: the written file parses", False, str(exc))
+    check("launchd cli: no .tmp file is left behind (an interrupted write must not "
+          "leave a half-plist launchd would refuse)",
+          not list((tmp / "agents").glob("*.tmp")))
+
+    bad = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "launchd.py"), "render", "com.navanax.nope",
+         "--root", str(tmp)],
+        capture_output=True, text=True, timeout=60)
+    check("launchd cli: an unknown label is refused non-zero, not rendered blank",
+          bad.returncode != 0 and "unknown label" in bad.stderr, bad.stderr[:200])
+
+    lbl = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "launchd.py"), "labels"],
+        capture_output=True, text=True, timeout=60)
+    check("launchd cli: `labels` lists exactly the three autostart jobs",
+          lbl.stdout.split() == ["com.navanax.recorder", "com.navanax.dashboard",
+                                 "com.navanax.traits"], lbl.stdout)
+
+
+def _supervised_root(tmp: Path, name: str, *, env_file: str | None) -> Path:
+    """A throwaway project root: gzip codec (no zstandard needed), one collection."""
+    root = tmp / name
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "base.yaml").write_text(
+        "version: 1\nenvironment: local\n"
+        "opensea:\n  stream_url: \"wss://127.0.0.1:1/socket/websocket\"\n"
+        "  heartbeat_seconds: 30\n  max_backoff_seconds: 60\n"
+        "landing:\n  root: \"data/landing\"\n  codec: gzip\n  codec_level: 1\n"
+        "  roll_bytes: 1048576\n  flush_seconds: 5\n  flush_events: 100\n"
+        "opstore:\n  path: \"data/ops.db\"\n"
+        "analytical:\n  path: \"data/analytics.sqlite\"\n"
+    )
+    (root / "config" / "watchlist.yaml").write_text(
+        "version: 1\ncollections:\n  - slug: argonauts\n    chain: ethereum\n")
+    if env_file is not None:
+        (root / ".env").write_text(env_file)
+    return root
+
+
+def test_ingest_supervised_exit_code_contract(tmp: Path) -> None:
+    """launchd KeepAlive restarts on ANY exit. What matters is that a refusal is
+    NON-ZERO, prompt, and says why -- an ingest that hangs instead of exiting is
+    a recorder that records nothing and never gets restarted.
+    """
+    import subprocess
+
+    def run(root: Path, timeout: float = 90.0):
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT / "src")
+        env["PYTHONUNBUFFERED"] = "1"
+        env.pop("OPENSEA_API_KEY", None)   # the parent's real key must not leak in
+        env.pop("NAVANAX_ENV", None)
+        try:
+            return subprocess.run(
+                [sys.executable, "-m", "navanax.cli", "--root", str(root),
+                 "ingest", "--supervised"],
+                capture_output=True, text=True, timeout=timeout, env=env, cwd=str(ROOT))
+        except subprocess.TimeoutExpired:
+            return None
+
+    # -- no .env: configuration refusal, exit 2 --------------------------------
+    r = run(_supervised_root(tmp, "no-env", env_file=None), timeout=60)
+    if r is None:
+        check("ingest --supervised: refuses promptly when .env is missing "
+              "(a hang here is a recorder that never records and is never restarted)",
+              False, "timed out")
+    else:
+        out = r.stdout + r.stderr
+        check("ingest --supervised: exit 2 when .env is missing", r.returncode == 2,
+              f"exit={r.returncode}: {out[-400:]}")
+        check("ingest --supervised: the refusal names the key and where to get one",
+              "OPENSEA_API_KEY" in out and "opensea.io" in out, out[-400:])
+        check("ingest --supervised: prints a run banner with its pid, so one restart "
+              "can be told from the next in a shared log file",
+              "supervised" in out and "pid=" in out, out[:200])
+
+    # -- another process holds the landing-zone lock: exit 4 -------------------
+    # The guarantee that makes autostart-install safe: two recorders can never
+    # write to one landing zone, because the second REFUSES rather than racing.
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+    if fcntl is None:
+        check("ingest --supervised: exit 4 when another recorder holds the lock",
+              True, "skipped: no fcntl on this platform")
+    else:
+        root = _supervised_root(tmp, "locked", env_file="OPENSEA_API_KEY=placeholder\n")
+        lock = root / "data" / "landing" / ".ingest.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with lock.open("a+") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fh.seek(0)
+            fh.truncate()
+            fh.write("pid=999999 started=2026-09-09T00:00:00+00:00\n")
+            fh.flush()
+            r2 = run(root, timeout=60)
+        if r2 is None:
+            check("ingest --supervised: exit 4 when another recorder holds the lock",
+                  False, "timed out -- it should refuse immediately, not wait")
+        else:
+            out2 = r2.stdout + r2.stderr
+            check("ingest --supervised: exit 4 when another recorder holds the lock",
+                  r2.returncode == 4, f"exit={r2.returncode}: {out2[-400:]}")
+            check("ingest --supervised: the lock refusal explains WHY two writers are "
+                  "forbidden (silently lost gap records)",
+                  "REFUSING TO INGEST" in out2 and "LOSE manifest" in out2, out2[-400:])
+
+
+def test_ingest_supervised_sigterm_is_a_clean_stop(tmp: Path) -> None:
+    """`launchctl bootout` sends SIGTERM. If that were not a clean stop, every
+    uninstall, every logout and every reinstall would drop the final frame --
+    up to ~7.5 s of events that cannot be re-fetched (BUG-20260909-037).
+
+    No network is needed: the consumer cannot reach the unroutable stream URL in
+    the fixture config, so it sits in its reconnect-and-record-a-gap loop, which
+    is exactly the state SIGTERM has to interrupt cleanly.
+    """
+    import signal
+    import subprocess
+
+    root = _supervised_root(tmp, "sigterm", env_file="OPENSEA_API_KEY=placeholder\n")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src")
+    env["PYTHONUNBUFFERED"] = "1"
+    env.pop("OPENSEA_API_KEY", None)
+    env.pop("NAVANAX_ENV", None)
+    p = subprocess.Popen(
+        [sys.executable, "-m", "navanax.cli", "--root", str(root), "ingest", "--supervised"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env, cwd=str(ROOT))
+    time.sleep(4)          # let it get into the run loop
+    running = p.poll() is None
+    p.send_signal(signal.SIGTERM)
+    try:
+        out = p.communicate(timeout=45)[0]
+        code = p.returncode
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, code = p.communicate()[0], None
+
+    check("ingest --supervised: stays up while the stream is unreachable rather than "
+          "exiting (a rejected key or an outage must not kill the recorder)",
+          running, "it exited on its own before SIGTERM was sent")
+    check("ingest --supervised: SIGTERM exits 0 -- so `launchctl bootout`, logout and "
+          "reinstall are clean stops, not kills that drop the final frame",
+          code == 0, f"exit={code}: {(out or '')[-500:]}")
+    check("ingest --supervised: the shutdown says which signal stopped it",
+          "SIGTERM" in (out or ""), (out or "")[-500:])
+    lock = root / "data" / "landing" / ".ingest.lock"
+    check("ingest --supervised: the landing-zone lock is released on exit, so the "
+          "launchd restart is not refused by its own predecessor",
+          not lock.exists() or _flock_is_free(lock))
+
+
+def _flock_is_free(lock: Path) -> bool:
+    try:
+        import fcntl
+    except ImportError:
+        return True
+    with lock.open("a+") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    return True
+
+
+def test_ingest_exit_codes_are_documented_and_distinct() -> None:
+    """A supervisor and a human both read these numbers. They must not collide,
+    and autostart-status.command prints a legend that has to match the code.
+    """
+    from navanax import cli
+    codes = {"OK": cli.EXIT_OK, "CONFIG": cli.EXIT_CONFIG, "CODEC": cli.EXIT_CODEC,
+             "ALREADY_RUNNING": cli.EXIT_ALREADY_RUNNING, "FATAL": cli.EXIT_FATAL}
+    check("ingest: every exit code is distinct", len(set(codes.values())) == len(codes),
+          repr(codes))
+    check("ingest: only a clean stop is zero",
+          codes["OK"] == 0 and all(v != 0 for k, v in codes.items() if k != "OK"),
+          repr(codes))
+    legend = (ROOT / "autostart-status.command").read_text()
+    missing = [f"{k}={v}" for k, v in codes.items()
+               if f"     {v}  " not in legend]
+    check("ingest: autostart-status.command's legend covers every exit code "
+          "(a code with no explanation is a number the operator cannot act on)",
+          not missing, ", ".join(missing))
+    # BUG class: a bare RuntimeError from deep in the stream used to be reported
+    # to the operator as "another ingest is already running".
+    check("ingest: the single-instance refusal has its own exception type, so an "
+          "unrelated RuntimeError cannot be reported as a lock conflict",
+          issubclass(cli.SingleInstanceError, RuntimeError)
+          and cli.SingleInstanceError is not RuntimeError)
+
+
+def test_autostart_install_refuses_before_touching_anything(tmp: Path) -> None:
+    """The installer writes to ~/Library/LaunchAgents. Both of its refusals must
+    fire BEFORE it writes anything, and must say what to do instead.
+    """
+    import shutil as _shutil
+    import subprocess
+
+    script = ROOT / "autostart-install.command"
+    check("autostart-install.command exists and is executable",
+          script.exists() and os.access(script, os.X_OK))
+
+    # 1. Not macOS. This machine is not a Mac, so this runs for real.
+    sandbox_home = tmp / "home-notmac"
+    (sandbox_home / "Library" / "LaunchAgents").mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(sandbox_home)
+    r = subprocess.run(["bash", str(script)], input="\n", capture_output=True,
+                       text=True, timeout=120, env=env)
+    out = r.stdout + r.stderr
+    on_mac = os.uname().sysname == "Darwin"
+    if on_mac:
+        check("autostart-install: refuses on a non-Mac", True,
+              "skipped: this IS a Mac, tested via the stubbed-uname case below")
+    else:
+        check("autostart-install: refuses on a non-Mac, non-zero, naming the OS",
+              r.returncode != 0 and "REFUSED" in out and "macOS" in out, out[-300:])
+        check("autostart-install: the non-Mac refusal says nothing was changed",
+              "Nothing was changed" in out, out[-300:])
+    check("autostart-install: a refused run installs NO plist",
+          not list((sandbox_home / "Library" / "LaunchAgents").glob("*.plist")))
+
+    # 2. macOS, but no .env. Stub `uname` so the script believes it is on a Mac,
+    #    and run it from a copy in an empty directory so there is no .env.
+    sandbox = tmp / "nodotenv"
+    (sandbox / "bin").mkdir(parents=True, exist_ok=True)
+    stub = sandbox / "bin" / "uname"
+    stub.write_text('#!/bin/bash\nif [ "$1" = "-s" ]; then echo Darwin; else echo Darwin; fi\n')
+    stub.chmod(0o755)
+    _shutil.copy2(script, sandbox / "autostart-install.command")
+    env2 = dict(os.environ)
+    env2["PATH"] = f"{sandbox / 'bin'}:{env2.get('PATH', '')}"
+    env2["HOME"] = str(sandbox_home)
+    r2 = subprocess.run(["bash", str(sandbox / "autostart-install.command")], input="\n",
+                        capture_output=True, text=True, timeout=120, env=env2)
+    out2 = r2.stdout + r2.stderr
+    check("autostart-install: with no .env it refuses non-zero rather than installing "
+          "three jobs that would restart every 10s forever and record nothing",
+          r2.returncode != 0 and "REFUSED" in out2 and ".env" in out2, out2[-400:])
+    check("autostart-install: the .env refusal tells the operator the exact fix",
+          ".env.example" in out2, out2[-400:])
+    check("autostart-install: still no plist installed after the .env refusal",
+          not list((sandbox_home / "Library" / "LaunchAgents").glob("*.plist")))
+
+
+def test_autostart_scripts_are_consistent() -> None:
+    """Cheap cross-checks that catch a rename in one file and not the other."""
+    ld = _launchd()
+    install = (ROOT / "autostart-install.command").read_text()
+    uninstall = (ROOT / "autostart-uninstall.command").read_text()
+    status = (ROOT / "autostart-status.command").read_text()
+
+    for lbl in ld.AUTOSTART_LABELS:
+        check(f"autostart: install and uninstall both handle {lbl}",
+              lbl in install and lbl in uninstall and lbl in status)
+    check("autostart: uninstall does not silently leave the opt-in keep-awake job "
+          "unmentioned", ld.KEEPAWAKE in uninstall)
+    check("autostart: install renders plists through tools/launchd.py rather than a "
+          "heredoc (plistlib cannot emit invalid XML; a heredoc can)",
+          "tools/launchd.py render" in install)
+    check("autostart: install stops a hand-started recorder before installing, using "
+          "the pid in the landing-zone lock",
+          ".ingest.lock" in install and "kill -TERM" in install)
+    check("autostart: install falls back to the older `launchctl load` on older macOS",
+          "launchctl bootstrap" in install and "launchctl load -w" in install)
+    check("autostart: uninstall removes the plist FILES, not just the loaded jobs",
+          "rm -f" in uninstall and "LaunchAgents" in uninstall)
+    check("autostart: install states the sleep caveat launchd cannot fix",
+          "SLEEP" in install.upper() and "caffeinate" in install)
+    check("autostart: install does NOT install the keep-awake job itself",
+          "keepawake-install.command" in install
+          and 'render "com.navanax.keepawake"' not in install)
+    check("autostart: install says closing the window changes nothing",
+          "CLOSING THIS WINDOW CHANGES NOTHING" in install)
+    for name in ("keepawake-install.command", "keepawake-uninstall.command",
+                 "autostart-status.command", "autostart-uninstall.command"):
+        p = ROOT / name
+        check(f"autostart: {name} exists and is executable",
+              p.exists() and os.access(p, os.X_OK))
+    ka = (ROOT / "keepawake-install.command").read_text()
+    check("keepawake-install: explains the battery/lid trade-off before acting",
+          "BATTERY" in ka.upper() and "LID" in ka.upper() and "AC power" in ka)
+    check("keepawake-install: requires an explicit yes -- it changes machine "
+          "behaviour, not just this project's",
+          'ANSWER" != "yes"' in ka or '"$ANSWER" != "yes"' in ka)
+
+
+def test_environments_doc_documents_unattended_running() -> None:
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    check("docs/04: has a 'Running unattended' section",
+          "Running unattended" in doc)
+    for term in ("launchd", "KeepAlive", "data/logs", "autostart-uninstall.command",
+                 "sleep"):
+        check(f"docs/04 §8 explains: {term}", term in doc)
+    check("docs/04 §8 records the exit-code contract a supervisor depends on",
+          "exit code" in doc.lower() and "ThrottleInterval" in doc)
+    readme = (ROOT / "README.md").read_text()
+    check("README points at the unattended-running section",
+          "autostart-install.command" in readme)
+
+
+# ===========================================================================
+# PR-2 (order_lives) and PR-4 (order_criteria). Every check below was written
+# against the OLD code first and fails there -- the tech-lead's gate, docs/03 §9.
+# ===========================================================================
+def _lives_store(tmp: Path, name: str):
+    """A store with the traits schema and a `put(frame, time, seq, **overrides)`
+    that pins valid_ts to the time given, so a lifecycle can be laid out exactly."""
+    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.traits import ensure_schema
+
+    n = Normalizer(tmp / "empty-lz", tmp / name)
+    ensure_schema(n.conn)
+
+    def put(raw, recv, seq, **over):
+        rr = parse_event(_env(seq, raw, recv))
+        rr["file"] = "f"
+        rr["valid_at"], rr["valid_ts"] = recv, iso_to_ts(recv)
+        rr.update(over)
+        n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})",
+                       tuple(rr.get(c) for c in COLS))
+        for c in rr.get("criteria") or []:
+            n.conn.execute(
+                "INSERT OR REPLACE INTO order_criteria VALUES (?,?,?,?,?,?,?,?)",
+                (rr["run"], rr["seq"], c["idx"], c["kind"], c["trait_type"], c["value"],
+                 c["num_min"], c["num_max"]))
+    return n, put
+
+
+def test_order_lives_primitive(tmp: Path) -> None:
+    """One row per order_hash, one definition of "ended" (quant §1.0, tech-lead PR-2).
+
+    Every assertion here fails against the pre-order_lives code, which had three
+    different terminator lists in one module and no relation to put them in.
+    """
+    from navanax.metrics import MetricEngine, load_intervals, standing_sql
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "lives.sqlite")
+    noexp = {"expiration_at": None, "expiration_ts": None}
+    # a bid cancelled TWICE: a duplicate cancel is one life, not two (T1)
+    put(REAL_BID, "2026-09-09T10:00:00Z", 1, order_hash="0xdup", token_id="1", **noexp)
+    put(REAL_CANCEL, "2026-09-09T10:00:10Z", 2, order_hash="0xdup", token_id="1")
+    put(REAL_CANCEL, "2026-09-09T10:00:20Z", 3, order_hash="0xdup", token_id="1")
+    # invalidated, then revalidated: the order re-opened (T3a)
+    put(REAL_BID, "2026-09-09T10:00:00Z", 4, order_hash="0xreval", token_id="2", **noexp)
+    put(REAL_INVALIDATE, "2026-09-09T10:00:05Z", 5, order_hash="0xreval", token_id="2")
+    put(REAL_INVALIDATE, "2026-09-09T10:00:07Z", 6, order_hash="0xreval", token_id="2",
+        event_type="order_revalidate")
+    # a terminator we cannot place in time (T3c)
+    put(REAL_BID, "2026-09-09T10:00:00Z", 7, order_hash="0xnullterm", token_id="3", **noexp)
+    put(REAL_CANCEL, "2026-09-09T10:00:15Z", 8, order_hash="0xnullterm", token_id="3",
+        valid_at=None, valid_ts=None)
+    # a collection offer good for five: five units of depth, not one (T3b)
+    put(REAL_COLL_OFFER, "2026-09-09T10:00:00Z", 9, order_hash="0xqty5", quantity=5, **noexp)
+    # an order that expires with no terminator ever seen
+    put(DOC_LISTING, "2026-09-09T10:00:00Z", 10, order_hash="0xexpire", token_id="4",
+        expiration_at="2026-09-09T10:05:00Z", expiration_ts=iso_to_ts("2026-09-09T10:05:00Z"))
+    # a termination whose placement we never saw: left-truncated (metric 12)
+    put(REAL_CANCEL, "2026-09-09T10:00:30Z", 11, order_hash="0xorphan", token_id="5")
+    n.conn.commit()
+    events_before = n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    refresh_order_lives(n.conn)
+
+    def life(h: str) -> dict:
+        cur = n.conn.execute("SELECT * FROM order_lives WHERE order_hash=?", (h,))
+        r = cur.fetchone()
+        return dict(zip([c[0] for c in cur.description], r, strict=True)) if r else {}
+
+    def standing(h: str, at: str) -> bool:
+        sql, a = standing_sql("e", iso_to_ts(at))
+        return bool(n.conn.execute(
+            f"SELECT EXISTS(SELECT 1 FROM events e WHERE e.order_hash=? AND {sql})",
+            (h, *a)).fetchone()[0])
+
+    check("order_lives: one row per order_hash, six orders from eleven events",
+          n.conn.execute("SELECT COUNT(*) FROM order_lives").fetchone()[0] == 6,
+          str(n.conn.execute("SELECT order_hash FROM order_lives").fetchall()))
+    d = life("0xdup")
+    check("order_lives (T1): two cancels on one order are ONE life, terminated by the FIRST",
+          d["t_term"] == iso_to_ts("2026-09-09T10:00:10Z") and d["terminations_seen"] == 2
+          and d["exit_reason"] == "cancelled", str(d))
+    r = life("0xreval")
+    check("order_lives (T3a): invalidate followed by revalidate is not a termination",
+          r["exit_reason"] == "censored" and r["t_term"] is None and r["revalidated"] == 1, str(r))
+    check("order_lives (T3a): ...so the revalidated order is standing", standing("0xreval", "2026-09-09T10:10:00Z"))
+    u = life("0xnullterm")
+    check("order_lives (T3c): a terminator with valid_ts NULL is `unknown`, counted, not dropped",
+          u["exit_reason"] == "unknown" and u["t_term"] is None and u["terminations_seen"] == 1, str(u))
+    check("order_lives (T3c): ...and does NOT leave the order standing forever",
+          not standing("0xnullterm", "2026-09-09T10:10:00Z"))
+    q = life("0xqty5")
+    check("order_lives (T3b): quantity is carried from the placement", q["quantity"] == 5, str(q))
+    x = life("0xexpire")
+    check("order_lives: expiry is a DERIVED exit at expiration_ts, source='derived'",
+          x["exit_reason"] == "expired" and x["exit_source"] == "derived"
+          and x["t_term"] == iso_to_ts("2026-09-09T10:05:00Z"), str(x))
+    check("order_lives: inferring expiry writes NO market event -- the record is untouched",
+          n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events_before
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE event_type LIKE '%expir%'").fetchone()[0] == 0)
+    check("order_lives: standing before its expiry, not after",
+          standing("0xexpire", "2026-09-09T10:03:00Z") and not standing("0xexpire", "2026-09-09T10:06:00Z"))
+    o = life("0xorphan")
+    check("order_lives: a termination with no placement is an orphan -- placement_seen=0, t_place never imputed",
+          o["placement_seen"] == 0 and o["t_place"] is None and o["exit_reason"] == "cancelled", str(o))
+    check("order_lives: an orphan is not standing (we never saw it placed)",
+          not standing("0xorphan", "2026-09-09T10:00:31Z"))
+    check("order_lives: the fold records which rules made the row",
+          d["method_version"] >= 1 and life("0xqty5")["scope_kind"] == "collection")
+
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    book = eng.live_book("argonauts", now=datetime(2026, 9, 9, 10, 10, tzinfo=timezone.utc))
+    hashes = {r["order_hash"] for v in ("asks", "item_bids", "collection_offers") for r in book[v]}
+    check("live book reads the one definition: the revalidated bid and the qty-5 offer stand, "
+          "the cancelled, the untimed and the orphan do not",
+          hashes == {"0xreval", "0xqty5"}, str(hashes))
+    check("live book (T3b): depth counts UNITS, so one quantity-5 offer is five",
+          book["depth"]["collection_offers"] == 5, str(book["depth"]))
+    n.close()
+
+
+def test_bid_lifetimes_censoring_and_orphans(tmp: Path) -> None:
+    """BUG-049: the old estimator's `n` was a count of bid x cancel PAIRS."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "lt.sqlite")
+    noexp = {"expiration_at": None, "expiration_ts": None}
+    put(REAL_BID, "2026-09-09T10:00:00Z", 1, order_hash="0xa", token_id="1", **noexp)
+    put(REAL_CANCEL, "2026-09-09T10:00:10Z", 2, order_hash="0xa", token_id="1")
+    put(REAL_CANCEL, "2026-09-09T10:00:20Z", 3, order_hash="0xa", token_id="1")
+    put(REAL_BID, "2026-09-09T10:00:00Z", 4, order_hash="0xb", token_id="2", **noexp)   # never ends
+    put(REAL_CANCEL, "2026-09-09T10:00:30Z", 5, order_hash="0xc", token_id="3")         # orphan
+    n.conn.commit()
+    refresh_order_lives(n.conn)
+    pairs = n.conn.execute(
+        """SELECT COUNT(*) FROM events b JOIN events c ON c.order_hash = b.order_hash
+           WHERE b.event_type='item_received_bid' AND c.event_type='item_cancelled'
+             AND c.valid_ts >= b.valid_ts""").fetchone()[0]
+    check("bid lifetimes (BUG-049): the old unbounded join really does cross-product -- 2 pairs, 1 bid",
+          pairs == 2, f"got {pairs}")
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    lt = eng.bid_lifetimes("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
+    check("bid lifetimes: n counts ORDERS, and the duration is to the FIRST termination",
+          lt["n"] == 1 and lt["median_s"] == 10.0, str(lt))
+    check("bid lifetimes: a bid still standing at window end is censored -- counted, not dropped",
+          lt["censored_n"] == 1 and lt["orders_at_risk"] == 2, str(lt))
+    check("bid lifetimes: the orphan rate is reported WITH its counts (project rule 4)",
+          lt["orphan_terminations"] == 1 and lt["terminations_in_window"] == 2
+          and abs(lt["orphan_rate"] - 0.5) < 1e-9, str(lt))
+    check("bid lifetimes: percentiles still carry their reliability flag at small n",
+          lt["percentiles_reliable"] is False and lt["min_n_for_percentiles"] == 30)
+    n.close()
+
+
+def test_order_criteria_parsing_and_migration(tmp: Path) -> None:
+    """PR-4: the criteria a trait offer carries, parsed, stored, migrated, re-foldable."""
+    import copy
+    import sqlite3
+
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer, parse_event
+    from navanax.traits import ensure_schema
+
+    def crit_of(mutate) -> dict:
+        raw = copy.deepcopy(REAL_TRAIT_OFFER)
+        mutate(raw[4]["payload"])
+        return parse_event(_env(1, raw, "2026-09-09T10:19:32Z"))
+
+    r = parse_event(_env(1, REAL_TRAIT_OFFER, "2026-09-09T10:19:32Z"))
+    check("criteria: the single/list form parses to one string criterion",
+          r["criteria_n"] == 1 and r["criteria_numeric_n"] == 0
+          and r["criteria"] == [{"idx": 0, "kind": "string", "trait_type": "Print",
+                                 "value": "Unclaimed", "num_min": None, "num_max": None}], str(r["criteria"]))
+
+    def only_list(p):
+        p["trait_criteria"] = None
+        p["trait_criteria_list"] = [{"trait_type": "Cloak", "trait_name": "Ivory"},
+                                    {"trait_type": "Print", "trait_name": "Unclaimed"}]
+    r2 = crit_of(only_list)
+    check("criteria: the list-only form (16 of 39 real offers) is an AND, one row per entry, idx 0..n-1",
+          r2["criteria_n"] == 2 and [c["idx"] for c in r2["criteria"]] == [0, 1]
+          and [c["trait_type"] for c in r2["criteria"]] == ["Cloak", "Print"], str(r2["criteria"]))
+
+    def numeric(p):
+        p["numeric_trait_criteria_list"] = [{"trait_type": "Level", "min": 3, "max": 9}]
+    r3 = crit_of(numeric)
+    check("criteria: numeric criteria are kept as their own kind, with idx after the string ones",
+          r3["criteria_n"] == 1 and r3["criteria_numeric_n"] == 1
+          and r3["criteria"][1] == {"idx": 1, "kind": "numeric", "trait_type": "Level",
+                                    "value": None, "num_min": 3.0, "num_max": 9.0}, str(r3["criteria"]))
+
+    def unreadable(p):
+        p["trait_criteria"] = None
+        p["trait_criteria_list"] = [{"trait_type": None, "trait_name": None}]
+    r4 = crit_of(unreadable)
+    check("criteria: a trait offer we could not read sets criteria_n = 0, NOT NULL (the loud-failure marker)",
+          r4["criteria_n"] == 0 and r4["criteria"] == [], str(r4["criteria_n"]))
+    check("criteria: an event that carries no criteria at all has criteria_n NULL, not 0",
+          parse_event(_env(1, REAL_BID, "2026-09-09T10:20:16Z"))["criteria_n"] is None)
+
+    def cased(p):
+        p["trait_criteria"] = {"trait_type": " Print ", "trait_name": "  UNCLAIMED  "}
+        p["trait_criteria_list"] = None
+    r5 = crit_of(cased)
+    check("criteria: values are stored VERBATIM -- stripped, never case-folded (traits.py's rule)",
+          r5["criteria"][0]["value"] == "UNCLAIMED" and r5["criteria"][0]["trait_type"] == "Print",
+          str(r5["criteria"]))
+
+    # -- additive migration onto a store an earlier version built ------------
+    legacy = tmp / "legacy.sqlite"
+    lc = sqlite3.connect(str(legacy))
+    lc.executescript("""CREATE TABLE events (run TEXT NOT NULL, seq INTEGER NOT NULL, file TEXT,
+        observed_at TEXT, valid_at TEXT, observed_ts REAL, valid_ts REAL, event_type TEXT,
+        collection TEXT, order_hash TEXT, expiration_at TEXT, expiration_ts REAL,
+        PRIMARY KEY (run, seq));
+        INSERT INTO events (run, seq, event_type, collection) VALUES ('r', 1, 'trait_offer', 'argonauts');""")
+    lc.commit()
+    lc.close()
+    ln = Normalizer(tmp / "empty-lz", legacy)
+    lcols = {row[1] for row in ln.conn.execute("PRAGMA table_info(events)")}
+    check("criteria: _migrate adds both columns to a store built by an earlier version (additive, expiration_ts precedent)",
+          {"criteria_n", "criteria_numeric_n"} <= lcols)
+    check("criteria: migration keeps the existing row and leaves the new columns NULL -- "
+          "the criteria are only in the landing zone, so a re-fold is what fills them",
+          ln.conn.execute("SELECT COUNT(*), criteria_n FROM events").fetchone() == (1, None))
+    rf = ln.refold_criteria()
+    check("criteria: refold_criteria REFUSES rather than silently no-opping when no raw frame is stored here",
+          rf["raw_frames_available"] is False and rf["action_required"] == "reset_for_refold() then sync()"
+          and rf["trait_offers_needing_refold"] == 1, str(rf))
+    ln.close()
+
+    # -- through the real path: landing zone -> sync -> criteria rows --------
+    clock = FakeClock(datetime(2026, 9, 9, 10, 19, 0, tzinfo=timezone.utc))
+    root = tmp / "lz-crit"
+    w = LandingZoneWriter(root, "run-crit", codec=GzipCodec(), clock=clock.now,
+                          monotonic=clock.monotonic, flush_events=2, auto_flush=False)
+    for raw in (REAL_TRAIT_OFFER, REAL_BID):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+        clock.advance(1)
+    w.flush()
+    w.close()
+    n = Normalizer(root, tmp / "crit.sqlite")
+    ensure_schema(n.conn)
+    s1 = n.sync()
+    check("criteria: sync writes the criteria rows alongside the events",
+          s1["rows_added"] == 2 and s1["criteria_rows"] == 1
+          and n.conn.execute("SELECT COUNT(*) FROM order_criteria").fetchone()[0] == 1, str(s1))
+    check("criteria: sync also refreshes order_lives, so the standing book is never a fold behind",
+          s1["lives_refreshed"] == 2, str(s1))
+    s2 = n.sync()
+    check("criteria: a second sync adds nothing and duplicates nothing",
+          s2["rows_added"] == 0 and n.conn.execute("SELECT COUNT(*) FROM order_criteria").fetchone()[0] == 1)
+
+    landing_files = sorted(p.name for p in root.rglob("*") if p.is_file())
+    cleared = n.reset_for_refold()
+    check("criteria: reset_for_refold clears the DERIVED rows only",
+          cleared["events"] == 2 and cleared["order_criteria"] == 1 and cleared["watermarks"] == 1
+          and n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0, str(cleared))
+    check("criteria: reset_for_refold does not touch the landing zone -- not one byte (docs/07 §4)",
+          sorted(p.name for p in root.rglob("*") if p.is_file()) == landing_files)
+    s3 = n.sync()
+    check("criteria: the re-fold is idempotent -- same events, same criteria rows, from the same frames",
+          s3["rows_added"] == 2 and s3["criteria_rows"] == 1
+          and n.conn.execute("SELECT COUNT(*) FROM order_criteria").fetchone()[0] == 1, str(s3))
+    check("criteria: the re-folded trait offer now carries criteria_n on the event row",
+          n.conn.execute("SELECT criteria_n, criteria_numeric_n FROM events "
+                         "WHERE event_type='trait_offer'").fetchone() == (1, 0))
+
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    cov = eng.criteria_coverage("argonauts")
+    check("criteria: the casing validation ALERTS when a criterion has no matching trait value",
+          cov["distinct_criteria"] == 1 and cov["missing"] == 1 and cov["alert"] is True, str(cov))
+    n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES ('argonauts','1','a','x')")
+    n.conn.execute("INSERT INTO traits VALUES ('argonauts','1','Print','unclaimed')")   # wrong case
+    n.conn.commit()
+    check("criteria: a case-only difference is still a miss -- verbatim on both sides is what makes it visible",
+          eng.criteria_coverage("argonauts")["missing"] == 1)
+    n.conn.execute("INSERT INTO traits VALUES ('argonauts','1','Print','Unclaimed')")
+    n.conn.commit()
+    check("criteria: ...and clears once the exact value exists",
+          eng.criteria_coverage("argonauts")["missing"] == 0)
+    n.close()
+
+
+def test_trait_offer_matching_rule(tmp: Path) -> None:
+    """BUG-051: the blanket exclusion becomes an evidence-based verdict, with a guard.
+
+    The named property test (dataeng §4.3, tech-lead E-V8, blocking) is here:
+    a trait offer with criteria_n = 0 matches NOTHING.
+    """
+    import copy
+
+    from navanax.metrics import MetricEngine, criteria_cover_sql, load_intervals
+    from navanax.normalize import refresh_order_lives
+
+    n, put = _lives_store(tmp, "cover.sqlite")
+    for tid, print_v in (("1", "Unclaimed"), ("2", "Claimed")):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Print", print_v),
+                            ("argonauts", tid, "Palette", "Seafoam")])
+
+    def offer(seq, hash_, mutate, **over):
+        raw = copy.deepcopy(REAL_TRAIT_OFFER)
+        mutate(raw[4]["payload"])
+        put(raw, "2026-09-09T10:00:00Z", seq, order_hash=hash_,
+            expiration_at=None, expiration_ts=None, **over)
+
+    def one(tt, tn):
+        def m(p):
+            p["trait_criteria"] = {"trait_type": tt, "trait_name": tn}
+            p["trait_criteria_list"] = None
+        return m
+
+    def nothing(p):
+        p["trait_criteria"] = None
+        p["trait_criteria_list"] = None
+
+    def numeric(p):
+        p["numeric_trait_criteria_list"] = [{"trait_type": "Level", "min": 1, "max": 5}]
+
+    offer(1, "0xcov", one("Print", "Unclaimed"), price_eth=0.41)     # COVERS  Print:Unclaimed
+    offer(2, "0xbad", nothing, price_eth=9.99)                       # unparsed: criteria_n = 0
+    offer(3, "0xnum", numeric, price_eth=8.88)                       # string + numeric: UNKNOWN
+    offer(4, "0xpar", one("Palette", "Seafoam"), price_eth=0.42)     # PARTIAL under Print:Unclaimed
+    offer(5, "0xdis", one("Print", "Claimed"), price_eth=0.43)       # DISJOINT
+    put(REAL_COLL_OFFER, "2026-09-09T10:00:00Z", 6, order_hash="0xcoll",
+        expiration_at=None, expiration_ts=None)
+    n.conn.commit()
+    refresh_order_lives(n.conn)
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+
+    def counted(traits):
+        s = eng.series(metric="bid_count", collection="argonauts", interval="1h",
+                       range_="6h", now=now, traits=traits)
+        return [v for v in s["raw"] if v][-1]
+
+    check("trait matching: with no filter every bid still counts (6 orders)", counted(None) == 6.0)
+    check("trait matching (BUG-051): under Print:Unclaimed the COVERING trait offer counts -- "
+          "the blanket exclusion is gone; only it and the collection offer pass",
+          counted({"Print": ["Unclaimed"]}) == 2.0, str(counted({"Print": ["Unclaimed"]})))
+    def covered(traits) -> set:
+        sq, ag = criteria_cover_sql("e", traits)
+        return {r[0] for r in n.conn.execute(
+            f"SELECT order_hash FROM events e WHERE e.event_type='trait_offer' AND {sq}", ag)}
+
+    every_filter = ({}, {"Print": ["Unclaimed"]}, {"Print": ["Claimed"]}, {"Palette": ["Seafoam"]},
+                    {"Print": ["Unclaimed"], "Palette": ["Seafoam"]}, {"Nothing": ["At all"]})
+    check("trait matching: the PROPERTY TEST -- a trait offer with criteria_n = 0 matches NOTHING, "
+          "under every filter (dataeng §4.3: with no criteria rows the NOT EXISTS is vacuously "
+          "true and it would otherwise match every filter and every token)",
+          all("0xbad" not in covered(f) for f in every_filter)
+          and counted({"Print": ["Unclaimed"]}) == 2.0 and counted({"Nothing": ["At all"]}) == 1.0,
+          str([sorted(covered(f)) for f in every_filter]))
+    got = covered({"Print": ["Unclaimed"]})
+    check("trait matching: COVERS is exactly the offers whose every criterion the filter guarantees",
+          got == {"0xcov"}, str(got))
+    got2 = covered({"Print": ["Unclaimed", "Claimed"]})
+    check("trait matching: a multi-value clause guarantees nothing, so it COVERS nothing "
+          "(S(F) is not a subset of S(C) when the filter admits both values)", got2 == set(), str(got2))
+
+    v = eng.trait_offer_verdicts("argonauts", {"Print": ["Unclaimed"]}, 0, now.timestamp())
+    check("trait matching: the five verdicts are reported separately and never summed",
+          (v["covers"], v["partial_n"], v["disjoint"], v["unknown_numeric"], v["unparsed"]) == (1, 1, 1, 1, 1),
+          str(v))
+    check("trait matching: a PARTIAL offer carries |S(F) n S(C)| AND |S(F)| -- never a bare number",
+          v["partial"][0]["overlap_tokens"] == 1 and v["partial"][0]["filter_tokens"] == 1
+          and v["partial"][0]["order_hash"] == "0xpar", str(v["partial"]))
+    check("trait matching: numeric criteria are UNKNOWN, which is excluded AND counted, never TRUE",
+          v["unknown_numeric"] == 1 and "0xnum" not in got)
+    s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                   range_="6h", now=now, traits={"Print": ["Unclaimed"]})
+    check("trait matching: the legs line now describes the COVER rule, not 'criteria not stored'",
+          "COVER" in s["basis"]["legs"]["collection_bid"]
+          and "criteria not stored" not in s["basis"]["legs"]["collection_bid"],
+          s["basis"]["legs"]["collection_bid"])
+    n.close()
 
 
 if __name__ == "__main__":

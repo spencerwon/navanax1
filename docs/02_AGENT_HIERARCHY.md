@@ -95,6 +95,9 @@ genuinely operator-level decisions reach Spencer.
         DESIGN LEAD (L2) ─ sees every user-facing change RENDERED before the
                           Operator does; asks him design questions as their
                           own thread. Reports to the Orchestrator.
+        MARKET ANALYST (L2) ─ on-chain due diligence on the ADDRESSES that
+                          make the market; never people. Reports to the
+                          Orchestrator; detectors validated by the Validator.
 ```
 
 **The escalation rules, stated plainly:**
@@ -380,7 +383,28 @@ warning, or signs off a page it has not seen rendered.
 **Reports to** the orchestrator. Design questions for Spencer go through the
 orchestrator as a separate thread with two or three concrete options.
 
-### 3.16 Context boundaries — summary
+### 3.16 Market Analyst (L2) — `market-analyst`, opus
+
+**Purpose.** On-chain market-structure due diligence on the wallets that make
+this market: behaviour, holdings, flows, counterparties, clustering, and
+manipulation-pattern detection, per **address**. Three makers produce 88% of
+Argonauts events; the Operator needs to know what kind of participant is
+behind a quote before trading against it.
+
+**Sources.** The landing zone first; public chain data (RPC / block-explorer,
+own key, never the OpenSea REST budget) second; OpenSea REST only for a public
+profile lookup, through `RestClient`, counted.
+
+**Boundary, stated plainly.** Addresses and clusters, never people. No linking
+an address to a legal name, company, employer, or personal finances; nothing
+recorded that the owner did not attach to the address themselves; profiles
+stay local and gitignored; findings are structure ("this address did X"), not
+motive. The charter is an exact description of the role, not a euphemism.
+
+**Reports to** the orchestrator. Pattern detectors go to the validator, never
+self-validated.
+
+### 3.17 Context boundaries — summary
 
 | Agent | Landing zone | Normalized | Train | Validation | Test | Config | Code | Live capital |
 |---|---|---|---|---|---|---|---|---|
