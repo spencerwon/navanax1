@@ -140,6 +140,11 @@ def job(label: str, root: Path | str, python: str = "python3",
         plist["ProgramArguments"] = [python, "-m", "navanax.cli", "traits"]
         plist["StartCalendarInterval"] = {"Hour": TRAITS_HOUR, "Minute": TRAITS_MINUTE}
         plist["ThrottleInterval"] = THROTTLE_SECONDS
+        # NOT RunAtLoad (tech-lead, PR-1 review): the first traits run spends up
+        # to ~97 metered reads, and the Operator must be told BEFORE budget is
+        # spent, not after. The installer says so and names traits.command for
+        # a run-it-now; the schedule takes care of every later day.
+        plist["RunAtLoad"] = False
     elif label == KEEPAWAKE:
         # -i: prevent IDLE sleep. -s: only while on AC power (so a closed lid on
         # battery still sleeps and the battery is not flattened overnight).

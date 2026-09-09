@@ -240,9 +240,24 @@ class Dashboard:
 
     def api_audit(self) -> dict[str, Any]:
         problems = verify_manifest(self.landing, deep=False)
+        notes = [p for p in problems if not is_integrity_failure(p)]
+        # Trait-offer criteria vs the traits table (dataeng §4.2): a criterion
+        # with no matching trait value can never match a token, and that reads
+        # as "no trait-offer depth" -- a quiet market -- unless it is surfaced.
+        coverage = {}
+        try:
+            with self.lock:
+                coverage = {slug: self.engine.criteria_coverage(slug) for slug in self.slugs}
+            for slug, cov in coverage.items():
+                if cov.get("alert"):
+                    n_tok = self.norm.conn.execute("SELECT COUNT(*) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
+                    notes.append(f"{slug}: {cov['missing']} of {cov['distinct_criteria']} trait-offer criteria match no "
+                                 f"trait value in the store ({'traits table is empty -- run traits.command' if n_tok == 0 else 'casing or spelling differs from the metadata'})")
+        except Exception as exc:  # noqa: BLE001 - the audit must still report checksums
+            notes.append(f"criteria coverage check failed: {type(exc).__name__}: {exc}")
         return {"at": _now_iso(), "mode": "shallow (checksums; run status.command for the deep audit)",
                 "failures": [p for p in problems if is_integrity_failure(p)],
-                "notes": [p for p in problems if not is_integrity_failure(p)]}
+                "notes": notes, "criteria_coverage": coverage}
 
     def api_meta(self) -> dict[str, Any]:
         return {"metrics": {k: v["label"] for k, v in METRICS.items()},

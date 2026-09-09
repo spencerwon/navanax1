@@ -1,0 +1,39 @@
+# The assumptions registry (docs/06 §4.4). Every judgment the code embodies is
+# listed here with its rationale and owner, so the Operator can audit the
+# system's opinions by reading one file. This is configuration: a change is a
+# branch and a merge through the normal gate (docs/04 §5), never an edit in place.
+#
+# The entries below are DEFINITIONS in the derivation layer rather than tuned
+# numbers -- they are here because two reasonable people could disagree about
+# them (docs/06 §4.1), which is the test for "assumption".
+
+version: 1
+
+assumptions:
+  - id: ASM-020
+    name: standing_order_definition
+    layer: derivation
+    decided: 2026-09-09
+    decided_by: Spencer (Operator), via the trait-book brief; implemented by data-engineer
+    owner: data-engineer
+    review: 2026-12-01
+    code: src/navanax/metrics.py::standing_sql
+    value:
+      unexpired: "expiration_ts IS NULL OR expiration_ts > as_of"
+      null_expiration: standing            # an order with no expiry never expires on its own
+      item_sold: final                     # a later order_revalidate does NOT reopen it
+      item_cancelled: final                # on-chain Seaport cancel; a later revalidate does NOT reopen it
+      order_invalidate: reopenable         # dead unless an order_revalidate for the same hash follows
+      revalidate_same_instant: reopens     # invalidate and revalidate at the SAME valid_ts -> standing (>= comparison)
+      revalidate_before_invalidate: no_effect
+    rationale: >
+      OpenSea emits order_invalidate / order_revalidate as the maker's balance
+      or approval comes and goes; a revalidated order is real, fillable
+      liquidity, so treating every invalidation as final (the behaviour before
+      2026-09-09) hid standing orders. Cancels and sales are terminal on
+      chain. NULL expiry is read as "never" because that is what a Seaport
+      endTime of max-uint means; the cost of being wrong is a stale ask on
+      screen, not a wrong trade. Same-instant revalidate is a tie-break with
+      no observed instance yet; it was chosen to keep the predicate a single
+      >= comparison and is listed so it can be revisited when one appears.
+    applies_to: [live_book, screener, trait_book]

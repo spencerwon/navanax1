@@ -16,4 +16,4 @@ item_received_bid 42,601 · item_cancelled 41,361 · order_invalidate 1,529 · c
 Contract 0x387c41b0b2f1128de44db1bcf8baad085f26392c. Ids observed 4..9999 — suggests a numeric range, not necessarily contiguous. Collection size per OpenSea: 9,212 (from earlier session).
 
 ## Budget facts
-REST: 120 reads/hour measured (not 600). Token list = ~47 reads (200 per page). Per-token endpoint = 1 read each. Stream = unmetered.
+REST: 120 reads/hour, measured -- the older figure in early docs was unsourced and wrong (BUG-003). Token list = ~47 reads (200 per page). Per-token endpoint = 1 read each. Stream = unmetered.
