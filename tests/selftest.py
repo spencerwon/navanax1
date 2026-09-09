@@ -1069,9 +1069,22 @@ def test_no_superseded_rate_limit_in_operator_text(tmp: Path) -> None:
     # test "scans every operator-facing file... so this class cannot recur
     # silently". It recurred silently in five files. Scan the whole repo, the
     # way tools/buglog.py already does for bug ids.
+    # Scan the files the repo actually CLAIMS -- i.e. tracked files. A
+    # generated artifact sitting in the working tree is output, not an
+    # assertion; a tracked one is an assertion. `tools/preflight_report.json`
+    # was both at once until it was untracked, which is why it is now
+    # gitignored: the report the documents get corrected FROM must not itself
+    # become a stale claim in the repo.
+    import subprocess
     skip_dirs = {".git", "__pycache__", ".venv", "node_modules", "data"}
+    try:
+        tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                                 text=True, timeout=30, check=True).stdout.split()
+        candidates = [ROOT / t for t in tracked]
+    except (OSError, subprocess.SubprocessError):
+        candidates = sorted(ROOT.rglob("*"))
     offenders = []
-    for f in sorted(ROOT.rglob("*")):
+    for f in candidates:
         if not f.is_file() or f.suffix.lower() in {".xlsx", ".gz", ".zst", ".db", ".pyc"}:
             continue
         if any(part in skip_dirs for part in f.relative_to(ROOT).parts):
