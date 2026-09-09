@@ -1686,3 +1686,56 @@ bugs:
   regression_test: tests/selftest.py::test_trait_offer_matching_rule
   monitor_gap: "The guard is one line from being a disaster: an unparsed offer has no criteria rows, which makes the match's NOT EXISTS vacuously true, so it would match every filter and every token -- silently, and in the direction that manufactures an edge. That failure mode has a named property test (`criteria_n = 0` matches nothing, over every shape of filter) rather than a code comment."
   pr: 5
+
+- id: BUG-20260909-052
+  summary: A gap left open by a run that died was never closed -- one stale open record masked every bucket on every chart to infinity
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T13:05:00-05:00"
+  occurred_at: "2026-09-09T12:55:00-05:00"
+  resolved_at: "2026-09-09T13:20:00-05:00"
+  detected_by: "tech-lead, PR-1 (autostart) review; reproduced with two ordinary start/stop cycles leaving two ended:null manifest records, and a series masked 6/6"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/stream.py, line: 566}
+  - {file: src/navanax/landing.py, line: 510}
+  requirement: REQ-F-15
+  data_impact: "None to stored data. Display: every metric including counts null from the orphan gap's start onward -- a recorded period rendered as a hole, the inverse of the promise the installer makes. PR-1 turned this from rare into routine (launchd restarts on every logout, sleep and crash)."
+  root_cause: >-
+    `_close_gap` closes only the gap this process opened. A run that dies
+    mid-disconnect leaves its gap open in the register and the manifest;
+    `record_downtime_gap` on the next start opens a NEW bounded gap and never
+    looks at the old one. The dashboard treats an open gap as open-ended.
+  resolution: "At startup the successor closes every gap a previous run left open, at that run's last checkpoint (where the downtime gap begins), in both the register and the manifest, with a reason naming the successor. Records are re-filed, never deleted."
+  regression_test: tests/selftest.py::test_orphan_open_gaps_are_closed_by_the_successor
+  monitor_gap: "test_restart_records_downtime_gap covered the NEW gap and never asked what happened to an old one. The two-cycle case is now the test."
+  pr: 5
+
+- id: BUG-20260909-053
+  summary: order_lives marked an order 'expired' at its expiration time even when that time had not arrived -- standing orders recorded as ended with lifetimes that had not elapsed
+  severity: S1
+  priority: P0
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-09T13:05:00-05:00"
+  occurred_at: "2026-09-09T12:30:00-05:00"
+  resolved_at: "2026-09-09T13:20:00-05:00"
+  detected_by: "tech-lead, PR-2 review; reproduced on a 4,000-order synthetic (5% of lives fabricated, p90 +76%, censored 0) and explained censored=1 of 46,814 on the real corpus"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 512}
+  requirement: REQ-F-19
+  data_impact: "Display only, in the flattering direction: bid lifetimes biased long, the censored bucket drained, so the book looked more durable than it was. The 11.69 s median quoted from the first real-corpus fold is withdrawn until re-folded."
+  root_cause: >-
+    The fold inferred expiry from `expiration_ts` without testing that the
+    expiration had passed. docs/06 §4.3 forbids imputation in DERIVATION;
+    recording a future end is imputing the future. The quant's spec stated
+    the condition; the implementation dropped it.
+  resolution: "Expiry is derived only when expiration_ts < the fold time; otherwise the life is censored. The incremental refresh also re-folds every censored life whose expiration has since passed, so an untouched order cannot stay 'standing' in the table after it expired."
+  regression_test: tests/selftest.py::test_expiry_is_never_in_the_future
+  monitor_gap: "The unit fixtures had no order whose expiration lay in the future relative to the fold. A censored count of 1 in 46,814 on the real run should have been read as a bug by whoever quoted it -- the fifth project rule, applied to a liquidity number."
+  pr: 5

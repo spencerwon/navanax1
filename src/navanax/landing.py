@@ -286,6 +286,26 @@ class ManifestWriter:
                                              g.get("gap_id") or 0))
             self._atomic_write(self.path_for(dt), data)
 
+    def open_gaps(self) -> list[dict[str, Any]]:
+        """Every gap record in every daily manifest that has no end. One entry
+        per gap_id (a multi-day gap is filed under each day it spans)."""
+        seen: set[Any] = set()
+        out: list[dict[str, Any]] = []
+        for mp in sorted(self.dir.glob("*.json")):
+            try:
+                with mp.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            for g in data.get("gaps", []):
+                if g.get("ended_at") is None:
+                    key = (g.get("gap_id"), g.get("run_id"), g.get("started_at"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(g)
+        return out
+
     def files_for_event_range(self, start_iso: str, end_iso: str) -> list[dict[str, Any]]:
         """Resolve an EVENT-TIME range to the files that may contain it.
 
@@ -506,6 +526,26 @@ class LandingZoneWriter:
         """
         for dt in _dates_spanned(gap.started_at, gap.ended_at, self._clock):
             self.manifest.record_gap(dt, gap)
+
+    def close_orphan_gaps(self, this_run_id: str, ended_at: str) -> list[GapRecord]:
+        """Close every manifest gap that a PREVIOUS run left open (tech-lead,
+        PR-1 review, S1). A gap with no end masks every bucket from its start
+        to infinity -- one stale record from a run that died mid-disconnect
+        blanks every chart forever. The predecessor cannot close it (it is
+        dead); its successor can, at the moment the predecessor was last known
+        alive, which is what `ended_at` should be. Records are re-filed with
+        an end, never deleted."""
+        closed: list[GapRecord] = []
+        fields = {f.name for f in GapRecord.__dataclass_fields__.values()}
+        for g in self.manifest.open_gaps():
+            if g.get("run_id") == this_run_id:
+                continue
+            rec = GapRecord(**{k: v for k, v in g.items() if k in fields})
+            end = max(ended_at, rec.started_at or ended_at)
+            rec.reason = (rec.reason or "") + f" | left open by run {rec.run_id}; closed by successor {this_run_id} at its startup"
+            self.close_gap_record(rec, end)
+            closed.append(rec)
+        return closed
 
     def close_gap_record(self, gap: GapRecord, ended_at: str) -> None:
         """Write a gap's END into the durable record.

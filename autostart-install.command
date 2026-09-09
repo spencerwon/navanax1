@@ -101,7 +101,7 @@ IS_NAVANAX=no
 if [ -n "$MANUAL_PID" ] && kill -0 "$MANUAL_PID" 2>/dev/null; then
   CMD="$(ps -p "$MANUAL_PID" -o command= 2>/dev/null)"
   case "$CMD" in
-    *navanax*) IS_NAVANAX=yes ;;
+    *navanax.cli*ingest*) IS_NAVANAX=yes ;;   # the recorder's exact command line, nothing looser
     *) echo "      The lock file names process $MANUAL_PID, but that process is:"
        echo "        ${CMD:-(unreadable)}"
        echo "      That is NOT a navanax recorder -- the lock file is stale and the"
@@ -146,11 +146,14 @@ echo
 echo "[6/6] Handing the jobs to macOS."
 UIDNUM="$(id -u)"
 DOMAIN="gui/$UIDNUM"
+PROBLEMS=0
 for L in $LABELS; do
   # Remove any previous copy first, or 'bootstrap' fails with "service already
   # loaded" and you would end up with the OLD job still running.
   launchctl bootout "$DOMAIN/$L" >/dev/null 2>&1
-  launchctl unload -w "$AGENTS/$L.plist" >/dev/null 2>&1
+  # 'enable' clears a disabled flag a previous 'unload -w' may have left, so
+  # bootstrap is not refused for a reason that has nothing to do with the job.
+  launchctl enable "$DOMAIN/$L" >/dev/null 2>&1
   if launchctl bootstrap "$DOMAIN" "$AGENTS/$L.plist" >/dev/null 2>&1; then
     echo "      loaded  $L"
   elif launchctl load -w "$AGENTS/$L.plist" >/dev/null 2>&1; then
@@ -159,6 +162,7 @@ for L in $LABELS; do
   else
     echo "      PROBLEM $L -- macOS refused to load it. Details:"
     launchctl bootstrap "$DOMAIN" "$AGENTS/$L.plist" 2>&1 | sed 's/^/              /'
+    PROBLEMS=$((PROBLEMS+1))
   fi
 done
 
@@ -176,6 +180,16 @@ for L in $LABELS; do
     echo "  $L: NOT LOADED -- see the message above"
   fi
 done
+
+if [ "$PROBLEMS" -gt 0 ]; then
+  echo
+  echo "============================================================"
+  echo "  $PROBLEMS job(s) did NOT load -- see PROBLEM above."
+  echo "  The jobs that loaded are running; the failed one is not."
+  echo "  Send the lines above to Claude. Nothing else was changed."
+  echo "============================================================"
+  echo; read -r -p "Press Enter to close. "; exit 1
+fi
 
 cat <<EOF
 
@@ -199,15 +213,14 @@ open needs to stay open.
                          Safari or Chrome whenever you want it --
                          no window to keep open, no button to press.
 
-  com.navanax.traits     the trait finder. Runs now, and then every
-                         day at 3:30 AM. It is resumable: a finished
-                         token list is not re-fetched and only failed
-                         tokens are retried, so the daily run is
-                         cheap after the first one.
-                         (The FIRST run is not cheap -- it can spend
-                         up to ~97 of your 120 hourly OpenSea reads.
-                         It is running right now. Do not start a big
-                         manual traits or backfill job today.)
+  com.navanax.traits     the trait finder. Runs every day at 3:30 AM
+                         -- NOT right now. The first run spends up to
+                         ~97 of your 120 hourly OpenSea reads, and
+                         that is your call, not this installer's:
+                         double-click traits.command when you want it
+                         now, or let 3:30 AM do it. Later runs are
+                         cheap: a finished token list is not
+                         re-fetched, only failed tokens retry.
 
   Logs (plain text, open them in TextEdit):
       $PROJECT/data/logs/recorder.log

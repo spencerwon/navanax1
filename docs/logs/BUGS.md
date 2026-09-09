@@ -462,9 +462,20 @@ and is biased in both directions at once. When the panel is rebuilt on real
 data the median may move **either** way. That is the expected consequence of two
 known defects — not a discovery, and not a new bug.
 
+### Round 13 — the gate on PR-1 (autostart) and PR-2/4 (order lives, criteria)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-052 | S1 | P0 | fixed | A gap left open by a dead run was never closed — one stale record masked every chart to infinity; launchd restarts made it routine |
+| BUG-20260909-053 | S1 | P0 | fixed | `order_lives` inferred expiry at a time that had not arrived — standing orders recorded as ended, lifetimes biased long |
+
+Both found by the tech-lead reproducing the change by running it, both in the
+flattering direction (a quiet market; a durable book), both fixed the same hour
+with a test that failed first.
+
 ### Still open
 
-**None.** All 51 logged bugs are fixed.
+**None.** All 53 logged bugs are fixed.
 
 ### The lesson
 

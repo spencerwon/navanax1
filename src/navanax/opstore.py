@@ -207,10 +207,10 @@ class OperationalStore:
             )
             return int(cur.lastrowid)
 
-    def close_gap(self, gap_id: int) -> None:
+    def close_gap(self, gap_id: int, ended_at: str | None = None) -> None:
         with self.connect() as c:
             c.execute("UPDATE gap_register SET ended_at=? WHERE id=? AND ended_at IS NULL",
-                      (_now(), gap_id))
+                      (ended_at or _now(), gap_id))
 
     def open_gaps(self) -> list[dict[str, Any]]:
         with self.connect() as c:

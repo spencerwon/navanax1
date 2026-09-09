@@ -2530,8 +2530,8 @@ def test_launchd_plists_are_valid_and_correct(tmp: Path) -> None:
     check("launchd: traits is scheduled daily at 03:30 local",
           tr.get("StartCalendarInterval") == {"Hour": 3, "Minute": 30},
           repr(tr.get("StartCalendarInterval")))
-    check("launchd: traits also RunAtLoad, so it does not wait until 03:30 to start",
-          tr.get("RunAtLoad") is True)
+    check("launchd: traits is NOT RunAtLoad -- metered budget is never spent before the Operator is told (tech-lead PR-1 S3)",
+          tr.get("RunAtLoad") is False)
     # The one that would quietly drain the metered REST budget forever.
     check("launchd: traits has NO KeepAlive -- it is a job that is SUPPOSED to finish, "
           "and restarting it in a loop would drain the 120/hr REST bucket",
@@ -3253,6 +3253,97 @@ def test_trait_offer_matching_rule(tmp: Path) -> None:
           and "criteria not stored" not in s["basis"]["legs"]["collection_bid"],
           s["basis"]["legs"]["collection_bid"])
     n.close()
+
+
+def test_expiry_is_never_in_the_future(tmp: Path) -> None:
+    """Tech-lead PR-2 review, S1: an order whose expiration has NOT arrived is
+    censored (still standing), never 'expired'. Recording a future end is
+    imputing the future (docs/06 §4.3); on a synthetic corpus it fabricated 5%
+    of lives and drained the censored count to 1 of 46,814 on the real one."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "expiry.sqlite")
+    exp = "2026-09-09T11:00:00Z"
+    put(REAL_BID, "2026-09-09T10:00:00Z", 1, order_hash="0xfuture", token_id="1",
+        expiration_at=exp, expiration_ts=iso_to_ts(exp))
+    put(REAL_BID, "2026-09-09T10:00:00Z", 2, order_hash="0xnoexp", token_id="2",
+        expiration_at=None, expiration_ts=None)
+    n.conn.commit()
+    t_before = iso_to_ts("2026-09-09T10:30:00Z")
+    refresh_order_lives(n.conn, now_ts=t_before)
+    row = n.conn.execute("SELECT exit_reason, t_term FROM order_lives WHERE order_hash='0xfuture'").fetchone()
+    check("expiry: before the expiration time the life is CENSORED with no t_term", row == ("censored", None), str(row))
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    lt = eng.bid_lifetimes("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), t_before)
+    check("expiry: bid_lifetimes counts it as censored, not ended", lt["censored_n"] == 2 and lt["n"] == 0, str(lt))
+    t_after = iso_to_ts("2026-09-09T11:30:00Z")
+    # incremental refresh with NO new events for this hash must still flip it
+    refresh_order_lives(n.conn, hashes=["0xsomethingelse"], now_ts=t_after)
+    row = n.conn.execute("SELECT exit_reason, t_term, exit_source FROM order_lives WHERE order_hash='0xfuture'").fetchone()
+    check("expiry: once the expiration has passed, an incremental refresh marks it expired (derived) at expiration_ts",
+          row == ("expired", iso_to_ts(exp), "derived"), str(row))
+    row = n.conn.execute("SELECT exit_reason FROM order_lives WHERE order_hash='0xnoexp'").fetchone()
+    check("expiry: an order with no expiration stays censored", row == ("censored",))
+    n.close()
+
+
+def test_orphan_open_gaps_are_closed_by_the_successor(tmp: Path) -> None:
+    """Tech-lead PR-1 review, S1: a gap left open by a run that died is closed by
+    the next run at the dead run's last checkpoint -- otherwise one stale open
+    record nulls every bucket on every chart forever, and launchd restarts make
+    that routine."""
+    from navanax.landing import GapRecord, LandingZoneWriter
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+
+    root = tmp / "orphan-lz"
+    store = OperationalStore(tmp / "orphan.db")
+    w1 = LandingZoneWriter(root, run_id="run-dead", codec=GzipCodec())
+    c1 = StreamConsumer("k", ["argonauts"], w1, store, run_id="run-dead")
+    c1.record_downtime_gap()                                  # first run: checkpoint only
+    gid = store.open_gap("run-dead", "connection reset", ["collection:argonauts"])
+    w1.record_gap(GapRecord(started_at="2026-09-09T10:00:00Z", ended_at=None, reason="connection reset",
+                            run_id="run-dead", topics=["collection:argonauts"], gap_id=gid))
+    w1.close()                                                # the run dies here, gap still open
+    store.save_checkpoint("opensea:stream", "run-dead", 10, "2026-09-09T10:05:00Z")
+    ck = store.get_checkpoint("opensea:stream")
+    check("orphan: the dead run left an open gap in register and manifest",
+          len(store.open_gaps()) == 1 and len(w1.manifest.open_gaps()) == 1)
+
+    # what the dashboard would have done with it: every bucket null, forever
+    nrm = Normalizer(root, tmp / "orphan.sqlite")
+    from navanax.dashboard import Dashboard
+    d = Dashboard.__new__(Dashboard)
+    d.landing, d.norm = root, nrm
+    spans = Dashboard._gap_spans(d)
+    check("orphan: before the fix an open gap masks to infinity", spans and spans[0][1] is None, str(spans))
+
+    w2 = LandingZoneWriter(root, run_id="run-next", codec=GzipCodec())
+    c2 = StreamConsumer("k", ["argonauts"], w2, store, run_id="run-next")
+    c2.record_downtime_gap()
+    w2.close()
+    reg = store.open_gaps()
+    man = w2.manifest.open_gaps()
+    check("orphan: the successor closes the dead run's gap in the register AND the manifest",
+          reg == [] and man == [], f"register open {len(reg)}, manifest open {len(man)}")
+    with store.connect() as conn:
+        row = dict(conn.execute("SELECT * FROM gap_register WHERE id=?", (gid,)).fetchone())
+    check("orphan: it is closed at the dead run's last checkpoint, where the downtime gap begins",
+          row["ended_at"] == ck["updated_at"], f"{row['ended_at']} vs {ck['updated_at']}")
+    d._gap_cache = None
+    spans = Dashboard._gap_spans(d)
+    check("orphan: no span is open-ended any more; the record shows two bounded gaps back to back",
+          spans and all(e is not None for _, e in spans) and len(spans) == 2, str(spans))
+    closed = [g for g in json.loads((root / "_manifest" / "2026-09-09.json").read_text())["gaps"] if g.get("gap_id") == gid]
+    check("orphan: the manifest record says who closed it and why", len(closed) == 1 and "closed by successor run-next" in closed[0]["reason"])
+    eng = MetricEngine(nrm.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    from datetime import timedelta
+    now = datetime.now(timezone.utc) + timedelta(hours=3)   # both gaps end at the successor's wall-clock start
+    s = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now, gaps=spans)
+    check("orphan: buckets after the closed gaps are defined again (0 sales while listening), not null",
+          s["raw"][-1] == 0.0 and s["basis"]["gap_masked_buckets"] < len(s["raw"]), str(s["raw"]))
+    nrm.close()
 
 
 if __name__ == "__main__":

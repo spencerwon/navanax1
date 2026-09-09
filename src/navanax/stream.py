@@ -613,6 +613,21 @@ class StreamConsumer:
             self._checkpoint()
             return None
         since = ck.get("updated_at") or ck.get("last_received_at")
+        # Sweep gaps the DEAD run left open (tech-lead, PR-1 review, S1). It
+        # cannot close them; we can, at the last moment it was known alive --
+        # `since` -- which the downtime gap below picks up from. Without this,
+        # one orphan record nulls every bucket on every chart from its start
+        # to infinity, and launchd restarts make that routine.
+        orphans = [g for g in self.opstore.open_gaps() if g.get("run_id") != self.run_id]
+        for g in orphans:
+            self.opstore.close_gap(int(g["id"]), ended_at=since)
+        closed_manifest = []
+        if hasattr(self.writer, "close_orphan_gaps"):
+            closed_manifest = self.writer.close_orphan_gaps(self.run_id, since)
+        if orphans or closed_manifest:
+            log.warning("closed %d register / %d manifest gap(s) left open by a previous run, at %s "
+                        "(its last checkpoint); the downtime gap continues from there",
+                        len(orphans), len(closed_manifest), since)
         gid = self.opstore.open_gap(
             self.run_id,
             f"process not running (previous run {ck.get('run_id')} last CHECKPOINTED "
