@@ -5,7 +5,7 @@ docs/07_STORAGE_AND_RECORDING.md §1.2: "Land first, normalize second."
 Every stream frame is written here, verbatim, before anything parses it. If the
 normalizer has a bug, the raw bytes are still on disk and can be reprocessed.
 If we normalized in flight and discarded the original, a parsing bug would mean
-the data is gone -- and at 600 REST reads/hour it may not be re-fetchable at any
+the data is gone -- and at 120 REST reads/hour (measured) it may not be re-fetchable at any
 price.
 
 Guarantees this module provides:
@@ -366,7 +366,12 @@ class LandingZoneWriter:
 # ---------------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------------
-def read_file(path: str | Path, codec: Codec | str | None = None, *, tolerate_truncation: bool = True) -> Iterator[dict[str, Any]]:
+def read_file(
+    path: str | Path,
+    codec: Codec | str | None = None,
+    *,
+    tolerate_truncation: bool = True,
+) -> Iterator[dict[str, Any]]:
     """Yield envelopes from a landing-zone file.
 
     `tolerate_truncation` is the crash-recovery path: a file whose last frame
@@ -381,7 +386,10 @@ def read_file(path: str | Path, codec: Codec | str | None = None, *, tolerate_tr
     blob = p.read_bytes()
     try:
         data = c.decompress(blob)
-    except Exception:
+    except Exception:  # noqa: BLE001 - deliberate: ANY decompression failure
+        # means the file is damaged or truncated, and every codec raises a
+        # different type. Falling back to frame-by-frame recovery is the whole
+        # point of REQ-D-26a; narrowing this would silently lose recoverable data.
         if not tolerate_truncation:
             raise
         data = c.decompress_truncated(blob)

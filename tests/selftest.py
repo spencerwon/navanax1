@@ -13,8 +13,6 @@ is what is worth testing here.
 from __future__ import annotations
 
 import asyncio
-import gzip
-import io
 import json
 import shutil
 import sys
@@ -25,24 +23,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from navanax.codec import GzipCodec, RawCodec  # noqa: E402
+from navanax.codec import GzipCodec  # noqa: E402
+from navanax.errors import NavanaxError  # noqa: E402
 from navanax.governor import Priority, RestGovernor, TokenBucket  # noqa: E402
-from navanax.landing import (  # noqa: E402
-    GapRecord,
-    LandingZoneWriter,
-    read_file,
-    verify_manifest,
-)
+from navanax.landing import LandingZoneWriter, read_file, verify_manifest  # noqa: E402
 from navanax.opstore import OperationalStore  # noqa: E402
-from navanax.stream import StreamConsumer  # noqa: E402
+from navanax.stream import StreamConsumer, normalize_frame  # noqa: E402
 
 PASS: list[str] = []
 FAIL: list[str] = []
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
-    (PASS if cond else FAIL).append(f"{name}{(' -- ' + detail) if detail and not cond else ''}")
-    print(f"{'PASS' if cond else 'FAIL'}  {name}" + (f"\n        {detail}" if detail and not cond else ""))
+    suffix = f" -- {detail}" if detail and not cond else ""
+    PASS.append(name) if cond else FAIL.append(f"{name}{suffix}")
+    print(f"{'PASS' if cond else 'FAIL'}  {name}"
+          + (f"\n        {detail}" if detail and not cond else ""))
 
 
 class FakeClock:
@@ -61,7 +57,8 @@ class FakeClock:
         self.mono += seconds
 
 
-def frame(slug: str, ets: str, event: str = "item_listed", price: str = "530000000000000000") -> str:
+def frame(slug: str, ets: str, event: str = "item_listed",
+          price: str = "530000000000000000") -> str:
     return json.dumps(
         {
             "topic": f"collection:{slug}",
@@ -214,22 +211,62 @@ def test_gap_recording(tmp: Path) -> None:
           st["items_total"] == 9210 and st["items_done"] == 4000 and st["state"] == "tokens")
 
 
+def test_dotenv_loading(tmp: Path) -> None:
+    """Regression for BUG-20260909-001: entry points never read .env."""
+    import os
+    from navanax.dotenv import DotenvError, load, parse, require
+
+    check("dotenv: strips quotes", parse('K="v"')["K"] == "v")
+    check("dotenv: handles export prefix", parse("export K=v")["K"] == "v")
+    check("dotenv: strips inline comment", parse("K=v # note")["K"] == "v")
+    check("dotenv: strips whitespace", parse("K =  v  ")["K"] == "v")
+    check("dotenv: skips comments/blanks", parse("# c\n\nK=v") == {"K": "v"})
+
+    d = tmp / "envtest"; d.mkdir(parents=True, exist_ok=True)
+    (d / ".env").write_text("OPENSEA_API_KEY=fake_key_value\n")
+    os.environ.pop("OPENSEA_API_KEY", None)
+    check("dotenv: require() reads .env when env var absent",
+          require("OPENSEA_API_KEY", path=d / ".env") == "fake_key_value",
+          "this is the exact bug: a correct .env reported as 'key not set'")
+
+    os.environ["OPENSEA_API_KEY"] = "from_environment"
+    check("dotenv: real env var wins over file",
+          require("OPENSEA_API_KEY", path=d / ".env") == "from_environment")
+    os.environ.pop("OPENSEA_API_KEY", None)
+
+    # The macOS trap: TextEdit saves Rich Text, file looks fine on screen.
+    (d / "rtf.env").write_bytes(rb"{\rtf1\ansi OPENSEA_API_KEY=x}")
+    try:
+        load(d / "rtf.env"); ok = False
+    except DotenvError as exc:
+        ok = "Rich Text" in str(exc) and "Make Plain Text" in str(exc)
+    check("dotenv: detects TextEdit RTF and says how to fix it", ok,
+          "an RTF .env is invisible in the editor and must be caught by bytes")
+
+    (d / "missing").mkdir(exist_ok=True)
+    try:
+        require("OPENSEA_API_KEY", path=d / "missing" / ".env"); ok2 = False
+    except DotenvError as exc:
+        ok2 = "cp .env.example .env" in str(exc)
+    check("dotenv: missing file gives an actionable message", ok2)
+
+
 def test_governor_budget() -> None:
     t = {"v": 0.0}
-    bucket = TokenBucket(capacity=600, per_seconds=3600, clock=lambda: t["v"])
-    check("governor: starts full", bucket.available() == 600)
+    bucket = TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t["v"])
+    check("governor: starts full", bucket.available() == 120)
 
-    for _ in range(600):
+    for _ in range(120):
         bucket.try_consume()
     check("governor: exhausts at capacity", bucket.available() == 0)
     check("governor: refuses when empty", bucket.try_consume() is False)
 
-    t["v"] += 6.0  # one token per six seconds at 600/hr
-    check("governor: refills at 600/hr", abs(bucket.available() - 1.0) < 1e-6,
+    t["v"] += 30.0  # one token per 30 seconds at the measured 120/hr
+    check("governor: refills at 120/hr", abs(bucket.available() - 1.0) < 1e-6,
           f"got {bucket.available()}")
 
     t["v"] += 36000.0
-    check("governor: caps at capacity", bucket.available() == 600)
+    check("governor: caps at capacity", bucket.available() == 120)
 
     bucket.observe_429()
     check("governor: 429 zeroes the local model", bucket.available() == 0)
@@ -244,31 +281,38 @@ def test_governor_budget() -> None:
 def test_governor_priority() -> None:
     """MAINTENANCE must starve before INTERACTIVE."""
     t = {"v": 0.0}
-    bucket = TokenBucket(capacity=600, per_seconds=3600, clock=lambda: t["v"])
+    bucket = TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t["v"])
     gov = RestGovernor(bucket)
-    for _ in range(500):
-        bucket.try_consume()          # 100 left
+    for _ in range(100):
+        bucket.try_consume()          # 20 left
     avail = bucket.available()
-    check("governor: 100 tokens remain", abs(avail - 100) < 1e-6, f"got {avail}")
+    check("governor: 20 tokens remain", abs(avail - 20) < 1e-6, f"got {avail}")
 
     async def scenario() -> tuple[bool, bool]:
         interactive_ok = False
         maintenance_ok = False
+        # Either outcome is a legitimate "denied": the wait times out, or the
+        # governor raises BudgetExhaustedError. Name both rather than blind-catching.
+        # asyncio.TimeoutError and builtin TimeoutError are the SAME class on
+        # Python 3.11+ and DIFFERENT classes on 3.10. This is the stdlib-only
+        # smoke test and must run anywhere, so list both; on 3.11+ the tuple
+        # simply contains a duplicate, which is harmless.
+        denied = (TimeoutError, asyncio.TimeoutError, NavanaxError)  # noqa: UP041
         try:
             await asyncio.wait_for(gov.acquire(Priority.INTERACTIVE), timeout=0.3)
             interactive_ok = True
-        except (asyncio.TimeoutError, Exception):
+        except denied:
             pass
         try:
             await asyncio.wait_for(gov.acquire(Priority.MAINTENANCE), timeout=0.3)
             maintenance_ok = True
-        except (asyncio.TimeoutError, Exception):
+        except denied:
             pass
         return interactive_ok, maintenance_ok
 
     i_ok, m_ok = asyncio.run(scenario())
-    check("governor: INTERACTIVE granted with 100 left", i_ok)
-    check("governor: MAINTENANCE starved below its 120-token floor", not m_ok,
+    check("governor: INTERACTIVE granted with 20 left", i_ok)
+    check("governor: MAINTENANCE starved below its 24-token floor", not m_ok,
           "low-priority work must not consume the last of the budget")
 
 
@@ -327,6 +371,61 @@ def test_irrecoverable_classification() -> None:
           "order_invalidate" in IRRECOVERABLE and "order_revalidate" in IRRECOVERABLE)
 
 
+def test_phoenix_v2_arrays() -> None:
+    """Regression for BUG-20260909-002: OpenSea speaks Phoenix v2 (arrays)."""
+    v1 = {"topic": "collection:argonauts", "event": "item_listed",
+          "payload": {"x": 1}, "ref": "1"}
+    n1 = normalize_frame(v1)
+    check("phoenix: v1 map still normalizes",
+          n1 is not None and n1["event"] == "item_listed"
+          and n1["topic"] == "collection:argonauts")
+
+    # [join_ref, ref, topic, event, payload] -- the shape that crashed us
+    v2 = ["1", "1", "collection:argonauts", "phx_reply",
+          {"status": "ok", "response": {}}]
+    n2 = normalize_frame(v2)
+    check("phoenix: v2 ARRAY normalizes (the crash case)",
+          n2 is not None and n2["event"] == "phx_reply"
+          and n2["topic"] == "collection:argonauts",
+          "this is the exact frame that raised AttributeError on .get()")
+    check("phoenix: v2 payload reachable",
+          n2 is not None and n2["payload"]["status"] == "ok")
+
+    check("phoenix: junk returns None, not a crash",
+          normalize_frame("just a string") is None
+          and normalize_frame([1, 2]) is None
+          and normalize_frame(None) is None)
+
+    class W:
+        run_id = "run-v2"
+        def __init__(self): self.landed = []
+        def write(self, raw, topic=None, event_timestamp=None, received_at=None):
+            self.landed.append((raw, topic, event_timestamp)); return len(self.landed)
+        def flush(self): pass
+        def record_gap(self, gap): pass
+    class S:
+        def open_gap(self, *a, **k): return 1
+        def close_gap(self, *a, **k): pass
+
+    w = W()
+    c = StreamConsumer("k", ["argonauts"], w, S())  # type: ignore[arg-type]
+    ev = json.dumps(["1", None, "collection:argonauts", "item_listed",
+                     {"event_type": "item_listed",
+                      "payload": {"event_timestamp": "2026-09-09T07:10:00Z"}}])
+    c.handle_frame(ev)
+    check("phoenix: consumer survives a v2 event frame", c.stats.events == 1)
+    check("phoenix: event_timestamp still extracted from v2",
+          w.landed[-1][2] == "2026-09-09T07:10:00Z", f"got {w.landed[-1][2]}")
+    check("phoenix: topic still extracted from v2",
+          w.landed[-1][1] == "collection:argonauts")
+
+    before = len(w.landed)
+    c.handle_frame('["only","three","items"]')
+    check("phoenix: unrecognised shape STILL LANDED verbatim",
+          len(w.landed) == before + 1,
+          "never drop bytes we may not be able to fetch again")
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError, DataIntegrityError, InsufficientSampleError,
@@ -359,11 +458,13 @@ def main() -> int:
         for fn in (
             test_roundtrip_and_verbatim, test_crash_recovery, test_hour_rolling,
             test_manifest_integrity, test_event_time_range_resolution, test_gap_recording,
+            test_dotenv_loading,
         ):
             print(f"\n--- {fn.__name__} ---")
             fn(tmp)
         for fn0 in (test_governor_budget, test_governor_priority, test_stream_parsing,
-                    test_irrecoverable_classification, test_error_hierarchy):
+                    test_irrecoverable_classification, test_phoenix_v2_arrays,
+                    test_error_hierarchy):
             print(f"\n--- {fn0.__name__} ---")
             fn0()
         print("\n" + "=" * 72)

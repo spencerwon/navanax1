@@ -179,18 +179,18 @@ class ZstdCodec:
         while pos < n:
             try:
                 size = zstandard.frame_content_size(data[pos:])
-            except Exception:
+            except (zstandard.ZstdError, ValueError):
                 break
             try:
                 frame = zstandard.ZstdDecompressor().decompress(
                     data[pos:], max_output_size=max(size, 1 << 24) if size > 0 else (1 << 24)
                 )
-            except Exception:
-                break  # partial trailing frame
+            except (zstandard.ZstdError, ValueError, MemoryError):
+                break  # partial trailing frame -- this is the recovery path
             out.extend(frame)
             try:
                 consumed = zstandard.frame_header_size(data[pos:])
-            except Exception:
+            except (zstandard.ZstdError, ValueError):
                 break
             # Advance by locating the next frame magic.
             nxt = data.find(b"\x28\xb5\x2f\xfd", pos + consumed)

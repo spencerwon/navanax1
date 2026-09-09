@@ -14,7 +14,7 @@ It answers the questions that cannot be answered from documentation:
   5. What does one real event actually cost in bytes?  (docs/07 §2.3 is an
      ESTIMATE. This replaces it with a measurement.)
 
-Budget: spends at most 3 REST reads of your 600/hour. The stream test is free.
+Budget: spends at most 3 REST reads of your hourly limit (measured 120). Stream test is free.
 
     export OPENSEA_API_KEY=...        # never paste a key into a file or a chat
     python3 tools/preflight.py --slug argonauts --stream-seconds 60
@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import statistics
 import sys
 import time
@@ -51,7 +52,8 @@ def say(status: str, msg: str, detail: str = "") -> None:
 def get(path: str, key: str) -> tuple[int, dict, dict]:
     req = urllib.request.Request(
         f"{REST}{path}",
-        headers={"x-api-key": key, "Accept": "application/json", "User-Agent": "navanax-preflight/0.1"},
+        headers={"x-api-key": key, "Accept": "application/json",
+                 "User-Agent": "navanax-preflight/0.1"},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -60,7 +62,7 @@ def get(path: str, key: str) -> tuple[int, dict, dict]:
         body = e.read().decode()[:400]
         try:
             parsed = json.loads(body)
-        except Exception:
+        except json.JSONDecodeError:
             parsed = {"raw": body}
         return e.code, dict(e.headers), parsed
 
@@ -71,8 +73,9 @@ def check_key(key: str, slug: str) -> bool:
     report["checks"]["auth"] = {"status": status}
 
     if status == 401:
-        say(BAD, "Key rejected (401).", "Check it is the API key, not a bearer token, and not expired.\n"
-                                        "Free instant keys expire after 7 days (REQ-D-06).")
+        say(BAD, "Key rejected (401).",
+            "Check it is the API key, not a bearer token, and not expired.\n"
+            "Free instant keys expire after 7 days (REQ-D-06).")
         return False
     if status == 404:
         say(BAD, f"Collection slug '{slug}' not found (404).",
@@ -108,7 +111,8 @@ def check_key(key: str, slug: str) -> bool:
     # --- 3. collection facts ---------------------------------------------
     print("\n--- 3. Collection facts " + "-" * 46)
     facts = {k: body.get(k) for k in
-             ("collection", "name", "owner", "total_supply", "is_disabled", "is_nsfw", "trait_offers_enabled")}
+             ("collection", "name", "owner", "total_supply", "is_disabled",
+              "is_nsfw", "trait_offers_enabled")}
     contracts = body.get("contracts") or []
     facts["contracts"] = contracts
     report["checks"]["collection"] = facts
@@ -126,7 +130,7 @@ def check_key(key: str, slug: str) -> bool:
         }
         print()
         say(OK, f"Onboarding estimate: {supply:,} items -> {pages} pages at 200/page",
-            f"~{est} REST reads, roughly {est/10:.0f} minutes of a 600/hr budget.\n"
+            f"~{est} REST reads = {est/120*100:.0f}% of a 120/hr budget (measured).\n"
             f"docs/07 §3.1 predicted 60-100 reads for this collection.")
     return True
 
@@ -143,6 +147,9 @@ def check_stream(key: str, slug: str, seconds: int) -> bool:
 
     import asyncio
     import websockets
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+    from navanax.stream import normalize_frame
 
     frames: list[str] = []
     events: list[dict] = []
@@ -169,12 +176,19 @@ def check_stream(key: str, slug: str, seconds: int) -> bool:
                     raw = raw.decode()
                 frames.append(raw)
                 try:
-                    m = json.loads(raw)
+                    parsed = json.loads(raw)
                 except json.JSONDecodeError:
+                    continue
+                # BUG-20260909-002: Phoenix v2 sends arrays, not maps.
+                m = normalize_frame(parsed)
+                if m is None:
+                    say(WARN, f"unrecognised frame shape: {type(parsed).__name__}",
+                        json.dumps(parsed)[:200])
                     continue
                 ev = m.get("event")
                 if ev == "phx_reply":
-                    st = (m.get("payload") or {}).get("status")
+                    pl = m.get("payload")
+                    st = (pl or {}).get("status") if isinstance(pl, dict) else None
                     say(OK if st == "ok" else BAD, f"Join reply: status={st}")
                     if st != "ok":
                         say(BAD, "Join REJECTED", json.dumps(m)[:300])
@@ -233,15 +247,26 @@ def main() -> int:
     ap.add_argument("--skip-stream", action="store_true")
     a = ap.parse_args()
 
-    key = os.environ.get("OPENSEA_API_KEY", "").strip()
     print("=" * 72)
     print("NAVANAX PREFLIGHT")
     print("=" * 72)
-    if not key:
-        say(BAD, "OPENSEA_API_KEY is not set.",
-            "export OPENSEA_API_KEY=...   (or put it in .env)\n"
-            "Never paste a key into a file, a commit, or a chat message.")
+
+    # Load .env, exactly as every message in this project says we do.
+    # BUG-20260909-001: we used to read only os.environ while telling the user
+    # to use .env, so a correctly-filled .env failed with "key is not set".
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+    try:
+        from navanax.dotenv import DotenvError, require
+        key = require("OPENSEA_API_KEY", path=pathlib.Path(__file__).resolve().parents[1] / ".env")
+    except DotenvError as exc:
+        say(BAD, str(exc).split("\n")[0], "\n".join(str(exc).split("\n")[1:]))
         return 2
+    except ImportError:
+        key = os.environ.get("OPENSEA_API_KEY", "").strip()
+        if not key:
+            say(BAD, "OPENSEA_API_KEY is not set and src/navanax/dotenv.py is missing.",
+                "Run this from the project root so the .env loader can be found.")
+            return 2
     say(OK, f"Key present ({len(key)} chars, ...{key[-4:]})")
 
     ok = check_key(key, a.slug)

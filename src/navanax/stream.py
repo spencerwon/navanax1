@@ -1,7 +1,7 @@
 """OpenSea Stream API consumer.
 
 The stream is the primary ingestion path: unmetered, and it does not count
-against the 600 reads/hour REST budget. This process is what starts the
+against the REST budget (measured 120 reads/hour). This process is what starts the
 historical record accumulating, and every day it is not running is a day of
 history that cannot be bought back.
 
@@ -66,6 +66,42 @@ ALL_EVENTS = (
     "item_received_bid", "item_received_offer", "item_metadata_updated",
     "collection_offer", "trait_offer", "order_invalidate", "order_revalidate",
 )
+
+
+def normalize_frame(parsed: Any) -> dict[str, Any] | None:
+    """Return a uniform dict from either Phoenix wire format.
+
+    BUG-20260909-002. Phoenix ships two serializers and OpenSea uses v2:
+
+      v1 (map)   {"topic":..., "event":..., "payload":..., "ref":...}
+      v2 (array) [join_ref, ref, topic, event, payload]
+
+    v2 exists because arrays are smaller on the wire. Our code assumed v1 and
+    called .get() on what turned out to be a list, so the consumer died on the
+    very first frame the server sent -- the join reply.
+
+    Returns None for anything that is neither shape. The caller still lands the
+    raw bytes; an unrecognised frame is a parsing question, never a reason to
+    drop data we may not be able to fetch again.
+    """
+    if isinstance(parsed, dict):
+        return {
+            "join_ref": parsed.get("join_ref"),
+            "ref": parsed.get("ref"),
+            "topic": parsed.get("topic"),
+            "event": parsed.get("event"),
+            "payload": parsed.get("payload"),
+        }
+    if isinstance(parsed, list) and len(parsed) >= 5:
+        join_ref, ref, topic, event, payload = parsed[0], parsed[1], parsed[2], parsed[3], parsed[4]
+        return {
+            "join_ref": join_ref,
+            "ref": ref,
+            "topic": topic if isinstance(topic, str) else None,
+            "event": event if isinstance(event, str) else None,
+            "payload": payload,
+        }
+    return None
 
 
 def _now() -> datetime:
@@ -199,12 +235,19 @@ class StreamConsumer:
         """
         self.stats.frames += 1
         try:
-            msg = json.loads(raw)
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
             # Land it anyway. Losing an unparseable frame loses the evidence
             # needed to find out why it was unparseable.
             self.writer.write(raw, topic=None, event_timestamp=None)
             log.warning("unparseable frame landed verbatim (%d bytes)", len(raw))
+            return None
+
+        # BUG-20260909-002: OpenSea speaks Phoenix v2, which sends ARRAYS.
+        msg = normalize_frame(parsed)
+        if msg is None:
+            self.writer.write(raw, topic=None, event_timestamp=None)
+            log.warning("unrecognised frame shape landed verbatim: %.120s", raw)
             return None
 
         event = msg.get("event")
@@ -311,8 +354,13 @@ class StreamConsumer:
                 hb.cancel()
                 try:
                     await hb
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except asyncio.CancelledError:
+                    pass  # expected: we just cancelled it
+                except Exception:  # noqa: BLE001 - logged, never swallowed
+                    # A heartbeat that died for a real reason is a clue about
+                    # why the connection dropped. Narrowing this would discard
+                    # that clue; we log it and let the outer error stand.
+                    log.warning("heartbeat task failed", exc_info=True)
 
     async def _heartbeat(self, ws: Any) -> None:
         while True:

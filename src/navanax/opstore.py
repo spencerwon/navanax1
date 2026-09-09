@@ -218,7 +218,8 @@ class OperationalStore:
     def rest_spend_since(self, iso_ts: str) -> dict[str, float]:
         with self.connect() as c:
             rows = c.execute(
-                "SELECT priority, SUM(cost) AS spend FROM rest_ledger WHERE at >= ? GROUP BY priority",
+                "SELECT priority, SUM(cost) AS spend FROM rest_ledger "
+                "WHERE at >= ? GROUP BY priority",
                 (iso_ts,),
             ).fetchall()
             return {r["priority"]: float(r["spend"]) for r in rows}
@@ -246,8 +247,10 @@ class OperationalStore:
                     (
                         slug, fields.get("state"), _now(), _now(),
                         fields.get("requests_spent", 0), fields.get("requests_est"),
-                        fields.get("items_total"), fields.get("items_done", 0),
-                        fields.get("last_cursor"), fields.get("error"),
+                        fields.get("items_total"),
+                        fields.get("items_done", 0),
+                        fields.get("last_cursor"),
+                        fields.get("error"),
                     ),
                 )
             else:

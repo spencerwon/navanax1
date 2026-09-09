@@ -2,8 +2,10 @@
 
 docs/00_REQUIREMENTS.md REQ-D-01..REQ-D-04.
 
-The free tier allows 600 reads/hour on a token bucket shared across every key on
-the account. That is roughly one request every six seconds. The obvious design --
+The free tier allows 120 reads/hour on a token bucket shared across every key on
+the account -- MEASURED from live x-ratelimit-limit headers 2026-09-09; the 600
+figure this project previously assumed was never verified and is wrong. That is
+one request every 30 seconds. The obvious design --
 each component calls the API when it needs to -- fails immediately: whichever
 component asks first consumes the budget, and it is always the background
 backfiller, because it never stops asking. Production ingestion then starves and
@@ -78,7 +80,7 @@ class TokenBucket:
 
     def __init__(
         self,
-        capacity: float = 600.0,
+        capacity: float = 120.0,   # measured; see config/base.yaml rest_budget
         per_seconds: float = 3600.0,
         *,
         clock: Callable[[], float] = time.monotonic,
@@ -204,9 +206,9 @@ class RestGovernor:
         # INTERACTIVE request arriving later still finds something left.
         self.reserve: dict[Priority, float] = reserve or {
             Priority.INTERACTIVE: 0.0,
-            Priority.SIGNAL: 20.0,
-            Priority.BACKFILL: 60.0,
-            Priority.MAINTENANCE: 120.0,
+            Priority.SIGNAL: 4.0,
+            Priority.BACKFILL: 12.0,
+            Priority.MAINTENANCE: 24.0,
         }
         self.max_backoff = max_backoff
         self._sleep = sleep or asyncio.sleep
@@ -223,7 +225,8 @@ class RestGovernor:
     def _floor(self, priority: Priority) -> float:
         return self.reserve.get(priority, 0.0)
 
-    async def acquire(self, priority: Priority, cost: float = 1.0, timeout: float | None = None) -> None:
+    async def acquire(self, priority: Priority, cost: float = 1.0,
+                      timeout: float | None = None) -> None:
         """Block until this priority may spend `cost` tokens."""
         deadline = None if timeout is None else time.monotonic() + timeout
         backoff = 1.0
@@ -289,7 +292,8 @@ class RestGovernor:
 
 
 class _Slot:
-    def __init__(self, gov: RestGovernor, priority: Priority, cost: float, timeout: float | None) -> None:
+    def __init__(self, gov: RestGovernor, priority: Priority, cost: float,
+                 timeout: float | None) -> None:
         self._gov = gov
         self._priority = priority
         self._cost = cost

@@ -30,5 +30,19 @@ where = ["src"]
 line-length = 100
 target-version = "py312"
 
+# Pinned explicitly. An unspecified ruleset silently changes when ruff updates,
+# which turns a green CI red on a day nobody touched the code (BUG-20260909-004).
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "BLE", "S110"]
+ignore = [
+  "E501",    # line length is enforced by the formatter, not the linter
+  "B008",    # function call in argument default -- deliberate for injected clocks
+  "UP038",   # isinstance tuple form is clearer here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]        # asserts are the point of a test file
+"tools/preflight.py" = ["E402"]  # sys.path setup must precede the local import
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
