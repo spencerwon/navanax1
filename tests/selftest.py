@@ -1506,6 +1506,45 @@ def test_startup_gate_refuses_a_lying_codec() -> None:
           "did NOT raise" in r, r[:120])
 
 
+def test_secrets_gate_knows_what_a_key_looks_like(tmp: Path) -> None:
+    """BUG-033. The REQ-N-11 gate fired on `OPENSEA_API_KEY=fake_key_value`.
+
+    First time it ever ran. A gate that cannot tell a 14-character placeholder
+    from a 32-character key teaches everyone to click past it. This proves the
+    replacement on both sides: it must stay quiet on the real test fixtures
+    and this whole suite, and it must fire on a key-shaped value, a GitHub
+    token, and a seed phrase -- in a test file, because tests are not exempt.
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import secrets_check as sc
+
+    check("secrets: the suite's own fixtures are NOT flagged",
+          sc.scan([ROOT / "tests" / "selftest.py"]) == [],
+          f"got {sc.scan([ROOT / 'tests' / 'selftest.py'])}")
+
+    d = tmp / "leak"
+    d.mkdir(exist_ok=True)
+    (d / "oops_test.py").write_text(
+        'OPENSEA_API_KEY = "' + "a1b2c3d4" * 4 + '"\n')          # 32 chars, key-shaped
+    (d / "token.yaml").write_text("token: github_pat_" + "X" * 30 + "\n")
+    (d / "wallet.txt").write_text(
+        "mnemonic: apple brave crane dance eagle fable grape house image "
+        "juice knife lemon\n")
+    (d / "fine.py").write_text(
+        'OPENSEA_API_KEY = "fake"\nexport OPENSEA_API_KEY=...\nkey = os.environ["OPENSEA_API_KEY"]\n')
+
+    hits = sc.scan(sorted(d.iterdir()))
+    kinds = {h.split(": ", 1)[1] for h in hits}
+    check("secrets: a 32-character key assignment IS flagged, even in a test file",
+          "credential assignment" in kinds, f"got {hits}")
+    check("secrets: a GitHub token IS flagged wherever it appears",
+          "github token" in kinds, f"got {hits}")
+    check("secrets: a seed phrase IS flagged (no agent may hold one, docs/02 §6.3)",
+          "seed phrase" in kinds, f"got {hits}")
+    check("secrets: placeholders, docs and env lookups are NOT flagged",
+          not any("fine.py" in h for h in hits), f"got {hits}")
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError,
@@ -1565,6 +1604,7 @@ def main() -> int:
             # --- tech-lead round 3 ---
             test_governor_adapts_capacity_from_server,
             test_backfill_worklist_is_not_vacuous,
+            test_secrets_gate_knows_what_a_key_looks_like,
         ):
             print(f"\n--- {fn.__name__} ---")
             fn(tmp)

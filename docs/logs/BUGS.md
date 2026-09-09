@@ -336,6 +336,22 @@ direction, but for the wrong reason. Fixed at the root: the walk now trusts
 the decoder's `eof`/`unused_data`, exactly as the gzip path always has, and
 the gate has its own regression test proving it refuses three lying codecs.
 
+### Round 6 — CI reaches steps that had never run
+
+CI passed the codec contract on real `zstandard` — **the first executed proof
+the production compressor works** — and then reached two steps that had never
+executed before.
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-033 | S3 | P0 | fixed | The REQ-N-11 credential gate fired on a 14-character test placeholder the first time it ever ran |
+| BUG-20260909-034 | S3 | P1 | fixed | CI actions target Node 20, which GitHub removes from runners on 2026-09-23 — two weeks out |
+
+A security gate with no precision has no authority: one that fires on
+`fake_key_value` will be clicked past on the day it fires on a real key. The
+grep is now a checker that knows what a key looks like, with its own test —
+and `tests/` is not exempt from it.
+
 ### Still open
 
 **None.** All 28 logged bugs are fixed.
