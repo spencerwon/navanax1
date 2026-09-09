@@ -6,6 +6,7 @@
     python -m navanax.cli verify            # re-verify landing-zone checksums
     python -m navanax.cli normalize         # one landing-zone -> store pass
     python -m navanax.cli dashboard         # localhost UI; normalizes continuously
+    python -m navanax.cli import-traits F   # load an Explorer tokens.json cache; zero REST
 
 Every day this is not running is a day of history that cannot be bought back:
 OpenSea publishes no historical floor series, so the record exists only because
@@ -396,6 +397,61 @@ def cmd_traits(args) -> int:
     return 0
 
 
+def cmd_import_traits(args) -> int:
+    """Load an Explorer `tokens.json` trait cache into the store. Zero REST reads.
+
+    Exit 0: imported cleanly. Exit 1: at least one token whose stored traits
+    DISAGREE with the cache -- printed in full; the store was not changed for
+    those tokens and the Operator must decide which source is right.
+    """
+    from .traits import import_explorer_cache, open_store
+    root = Path(args.root)
+    cfg, slugs = _config(root)
+    slug = args.collection or (slugs[0] if slugs else None)
+    if not slug:
+        print("no collection: pass --collection or fill the watchlist", file=sys.stderr)
+        return 2
+    src = Path(args.tokens_json)
+    try:
+        cache = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read {src}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(cache, dict):
+        print(f"{src} is not a dict keyed by token id", file=sys.stderr)
+        return 2
+    generated: float | None = args.generated
+    if generated is None:
+        # The cache's own timestamp lives in summary.json next to it.
+        sp = src.with_name("summary.json")
+        try:
+            generated = float(json.loads(sp.read_text(encoding="utf-8"))["generated"])
+        except (OSError, ValueError, KeyError, TypeError):
+            print(f"no --generated given and {sp} has no `generated` epoch; refusing to guess when the "
+                  f"traits were observed", file=sys.stderr)
+            return 2
+    generated_at = datetime.fromtimestamp(generated, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    db = root / cfg["analytical"]["path"]
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = open_store(db)
+    try:
+        res = import_explorer_cache(conn, cache, slug=slug, generated_at=generated_at, contract=args.contract)
+    finally:
+        conn.close()
+    dis = res.pop("disagreements")
+    print(json.dumps(res, indent=2))
+    if dis:
+        print(f"\n*** {len(dis)} TRAIT DISAGREEMENT(S) between the store and {src.name} -- nothing overwritten ***",
+              file=sys.stderr)
+        for d in dis:
+            print(f"  token {d['token_id']:>6}  {d['trait_type']}: store={d['stored']}  cache={d['cache']}",
+                  file=sys.stderr)
+        print("One of the two sources is wrong for these tokens. Decide which before trusting either.",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_dashboard(args) -> int:
     from .dashboard import serve
     root = Path(args.root)
@@ -436,6 +492,13 @@ def main(argv=None) -> int:
     t.add_argument("--slug", default=None)
     t.add_argument("--limit", type=int, default=None, help="fetch traits for at most N tokens this run")
     t.set_defaults(fn=cmd_traits)
+    it = sub.add_parser("import-traits", help="load an Explorer tokens.json trait cache; zero REST reads")
+    it.add_argument("tokens_json")
+    it.add_argument("--collection", default=None)
+    it.add_argument("--contract", default=None, help="token contract; defaults to the known one for the slug")
+    it.add_argument("--generated", type=float, default=None,
+                    help="epoch seconds the cache was generated; defaults to summary.json `generated` next to it")
+    it.set_defaults(fn=cmd_import_traits)
     d = sub.add_parser("dashboard")
     d.add_argument("--port", type=int, default=None)
     d.add_argument("--no-browser", action="store_true")

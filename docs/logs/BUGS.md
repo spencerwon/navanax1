@@ -468,14 +468,26 @@ known defects — not a discovery, and not a new bug.
 |---|---|---|---|---|
 | BUG-20260909-052 | S1 | P0 | fixed | A gap left open by a dead run was never closed — one stale record masked every chart to infinity; launchd restarts made it routine |
 | BUG-20260909-053 | S1 | P0 | fixed | `order_lives` inferred expiry at a time that had not arrived — standing orders recorded as ended, lifetimes biased long |
+| BUG-20260909-054 | S3 | P1 | fixed | The collection list endpoint carries `traits`; the list pass discarded them and left 9,161 tokens to a ~76-hour per-token fallback |
 
 Both found by the tech-lead reproducing the change by running it, both in the
 flattering direction (a quiet market; a durable book), both fixed the same hour
 with a test that failed first.
 
+Found by reading a second tool's scraper against ours. `SpencerTinker/scrape.py`
+reads `nft["traits"]` from the SAME `GET /collection/{slug}/nfts` pages that
+`traits.py` walked on 2026-09-09, and got traits for all 8,798 indexed
+Argonauts in 44 reads. Our docstring said the field was not there; the code
+believed the docstring; the fixture was written from the docstring. The
+47 reads were spent and the field thrown away. Fix: store list-carried
+traits immediately (`opensea_nft_list`), keep the metadata_url / fallback
+paths only for entries without them, and add `navanax import-traits` so the
+friend's cache loads with zero reads. Docstring now states what is verified
+and for which collection; other collections must be re-verified.
+
 ### Still open
 
-**None.** All 53 logged bugs are fixed.
+**None.** All 54 logged bugs are fixed.
 
 ### The lesson
 
