@@ -42,6 +42,17 @@ OK, WARN, BAD = "  OK  ", " WARN ", " FAIL "
 report: dict = {"ran_at": datetime.now(timezone.utc).isoformat(), "checks": {}}
 
 
+def _ssl_ctx():
+    """BUG-20260909-035: verify via certifi when the system store is empty."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+    try:
+        from navanax.tls import ssl_context
+        return ssl_context()
+    except ImportError:
+        import ssl
+        return ssl.create_default_context()
+
+
 def say(status: str, msg: str, detail: str = "") -> None:
     print(f"[{status}] {msg}")
     if detail:
@@ -56,7 +67,7 @@ def get(path: str, key: str) -> tuple[int, dict, dict]:
                  "User-Agent": "navanax-preflight/0.1"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_ctx()) as r:
             return r.status, dict(r.headers), json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         body = e.read().decode()[:400]
@@ -167,7 +178,8 @@ def check_stream(key: str, slug: str, seconds: int) -> bool:
 
     async def run() -> None:
         url = f"{WS}?token={key}"
-        async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+        async with websockets.connect(url, ping_interval=20, ping_timeout=20,
+                                      ssl=_ssl_ctx()) as ws:
             say(OK, "WebSocket connected.")
             await ws.send(json.dumps(
                 {"topic": f"collection:{slug}", "event": "phx_join", "payload": {}, "ref": "1"}))

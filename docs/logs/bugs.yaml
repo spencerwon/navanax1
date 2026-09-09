@@ -1179,3 +1179,52 @@ bugs:
   regression_test: "CI itself -- the deprecation annotation disappears"
   monitor_gap: "Nothing in the project tracks external end-of-life dates. The research agent's charter covers the OpenSea API contract; it should cover the CI runtime too."
   pr: 2
+
+- id: BUG-20260909-035
+  summary: First live run failed CERTIFICATE_VERIFY_FAILED seven times -- python.org macOS Python ships no root certificates, and the consumer blamed the stream
+  severity: S3
+  priority: P0
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T10:20:00-05:00"
+  occurred_at: "2026-09-09T10:16:49-05:00"
+  resolved_at: "2026-09-09T10:45:00-05:00"
+  detected_by: "Spencer, first double-click of start.command"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/tls.py, line: 1}
+  - {file: src/navanax/stream.py, line: 755}
+  - {file: tools/preflight.py, line: 52}
+  requirement: REQ-D-06
+  data_impact: >-
+    No data recorded for the duration -- a real gap, correctly registered.
+    But the log said "stream error" and reconnected with backoff (1.2s, 3s,
+    6s, 10s, 13.5s, 22s, 78s), which is the right response to an upstream
+    failure and a useless one here: nothing on OpenSea's end had changed and
+    nothing on the retry path could fix it. Everything the code did was
+    correct by its own rules (BUG-008 backoff, BUG-013 gap classification,
+    BUG-025 one gap not seven). The rules were pointed at the wrong diagnosis.
+  root_cause: >-
+    The Python from python.org on macOS ships with NO root certificates wired
+    up until the operator runs the "Install Certificates.command" that comes
+    with it. Nothing in the project mentioned this, because the earlier smoke
+    test ran under a conda Python that bundles its own CA store. The operator
+    had just upgraded to 3.14 -- at the project's suggestion -- and the very
+    first run hit it. A local configuration problem wearing an upstream error's
+    clothes, the same family as BUG-018 (disk full recorded as a stream gap).
+  resolution: >-
+    src/navanax/tls.py: a verifying SSL context that loads certifi's CA bundle
+    when present -- certifi is now a declared dependency, so start.command
+    installs it and a bare python.org build verifies without the operator
+    knowing the installer exists. The stream consumer and preflight both use
+    it. When a certificate-verification failure is caught, the consumer logs
+    ONCE at ERROR that this is not an outage and names the two fixes, then
+    keeps its normal backoff. The gap is still recorded, because we really
+    were not recording.
+  regression_test: tests/selftest.py::test_cert_failure_names_the_fix_once
+  monitor_gap: >-
+    The live smoke test ran under one Python; the operator's launcher ran
+    under another. No test, and no launcher, checked that the interpreter it
+    found could verify a certificate before pointing it at the internet.
+  pr: 3

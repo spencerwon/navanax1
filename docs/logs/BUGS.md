@@ -352,6 +352,18 @@ A security gate with no precision has no authority: one that fires on
 grep is now a checker that knows what a key looks like, with its own test —
 and `tests/` is not exempt from it.
 
+### Round 7 — the first double-click
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-035 | S3 | P0 | fixed | First live run failed CERTIFICATE_VERIFY_FAILED seven times — python.org macOS Python ships no root certificates, and the consumer blamed the stream |
+
+Everything the code did was right by its own rules: one gap, correct
+backoff, correct class labelling. The rules were aimed at the wrong diagnosis.
+Same family as BUG-018 — a local problem in an upstream error's clothes. The
+consumer now says so once, in words that name the fix, and `certifi` makes the
+fix unnecessary on a fresh install.
+
 ### Still open
 
 **None.** All 28 logged bugs are fixed.

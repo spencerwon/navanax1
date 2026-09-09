@@ -1545,6 +1545,72 @@ def test_secrets_gate_knows_what_a_key_looks_like(tmp: Path) -> None:
           not any("fine.py" in h for h in hits), f"got {hits}")
 
 
+def test_cert_failure_names_the_fix_once(tmp: Path) -> None:
+    """BUG-035. First live run: CERTIFICATE_VERIFY_FAILED x7, backing off, gap
+    opened blaming "stream error". The stream was fine. The python.org macOS
+    build ships no root certificates until its Install Certificates.command is
+    run, and nothing in the project said so. A local problem wearing an
+    upstream error's clothes must be named, once, with the fix.
+    """
+    import logging
+    import ssl
+
+    from navanax.tls import cert_failure_hint, is_cert_failure, ssl_context
+
+    check("tls: the context verifies (never CERT_NONE)",
+          ssl_context().verify_mode == ssl.CERT_REQUIRED)
+    check("tls: recognises the verification failure family",
+          is_cert_failure(ssl.SSLCertVerificationError(
+              1, "certificate verify failed: unable to get local issuer certificate")))
+    check("tls: does NOT fire on ordinary network errors",
+          not is_cert_failure(ConnectionResetError("peer reset")))
+    hint = cert_failure_hint()
+    check("tls: the hint says it is not an outage and names an actual fix",
+          "NOT an OpenSea outage" in hint and "certifi" in hint)
+
+    store = OperationalStore(tmp / "tls.db")
+    calls = {"n": 0}
+
+    class Boom:
+        async def __aenter__(self):
+            raise ssl.SSLCertVerificationError(
+                1, "certificate verify failed: unable to get local issuer certificate")
+        async def __aexit__(self, *a): return False
+
+    def factory(_url):
+        calls["n"] += 1
+        return Boom()
+
+    c = StreamConsumer("k", ["argonauts"], FakeWriter(), store, run_id="run-tls",
+                       connect_factory=factory, max_backoff=0.2)
+    records: list[logging.LogRecord] = []
+    h = logging.Handler()
+    h.emit = records.append  # type: ignore[assignment]
+    logging.getLogger("navanax.stream").addHandler(h)
+    try:
+        async def drive():
+            t = asyncio.create_task(c.run())
+            await asyncio.sleep(0.6)
+            c.stop()
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        asyncio.run(drive())
+    finally:
+        logging.getLogger("navanax.stream").removeHandler(h)
+
+    hints = [r for r in records if r.levelno >= logging.ERROR
+             and "NOT an OpenSea outage" in r.getMessage()]
+    check("tls: the hint is logged at ERROR", len(hints) >= 1,
+          f"{calls['n']} connect attempts, 0 hints")
+    check("tls: ...exactly ONCE, not on every retry", len(hints) == 1,
+          f"{len(hints)} hints across {calls['n']} attempts")
+    check("tls: the gap is still recorded (we really were not recording)",
+          len(store.open_gaps()) == 1)
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError,
@@ -1605,6 +1671,7 @@ def main() -> int:
             test_governor_adapts_capacity_from_server,
             test_backfill_worklist_is_not_vacuous,
             test_secrets_gate_knows_what_a_key_looks_like,
+            test_cert_failure_names_the_fix_once,
         ):
             print(f"\n--- {fn.__name__} ---")
             fn(tmp)

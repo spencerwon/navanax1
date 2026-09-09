@@ -49,6 +49,7 @@ from .errors import (
 )
 from .landing import GapRecord, LandingZoneWriter
 from .opstore import OperationalStore
+from .tls import cert_failure_hint, is_cert_failure, ssl_context
 
 #: One checkpoint row covers the whole consumer. It answers exactly one
 #: question -- "when was this process last known to be alive?" -- which is what
@@ -221,6 +222,7 @@ class StreamConsumer:
         self._stop = asyncio.Event()
         self._open_gap_id: int | None = None
         self._open_gap_record: GapRecord | None = None
+        self._cert_hint_shown = False
         # BUG-20260909-005: join replies are now tracked to a conclusion.
         self._pending_joins: dict[str, str] = {}   # ref -> topic
         self._joined: set[str] = set()
@@ -681,6 +683,11 @@ class StreamConsumer:
                 self._open_gap(f"{type(exc).__name__}: {exc}")
                 self.stats.reconnects += 1
                 log.warning("stream error (%s)", exc)
+                if is_cert_failure(exc) and not self._cert_hint_shown:
+                    # BUG-20260909-035: a LOCAL problem wearing an upstream
+                    # error's clothes. Say so once, in words that name the fix.
+                    self._cert_hint_shown = True
+                    log.error("%s", cert_failure_hint())
             finally:
                 self.writer.flush()
                 self._checkpoint()
@@ -761,7 +768,11 @@ class StreamConsumer:
                 expected="websockets installed",
                 received="ImportError",
             ) from exc
-        return websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=8 * 1024 * 1024)
+        # BUG-20260909-035: an explicit verifying context so a python.org
+        # install with no system certificates still verifies via certifi.
+        return websockets.connect(url, ping_interval=20, ping_timeout=20,
+                                  max_size=8 * 1024 * 1024,
+                                  ssl=ssl_context() if url.startswith("wss://") else None)
 
 
 def new_run_id() -> str:
