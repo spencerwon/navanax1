@@ -1339,3 +1339,68 @@ bugs:
     The closest honest check is the function count in the summary line, and
     CI could assert it never decreases. Left as a Phase 1 improvement.
   pr: 3
+
+- id: BUG-20260909-039
+  summary: OpenSea's payment_token.eth_price is the ORDER'S VALUE on bids/listings but the TOKEN'S RATE on sales; a parser trusting it records a 1.43 ETH sale as 1.00
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-09T11:20:00-05:00"
+  occurred_at: "2026-09-09T11:05:00-05:00"
+  resolved_at: "2026-09-09T11:40:00-05:00"
+  detected_by: "orchestrator, validating the new parser against every real frame on the operator's machine before shipping (74,286 frames) -- the first real item_sold"
+  detection_channel: validator
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 153}
+  requirement: REQ-F-02
+  data_impact: >-
+    None -- caught before the normalizer ever ran for real. Had it shipped:
+    every sale price in the store would have been the WETH/ETH exchange rate
+    (~1.0009) instead of the sale value, a ~30% error on the first real sale,
+    silent, in the one event type every downstream metric cares about most.
+    Same field, different meaning, per event type, documented nowhere. Also
+    found: multi-item collection offers report the TOTAL (0.906 for 2 x 0.453);
+    29 rows in the first hour.
+  root_cause: "The field was trusted as a value. The stream is not internally consistent about what it means."
+  resolution: >-
+    _resolve_price() checks rather than trusts: wei / 10^decimals is always the
+    per-item token amount; if eth_price matches units x quantity it is a total
+    value (per-item = value / quantity); if not and it looks like a per-unit
+    rate, value = units x rate. The basis used is stored on every row
+    (price_basis) so an audit can list every row where the forms disagreed.
+    Fixtures replaced with the REAL sale and listing.
+  regression_test: tests/selftest.py::test_normalizer_parses_real_frames
+  monitor_gap: >-
+    The sale and listing fixtures were written from OpenSea's documentation
+    before any had been observed -- the BUG-002 shape. Running the parser over
+    all real frames before shipping is what caught it, and that check is now
+    how new parsers are accepted.
+  pr: 3
+
+- id: BUG-20260909-040
+  summary: Order-lifecycle joins used the wrong index -- 2,000 bid lifetimes took 29 s on one hour of data; the dashboard hung
+  severity: S3
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T11:30:00-05:00"
+  occurred_at: "2026-09-09T11:10:00-05:00"
+  resolved_at: "2026-09-09T11:45:00-05:00"
+  detected_by: "orchestrator, end-to-end run of the dashboard against the real landing zone (gzip mirror) on the operator's machine"
+  detection_channel: validator
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 76}
+  - {file: src/navanax/metrics.py, line: 280}
+  requirement: REQ-N-07
+  data_impact: "None to data. The /api/lifetimes request blocked the store lock for 29+ s, which stalled every other panel -- the page would have appeared dead."
+  root_cause: >-
+    SQLite's planner chose the (event_type, valid_ts) index for the join side
+    of a self-join on order_hash and scanned every cancellation for every bid.
+    A composite index existed only in the author's intent.
+  resolution: "Composite index ix_events_lifecycle(order_hash, event_type, valid_ts), pinned with INDEXED BY on both lifecycle queries; ANALYZE after each sync that adds rows. 38,286 lifetimes in 0.09 s."
+  regression_test: tests/selftest.py::test_metric_engine_contract
+  monitor_gap: "The unit test's store had six rows. Nothing about a query plan shows at six rows; it showed at 85,713."
+  pr: 3

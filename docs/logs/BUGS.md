@@ -384,6 +384,19 @@ the ledger as BUG-032's regression test, the ledger check confirmed it existed,
 and it had never run. The ledger's own evidence had the claim-versus-reality
 gap the ledger exists to catch. Test discovery replaces the list.
 
+### Round 9 — the dashboard, validated against real data before shipping
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-039 | S1 | P0 | fixed | `payment_token.eth_price` is the order's value on bids/listings but the token's rate on sales — a trusting parser records a 1.43 ETH sale as 1.00 |
+| BUG-20260909-040 | S3 | P0 | fixed | Order-lifecycle joins used the wrong index; 2,000 bid lifetimes took 29 s and the dashboard hung |
+
+Both caught by running the new code over **every real frame on the
+operator's machine** (74,286) before it shipped — the check that BUG-002
+taught and that is now how a parser gets accepted. First real numbers from
+the same run: bids on Argonauts stand for a **median of 9 seconds** (p10 3.2 s,
+p90 234 s, n = 38,286).
+
 ### Still open
 
 **None.** All 28 logged bugs are fixed.

@@ -28,6 +28,9 @@ analysis = ["pandas>=2.2", "numpy>=1.26", "scipy>=1.13", "statsmodels>=0.14",
 [project.scripts]
 navanax = "navanax.cli:main"
 
+[tool.setuptools.package-data]
+navanax = ["ui/*.html"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

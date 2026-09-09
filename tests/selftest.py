@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -1723,6 +1724,326 @@ def main() -> int:
         return 1 if FAIL else 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+
+# ===========================================================================
+# Dashboard: normalizer, metric engine, server. Fixtures below are REAL frames
+# captured from the live Argonauts stream on 2026-09-09 (trimmed, hashes
+# shortened) -- the BUG-002 lesson is that fixtures written from the author's
+# assumptions inherit the author's bugs.
+# ===========================================================================
+REAL_BID = ["1", None, "collection:argonauts", "item_received_bid", {
+    "event_type": "item_received_bid", "version": 1, "sent_at": "2026-09-09T10:18:41.216000Z",
+    "payload": {"base_price": "880000000000000000", "chain": "ethereum",
+                "collection": {"slug": "argonauts"}, "created_date": "2026-09-09T10:18:37.000000Z",
+                "event_timestamp": "2026-09-09T10:18:39.860000Z",
+                "expiration_date": "2026-09-09T10:48:37.000000Z",
+                "item": {"nft_id": "ethereum/0x387c41b0b2f1128de44db1bcf8baad085f26392c", "chain": {"name": "ethereum"}},
+                "maker": {"address": "0x0d9ec524ed52f109c530a28c91fe190c44c0babd"},
+                "order_hash": "0x39f82750fe2f69c61a699517eeb4d06d32ea3b9d",
+                "payment_token": {"address": "0xc02a", "decimals": 18, "eth_price": "0.88",
+                                  "name": "Wrapped Ethereum", "symbol": "WETH", "usd_price": "2190.1264"},
+                "protocol_data": {"parameters": {"consideration": [
+                    {"itemType": 2, "token": "0x387c41b0b2f1128de44db1bcf8baad085f26392c",
+                     "identifierOrCriteria": "7531", "startAmount": "1", "endAmount": "1"}]}},
+                "quantity": 1, "taker": None}}]
+REAL_CANCEL = ["1", None, "collection:argonauts", "item_cancelled", {
+    "event_type": "item_cancelled", "version": 2, "sent_at": "2026-09-09T10:19:02.375000Z",
+    "payload": {"base_price": "800000000000000000", "chain": "ethereum",
+                "collection": {"slug": "argonauts"}, "event_timestamp": "2026-09-09T10:19:02.350000Z",
+                "expiration_date": "2026-09-09T10:48:56.000000Z", "is_private": False,
+                "listing_date": "2026-09-09T10:18:56.000000Z", "listing_type": None,
+                "maker": {"address": "0x0d9ec524ed52f109c530a28c91fe190c44c0babd"},
+                "order_hash": "0x39f82750fe2f69c61a699517eeb4d06d32ea3b9d",
+                "payment_token": {"decimals": 18, "eth_price": "0.8", "symbol": "WETH", "usd_price": "1991.024"},
+                "quantity": 1, "taker": None, "transaction": None,
+                "item": {"nft_id": "ethereum/0x387c41b0b2f1128de44db1bcf8baad085f26392c/7531"}}}]
+REAL_INVALIDATE = ["1", None, "collection:argonauts", "order_invalidate", {
+    "event_type": "order_invalidate", "version": 2, "sent_at": "2026-09-09T10:18:42.742000Z",
+    "payload": {"chain": "ethereum", "collection": {"slug": "argonauts"},
+                "event_timestamp": "2026-09-09T10:18:42.160000Z",
+                "item": {"nft_id": "ethereum/0x387c41b0b2f1128de44db1bcf8baad085f26392c/4842"},
+                "order_hash": "0x7cb446f85c8c0599afb6b5b1f87f26e3a1cab486"}}]
+REAL_COLL_OFFER = ["1", None, "collection:argonauts", "collection_offer", {
+    "event_type": "collection_offer", "version": 1, "sent_at": "2026-09-09T10:19:24.041000Z",
+    "payload": {"asset_contract_criteria": {"address": "0x387c41b0b2f1128de44db1bcf8baad085f26392c"},
+                "base_price": "348000000000000000", "chain": "ethereum",
+                "collection": {"slug": "argonauts"}, "collection_criteria": {"slug": "argonauts"},
+                "event_timestamp": "2026-09-09T10:19:23.500000Z",
+                "expiration_date": "2026-09-10T10:19:23.000000Z",
+                "maker": {"address": "0xbffec906aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                "order_hash": "0xco11ec7i0n0ffer0000000000000000000000000",
+                "payment_token": {"decimals": 18, "eth_price": "0.348", "symbol": "WETH", "usd_price": "866.1"},
+                "quantity": 1}}]
+# Real, from the same capture: the first Argonauts sale and listing ever recorded.
+REAL_LISTING = ["1", None, "collection:argonauts", "item_listed", {
+    "event_type": "item_listed", "sent_at": "2026-09-09T10:27:22.000000Z",
+    "payload": {"base_price": "1590000000000000000", "chain": "ethereum", "collection": {"slug": "argonauts"},
+                "event_timestamp": "2026-09-09T10:27:21.795000Z", "expiration_date": "2026-10-09T10:27:21.000000Z",
+                "is_private": False, "listing_date": "2026-09-09T10:27:21.000000Z", "listing_type": None,
+                "item": {"nft_id": "ethereum/0x387c41b0b2f1128de44db1bcf8baad085f26392c/4027"},
+                "maker": {"address": "0x217a9b455146ee1e89c57cde48ba883b786548dc"},
+                "order_hash": "0xbf626b87d23e4cf4b20ce2ebb2002526c786133b1b6c5ce644fc1f7280b82d38",
+                "payment_token": {"address": "0x0000000000000000000000000000000000000000", "decimals": 18,
+                                  "eth_price": "1.59", "name": "Ethereum", "symbol": "ETH", "usd_price": "3959.5929"},
+                "quantity": 1, "taker": None}}]
+REAL_SALE = ["1", None, "collection:argonauts", "item_sold", {
+    "event_type": "item_sold", "sent_at": "2026-09-09T10:26:12.000000Z",
+    "payload": {"sale_price": "1430000000000000000", "chain": "ethereum", "closing_date": "2026-09-09T10:26:11.000000Z",
+                "collection": {"slug": "argonauts"}, "event_timestamp": "2026-09-09T10:26:11.000000Z",
+                "is_private": False, "listing_type": None,
+                "item": {"nft_id": "ethereum/0x387c41b0b2f1128de44db1bcf8baad085f26392c/8119"},
+                "maker": {"address": "0xb78bf0baea59c9d108b43f10a013dfbce5717d1c"},
+                "taker": {"address": "0x395b9f085048faaa4bcc6c63a98abefb164e8e61"},
+                "order_hash": "0xaef8bbe92f2f02f22b48e534518eee5d74e66226cd004bf14df2856b229c17b3",
+                # NOTE the semantics: on a SALE these are the TOKEN'S RATE (WETH/ETH, ETH/USD),
+                # not the order's value as they are on bids and listings.
+                "payment_token": {"address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", "decimals": 18,
+                                  "eth_price": "1.000863124510729", "name": "Wrapped Ethereum", "symbol": "WETH",
+                                  "usd_price": "2493.1"},
+                "quantity": 1,
+                "transaction": {"hash": "0x5f4b0611f92bcd0b33e9df47e5bd0e18429a3d35a2faf8bf122e52c60445f62e",
+                                "timestamp": "1788949571"}}}]
+DOC_LISTING, DOC_SALE = REAL_LISTING, REAL_SALE   # names kept for the tests below
+
+
+def _env(seq: int, raw: list, recv: str, run: str = "run-ui") -> dict:
+    return {"_seq": seq, "_run": run, "_recv": recv, "_topic": raw[2], "_ets": raw[4]["payload"].get("event_timestamp"),
+            "raw": json.dumps(raw, separators=(",", ":"))}
+
+
+def test_normalizer_parses_real_frames() -> None:
+    """Structure only: every field the metrics need, from frames OpenSea actually sent."""
+    from navanax.normalize import parse_event
+
+    r = parse_event(_env(1, REAL_BID, "2026-09-09T10:20:16.619812Z"))
+    check("parse: item_received_bid -> row", r is not None and r["event_type"] == "item_received_bid")
+    check("parse: token id recovered from the Seaport consideration (nft_id lacks it)",
+          r["token_id"] == "7531", f"got {r['token_id']}")
+    check("parse: contract from nft_id", r["contract"] == "0x387c41b0b2f1128de44db1bcf8baad085f26392c")
+    check("parse: ETH and USD both stored, primary recorded as the ORDER's own values (REQ-F-02)",
+          r["price_eth"] == 0.88 and r["price_usd"] == 2190.1264)
+    check("parse: implied ETH/USD carried for later audit against a second provider",
+          abs(r["implied_ethusd"] - 2488.78) < 0.01, f"got {r['implied_ethusd']}")
+    check("parse: wei kept as text, never a float", r["price_wei"] == "880000000000000000")
+    check("parse: both timestamps -- observed (ours) and valid (market's)",
+          r["observed_at"] == "2026-09-09T10:20:16.619812Z" and r["valid_at"] == "2026-09-09T10:18:39.860000Z"
+          and r["valid_ts"] < r["observed_ts"], "the stream delivered a 97-second-old event on connect")
+    check("parse: maker, order_hash, expiration",
+          r["maker"].startswith("0x0d9ec524") and r["order_hash"].startswith("0x39f8")
+          and r["expiration_at"] == "2026-09-09T10:48:37.000000Z")
+
+    c = parse_event(_env(2, REAL_CANCEL, "2026-09-09T10:20:16.7Z"))
+    check("parse: item_cancelled -> row with order_hash for lifecycle matching",
+          c["event_type"] == "item_cancelled" and c["order_hash"] == r["order_hash"] and c["token_id"] == "7531")
+    inv = parse_event(_env(3, REAL_INVALIDATE, "2026-09-09T10:20:16.8Z"))
+    check("parse: order_invalidate has no price and that is fine",
+          inv["price_eth"] is None and inv["order_hash"].startswith("0x7cb4"))
+    co = parse_event(_env(4, REAL_COLL_OFFER, "2026-09-09T10:20:17Z"))
+    check("parse: collection_offer -> contract from asset_contract_criteria, no token id",
+          co["contract"].startswith("0x387c") and co["token_id"] is None and co["price_eth"] == 0.348)
+    s = parse_event(_env(5, REAL_SALE, "2026-09-09T10:26:13Z"))
+    check("parse: item_sold uses sale_price and carries taker + tx",
+          s["price_wei"] == "1430000000000000000" and s["taker"].startswith("0x395b") and s["tx_hash"].startswith("0x5f4b"))
+    check("parse: a SALE's eth_price is a RATE, not a value -- price is units x rate (found in real data)",
+          abs(s["price_eth"] - 1.43 * 1.000863124510729) < 1e-9 and s["price_basis"] == "units_x_rate",
+          f"got {s['price_eth']} basis={s['price_basis']} -- trusting the field gives 1.00, a 30% error")
+    check("parse: ...and USD follows the same rule", abs(s["price_usd"] - 1.43 * 2493.1) < 1e-6)
+    lst = parse_event(_env(6, REAL_LISTING, "2026-09-09T10:27:23Z"))
+    check("parse: a LISTING's eth_price is the order value, and the row says which basis was used",
+          lst["price_eth"] == 1.59 and lst["price_basis"] == "order_value")
+    check("parse: a BID's eth_price is the order value too", r["price_basis"] == "order_value")
+    two = json.loads(json.dumps(REAL_COLL_OFFER))
+    two[4]["payload"].update({"base_price": "453000000000000000", "quantity": 2,
+                              "payment_token": {"decimals": 18, "eth_price": "0.906", "symbol": "WETH",
+                                                "usd_price": "2257.0"}})
+    t = parse_event(_env(7, two, "2026-09-09T10:30:00Z"))
+    check("parse: a 2-item offer reports its TOTAL; the row stores the PER-ITEM price (29 real rows in hour one)",
+          abs(t["price_eth"] - 0.453) < 1e-12 and abs(t["price_usd"] - 1128.5) < 1e-9
+          and t["quantity"] == 2 and t["price_basis"] == "order_value", f"got {t['price_eth']} {t['price_basis']}")
+    check("parse: control frames -> None",
+          parse_event({"_topic": "__control__", "raw": "[]"}) is None)
+    check("parse: junk -> None, never an exception",
+          parse_event({"_topic": "x", "raw": "not json"}) is None)
+
+
+def test_normalizer_is_incremental(tmp: Path) -> None:
+    """Reads only new frames each pass; an OPEN file's later frames arrive on the next pass."""
+    from navanax.normalize import Normalizer
+
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    root = tmp / "lz-norm"
+    w = LandingZoneWriter(root, "run-ui", codec=GzipCodec(), clock=clock.now,
+                          monotonic=clock.monotonic, flush_events=2, auto_flush=False)
+    for raw in (REAL_BID, REAL_CANCEL, REAL_INVALIDATE, REAL_COLL_OFFER):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+        clock.advance(1)
+    w.flush()   # 4 events in closed frames, file still OPEN
+    n = Normalizer(root, tmp / "lz-norm.sqlite")
+    s1 = n.sync()
+    check("normalizer: first pass reads every complete frame of an open file",
+          s1["rows_added"] == 4, f"got {s1}")
+    s2 = n.sync()
+    check("normalizer: second pass with nothing new adds nothing", s2["rows_added"] == 0, f"got {s2}")
+
+    w.write(json.dumps(DOC_LISTING), topic="collection:argonauts", event_timestamp="2026-09-09T10:30:00.000000Z")
+    w.write(json.dumps(DOC_SALE), topic="collection:argonauts", event_timestamp="2026-09-09T10:40:00.000000Z")
+    w.flush()
+    s3 = n.sync()
+    check("normalizer: new frames on the SAME open file are picked up", s3["rows_added"] == 2, f"got {s3}")
+    w.close()
+    s4 = n.sync()
+    check("normalizer: closing the file adds no duplicates", s4["rows_added"] == 0
+          and n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 6)
+    s5 = n.sync()
+    check("normalizer: a fully-read closed file is skipped entirely", s5["files_read"] == 0, f"got {s5}")
+    n.close()
+
+
+def test_metric_engine_contract(tmp: Path) -> None:
+    """The MetricRequest tuple (docs/06 §3): intervals from config, transforms,
+    immediacy undefined when either side is missing, basis on every response."""
+    from navanax.metrics import MetricEngine, apply_transform, bucket_of, load_intervals
+    from navanax.normalize import Normalizer
+
+    iv = load_intervals(ROOT / "config" / "intervals.yaml")
+    check("metrics: every interval Spencer listed is in config, not code",
+          all(k in iv["intervals"] for k in ("1m", "3h", "6h", "1h", "1d", "2d", "1w", "1mo", "2mo", "3mo", "6mo", "1y", "2y"))
+          and all(k in iv["anchored"] for k in ("HTD", "DTD", "MTD", "YTD")))
+
+    # calendar arithmetic is not duration arithmetic (docs/06 §1.3)
+    ts = datetime(2026, 9, 9, 15, 30, tzinfo=timezone.utc).timestamp()
+    b = datetime.fromtimestamp(bucket_of(ts, iv["intervals"]["3mo"], "America/Chicago"), tz=timezone.utc)
+    check("metrics: a 3-month bucket starts on a calendar quarter in the DISPLAY timezone",
+          b.astimezone(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d %H:%M") == "2026-07-01 00:00", f"got {b}")
+    b1h = bucket_of(ts, iv["intervals"]["1h"], "America/Chicago")
+    check("metrics: sub-day buckets are UTC-aligned", b1h == datetime(2026, 9, 9, 15, tzinfo=timezone.utc).timestamp())
+
+    v, basis = apply_transform([None, 2.0, 3.0, None, 1.0], "PCT")
+    check("metrics: PCT baseline is the first non-null value and is reported",
+          basis["baseline_value"] == 2.0 and v[2] == 0.5 and v[4] == -0.5 and v[0] is None and v[3] is None)
+    lv, _ = apply_transform([1.0, 1.5, 1.0], "LOG")
+    check("metrics: LOG is symmetric under reversal (docs/06 §2.2)",
+          abs(lv[1] - 0.405465) < 1e-5 and abs(lv[2]) < 1e-12, f"got {lv}")
+    bp, _ = apply_transform([100.0, 101.0], "BPS")
+    check("metrics: BPS = PCT x 10,000", abs(bp[1] - 100.0) < 1e-9)
+
+    # a small store: one bid, one collection offer, one listing, one sale
+    n = Normalizer(tmp / "empty-lz", tmp / "me.sqlite")
+    for i, (raw, recv) in enumerate(((REAL_BID, "10:20:16"), (REAL_CANCEL, "10:20:16"),  # noqa: B007
+                                     (REAL_COLL_OFFER, "10:20:17"),
+                                     (DOC_LISTING, "10:30:01"), (DOC_SALE, "10:40:01")), 1):
+        from navanax.normalize import COLS, parse_event
+        row = parse_event(_env(i, raw, f"2026-09-09T{recv}Z"))
+        row["file"] = "f"
+        n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})",
+                       tuple(row.get(c) for c in COLS))
+    n.conn.commit()
+    eng = MetricEngine(n.conn, iv, "America/Chicago")
+    now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+
+    s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h", range_="6h", now=now)
+    check("metrics: immediacy_cost = lowest ask - highest collection offer, in the ONE interval with both",
+          len(s["t"]) == 1 and abs(s["raw"][0] - (1.59 - 0.348)) < 1e-9, f"got {s['raw']}")
+    check("metrics: ...and % of ask alongside (REQ-F-13a: both percentage and absolute)",
+          abs(s["pct_of_ask"][0] - (1.59 - 0.348) / 1.59) < 1e-9)
+    s5 = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h", now=now)
+    check("metrics: at 5m the offer and the listing fall in different buckets -> UNDEFINED, not filled",
+          all(v is None for v in s5["raw"]) and s5["basis"]["undefined_buckets"] == len(s5["raw"]) and len(s5["raw"]) >= 2,
+          f"got {s5['raw']}")
+    u = eng.series(metric="floor_ask", collection="argonauts", denomination="USD", interval="1h", range_="6h", now=now)
+    check("metrics: USD denomination uses the event's own USD at its timestamp", u["raw"] == [3959.5929])
+    check("metrics: every response carries its basis (docs/06 §2.2)",
+          all(k in u["basis"] for k in ("metric", "denomination", "transform", "interval", "range", "wash_filter",
+                                        "as_of", "display_timezone", "baseline_value")))
+    check("metrics: wash_filter is honestly reported as raw (no filter exists)", u["basis"]["wash_filter"] == "raw")
+    try:
+        eng.series(metric="floor_ask", collection="argonauts", interval="7m", now=now)
+        bad = False
+    except ValueError:
+        bad = True
+    check("metrics: an interval not in config is REFUSED, not improvised", bad)
+
+    book = eng.live_book("argonauts", now=now)
+    # now=11:00: the bid was CANCELLED at 10:19:02 (and would also have expired at 10:48);
+    # the listing (#4027, a different order from the #8119 sale) still stands; so does the offer.
+    check("metrics: live book -- the cancelled bid is gone, the unsold listing stands, the collection offer stands",
+          book["item_bids"] == [] and len(book["asks"]) == 1 and book["asks"][0]["token_id"] == "4027"
+          and len(book["collection_offers"]) == 1,
+          f"got bids={len(book['item_bids'])} asks={len(book['asks'])} coll={len(book['collection_offers'])}")
+    lt = eng.bid_lifetimes("argonauts", 0, now.timestamp())
+    check("metrics: bid lifetime = cancel.valid_ts - bid.valid_ts, with its n",
+          lt["n"] == 1 and abs(lt["median_s"] - 22.49) < 0.01 and lt["percentiles_reliable"] is False, f"got {lt}")
+    n.close()
+
+
+def test_dashboard_serves_localhost_only(tmp: Path) -> None:
+    """REQ-N-13, and a smoke test of every API route over real HTTP."""
+    import http.client
+    import shutil as _sh
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import Dashboard, make_handler, serve
+
+    root = tmp / "dashroot"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    import yaml
+    cfg = yaml.safe_load((root / "config" / "base.yaml").read_text())
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / cfg["landing"]["root"], "run-d", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    for raw in (REAL_BID, REAL_COLL_OFFER, DOC_LISTING):
+        w.write(json.dumps(raw), topic="collection:argonauts", event_timestamp=raw[4]["payload"]["event_timestamp"])
+    w.close()
+
+    try:
+        serve(root, cfg, ["argonauts"], host="0.0.0.0", port=0, open_browser=False)
+        refused = False
+    except ValueError as exc:
+        refused = "REQ-N-13" in str(exc)
+    check("dashboard: REFUSES to bind anything but loopback (REQ-N-13)", refused)
+
+    dash = Dashboard(root, cfg, ["argonauts"])
+    dash._sync_once()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(dash))
+    port = httpd.server_address[1]
+    t = _th.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        def get(path):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+            return r.status, body
+        st, body = get("/api/status")
+        j = json.loads(body)
+        check("dashboard: /api/status", st == 200 and j["store"]["events"] == 3, f"{st} {body[:120]}")
+        for path in ("/api/meta", "/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD",
+                     "/api/multi?collection=argonauts&interval=1h&range=YTD", "/api/book?collection=argonauts",
+                     "/api/tape?collection=argonauts", "/api/makers?collection=argonauts&range=YTD",
+                     "/api/lifetimes?collection=argonauts&range=YTD", "/api/mix?range=YTD", "/api/gaps", "/api/audit"):
+            st, body = get(path)
+            check(f"dashboard: {path.split('?')[0]} -> 200 JSON", st == 200 and body[:1] in (b"{", b"["),
+                  f"{st} {body[:100]}")
+        st, body = get("/api/series?metric=nope&collection=argonauts")
+        check("dashboard: a bad request is a 400 with the reason, not a crash",
+              st == 400 and b"unknown metric" in body)
+        st, body = get("/")
+        check("dashboard: serves the page", st == 200 and b"NAVANAX" in body)
+        st, _ = get("/../pyproject.toml")
+        check("dashboard: no path traversal out of the ui dir", st == 404)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.norm.close()
 
 
 if __name__ == "__main__":

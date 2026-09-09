@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Navanax</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--ask:#f0883e;--bid:#58a6ff;--coll:#3fb950;--acc:#a371f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+header{display:flex;align-items:center;gap:18px;padding:12px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5;flex-wrap:wrap}
+header h1{font-size:18px;margin:0;letter-spacing:.5px}header h1 span{color:var(--dim);font-weight:400;font-size:12px;margin-left:8px}
+.tiles{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}.tile{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 12px;min-width:110px}
+.tile b{display:block;font-size:17px;font-variant-numeric:tabular-nums}.tile small{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--dim)}.dot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}.dot.bad{background:var(--bad)}
+.controls{display:flex;gap:10px;padding:10px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap;align-items:center}
+.controls label{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.4px}select,button{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:5px 8px;font:inherit}
+button{cursor:pointer}button:hover{border-color:var(--acc)}
+main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:14px 20px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
+.card h2{font-size:13px;margin:0 0 6px;color:var(--fg);text-transform:uppercase;letter-spacing:.5px}.card h2 em{color:var(--dim);font-style:normal;font-weight:400;text-transform:none;letter-spacing:0;margin-left:8px}
+.basis{color:var(--dim);font-size:11px;margin-top:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+.c12{grid-column:span 12}.c8{grid-column:span 8}.c6{grid-column:span 6}.c4{grid-column:span 4}.c3{grid-column:span 3}
+@media(max-width:1100px){.c8,.c6,.c4,.c3{grid-column:span 12}}
+.plot{width:100%;height:300px}.plot.tall{height:360px}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}th{color:var(--dim);font-weight:500;text-transform:uppercase;font-size:10px;letter-spacing:.4px}
+td.num{text-align:right}.ask{color:var(--ask)}.bid{color:var(--bid)}.coll{color:var(--coll)}.mono{font-family:ui-monospace,Menlo,monospace}
+.empty{color:var(--dim);font-style:italic;padding:8px 0}.note{color:var(--warn)}.fail{color:var(--bad);font-weight:600}
+footer{color:var(--dim);font-size:11px;padding:10px 20px 30px;border-top:1px solid var(--line)}
+</style></head><body>
+<header><h1>NAVANAX <span id="hdr-sub">phase 0 · live record</span></h1>
+ <div class="tiles">
+  <div class="tile"><small>recorder</small><b><span class="dot" id="rec-dot"></span><span id="rec">…</span></b></div>
+  <div class="tile"><small>events in store</small><b id="t-events">…</b></div>
+  <div class="tile"><small>events / min</small><b id="t-rate">…</b></div>
+  <div class="tile"><small>last event age</small><b id="t-age">…</b></div>
+  <div class="tile"><small>gaps open / to backfill</small><b id="t-gaps">…</b></div>
+  <div class="tile"><small>landing zone</small><b id="t-disk">…</b></div>
+  <div class="tile"><small>ETH / USD used</small><b id="t-rate-usd">…</b></div>
+  <div class="tile"><small>normalizer lag</small><b id="t-lag">…</b></div>
+ </div></header>
+<div class="controls">
+ <label>collection</label><select id="collection"></select>
+ <label>interval</label><select id="interval"></select>
+ <label>range</label><select id="range">
+  <option value="1h">last 1h</option><option value="6h" selected>last 6h</option><option value="24h">last 24h</option><option value="7d">last 7d</option><option value="30d">last 30d</option>
+  <option value="HTD">HTD · hour to date</option><option value="DTD">DTD · day to date</option><option value="MTD">MTD · month to date</option><option value="YTD">YTD · year to date</option></select>
+ <label>denomination</label><select id="denom"><option>ETH</option><option>USD</option></select>
+ <label>transform</label><select id="transform"><option>ABS</option><option>PCT</option><option>LOG</option><option>DIFF</option><option>BPS</option></select>
+ <button id="refresh">refresh now</button><span id="asof" class="basis"></span>
+</div>
+<main>
+ <div class="card c8"><h2>Prices<em>lowest ask · highest collection offer · highest item bid, per interval</em></h2><div id="p-prices" class="plot tall"></div><div class="basis" id="b-prices"></div></div>
+ <div class="card c4"><h2>Live book<em>orders placed, not cancelled, unexpired</em></h2><div id="book"></div></div>
+ <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer (REQ-F-13a) · hole = no bid</em></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
+ <div class="card c4"><h2>How long a bid stands<em>placed → cancelled, same order</em></h2><div id="life"></div><h2 style="margin-top:14px">Event mix<em>this window</em></h2><div id="p-mix" class="plot" style="height:200px"></div></div>
+ <div class="card c8"><h2>Activity<em>per interval</em></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
+ <div class="card c4"><h2>Who is making this market<em>events by maker, this window</em></h2><div id="makers"></div></div>
+ <div class="card c6"><h2>Sales tape<em>most recent</em></h2><div id="tape"></div></div>
+ <div class="card c6"><h2>Ingestion gaps<em>from the manifest · shaded on charts (REQ-F-15)</em></h2><div id="gaps"></div><h2 style="margin-top:14px">Integrity audit<em>shallow, every refresh</em></h2><div id="audit"></div></div>
+</main>
+<footer>Every number on this page comes through the MetricRequest contract (docs/06 §3). Observed quantities only — no fair value, no smoothing, wash filter = raw. Undefined values are drawn as holes, never filled. Display timezone: <span id="tz"></span>.</footer>
+<script>
+const $=s=>document.querySelector(s);const J=async u=>{const r=await fetch(u);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
+const L={paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:'#e6edf3',size:11},margin:{l:48,r:48,t:10,b:36},xaxis:{gridcolor:'#21262d',zeroline:false},yaxis:{gridcolor:'#21262d',zeroline:false},legend:{orientation:'h',y:1.08},hovermode:'x unified'};
+const C={config:{displaylogo:false,responsive:true}};
+let meta, gaps=[];
+const fmt=(v,d=4)=>v==null?'—':(+v).toLocaleString(undefined,{maximumFractionDigits:d});
+const age=s=>{if(!s)return '—';const d=(Date.now()-Date.parse(s))/1000;return d<60?`${d.toFixed(0)}s`:d<3600?`${(d/60).toFixed(1)}m`:`${(d/3600).toFixed(1)}h`};
+const short=a=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
+const bytes=b=>b<1e6?(b/1e3).toFixed(0)+' KB':b<1e9?(b/1e6).toFixed(1)+' MB':(b/1e9).toFixed(2)+' GB';
+function q(){return {collection:$('#collection').value,interval:$('#interval').value,range:$('#range').value,denom:$('#denom').value,transform:$('#transform').value}}
+function qs(o){return Object.entries(o).map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join('&')}
+function basis(b){return `${b.label}\n${b.denomination} · ${b.transform}${b.baseline_value!=null&&b.transform!=='ABS'?` · baseline ${fmt(b.baseline_value)} @ ${b.baseline_at}`:''} · interval ${b.interval} · ${b.range.spec} (${b.range.start.slice(0,16)} → ${b.range.end.slice(0,16)} UTC) · wash_filter=${b.wash_filter} · ${b.buckets} buckets, ${b.undefined_buckets} undefined · as_of ${b.as_of.slice(0,19)}`}
+function gapShapes(){return gaps.filter(g=>g.started_at).map(g=>({type:'rect',xref:'x',yref:'paper',x0:g.started_at,x1:g.ended_at||new Date().toISOString(),y0:0,y1:1,fillcolor:'rgba(248,81,73,0.12)',line:{width:0}}))}
+async function status(){const s=await J('/api/status');$('#rec').textContent=s.recorder.running?'recording':'stopped';$('#rec-dot').className='dot '+(s.recorder.running?'ok':'bad');
+ $('#t-events').textContent=fmt(s.store.events,0);$('#t-rate').textContent=fmt(s.store.events_last_60s,0);$('#t-age').textContent=age(s.store.last_observed_at);
+ $('#t-gaps').textContent=`${s.gaps.open} / ${s.gaps.awaiting_backfill}`;$('#t-disk').textContent=bytes(s.landing_bytes);
+ const n=s.normalizer;$('#t-lag').textContent=n.error?'ERROR':`${n.took_ms} ms`;$('#t-lag').title=n.error||JSON.stringify(n.stats);$('#tz').textContent=s.display_timezone;$('#t-rate-usd').textContent=s.ethusd.rate?'$'+fmt(s.ethusd.rate,0):'—';$('#t-rate-usd').title=s.ethusd.rate?`${s.ethusd.provider}, as of ${s.ethusd.at}`:'no priced event yet';$('#asof').textContent='as of '+s.now.slice(0,19)+'Z'}
+async function prices(){const p=q();const m=await J('/api/multi?'+qs({...p,metrics:'floor_ask,collection_bid,top_item_bid'}));
+ const tr=[['floor_ask','lowest ask','#f0883e'],['collection_bid','collection offer','#3fb950'],['top_item_bid','top item bid','#58a6ff']].map(([k,n,c])=>({x:m[k].t,y:m[k].v,name:n,mode:'lines+markers',line:{color:c,width:2},marker:{size:5},connectgaps:false}));
+ Plotly.react('p-prices',tr,{...L,shapes:gapShapes(),yaxis:{...L.yaxis,title:p.transform==='ABS'?p.denom:p.transform}},C.config);$('#b-prices').textContent=basis(m.floor_ask.basis)}
+async function imm(){const p=q();const s=await J('/api/series?'+qs({...p,metric:'immediacy_cost'}));
+ const tr=[{x:s.t,y:s.v,name:'spread ('+(p.transform==='ABS'?p.denom:p.transform)+')',mode:'lines+markers',line:{color:'#a371f7',width:2},connectgaps:false},
+  {x:s.t,y:(s.pct_of_ask||[]).map(v=>v==null?null:v*100),name:'% of ask',yaxis:'y2',mode:'lines',line:{color:'#8b949e',dash:'dot'},connectgaps:false}];
+ Plotly.react('p-imm',tr,{...L,shapes:gapShapes(),yaxis2:{overlaying:'y',side:'right',title:'% of ask',gridcolor:'rgba(0,0,0,0)'}},C.config);
+ $('#b-imm').textContent=basis(s.basis)+(s.basis.undefined_buckets?`\n${s.basis.undefined_buckets} interval(s) undefined: no collection offer or no listing observed — shown as holes, never filled.`:'')}
+async function act(){const p={...q(),transform:'ABS'};const m=await J('/api/multi?'+qs({...p,metrics:'bid_count,cancel_count,listing_count,sales_count'}));
+ const tr=[['bid_count','bids','#58a6ff'],['cancel_count','cancels','#f85149'],['listing_count','listings','#f0883e'],['sales_count','sales','#3fb950']].map(([k,n,c])=>({x:m[k].t,y:m[k].v,name:n,type:'bar',marker:{color:c}}));
+ Plotly.react('p-act',tr,{...L,barmode:'stack',shapes:gapShapes()},C.config);$('#b-act').textContent=basis(m.bid_count.basis).replace(/^.*\n/,'counts per interval\n')}
+async function mix(){const p=q();const m=await J('/api/mix?'+qs({collection:p.collection,range:p.range}));
+ Plotly.react('p-mix',[{x:m.map(r=>r.n),y:m.map(r=>r.event_type),type:'bar',orientation:'h',marker:{color:'#a371f7'}}],{...L,margin:{l:130,r:10,t:4,b:24}},C.config)}
+async function book(){const p=q();const b=await J('/api/book?'+qs({collection:p.collection,limit:8}));const d=p.denom==='USD'?'price_usd':'price_eth';
+ const row=(r,c)=>`<tr class="${c}"><td>#${r.token_id||'coll'}</td><td class="num">${fmt(r[d])}</td><td class="mono">${short(r.maker)}</td><td>${age(r.valid_at)} ago</td><td>${r.expiration_at?'exp '+age(r.expiration_at).replace(/^-/,'in '):''}</td></tr>`;
+ const sec=(t,rows,c)=>`<h2 style="margin-top:8px">${t}<em>${rows.length} shown</em></h2>`+(rows.length?`<table><tr><th>item</th><th>${p.denom}</th><th>maker</th><th>placed</th><th></th></tr>${rows.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`);
+ $('#book').innerHTML=sec('asks',b.asks,'ask')+sec('collection offers',b.collection_offers,'coll')+sec('item bids',b.item_bids,'bid')}
+async function tape(){const p=q();const t=await J('/api/tape?'+qs({collection:p.collection,limit:25}));const d=p.denom==='USD'?'price_usd':'price_eth';
+ $('#tape').innerHTML=t.length?`<table><tr><th>when</th><th>item</th><th>${p.denom}</th><th>seller</th><th>buyer</th><th>tx</th></tr>${t.map(r=>`<tr><td>${r.valid_at.slice(5,19)}</td><td>#${r.token_id||'?'}</td><td class="num">${fmt(r[d])}</td><td class="mono">${short(r.maker)}</td><td class="mono">${short(r.taker)}</td><td class="mono">${short(r.tx_hash)}</td></tr>`).join('')}</table>`:`<div class="empty">no sales recorded in the store yet — a thin market can go hours between them</div>`}
+async function makers(){const p=q();const m=await J('/api/makers?'+qs({collection:p.collection,range:p.range}));const T=m.total_events_with_maker||1;
+ $('#makers').innerHTML=m.top.length?`<table><tr><th>maker</th><th>events</th><th>share</th><th>bids</th><th>cancels</th><th>listings</th></tr>${m.top.map(r=>`<tr><td class="mono">${short(r.maker)}</td><td class="num">${fmt(r.events,0)}</td><td class="num">${(100*r.events/T).toFixed(1)}%</td><td class="num">${r.bids}</td><td class="num">${r.cancels}</td><td class="num">${r.listings}</td></tr>`).join('')}</table><div class="basis">of ${fmt(T,0)} events with a maker in this window</div>`:'<div class="empty">nothing in window</div>'}
+async function life(){const p=q();const l=await J('/api/lifetimes?'+qs({collection:p.collection,range:p.range}));
+ $('#life').innerHTML=l.n?`<table><tr><th>n</th><th>p10</th><th>median</th><th>p90</th></tr><tr><td class="num">${fmt(l.n,0)}</td><td class="num">${fmt(l.p10_s,0)}s</td><td class="num">${fmt(l.median_s,0)}s</td><td class="num">${fmt(l.p90_s,0)}s</td></tr></table><div class="basis">${l.percentiles_reliable?'':'⚠ n < '+l.min_n_for_percentiles+': percentiles not reliable (REQ-F-19)'}</div>`:'<div class="empty">no bid→cancel pairs in window</div>'}
+async function gapsAudit(){gaps=await J('/api/gaps');const a=await J('/api/audit');
+ $('#gaps').innerHTML=gaps.length?`<table><tr><th>started</th><th>ended</th><th>reason</th><th>lost for good</th></tr>${gaps.slice(-12).reverse().map(g=>`<tr><td>${(g.started_at||'').slice(5,19)}</td><td>${g.ended_at?g.ended_at.slice(5,19):'<span class=note>open</span>'}</td><td title="${g.reason}">${(g.reason||'').slice(0,60)}</td><td>${(g.irrecoverable_classes||[]).length?(g.irrecoverable_classes||[]).map(c=>c.replace('item_','')).join(', '):'—'}</td></tr>`).join('')}</table>`:'<div class="empty">no gaps recorded</div>';
+ $('#audit').innerHTML=(a.failures.length?a.failures.map(f=>`<div class="fail">${f}</div>`).join(''):'<div style="color:var(--ok)">clean</div>')+a.notes.map(n=>`<div class="note">${n}</div>`).join('')+`<div class="basis">${a.mode} · ${a.at.slice(11,19)}Z</div>`}
+async function all(){try{await status();await gapsAudit();await Promise.all([prices(),imm(),act(),mix(),book(),tape(),makers(),life()])}catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
+async function init(){meta=await J('/api/meta');$('#collection').innerHTML=meta.watchlist.map(s=>`<option>${s}</option>`).join('');
+ $('#interval').innerHTML=meta.intervals.map(i=>`<option ${i==='5m'?'selected':''}>${i}</option>`).join('');
+ document.querySelectorAll('.controls select').forEach(s=>s.addEventListener('change',all));$('#refresh').addEventListener('click',all);await all();setInterval(all,10000)}
+init();
+</script></body></html>

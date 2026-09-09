@@ -3,6 +3,8 @@
     python -m navanax.cli ingest            # run the consumer
     python -m navanax.cli status            # ingestion health
     python -m navanax.cli verify            # re-verify landing-zone checksums
+    python -m navanax.cli normalize         # one landing-zone -> store pass
+    python -m navanax.cli dashboard         # localhost UI; normalizes continuously
 
 Every day this is not running is a day of history that cannot be bought back:
 OpenSea publishes no historical floor series, so the record exists only because
@@ -257,6 +259,36 @@ def cmd_verify(args) -> int:
     return 1
 
 
+def cmd_normalize(args) -> int:
+    """One pass of landing zone -> analytical store. The dashboard does this continuously."""
+    from .normalize import Normalizer
+    root = Path(args.root)
+    cfg, _ = _config(root)
+    n = Normalizer(root / cfg["landing"]["root"], root / cfg["analytical"]["path"])
+    stats = n.sync()
+    print(json.dumps(stats, indent=2))
+    n.close()
+    return 0
+
+
+def cmd_dashboard(args) -> int:
+    from .dashboard import serve
+    root = Path(args.root)
+    cfg, slugs = _config(root)
+    try:
+        serve(root, cfg, slugs, port=args.port, open_browser=not args.no_browser)
+    except ValueError as exc:
+        print(f"REFUSING: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"could not bind the dashboard port: {exc}\n"
+              f"  Is another dashboard already running? Open http://127.0.0.1:"
+              f"{args.port or (cfg.get('dashboard') or {}).get('port', 8765)}/ instead.",
+              file=sys.stderr)
+        return 3
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="navanax")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
@@ -269,6 +301,11 @@ def main(argv=None) -> int:
                    help="checksums only; skip decompressing every file "
                         "(fast, but cannot detect a short decode)")
     v.set_defaults(fn=cmd_verify)
+    sub.add_parser("normalize").set_defaults(fn=cmd_normalize)
+    d = sub.add_parser("dashboard")
+    d.add_argument("--port", type=int, default=None)
+    d.add_argument("--no-browser", action="store_true")
+    d.set_defaults(fn=cmd_dashboard)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s  %(message)s")
