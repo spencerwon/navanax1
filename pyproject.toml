@@ -6,10 +6,14 @@ build-backend = "setuptools.build_meta"
 name = "navanax"
 version = "0.1.0"
 description = "OpenSea data consolidation, analysis and trade-discovery platform"
-requires-python = ">=3.12"
+# 3.10, not 3.12: the Linux workspace the operator actually runs this in is
+# Python 3.10.12, where `datetime.UTC` and `StrEnum` do not exist. A
+# requires-python the real environment cannot satisfy is the same
+# claim-versus-reality failure as a wrong docstring (BUG-20260909-011).
+requires-python = ">=3.10"
 dependencies = [
   "websockets>=12.0",
-  "zstandard>=0.22.0",
+  "zstandard>=0.23.0",   # <0.23 defaulted read_across_frames=False (BUG-20260909-010)
   "PyYAML>=6.0",
   "httpx>=0.27.0",
   "duckdb>=1.0.0",
@@ -28,7 +32,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py310"
 
 # Pinned explicitly. An unspecified ruleset silently changes when ruff updates,
 # which turns a green CI red on a day nobody touched the code (BUG-20260909-004).

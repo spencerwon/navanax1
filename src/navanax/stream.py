@@ -35,14 +35,21 @@ import asyncio
 import json
 import logging
 import random
+import time
 import uuid
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
-from .errors import UpstreamUnavailableError
+from .errors import SubscriptionRejectedError, UpstreamUnavailableError
 from .landing import GapRecord, LandingZoneWriter
 from .opstore import OperationalStore
+
+#: One checkpoint row covers the whole consumer. It answers exactly one
+#: question -- "when was this process last known to be alive?" -- which is what
+#: turns the interval between two runs into a recorded gap (BUG-20260909-009).
+STREAM_KEY = "opensea:stream"
 
 log = logging.getLogger("navanax.stream")
 
@@ -123,6 +130,9 @@ class StreamStats:
     unknown_events: dict[str, int] = field(default_factory=dict)
     last_event_ts: str | None = None
     max_event_ts: str | None = None
+    joined: list[str] = field(default_factory=list)
+    join_rejected: dict[str, str] = field(default_factory=dict)
+    gaps_opened: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -135,6 +145,9 @@ class StreamStats:
             "unknown_events": dict(self.unknown_events),
             "last_event_ts": self.last_event_ts,
             "max_event_ts": self.max_event_ts,
+            "joined": list(self.joined),
+            "join_rejected": dict(self.join_rejected),
+            "gaps_opened": self.gaps_opened,
         }
 
 
@@ -160,6 +173,10 @@ class StreamConsumer:
         run_id: str | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         connect_factory: Callable[[str], Any] | None = None,
+        join_timeout: float = 15.0,
+        stable_seconds: float = 60.0,
+        checkpoint_every: int = 50,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not api_key:
             raise ValueError(
@@ -178,10 +195,18 @@ class StreamConsumer:
         self.run_id = run_id or writer.run_id
         self.on_event = on_event
         self._connect_factory = connect_factory  # injectable for tests
+        self.join_timeout = join_timeout
+        self.stable_seconds = stable_seconds
+        self.checkpoint_every = checkpoint_every
+        self._monotonic = monotonic
         self.stats = StreamStats()
         self._ref = 0
         self._stop = asyncio.Event()
         self._open_gap_id: int | None = None
+        # BUG-20260909-005: join replies are now tracked to a conclusion.
+        self._pending_joins: dict[str, str] = {}   # ref -> topic
+        self._joined: set[str] = set()
+        self._since_checkpoint = 0
 
     # -- protocol helpers --------------------------------------------------
     def _next_ref(self) -> str:
@@ -192,10 +217,105 @@ class StreamConsumer:
         return [f"collection:{slug}" for slug in self.collections]
 
     def join_messages(self) -> list[str]:
-        return [
-            json.dumps({"topic": t, "event": "phx_join", "payload": {}, "ref": self._next_ref()})
-            for t in self._topics()
-        ]
+        """Build the join frames AND register each ref as outstanding.
+
+        The ref is how a reply is matched back to the topic it answers. Without
+        that mapping a `phx_reply` is an anonymous frame and a rejection is
+        indistinguishable from an acknowledgement (BUG-20260909-005).
+        """
+        self._pending_joins.clear()
+        self._joined.clear()
+        out: list[str] = []
+        for t in self._topics():
+            ref = self._next_ref()
+            self._pending_joins[ref] = t
+            out.append(
+                json.dumps({"topic": t, "event": "phx_join", "payload": {}, "ref": ref})
+            )
+        return out
+
+    # -- join outcomes -----------------------------------------------------
+    def _handle_join_reply(self, msg: dict[str, Any]) -> None:
+        ref = msg.get("ref")
+        ref = str(ref) if ref is not None else None
+        topic = self._pending_joins.pop(ref, None) if ref else None
+        if topic is None:
+            topic = msg.get("topic") if isinstance(msg.get("topic"), str) else None
+            if topic in self._pending_joins.values():
+                self._pending_joins = {
+                    r: t for r, t in self._pending_joins.items() if t != topic
+                }
+            elif topic is None or not topic.startswith("collection:"):
+                return  # a reply to a heartbeat or some other ref -- not ours
+
+        payload = msg.get("payload")
+        status = payload.get("status") if isinstance(payload, dict) else None
+        if status == "ok":
+            self._joined.add(topic)
+            if topic not in self.stats.joined:
+                self.stats.joined.append(topic)
+            log.info("subscribed: %s", topic)
+            return
+
+        reason = json.dumps(payload)[:300] if payload is not None else "no payload"
+        self._reject_join(topic, f"status={status} {reason}")
+
+    def _reject_join(self, topic: str, reason: str) -> None:
+        """A topic we are NOT subscribed to. Loud, recorded, and gap-registered.
+
+        The failure this prevents is the quiet one: an expired key or a bad slug
+        leaves a healthy-looking process recording nothing, and the first sign
+        is an empty chart weeks later.
+        """
+        self.stats.join_rejected[topic] = reason
+        err = SubscriptionRejectedError(
+            f"phx_join refused for {topic}; this process is recording NOTHING for it",
+            expected="status=ok",
+            received=reason,
+            ingestion_run_id=self.run_id,
+            topic=topic,
+        )
+        log.error("%s", err)
+        gid = self.opstore.open_gap(
+            self.run_id,
+            f"subscription rejected: {topic} ({reason})",
+            topics=[topic],
+            # Whatever happens in this window is not backfillable in general:
+            # cancellations and order invalidations in it are gone (REQ-D-09a),
+            # and we do not know how long it will last.
+            backfillable=False,
+        )
+        self.stats.gaps_opened += 1
+        self.writer.record_gap(
+            GapRecord(
+                started_at=_iso(_now()), ended_at=None,
+                reason=f"subscription rejected: {reason}",
+                run_id=self.run_id, topics=[topic], backfillable=False,
+            )
+        )
+        log.error(
+            "gap %d opened for %s. Check: (1) the API key has not expired -- free "
+            "instant keys last 7 days (REQ-D-06); (2) the collection slug is the "
+            "last path segment of its OpenSea URL.", gid, topic,
+        )
+
+    def _check_join_timeouts(self) -> None:
+        """A join that is never answered is a rejection that forgot to reply."""
+        for ref, topic in list(self._pending_joins.items()):
+            self._pending_joins.pop(ref, None)
+            self._reject_join(topic, f"no phx_reply within {self.join_timeout:.0f}s")
+
+    def _checkpoint(self) -> None:
+        """Record that this process was alive, and how far it got.
+
+        BUG-20260909-009: `save_checkpoint` existed and was called by nothing
+        except the test suite, so after a restart there was no "last alive"
+        timestamp and the downtime between two runs was never recorded as a gap.
+        """
+        self.opstore.save_checkpoint(
+            STREAM_KEY, self.run_id, self.writer.sequence, self.stats.max_event_ts
+        )
+        self._since_checkpoint = 0
 
     def heartbeat_message(self) -> str:
         return json.dumps(
@@ -254,14 +374,31 @@ class StreamConsumer:
         topic = msg.get("topic")
 
         if event in ("phx_reply", "phx_close", "phx_error"):
+            # Control frames are landed too. They are small and infrequent, and
+            # they are the only on-disk evidence of what this process was
+            # actually subscribed to at a given moment -- which is precisely
+            # the question that could not be answered when BUG-20260909-005
+            # made a refused join invisible.
+            self.writer.write(raw, topic="__control__", event_timestamp=None)
+            if event == "phx_reply":
+                self._handle_join_reply(msg)
+            elif event in ("phx_close", "phx_error"):
+                t = topic if isinstance(topic, str) else "?"
+                if t in self._joined:
+                    self._joined.discard(t)
+                    self._reject_join(t, f"channel {event} after a successful join")
             return msg
         if topic == "phoenix" or event == "heartbeat":
             self.stats.heartbeats += 1
+            self.writer.write(raw, topic="__control__", event_timestamp=None)
             return msg
 
         ets = self.extract_event_timestamp(msg)
         self.writer.write(raw, topic=topic, event_timestamp=ets)
         self.stats.events += 1
+        self._since_checkpoint += 1
+        if self._since_checkpoint >= self.checkpoint_every:
+            self._checkpoint()
 
         if ets:
             # Out-of-order arrival is EXPECTED, not an error -- the stream is
@@ -316,23 +453,90 @@ class StreamConsumer:
     def stop(self) -> None:
         self._stop.set()
 
+    def record_downtime_gap(self) -> int | None:
+        """Record the interval since this consumer last checkpointed.
+
+        BUG-20260909-009. A restart used to leave no trace at all: the previous
+        run's last-known-alive time was never written, so the window between
+        two runs -- an overnight laptop sleep, a crash, a deploy -- simply did
+        not appear in the gap register. Downstream, an absence of events is
+        indistinguishable from a quiet market, which is the single most
+        dangerous confusion available in this system: it turns "we were not
+        watching" into "nothing happened", and a backtest reads the second.
+
+        Called once at the start of `run()`. Returns the gap id, or None if
+        this is the first run this store has ever seen.
+        """
+        ck = self.opstore.get_checkpoint(STREAM_KEY)
+        if not ck:
+            log.info("no previous checkpoint: first run against this operational store")
+            self._checkpoint()
+            return None
+        since = ck.get("updated_at") or ck.get("last_received_at")
+        gid = self.opstore.open_gap(
+            self.run_id,
+            f"process not running (previous run {ck.get('run_id')} last alive {since})",
+            topics=self._topics(),
+            backfillable=True,
+            started_at=since,
+        )
+        self.opstore.close_gap(gid)
+        self.stats.gaps_opened += 1
+        self.writer.record_gap(
+            GapRecord(
+                started_at=since, ended_at=_iso(_now()),
+                reason=f"process not running since {since} (run {ck.get('run_id')})",
+                run_id=self.run_id, topics=self._topics(), backfillable=True,
+            )
+        )
+        log.warning(
+            "recorded downtime gap %d: nothing was recorded between %s and now. "
+            "Sales, listings and offers in that window are backfillable; "
+            "cancellations and order invalidate/revalidate are NOT (REQ-D-09a).",
+            gid, since,
+        )
+        self._checkpoint()
+        return gid
+
     async def run(self) -> None:
         backoff = 1.0
+        self.record_downtime_gap()
         while not self._stop.is_set():
+            t0 = self._monotonic()
             try:
                 await self._run_once()
-                backoff = 1.0
+                if self._stop.is_set():
+                    break
+                # BUG-20260909-008. A clean close used to fall straight through
+                # here: no gap recorded, backoff reset to 1.0, and the loop
+                # reconnected with NO sleep at all. A server closing politely in
+                # a loop therefore span the event loop hot while recording
+                # nothing -- and because no exception was raised, it looked like
+                # a series of successful runs.
+                self._open_gap("connection closed by peer without a stop request")
+                self.stats.reconnects += 1
+                log.warning("stream closed cleanly but we did not ask it to")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect on anything
                 self._open_gap(f"{type(exc).__name__}: {exc}")
                 self.stats.reconnects += 1
-                delay = min(self.max_backoff, backoff) * (0.5 + random.random())
-                log.warning("stream error (%s); reconnecting in %.1fs", exc, delay)
-                await asyncio.sleep(delay)
-                backoff = min(self.max_backoff, backoff * 2)
+                log.warning("stream error (%s)", exc)
             finally:
                 self.writer.flush()
+                self._checkpoint()
+
+            if self._stop.is_set():
+                break
+            # Backoff resets only after a connection that actually STAYED UP.
+            # Resetting it on every return let a flapping connection retry at
+            # full speed forever.
+            if (self._monotonic() - t0) >= self.stable_seconds:
+                backoff = 1.0
+            delay = min(self.max_backoff, backoff) * (0.5 + random.random())
+            log.warning("reconnecting in %.1fs", delay)
+            await asyncio.sleep(delay)
+            backoff = min(self.max_backoff, backoff * 2)
 
     async def _run_once(self) -> None:
         connect = self._connect_factory or self._default_connect
@@ -342,9 +546,9 @@ class StreamConsumer:
             self._close_gap()
             for m in self.join_messages():
                 await ws.send(m)
-            log.info("subscribed to %d collections", len(self.collections))
+            log.info("sent %d join requests; awaiting replies", len(self.collections))
 
-            hb = asyncio.create_task(self._heartbeat(ws))
+            hb = asyncio.create_task(self._keepalive(ws))
             try:
                 async for raw in ws:
                     if self._stop.is_set():
@@ -360,12 +564,33 @@ class StreamConsumer:
                     # A heartbeat that died for a real reason is a clue about
                     # why the connection dropped. Narrowing this would discard
                     # that clue; we log it and let the outer error stand.
-                    log.warning("heartbeat task failed", exc_info=True)
+                    log.warning("keepalive task failed", exc_info=True)
 
-    async def _heartbeat(self, ws: Any) -> None:
+    async def _keepalive(self, ws: Any) -> None:
+        """Heartbeat, join-reply deadline, and periodic checkpoint.
+
+        One task rather than three: they all just need a clock, and a single
+        task is one thing to cancel correctly rather than three.
+        """
+        deadline = self._monotonic() + self.join_timeout
+        checked = False
+        next_hb = self._monotonic() + self.heartbeat_seconds
         while True:
-            await asyncio.sleep(self.heartbeat_seconds)
-            await ws.send(self.heartbeat_message())
+            await asyncio.sleep(min(1.0, self.heartbeat_seconds))
+            now = self._monotonic()
+            if not checked and now >= deadline:
+                checked = True
+                self._check_join_timeouts()
+                if not self._joined:
+                    log.error(
+                        "NOT SUBSCRIBED TO ANYTHING after %.0fs. The socket is open "
+                        "and the process looks healthy, but no market data is being "
+                        "recorded.", self.join_timeout,
+                    )
+            if now >= next_hb:
+                next_hb = now + self.heartbeat_seconds
+                await ws.send(self.heartbeat_message())
+                self._checkpoint()
 
     @staticmethod
     def _default_connect(url: str) -> Any:

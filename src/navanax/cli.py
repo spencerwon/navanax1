@@ -10,10 +10,17 @@ we recorded it.
 """
 from __future__ import annotations
 
-import argparse, asyncio, json, logging, os, sys
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
 from pathlib import Path
 
-from .landing import LandingZoneWriter, verify_manifest
+from .codec import get_codec, verify_codec_roundtrip
+from .dotenv import DotenvError, require
+from .landing import LandingZoneWriter, is_integrity_failure, verify_manifest
 from .opstore import OperationalStore
 from .stream import StreamConsumer, new_run_id
 
@@ -47,18 +54,27 @@ def cmd_ingest(args) -> int:
     if not slugs:
         print("watchlist is empty -- nothing to subscribe to", file=sys.stderr)
         return 2
-    key = os.environ.get("OPENSEA_API_KEY", "")
-    if not key:
-        print(
-            "OPENSEA_API_KEY is not set.\n"
-            "  The stream is unmetered but still needs a key.\n"
-            "  Get one: https://docs.opensea.io/reference/api-keys\n"
-            "  Put it in .env (which is gitignored). Never in the repo.",
-            file=sys.stderr)
+    # BUG-20260909-001: read .env, which is what every message tells the user to fill in.
+    try:
+        key = require("OPENSEA_API_KEY", path=root / ".env")
+    except DotenvError as exc:
+        print(f"{exc}\n\n  The stream is unmetered but still needs a key.\n"
+              f"  Get one: https://docs.opensea.io/reference/api-keys",
+              file=sys.stderr)
         return 2
 
     run_id = new_run_id()
     lz = cfg["landing"]
+
+    # Prove the crash-safety property on THIS machine before recording anything
+    # that cannot be re-fetched. Costs microseconds; the alternative is trusting
+    # that whichever `zstandard` version pip installed reads multi-frame files.
+    try:
+        verify_codec_roundtrip(get_codec(lz.get("codec", "zstd"), lz.get("codec_level")))
+    except Exception as exc:  # noqa: BLE001 - any failure here means do not ingest
+        print(f"REFUSING TO INGEST\n\n{exc}", file=sys.stderr)
+        return 3
+
     writer = LandingZoneWriter(
         root / lz["root"], run_id,
         codec=lz.get("codec", "zstd"), codec_level=lz.get("codec_level"),
@@ -115,11 +131,17 @@ def cmd_verify(args) -> int:
     root = Path(args.root)
     cfg, _ = _config(root)
     problems = verify_manifest(root / cfg["landing"]["root"])
-    if not problems:
-        print("landing zone verified clean")
+    failures = [p for p in problems if is_integrity_failure(p)]
+    notes = [p for p in problems if not is_integrity_failure(p)]
+
+    for n in notes:
+        print("NOTE  " + n)
+    if not failures:
+        print("landing zone verified clean"
+              + (f" ({len(notes)} note(s) above)" if notes else ""))
         return 0
     print("S0a -- LANDING ZONE INTEGRITY FAILURE", file=sys.stderr)
-    for p in problems:
+    for p in failures:
         print("  " + p, file=sys.stderr)
     print("\nThe append-only guarantee is what the reprocessing path rests on.\n"
           "Halt ingestion and investigate before writing anything further.", file=sys.stderr)

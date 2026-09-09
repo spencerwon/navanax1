@@ -1,0 +1,358 @@
+# Navanax bug ledger -- THE SOURCE OF TRUTH for the bug log.
+#
+# This file is machine-readable on purpose. `docs/logs/BUGS.xlsx` is GENERATED
+# from it by `tools/buglog.py`; nobody types into the spreadsheet. A hand-typed
+# log drifts from the code within a week, and this project has already shipped
+# four bugs whose entire shape was "every artifact agrees except the code".
+#
+#   python3 tools/buglog.py              # regenerate the spreadsheet
+#   python3 tools/buglog.py --check      # CI gate: ledger vs BUGS.md vs code
+#
+# Owned by the `bug-triage` agent (docs/02_AGENT_HIERARCHY.md).
+# Schema and severity definitions: docs/05_BUG_TAXONOMY.md.
+#
+# severity : S0a data corruption (halt ingestion) | S0b backtest integrity
+#            (halt backtests) | S1 silent wrongness | S2 data loss
+#            S3 functional break | S4 cosmetic
+# priority : P0 drop everything | P1 before the next merge | P2 this phase
+#            P3 backlog                          (derived; see 05 §2.2)
+# class    : CFG config/env | ING ingestion | NRM normalisation | STA statistics
+#            RTL rate limiting | TMP temporal | SEC security | INF infrastructure
+
+repo: spencerwon/navanax1
+schema_version: 1
+
+bugs:
+
+- id: BUG-20260909-001
+  summary: Entry points read only os.environ; never loaded the .env they told users to fill
+  severity: S1
+  priority: P0
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T01:05:00-05:00"
+  occurred_at: "2026-09-09T00:38:00-05:00"
+  resolved_at: "2026-09-09T01:40:00-05:00"
+  detected_by: "Spencer, running setup.command on his own machine"
+  detection_channel: operator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: tools/preflight.py, line: 236}
+  - {file: src/navanax/cli.py, line: 50}
+  requirement: REQ-D-06
+  data_impact: "None. Nothing had been ingested; both paths are read-only and abort before writing."
+  root_cause: >-
+    Every artifact around the code -- the error message, .env.example, .gitignore,
+    04_ENVIRONMENTS.md 6.2, setup.command's on-screen text -- specified that .env
+    was read. No code ever opened it.
+  resolution: "Added src/navanax/dotenv.py and wired both entry points to it. Detects TextEdit RTF saves, BOM, CRLF, quotes, export prefixes."
+  regression_test: tests/selftest.py::test_dotenv_loading
+  monitor_gap: >-
+    No test exercised a real entry point end to end. 49 assertions covered
+    internals; zero covered "does a first-time operator get past step one".
+  pr: 1
+
+- id: BUG-20260909-002
+  summary: Stream consumer assumed Phoenix v1 map frames; OpenSea sends v2 arrays
+  severity: S3
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T02:20:00-05:00"
+  occurred_at: "2026-09-09T00:50:00-05:00"
+  resolved_at: "2026-09-09T02:35:00-05:00"
+  detected_by: "Spencer, first live WebSocket connection"
+  detection_channel: operator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 71}
+  - {file: tools/preflight.py, line: 183}
+  requirement: REQ-D-26
+  data_impact: "None. No ingestion had run; the consumer crashed loudly on its first frame before writing anything."
+  root_cause: >-
+    Phoenix ships two serialisers. v1 sends maps; v2 sends arrays
+    [join_ref, ref, topic, event, payload]. OpenSea uses v2. The code called
+    .get() on a list. AttributeError on the very first frame -- the join reply.
+  resolution: "Added normalize_frame() handling both wire formats; both call sites route through it."
+  regression_test: tests/selftest.py::test_phoenix_v2_arrays
+  monitor_gap: >-
+    No test used a real frame. Every synthetic fixture was a v1 map because that
+    is the format I wrote them in -- the test data inherited the bug from the
+    code it was testing.
+  pr: 1
+
+- id: BUG-20260909-003
+  summary: Documented REST budget of 600/hr was an unverified assumption; measured limit is 120/hr
+  severity: S1
+  priority: P0
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T02:25:00-05:00"
+  occurred_at: "2026-09-09T00:15:00-05:00"
+  resolved_at: "2026-09-09T02:50:00-05:00"
+  detected_by: "Spencer, first live API response header x-ratelimit-limit: 120"
+  detection_channel: operator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: config/base.yaml, line: 22}
+  - {file: src/navanax/governor.py, line: 1}
+  requirement: REQ-D-02
+  data_impact: "None -- no ingestion had run. But every budget calculation in the document set was wrong by 5x."
+  root_cause: >-
+    The 600 figure was never sourced. It appeared once, was repeated across seven
+    documents, and its ubiquity became its credibility. Caveat on the
+    replacement: that response carried cf-cache-status HIT, so 120 is a
+    provisional measurement, not ground truth.
+  resolution: "Config default 120, reserve floors rescaled 0/4/12/24, five docs corrected. Numbers now carry provenance tags: MEASURED <date> / ASSUMED / FROM DOCS <url>."
+  regression_test: tests/selftest.py::test_governor_budget
+  monitor_gap: "Nothing in the process required a figure to have a source."
+  pr: 1
+
+- id: BUG-20260909-004
+  summary: "CI lint failed on first PR: 43 ruff errors; ruleset unpinned and tools/ unlinted"
+  severity: S4
+  priority: P1
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T02:45:00-05:00"
+  occurred_at: "2026-09-09T02:40:00-05:00"
+  resolved_at: "2026-09-09T03:10:00-05:00"
+  detected_by: "GitHub Actions CI on PR #1 -- the gate working as designed"
+  detection_channel: ci
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: pyproject.toml, line: 30}
+  - {file: .github/workflows/ci.yml, line: 1}
+  requirement: REQ-N-13
+  data_impact: "None. Style only."
+  root_cause: >-
+    [tool.ruff] set only line-length and target-version with no select, so the
+    effective ruleset was whatever ruff's defaults were in the version CI
+    installed -- a green build could go red on a day nobody touched the code.
+    Separately, lint never covered tools/, where preflight.py lives.
+  resolution: >-
+    Removed 4 unused imports, wrapped 8 long lines, narrowed 5 broad excepts,
+    pinned the ruleset, extended lint to tools/. REJECTED Copilot's suggested
+    narrowing of the heartbeat except -- it would let a real heartbeat failure
+    propagate from a finally block and mask the connection error.
+  regression_test: "CI itself (ruff check src tests tools)"
+  monitor_gap: "Two: unpinned ruleset, and tools/ was never linted."
+  pr: 1
+
+- id: BUG-20260909-005
+  summary: A rejected phx_join was invisible -- control frames returned before landing and the reply was never read
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T07:40:00-05:00"
+  occurred_at: "2026-09-09T00:50:00-05:00"
+  resolved_at: "2026-09-09T09:05:00-05:00"
+  detected_by: "validator agent (opus), independent adversarial review of PR #1"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 256}
+  - {file: src/navanax/stream.py, line: 343}
+  requirement: REQ-D-06
+  data_impact: >-
+    Potentially total. An expired key or a wrong slug leaves a process that runs
+    for days at 0 events with "open gaps 0" and healthy stats. Every event in
+    that window is lost and the evidence of why was never written to disk.
+  root_cause: >-
+    handle_frame returned phx_reply / phx_close / phx_error before landing them
+    and before anything read the status field. BUG-002's own closing note said
+    confirming the join was "the next thing to establish" -- and it was not.
+  resolution: >-
+    Join refs are tracked to a conclusion. A refused join raises
+    SubscriptionRejectedError (S1), opens a NON-backfillable gap naming the
+    topic, and logs the two things to check (key expiry, slug). A join never
+    answered within join_timeout is treated the same way -- silence is the
+    failure mode an expired key actually produces. Control frames are now landed
+    as the only on-disk evidence of what the process was subscribed to.
+  regression_test: tests/selftest.py::test_join_reply_is_read
+  monitor_gap: "Nothing asserted that a subscription was accepted."
+  pr: 1
+
+- id: BUG-20260909-006
+  summary: REQ-D-26a's time-based frame flush did not exist -- the 5s cadence only fired when the next event arrived
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T07:40:00-05:00"
+  occurred_at: "2026-09-09T00:30:00-05:00"
+  resolved_at: "2026-09-09T09:05:00-05:00"
+  detected_by: "validator agent (opus), independent adversarial review of PR #1"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/landing.py, line: 303}
+  requirement: REQ-D-26a
+  data_impact: >-
+    Repro: one event, then 7200 simulated idle seconds -> 0 bytes on disk, no
+    manifest file, and after a simulated SIGKILL read_file recovered 0 events
+    while verify_manifest returned "clean". This is the NORMAL regime for a thin
+    collection: preflight saw zero events in 60s on Argonauts, and the event
+    types actually observed live were item_cancelled -- REQ-D-09a IRRECOVERABLE,
+    which REST can never return.
+  root_cause: >-
+    _maybe_flush_frame was reachable only from write(). No timer thread, no async
+    task, no tick. The docstring's "bounding crash loss to seconds" was false:
+    loss was bounded by the inter-event interval, which is unbounded. Same shape
+    as BUG-001 and BUG-003 -- requirement, docstring and bug log all agreed on
+    behaviour the code did not have.
+  resolution: >-
+    Added LandingZoneWriter.tick() (time-based flush with no write) and a daemon
+    flusher thread that calls it. Tests drive tick() from a fake clock so the
+    cadence is asserted deterministically instead of by sleeping. Files are also
+    now recorded in the manifest at OPEN and updated on every frame flush.
+  regression_test: tests/selftest.py::test_idle_flush_cadence
+  monitor_gap: >-
+    The self-test drove the flush by writing events. It never tested the idle
+    case, which is the normal regime for the target market.
+  pr: 1
+
+- id: BUG-20260909-007
+  summary: verify_manifest walked manifest->disk only; orphaned complete files were invisible and reported clean
+  severity: S2
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T07:40:00-05:00"
+  occurred_at: "2026-09-09T00:30:00-05:00"
+  resolved_at: "2026-09-09T09:05:00-05:00"
+  detected_by: "validator agent (opus), independent adversarial review of PR #1"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/landing.py, line: 402}
+  - {file: src/navanax/landing.py, line: 358}
+  requirement: REQ-D-28
+  data_impact: >-
+    Killed before close() -> 553 bytes and 6 readable events on disk, _manifest/
+    empty, and `navanax verify` printed "landing zone verified clean". Every
+    ungraceful termination orphaned its final file, permanently unreachable via
+    the manifest path ManifestWriter documents as mandatory.
+  root_cause: >-
+    A FileRecord was written only in _close_current. The one audit whose entire
+    job is to notice that something is wrong could not see data files it had no
+    record of, because it only ever looked up records it already had.
+  resolution: >-
+    Files are recorded at OPEN and updated on every frame flush, so the manifest
+    always describes what is on disk. verify_manifest now reconciles in BOTH
+    directions and reports ORPHAN (integrity failure) and OPEN (note, with the
+    recoverable event count). cli verify separates failures from notes.
+  regression_test: tests/selftest.py::test_verify_sees_orphans_and_open_files
+  monitor_gap: "The manifest test only ever verified files the test itself had closed."
+  pr: 1
+
+- id: BUG-20260909-008
+  summary: A clean WebSocket close recorded no gap and reconnected with zero backoff
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T07:40:00-05:00"
+  occurred_at: "2026-09-09T00:30:00-05:00"
+  resolved_at: "2026-09-09T09:05:00-05:00"
+  detected_by: "validator agent (opus), independent adversarial review of PR #1"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 319}
+  requirement: REQ-D-14
+  data_impact: >-
+    OpenSea drops idle subscriptions gracefully; `async for` then returns
+    normally. _open_gap was called only from `except Exception`, so reconnects
+    stayed 0, gap records stayed 0, and the loop spun hot. MEASURED against the
+    reverted code by the new regression test: 5,965 reconnect attempts in 0.4
+    seconds, recording nothing. REQ-D-14 was satisfied only on the crash path.
+  root_cause: >-
+    A normal return from _run_once was treated as success: backoff reset to 1.0
+    and the loop continued with no sleep at all. Because no exception was raised,
+    it looked like a run of successes.
+  resolution: >-
+    An unrequested clean close now opens a gap, counts a reconnect, and goes
+    through the same backoff path as an error. Backoff resets only after a
+    connection that stayed up for stable_seconds (60s default), so a flapping
+    connection can no longer retry at full speed forever.
+  regression_test: tests/selftest.py::test_clean_close_records_gap_and_backs_off
+  monitor_gap: "No test ever exercised a connection that closed without raising."
+  pr: 1
+
+- id: BUG-20260909-009
+  summary: No gap was recorded across a process restart; the checkpoint table was never written by production code
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T07:40:00-05:00"
+  occurred_at: "2026-09-09T00:30:00-05:00"
+  resolved_at: "2026-09-09T09:05:00-05:00"
+  detected_by: "validator agent (opus), independent adversarial review of PR #1"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/opstore.py, line: 149}
+  - {file: src/navanax/cli.py, line: 45}
+  requirement: REQ-D-14
+  data_impact: >-
+    Stop Friday, restart Monday -> "open gaps 0", a 72-hour hole with nothing
+    marking it and no last_event_ts to bound it. Downstream reads a continuous
+    record. An absence of events becomes indistinguishable from a quiet market,
+    which turns "we were not watching" into "nothing happened" -- and a backtest
+    reads the second. 05 2.1 escalation: an unrecoverable gap spanning analysed
+    data is S1.
+  root_cause: "opstore.save_checkpoint was called only from tests/selftest.py. cli.py called it nowhere."
+  resolution: >-
+    Checkpoints are written every checkpoint_every events, on every heartbeat,
+    and on every reconnect. run() calls record_downtime_gap() at startup, which
+    opens a gap STARTING AT the previous run's last checkpoint (not at boot,
+    which would understate the hole by its own duration) and closes it at now.
+    opstore.open_gap gained an explicit started_at for this.
+  regression_test: tests/selftest.py::test_restart_records_downtime_gap
+  monitor_gap: "No test covered a second run against an existing operational store."
+  pr: 1
+
+- id: BUG-20260909-010
+  summary: ZstdCodec could silently return only the first frame of a multi-frame file, depending on the installed python-zstandard version
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T07:45:00-05:00"
+  occurred_at: "2026-09-09T00:30:00-05:00"
+  resolved_at: "2026-09-09T09:05:00-05:00"
+  detected_by: "validator agent (opus) raised it as must-settle-before-merge"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/codec.py, line: 160}
+  - {file: pyproject.toml, line: 12}
+  requirement: REQ-D-26a
+  data_impact: >-
+    Every landing-zone file is multi-frame by design. stream_reader's
+    read_across_frames parameter DEFAULTED TO FALSE before python-zstandard
+    0.23.0, and pyproject pinned >=0.22.0. On an older install, read_file on a
+    healthy 64 MB production .zst would have returned roughly the first five
+    seconds of it, raised nothing, and verified clean -- the manifest checksum is
+    taken over the COMPRESSED bytes and would still have matched.
+  root_cause: >-
+    A correctness property was left resting on a third-party default that changed
+    between releases, in an environment where the version could not be checked.
+  resolution: >-
+    Removed the dependency on the flag entirely: the codec walks frames itself,
+    validating each candidate boundary rather than trusting a magic-byte search.
+    Added verify_codec_roundtrip(), which writes a multi-frame file, reads it
+    back, truncates it and recovers it -- run at ingest startup on the machine
+    that has the real library, so `navanax ingest` REFUSES TO START rather than
+    silently recording data it cannot read back. pyproject pinned to >=0.23.0 as
+    well, as a second line rather than the only one.
+  regression_test: tests/selftest.py::test_codec_multiframe_contract
+  monitor_gap: >-
+    The self-test used the gzip codec exclusively. The production codec had zero
+    coverage, and the sandbox where the code was written cannot install
+    zstandard -- so no amount of local testing could have caught it. The startup
+    self-check exists because the test suite structurally cannot.
+  pr: 1

@@ -19,6 +19,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -26,7 +27,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from navanax.codec import GzipCodec  # noqa: E402
 from navanax.errors import NavanaxError  # noqa: E402
 from navanax.governor import Priority, RestGovernor, TokenBucket  # noqa: E402
-from navanax.landing import LandingZoneWriter, read_file, verify_manifest  # noqa: E402
+from navanax.landing import (  # noqa: E402
+    LandingZoneWriter,
+    is_integrity_failure,
+    read_file,
+    verify_manifest,
+)
 from navanax.opstore import OperationalStore  # noqa: E402
 from navanax.stream import StreamConsumer, normalize_frame  # noqa: E402
 
@@ -76,6 +82,31 @@ def frame(slug: str, ets: str, event: str = "item_listed",
         },
         separators=(",", ":"),
     )
+
+
+class FakeWriter:
+    """Stand-in for LandingZoneWriter with the full interface the consumer uses."""
+
+    run_id = "run-fake"
+
+    def __init__(self) -> None:
+        self.landed: list[tuple[str, str | None, str | None]] = []
+        self.gaps: list[Any] = []
+        self.flushes = 0
+
+    @property
+    def sequence(self) -> int:
+        return len(self.landed)
+
+    def write(self, raw, topic=None, event_timestamp=None, received_at=None):
+        self.landed.append((raw, topic, event_timestamp))
+        return len(self.landed)
+
+    def flush(self) -> None:
+        self.flushes += 1
+
+    def record_gap(self, gap) -> None:
+        self.gaps.append(gap)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +245,7 @@ def test_gap_recording(tmp: Path) -> None:
 def test_dotenv_loading(tmp: Path) -> None:
     """Regression for BUG-20260909-001: entry points never read .env."""
     import os
+
     from navanax.dotenv import DotenvError, load, parse, require
 
     check("dotenv: strips quotes", parse('K="v"')["K"] == "v")
@@ -222,7 +254,8 @@ def test_dotenv_loading(tmp: Path) -> None:
     check("dotenv: strips whitespace", parse("K =  v  ")["K"] == "v")
     check("dotenv: skips comments/blanks", parse("# c\n\nK=v") == {"K": "v"})
 
-    d = tmp / "envtest"; d.mkdir(parents=True, exist_ok=True)
+    d = tmp / "envtest"
+    d.mkdir(parents=True, exist_ok=True)
     (d / ".env").write_text("OPENSEA_API_KEY=fake_key_value\n")
     os.environ.pop("OPENSEA_API_KEY", None)
     check("dotenv: require() reads .env when env var absent",
@@ -237,7 +270,8 @@ def test_dotenv_loading(tmp: Path) -> None:
     # The macOS trap: TextEdit saves Rich Text, file looks fine on screen.
     (d / "rtf.env").write_bytes(rb"{\rtf1\ansi OPENSEA_API_KEY=x}")
     try:
-        load(d / "rtf.env"); ok = False
+        load(d / "rtf.env")
+        ok = False
     except DotenvError as exc:
         ok = "Rich Text" in str(exc) and "Make Plain Text" in str(exc)
     check("dotenv: detects TextEdit RTF and says how to fix it", ok,
@@ -245,7 +279,8 @@ def test_dotenv_loading(tmp: Path) -> None:
 
     (d / "missing").mkdir(exist_ok=True)
     try:
-        require("OPENSEA_API_KEY", path=d / "missing" / ".env"); ok2 = False
+        require("OPENSEA_API_KEY", path=d / "missing" / ".env")
+        ok2 = False
     except DotenvError as exc:
         ok2 = "cp .env.example .env" in str(exc)
     check("dotenv: missing file gives an actionable message", ok2)
@@ -293,10 +328,11 @@ def test_governor_priority() -> None:
         maintenance_ok = False
         # Either outcome is a legitimate "denied": the wait times out, or the
         # governor raises BudgetExhaustedError. Name both rather than blind-catching.
+        #
         # asyncio.TimeoutError and builtin TimeoutError are the SAME class on
-        # Python 3.11+ and DIFFERENT classes on 3.10. This is the stdlib-only
-        # smoke test and must run anywhere, so list both; on 3.11+ the tuple
-        # simply contains a duplicate, which is harmless.
+        # Python 3.11+ and DIFFERENT classes on 3.10. This file is the
+        # stdlib-only smoke test and must run anywhere, so list both; on 3.11+
+        # the tuple simply contains a duplicate, which is harmless.
         denied = (TimeoutError, asyncio.TimeoutError, NavanaxError)  # noqa: UP041
         try:
             await asyncio.wait_for(gov.acquire(Priority.INTERACTIVE), timeout=0.3)
@@ -317,34 +353,32 @@ def test_governor_priority() -> None:
 
 
 def test_stream_parsing() -> None:
-    class NullWriter:
-        run_id = "run-g"
-        def __init__(self): self.landed: list[tuple[str, str | None]] = []
-        def write(self, raw, topic=None, event_timestamp=None, received_at=None):
-            self.landed.append((raw, event_timestamp)); return len(self.landed)
-        def flush(self): pass
-        def record_gap(self, gap): pass
-
     class NullStore:
         def open_gap(self, *a, **k): return 1
         def close_gap(self, *a, **k): pass
+        def save_checkpoint(self, *a, **k): pass
+        def get_checkpoint(self, *a, **k): return None
 
-    w = NullWriter()
+    w = FakeWriter()
     c = StreamConsumer("fake-key", ["argonauts"], w, NullStore())  # type: ignore[arg-type]
 
     f1 = frame("argonauts", "2026-09-09T10:00:00Z")
     c.handle_frame(f1)
     check("stream: extracts nested event_timestamp",
-          w.landed[-1][1] == "2026-09-09T10:00:00Z", f"got {w.landed[-1][1]}")
+          w.landed[-1][2] == "2026-09-09T10:00:00Z", f"got {w.landed[-1][2]}")
     check("stream: lands frame verbatim", w.landed[-1][0] == f1)
 
     c.handle_frame('{"topic":"phoenix","event":"heartbeat","payload":{},"ref":"1"}')
     check("stream: heartbeat not counted as event", c.stats.events == 1)
     check("stream: heartbeat counted", c.stats.heartbeats == 1)
 
+    before = len(w.landed)
     c.handle_frame("{not json")
-    check("stream: unparseable frame STILL landed", len(w.landed) == 2,
+    check("stream: unparseable frame STILL landed", len(w.landed) == before + 1,
           "discarding it would destroy the evidence needed to diagnose it")
+    check("stream: the heartbeat was landed as a control frame",
+          any(t == "__control__" for _, t, _ in w.landed),
+          "control frames are the only on-disk evidence of what we subscribed to")
 
     c.handle_frame(frame("argonauts", "2026-09-09T09:59:00Z"))   # older -> out of order
     check("stream: out-of-order arrival counted", c.stats.out_of_order == 1)
@@ -400,7 +434,8 @@ def test_phoenix_v2_arrays() -> None:
         run_id = "run-v2"
         def __init__(self): self.landed = []
         def write(self, raw, topic=None, event_timestamp=None, received_at=None):
-            self.landed.append((raw, topic, event_timestamp)); return len(self.landed)
+            self.landed.append((raw, topic, event_timestamp))
+            return len(self.landed)
         def flush(self): pass
         def record_gap(self, gap): pass
     class S:
@@ -426,10 +461,275 @@ def test_phoenix_v2_arrays() -> None:
           "never drop bytes we may not be able to fetch again")
 
 
+# ===========================================================================
+# Regression tests for the five blocking findings the Validator raised on
+# PR #1. Every one of these fails against the code as it was when the suite
+# was 66/66 green -- which is the only thing that makes them worth having.
+# ===========================================================================
+def test_idle_flush_cadence(tmp: Path) -> None:
+    """BUG-20260909-006. REQ-D-26a's TIME-based flush, which did not exist.
+
+    The old `_maybe_flush_frame` was reachable only from `write()`, so the
+    5-second cadence fired when the next event arrived rather than when 5
+    seconds passed. For a thin collection -- preflight saw ZERO events in 60s
+    on Argonauts -- that is the normal regime, and the loss is total.
+    """
+    clock = FakeClock(datetime(2026, 9, 9, 8, 0, 0, tzinfo=timezone.utc))
+    root = tmp / "idle"
+    w = LandingZoneWriter(root, "run-idle", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic,
+                          flush_seconds=5.0, flush_events=1000, auto_flush=False)
+
+    # One item_cancelled -- REQ-D-09a IRRECOVERABLE, and exactly the event type
+    # the live smoke test actually observed on Argonauts.
+    w.write(frame("argonauts", "2026-09-09T08:00:00Z", event="item_cancelled"),
+            topic="collection:argonauts", event_timestamp="2026-09-09T08:00:00Z")
+
+    path = sorted((root / "stream").rglob("*.jsonl.gz"))[0]
+    check("idle flush: nothing on disk before the cadence fires",
+          path.stat().st_size == 0)
+
+    clock.advance(7200)          # two hours of silence
+    w.tick()                     # the cadence, driven without a write
+
+    size = path.stat().st_size
+    check("idle flush: the frame IS closed after flush_seconds with no traffic",
+          size > 0,
+          "old behaviour: 0 bytes, because the timer only ran inside write()")
+
+    # Simulate SIGKILL: never call close(). Read what a crash would leave.
+    recovered = list(read_file(path, GzipCodec(), tolerate_truncation=True))
+    check("idle flush: the event survives a kill with no clean shutdown",
+          len(recovered) == 1 and "item_cancelled" in recovered[0]["raw"],
+          f"recovered {len(recovered)} events; this event is IRRECOVERABLE via REST")
+
+    mf = json.loads((root / "_manifest" / "2026-09-09.json").read_text())
+    rec = [f for f in mf["files"] if f["filename"] == str(path.relative_to(root))]
+    check("idle flush: the open file is in the manifest before it closes",
+          len(rec) == 1 and rec[0]["status"] == "open" and rec[0]["event_count"] == 1,
+          f"got {rec}")
+
+    w.close()
+    check("idle flush: closing marks the record closed and checksums it",
+          json.loads((root / "_manifest" / "2026-09-09.json").read_text())
+          ["files"][0]["status"] == "closed")
+
+
+def test_verify_sees_orphans_and_open_files(tmp: Path) -> None:
+    """BUG-20260909-007. verify_manifest walked manifest -> disk only.
+
+    A file on disk that the manifest did not know about was invisible to the
+    one audit whose entire job is to notice that something is wrong, and the
+    audit returned "verified clean".
+    """
+    clock = FakeClock(datetime(2026, 9, 9, 9, 0, 0, tzinfo=timezone.utc))
+    root = tmp / "orphan"
+    w = LandingZoneWriter(root, "run-orph", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic,
+                          flush_events=2, auto_flush=False)
+    for i in range(4):
+        w.write(frame("argonauts", f"2026-09-09T09:00:{i:02d}Z"),
+                event_timestamp=f"2026-09-09T09:00:{i:02d}Z")
+    w.flush()
+
+    problems = verify_manifest(root)
+    check("verify: an unclosed file is reported, not certified clean",
+          any(p.startswith("OPEN") for p in problems), f"got {problems}")
+    check("verify: an unclosed file is a NOTE, not an integrity failure",
+          not any(is_integrity_failure(p) for p in problems), f"got {problems}")
+
+    w.close()
+    check("verify: clean after a clean close", verify_manifest(root) == [])
+
+    # Now make a genuine orphan: a real data file the manifest has no record of.
+    mpath = root / "_manifest" / "2026-09-09.json"
+    data = json.loads(mpath.read_text())
+    victim = data["files"][0]["filename"]
+    data["files"] = []
+    mpath.write_text(json.dumps(data, indent=2))
+
+    problems = verify_manifest(root)
+    check("verify: DETECTS an orphaned data file (S0a)",
+          any(p.startswith("ORPHAN") and victim in p for p in problems),
+          f"got {problems}")
+    check("verify: orphan counts as an integrity failure",
+          any(is_integrity_failure(p) for p in problems))
+    check("verify: orphan report says how much data is recoverable from it",
+          any("4 events recoverable" in p for p in problems), f"got {problems}")
+
+
+def test_join_reply_is_read(tmp: Path) -> None:
+    """BUG-20260909-005. A refused phx_join used to be invisible.
+
+    `handle_frame` returned control frames before anything read their status,
+    so an expired key or a wrong slug produced a process that connects,
+    heartbeats, logs nothing, and records nothing.
+    """
+    store = OperationalStore(tmp / "join.db")
+    w = FakeWriter()
+    c = StreamConsumer("k", ["argonauts", "chromie-squiggle"], w, store,
+                       run_id="run-join")
+
+    joins = [json.loads(m) for m in c.join_messages()]
+    refs = {j["ref"]: j["topic"] for j in joins}
+    check("join: each join is tracked by its ref", len(refs) == 2)
+
+    ok_ref = joins[0]["ref"]
+    c.handle_frame(json.dumps([ok_ref, ok_ref, joins[0]["topic"], "phx_reply",
+                               {"status": "ok", "response": {}}]))
+    check("join: an accepted join is recorded as subscribed",
+          c.stats.joined == ["collection:argonauts"], f"got {c.stats.joined}")
+
+    bad_ref = joins[1]["ref"]
+    c.handle_frame(json.dumps([bad_ref, bad_ref, joins[1]["topic"], "phx_reply",
+                               {"status": "error",
+                                "response": {"reason": "unauthorized"}}]))
+    check("join: a REFUSED join is recorded, not swallowed",
+          "collection:chromie-squiggle" in c.stats.join_rejected,
+          f"got {c.stats.join_rejected}")
+    check("join: a refused join opens a gap in the register",
+          len(store.open_gaps()) == 1, f"got {store.open_gaps()}")
+    check("join: that gap is marked NOT backfillable",
+          store.open_gaps()[0]["backfillable"] == 0)
+    check("join: control frames are landed as evidence",
+          sum(1 for _, t, _ in w.landed if t == "__control__") == 2,
+          "the reply frame is the only on-disk record of what we subscribed to")
+
+    # A join that is never answered at all is the same failure, quieter.
+    c2 = StreamConsumer("k", ["argonauts"], FakeWriter(), store, run_id="run-to")
+    c2.join_messages()
+    c2._check_join_timeouts()
+    check("join: an UNANSWERED join is treated as a rejection",
+          "collection:argonauts" in c2.stats.join_rejected,
+          "silence is the failure mode an expired key actually produces")
+
+
+def test_clean_close_records_gap_and_backs_off(tmp: Path) -> None:
+    """BUG-20260909-008. A clean close recorded no gap and did not back off.
+
+    The old loop reset backoff to 1.0 and continued with NO sleep, so a peer
+    closing politely in a loop spun the event loop hot while recording nothing
+    -- and raised no exception, so it looked like a run of successes.
+    """
+    store = OperationalStore(tmp / "close.db")
+    w = FakeWriter()
+    connects = {"n": 0}
+
+    class ClosingWS:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def send(self, _m): pass
+        def __aiter__(self): return self
+        async def __anext__(self): raise StopAsyncIteration
+
+    def factory(_url):
+        connects["n"] += 1
+        return ClosingWS()
+
+    c = StreamConsumer("k", ["argonauts"], w, store, run_id="run-close",
+                       connect_factory=factory, max_backoff=5.0)
+
+    async def drive() -> None:
+        task = asyncio.create_task(c.run())
+        await asyncio.sleep(0.4)
+        c.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(drive())
+
+    check("clean close: a gap IS recorded when the peer closes unasked",
+          any("closed by peer" in g["reason"] for g in store.open_gaps()),
+          f"got {[g['reason'] for g in store.open_gaps()]}")
+    check("clean close: backoff is applied, the loop does not spin",
+          connects["n"] <= 3,
+          f"reconnected {connects['n']} times in 0.4s -- old code had no sleep "
+          f"on this path at all")
+    check("clean close: at least one reconnect actually happened",
+          connects["n"] >= 1)
+
+
+def test_restart_records_downtime_gap(tmp: Path) -> None:
+    """BUG-20260909-009. `save_checkpoint` was called only by the test suite.
+
+    With no last-known-alive timestamp, the window between two runs left no
+    trace, and downstream an absence of events is indistinguishable from a
+    quiet market.
+    """
+    store = OperationalStore(tmp / "restart.db")
+    c1 = StreamConsumer("k", ["argonauts"], FakeWriter(), store, run_id="run-1")
+
+    check("restart: no gap on the very first run ever",
+          c1.record_downtime_gap() is None and store.open_gaps() == [])
+    ck = store.get_checkpoint("opensea:stream")
+    check("restart: the first run writes a checkpoint",
+          ck is not None and ck["run_id"] == "run-1")
+
+    w2 = FakeWriter()
+    c2 = StreamConsumer("k", ["argonauts"], w2, store, run_id="run-2")
+    gid = c2.record_downtime_gap()
+    check("restart: the SECOND run records the downtime as a gap", gid is not None)
+
+    with store.connect() as conn:
+        row = dict(conn.execute("SELECT * FROM gap_register WHERE id=?", (gid,)).fetchone())
+    check("restart: the gap starts at the previous run's last checkpoint",
+          row["started_at"] == ck["updated_at"],
+          f"gap starts {row['started_at']}, previous run last alive {ck['updated_at']}")
+    check("restart: the gap is closed, not left dangling",
+          row["ended_at"] is not None)
+    check("restart: the gap names the run that stopped",
+          "run-1" in row["reason"], row["reason"])
+    check("restart: the gap reaches the landing-zone manifest too",
+          len(w2.gaps) == 1 and w2.gaps[0].started_at == ck["updated_at"])
+
+
+def test_codec_multiframe_contract() -> None:
+    """BUG-20260909-010. The zstd multi-frame question, answered by running it.
+
+    `stream_reader`'s `read_across_frames` default CHANGED in python-zstandard
+    0.23.0. Below that, a multi-frame file decompressed to its first frame and
+    raised nothing -- and the manifest checksum, taken over compressed bytes,
+    would still have matched. Rather than pin a version and hope, the codec
+    walks frames itself and this contract is checked at ingest startup.
+    """
+    from navanax.codec import RawCodec, verify_codec_roundtrip
+
+    for codec in (GzipCodec(), RawCodec()):
+        try:
+            verify_codec_roundtrip(codec, frames=5)
+            ok, why = True, ""
+        except Exception as exc:  # noqa: BLE001
+            ok, why = False, str(exc)
+        check(f"codec: {codec.name} passes the 5-frame round-trip + truncation contract",
+              ok, why)
+
+    try:
+        import zstandard  # noqa: F401
+
+        from navanax.codec import ZstdCodec
+    except ImportError:
+        print("        (zstandard not installed here -- the SAME contract runs at "
+              "ingest startup on the machine that has it)")
+        return
+    try:
+        verify_codec_roundtrip(ZstdCodec(level=3), frames=5)
+        ok, why = True, ""
+    except Exception as exc:  # noqa: BLE001
+        ok, why = False, str(exc)
+    check(f"codec: zstd passes the 5-frame contract (python-zstandard "
+          f"{zstandard.__version__})", ok, why)
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
-        BacktestIntegrityError, DataIntegrityError, InsufficientSampleError,
-        LeakageDetectedError, Severity,
+        BacktestIntegrityError,
+        DataIntegrityError,
+        InsufficientSampleError,
+        LeakageDetectedError,
+        Severity,
     )
 
     check("errors: DataIntegrityError halts ingestion",
@@ -459,12 +759,16 @@ def main() -> int:
             test_roundtrip_and_verbatim, test_crash_recovery, test_hour_rolling,
             test_manifest_integrity, test_event_time_range_resolution, test_gap_recording,
             test_dotenv_loading,
+            # --- regressions for the five blocking findings on PR #1 ---
+            test_idle_flush_cadence, test_verify_sees_orphans_and_open_files,
+            test_join_reply_is_read, test_clean_close_records_gap_and_backs_off,
+            test_restart_records_downtime_gap,
         ):
             print(f"\n--- {fn.__name__} ---")
             fn(tmp)
         for fn0 in (test_governor_budget, test_governor_priority, test_stream_parsing,
                     test_irrecoverable_classification, test_phoenix_v2_arrays,
-                    test_error_hierarchy):
+                    test_codec_multiframe_contract, test_error_hierarchy):
             print(f"\n--- {fn0.__name__} ---")
             fn0()
         print("\n" + "=" * 72)

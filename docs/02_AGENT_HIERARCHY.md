@@ -40,7 +40,7 @@ Five levels. Every agent is assigned exactly one.
 | Level | Name | Can | Cannot |
 |---|---|---|---|
 | **L0** | Observer | Read data, produce reports and analysis | Modify anything |
-| **L1** | Analyst | L0 + write to scratch/derived stores, run experiments, and (where §3.10 grants it) write analytical code in a branch | Modify raw data, change config, merge, write non-analytical code |
+| **L1** | Analyst | L0 + write to scratch/derived stores, run experiments, and (where §3.14 grants it) write analytical code in a branch | Modify raw data, change config, merge, write non-analytical code |
 | **L2** | Builder | L1 + write code, open PRs, modify config in a branch | Merge, write to production data, modify raw/landing zone |
 | **L3** | Integrator | L2 + merge approved PRs, deploy, migrate schemas | Bypass validation gates, act without approval, alter historical records |
 | **L4** | Operator (human) | Everything, including all capital decisions | — |
@@ -53,30 +53,65 @@ Five levels. Every agent is assigned exactly one.
 
 ## 3. Development Agent Hierarchy
 
+### 3.0 Team structure and escalation
+
+The population is organised as **two teams with two different escalation
+paths**, so that a fix is made at the lowest level that can make it and only
+genuinely operator-level decisions reach Spencer.
+
 ```
-                      ┌──────────────────┐
-                      │  OPERATOR (L4)   │
-                      │  Spencer         │
-                      └────────┬─────────┘
-                               │ direction, approval, capital decisions
-                      ┌────────┴─────────┐
-                      │  ORCHESTRATOR    │  L2 (L3 when
-                      │  Plans, decomposes│  integrating,
-                      │  routes, integrates│  per §3.6)
-                      └────────┬─────────┘
-          ┌──────────┬─────────┼─────────┬──────────┐
-          │          │         │         │          │
-     ┌────┴───┐ ┌────┴───┐ ┌───┴────┐ ┌──┴─────┐ ┌──┴──────┐
-     │  DATA  │ │ QUANT  │ │ PLATFORM│ │VALIDATOR│ │ RESEARCH│
-     │ ENGINEER│ │RESEARCH│ │ ENGINEER│ │  (L1)   │ │  (L0)   │
-     │  (L2)  │ │  (L1)  │ │  (L2)  │ │         │ │         │
-     └────────┘ └────────┘ └────────┘ └─────────┘ └─────────┘
-                                          ▲
-                    ┌─────────────────────┘
-                    │  INDEPENDENT — never reports to the agent whose
-                    │  work it validates; reports directly to Operator
-                    └──────────────────────────────────────────────
+                      ┌──────────────────────────────┐
+                      │        OPERATOR  (L4)        │
+                      │  Spencer — product owner,     │
+                      │  lead strategist, SOLE merge  │
+                      │  and capital authority        │
+                      └───────────────┬──────────────┘
+                                      │ direction · PR approval · capital
+                      ┌───────────────┴──────────────┐
+                      │   ORCHESTRATOR  (L2 / L3)    │  ← lead program manager
+                      │  plans, decomposes, routes,   │    reports to Spencer
+                      │  integrates, closes the loop   │
+                      └───────┬──────────────┬───────┘
+                              │              │
+        ┌─────────────────────┘              └──────────────────────┐
+        │  DEV TEAM                                     OPS TEAM    │
+        │  escalates to TECH LEAD                       escalates   │
+        │                                               to the      │
+┌───────┴──────────┐                                    ORCHESTRATOR│
+│   TECH LEAD (L3) │  gate before every PR                          │
+│   may BLOCK,     │                                    ┌───────────┴────────┐
+│   may not merge  │                                    │  PLATFORM ENGINEER │
+└───────┬──────────┘                                    │  BUILD REPORTER    │
+        │                                               │  DOCS STEWARD      │
+┌───────┴───────┬──────────────┬─────────────┐          │  BUG TRIAGE        │
+│ DATA ENGINEER │ QUANT RESEARCH│ UI DESIGNER │          │  RESEARCH          │
+│     (L2)      │     (L1)      │    (L1)     │          └────────────────────┘
+└───────────────┴──────────────┴─────────────┘
+
+        VALIDATOR (L1) ── independent. Never reports to the agent whose work
+                          it reviews. Reports to the Operator.
+        QA AUDITOR (L2) ─ independent. Routes findings DOWN to the level that
+                          can fix them; up to the Operator only when needed.
 ```
+
+**The escalation rules, stated plainly:**
+
+| Situation | Goes to | Not to |
+|---|---|---|
+| A defect in code, tests, schema, or docs describing code | **Tech Lead**, who assigns it | Spencer |
+| Tech Lead and a specialist disagree on a fix | **Tech Lead decides.** It is the gate | Spencer |
+| A fix would change scope, architecture, or a requirement | Tech Lead → **Orchestrator** | Spencer directly |
+| Environment, CI, secrets, budget, repo settings, Slack, agent definitions | **Orchestrator** | Tech Lead |
+| A requirement is ambiguous or contradicts another | Orchestrator → **Spencer** | guessing |
+| A trade-off between cost, scope, and risk | Orchestrator → **Spencer**, with a recommendation | deciding it internally |
+| Anything touching capital, keys, or a transaction | **Spencer, always** | anyone |
+
+**Cycle down before escalating up.** A finding that a lower level can close is
+closed there. Escalation is for decisions, not for work.
+
+**Close the loop.** Whenever something reaches Spencer, the Orchestrator states:
+what happened, what it recommends, what it needs from him, and what is blocked
+until he answers. He is never left holding an open question with no context.
 
 ### 3.1 Orchestrator (L2)
 
@@ -156,7 +191,48 @@ Five levels. Every agent is assigned exactly one.
 
 **Access:** the Validator may access the validation partition. Only the Validator may trigger a test-partition evaluation, once per signal (methodology §7.4).
 
-### 3.6 Integrator (L3)
+### 3.6 Tech Lead (L3) — `tech-lead`, opus
+
+**Purpose.** The gate between finished work and a pull request. Everything the
+dev team produces passes through here before Spencer sees it, so that his review
+is about *judgment* rather than about catching what should have been caught
+upstream.
+
+**Exists because of a specific failure.** Phase 0 reached a live smoke test with
+66 passing assertions and a `status=ok` from the API, and an independent
+Validator then found **five separate ways it silently lost irreplaceable data**.
+Every one was in code that looked finished. The gap was not effort — it was that
+nobody checked the whole against the requirements before it moved.
+
+**Checks what neither the specialist nor the Validator does.** The Validator
+hunts defects in the code as written. The Tech Lead asks whether the change makes
+sense as part of the system:
+
+- **Requirement traceability, and requirement *reality*.** A requirement marked
+  satisfied must trace to running code, not to a docstring claiming it.
+  *Grep for the mechanism; do not trust the comment.*
+- **Claim-versus-code drift**, especially in what the *operator* reads —
+  README, `setup.command`, error messages, CLI help.
+- **Config that is actually parsed.** A config block nothing reads is worse than
+  no config: it looks like a knob and turns nothing.
+- **Dead code that implies capability.**
+- **Test coverage of the claim, not of the function.**
+- **Whether a Validator finding was fixed or dodged** by rewording a docstring,
+  loosening a test, or adding a `noqa`.
+- **The PR's own title, summary and description** — complete, accurate, honest
+  about what was deferred, and explicit about what Spencer needs to decide. The
+  description is the interface between the work and the only person with merge
+  authority; overstating it is the same claim-versus-reality failure as a wrong
+  docstring, aimed at the person who can least afford it.
+
+**May:** block a PR. Assign work back to any dev-team specialist. Require a
+regression test that demonstrably fails against the unfixed code.
+
+**May not:** merge. Approve its own work. Weaken a Validator finding.
+
+**Reports to** Spencer — never to the agent whose work it is reviewing.
+
+### 3.7 Integrator (L3)
 
 **Purpose.** The merge and deploy authority. Not a separate specialist — this is a **role the Orchestrator assumes**, and only after a Validator sign-off exists for the change in question.
 
@@ -166,7 +242,7 @@ Five levels. Every agent is assigned exactly one.
 
 Separating this from ordinary L2 work is the point: the agent that wrote the change is never the authority that admits it.
 
-### 3.7 UI Designer (L1) — `ui-designer`, sonnet
+### 3.8 UI Designer (L1) — `ui-designer`, sonnet
 
 **Purpose.** Spencer's conversational design partner. He describes what he wants in plain language; this agent proposes, iterates, and — once he approves — writes a Design Spec that `platform-engineer` builds from.
 
@@ -176,7 +252,7 @@ Separating this from ordinary L2 work is the point: the agent that wrote the cha
 
 **The handoff is the point.** Design converges in conversation, where iteration is cheap; implementation starts only from an approved written spec, where iteration is expensive. A spec is not approved until its correctness checklist is filled in — uncertainty shown, gaps rendered as gaps, staleness visible, provenance reachable, sample sizes present, both denominations available. Those look cosmetic and each one causes a wrong trading decision.
 
-### 3.8 Build Reporter (L0) — `build-reporter`, sonnet
+### 3.9 Build Reporter (L0) — `build-reporter`, sonnet
 
 **Purpose.** Spencer should not have to ask what changed. This agent produces the running record: doc change digests, changelog entries, bug and error summaries, ingestion health, and what needs his decision.
 
@@ -188,7 +264,7 @@ Separating this from ordinary L2 work is the point: the agent that wrote the cha
 
 **Its most valuable output is drift detection**: documents claiming one thing while code does another. That is reported as a defect with an owner.
 
-### 3.9 Research (L0)
+### 3.10 Research (L0)
 
 **Purpose.** Read-only investigation — market context, API changes, methodology literature, collection background.
 
@@ -196,7 +272,67 @@ Separating this from ordinary L2 work is the point: the agent that wrote the cha
 
 **Constraints:** read-only; must cite sources; must distinguish fact from inference explicitly.
 
-### 3.10 Context boundaries — summary
+### 3.11 Docs Steward (L0) — `docs-steward`, haiku
+
+**Purpose.** Keeps the document set current and posts a change feed to
+`#opensea-dev` the moment anything changes — file, section, what changed, and
+**why**, so a decision can be backtracked without reading commit history.
+
+**Rules:** say why, not only what · one post per logical change · flag a
+reversal loudly · never post a change that is merely proposed.
+
+**Escalates to** the Orchestrator (ops team).
+
+### 3.12 Bug Triage (L0) — `bug-triage`, haiku
+
+**Purpose.** Owns `docs/logs/bugs.yaml`, the machine-readable ledger that
+`docs/logs/BUGS.xlsx` and the narrative `BUGS.md` are both reconciled against.
+Assigns severity and error class from `docs/05_BUG_TAXONOMY.md`, and records the
+**monitor gap** for every bug — the reason it was not caught — which is the field
+that has taught this project the most.
+
+Nobody types into the spreadsheet. `python3 tools/buglog.py` regenerates it;
+`--check` fails CI if a bug is marked fixed while the regression test it names
+does not exist.
+
+**Escalates to** the Orchestrator (ops team).
+
+### 3.13 QA Auditor (L2) — `qa-auditor`, sonnet
+
+**Purpose.** Reconciles what was **said** against what is **in the repo**.
+
+Work here happens in long conversations. Things get decided, described, and
+declared done in chat. Some land in the repo, some land partially, some land in
+the code and never reach the document that specifies them. Nobody notices,
+because the conversation moved on and the conversation is where the claim lives.
+
+**Exists because four of this project's bugs share one shape** — a claim and an
+implementation that disagreed, surviving because *everything except the code*
+agreed:
+
+| Bug | Every artifact said | The code did |
+|---|---|---|
+| BUG-001 | `.env` is read | read only `os.environ` |
+| BUG-003 | 600 REST reads/hour | the real limit is 120 |
+| BUG-006 | a frame closes every 5 seconds | flushed only when the next event arrived |
+| BUG-010 | landing files are multi-frame and recoverable | could return only the first frame |
+
+**Checks:** claims made in conversation against artifacts on disk · docs against
+code, especially every number · docs against each other · the bug ledger against
+reality (`tools/buglog.py --check`, plus whether a named regression test actually
+asserts the failure mode) · agent definitions against the workflows that cite
+them.
+
+**Routes rather than fixes.** Dev findings to the Tech Lead; ops findings to the
+Orchestrator; only ambiguity, trade-offs, and "something you were relying on is
+not done" to Spencer.
+
+**Says "unverifiable from the repo"** when a claim cannot be checked, and says
+what would settle it. Never marks it verified.
+
+**Runs continuously**, not only before a PR.
+
+### 3.14 Context boundaries — summary
 
 | Agent | Landing zone | Normalized | Train | Validation | Test | Config | Code | Live capital |
 |---|---|---|---|---|---|---|---|---|
@@ -205,6 +341,8 @@ Separating this from ordinary L2 work is the point: the agent that wrote the cha
 | Quant Research | R¹ | R¹ | **R/W** | — | — | R/W-branch³ | R/W-branch² | — |
 | Platform Eng | — | R | — | — | — | R/W-branch | R/W-branch | — |
 | Validator | R | R | R | **R** | **R (once)** | R | R/W-branch⁴ | — |
+| Tech Lead | R | R | — | — | — | R | R | — |
+| QA Auditor | R | R | — | — | — | R | R | — |
 | UI Designer | — | R | — | — | — | R | — | — |
 | Build Reporter | R | R | — | — | — | R | R | — |
 | Research | — | R | — | — | — | R | R | — |
@@ -231,8 +369,12 @@ Operator states intent
   → Specialist: implement with tests written alongside
   → Validator: independent review (correctness, leakage, provenance, performance)
   → [BLOCK if failed → return to specialist with findings]
-  → tech-lead: coherence + requirement traceability + were findings really fixed
+  → tech-lead: coherence + requirement traceability + were findings really
+       fixed + is the PR description complete, accurate, and honest about
+       what was deferred
   → [BLOCK if failed → back to the specialist with specifics]
+  → qa-auditor: does the repo match everything that was CLAIMED about it
+  → [route findings down: dev → tech-lead, ops → orchestrator]
   → Open PR. Post to #opensea-dev.
   → ⛔ SPENCER APPROVES THE PR — no exceptions, no auto-merge
   → Integrator: merge

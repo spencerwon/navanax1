@@ -22,7 +22,7 @@ from __future__ import annotations
 import gzip
 import io
 import zlib
-from typing import BinaryIO, Protocol
+from typing import Any, BinaryIO, Protocol
 
 
 class FrameWriter(Protocol):
@@ -147,6 +147,94 @@ class _ZstdFrameWriter:
         self._fh.flush()
 
 
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def _zstd_one_frame(dctx: Any, blob: bytes) -> bytes:
+    """Decompress exactly one zstd frame from the front of `blob`.
+
+    Uses stream_reader with its DEFAULT frame behaviour, which is the one thing
+    that is stable across every python-zstandard version. Whether that default
+    is "stop at the first frame" (<0.23) or "read across frames" (>=0.23) does
+    not matter here, because `blob` is sliced to a single frame by the caller.
+    """
+    out = bytearray()
+    with dctx.stream_reader(io.BytesIO(blob)) as r:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            out.extend(chunk)
+    return bytes(out)
+
+
+def _zstd_walk(data: bytes, *, strict: bool) -> bytes:
+    """Decompress a concatenation of zstd frames, one frame at a time.
+
+    BUG-20260909-010. `ZstdDecompressor.stream_reader` gained a
+    `read_across_frames` parameter whose DEFAULT CHANGED in python-zstandard
+    0.23.0: before that release a multi-frame file silently decompressed to its
+    first frame only. Every landing-zone file we write is multi-frame by
+    design (REQ-D-26a), so on an older binding `decompress` would have returned
+    the first ~5 seconds of a 64 MB file and reported success. Nothing in the
+    system would have noticed: the manifest checksum is over the COMPRESSED
+    bytes and would still have matched.
+
+    Rather than depend on a version whose behaviour we cannot check at import
+    time, this walks the frames explicitly. Frame boundaries are found by the
+    4-byte magic; a magic sequence occurring by chance inside compressed data
+    is handled by validation, not by trust -- a slice that does not decompress
+    cleanly is extended to the next candidate boundary before being believed.
+
+    `strict=True` raises on a damaged or truncated trailing frame (the normal
+    read path). `strict=False` stops there and returns everything recovered so
+    far, which is the crash-recovery path REQ-D-26a exists to provide.
+    """
+    import zstandard
+
+    dctx = zstandard.ZstdDecompressor()
+    out = bytearray()
+    pos = 0
+    n = len(data)
+
+    while pos < n:
+        # Candidate ends: every later frame magic, then end-of-file.
+        ends: list[int] = []
+        probe = pos + 4
+        while len(ends) < 64:
+            nxt = data.find(ZSTD_MAGIC, probe)
+            if nxt == -1:
+                break
+            ends.append(nxt)
+            probe = nxt + 4
+        ends.append(n)
+
+        frame: bytes | None = None
+        consumed = 0
+        last_exc: Exception | None = None
+        for end in ends:
+            try:
+                frame = _zstd_one_frame(dctx, data[pos:end])
+            except Exception as exc:  # noqa: BLE001 - any binding raises its own type
+                last_exc = exc
+                continue
+            consumed = end - pos
+            break
+
+        if frame is None:
+            if strict:
+                raise ValueError(
+                    f"zstd frame at byte {pos} does not decompress "
+                    f"({type(last_exc).__name__}: {last_exc})"
+                )
+            break  # truncated trailing frame -- recovery path, keep what we have
+        out.extend(frame)
+        if consumed <= 0:
+            break
+        pos += consumed
+    return bytes(out)
+
+
 class ZstdCodec:
     name = "zstd"
     ext = ".jsonl.zst"
@@ -158,46 +246,10 @@ class ZstdCodec:
         return _ZstdFrameWriter(fh, self.level)
 
     def decompress(self, data: bytes) -> bytes:
-        import zstandard
-
-        dctx = zstandard.ZstdDecompressor()
-        out = bytearray()
-        with dctx.stream_reader(io.BytesIO(data)) as r:
-            while True:
-                chunk = r.read(1 << 20)
-                if not chunk:
-                    break
-                out.extend(chunk)
-        return bytes(out)
+        return _zstd_walk(data, strict=True)
 
     def decompress_truncated(self, data: bytes) -> bytes:
-        import zstandard
-
-        out = bytearray()
-        pos = 0
-        n = len(data)
-        while pos < n:
-            try:
-                size = zstandard.frame_content_size(data[pos:])
-            except (zstandard.ZstdError, ValueError):
-                break
-            try:
-                frame = zstandard.ZstdDecompressor().decompress(
-                    data[pos:], max_output_size=max(size, 1 << 24) if size > 0 else (1 << 24)
-                )
-            except (zstandard.ZstdError, ValueError, MemoryError):
-                break  # partial trailing frame -- this is the recovery path
-            out.extend(frame)
-            try:
-                consumed = zstandard.frame_header_size(data[pos:])
-            except (zstandard.ZstdError, ValueError):
-                break
-            # Advance by locating the next frame magic.
-            nxt = data.find(b"\x28\xb5\x2f\xfd", pos + consumed)
-            if nxt == -1:
-                break
-            pos = nxt
-        return bytes(out)
+        return _zstd_walk(data, strict=False)
 
 
 class RawCodec:
@@ -230,6 +282,56 @@ class _RawFrameWriter:
 
     def close(self) -> None:
         self._fh.flush()
+
+
+def verify_codec_roundtrip(codec: Codec, *, frames: int = 3) -> None:
+    """Prove, on THIS machine with THIS library version, that the crash-safety
+    property actually holds. Raises RuntimeError if it does not.
+
+    Written because the alternative was to reason about which version of
+    `zstandard` pip happened to install and what its defaults were that year.
+    A 200-microsecond check at startup answers the question for the machine
+    that is about to record data it cannot re-fetch.
+
+    Asserts two things:
+      1. A file of `frames` closed frames reads back COMPLETE. (A binding that
+         stops at frame one returns 1/frames of the file and raises nothing.)
+      2. That same file with its trailing frame chopped still yields every
+         COMPLETE frame before the cut. That is REQ-D-26a's whole purpose.
+    """
+    buf = io.BytesIO()
+    w = codec.writer(buf)
+    lines = [f"frame-{i}\n".encode() for i in range(frames)]
+    for line in lines:
+        w.write(line)
+        w.flush_frame()
+    w.close()
+    blob = buf.getvalue()
+    expected = b"".join(lines)
+
+    got = codec.decompress(blob)
+    if got != expected:
+        raise RuntimeError(
+            f"codec {codec.name!r} FAILED the multi-frame round-trip on this machine: "
+            f"wrote {len(expected)} bytes across {frames} frames, read back {len(got)}. "
+            f"Landing-zone files are multi-frame by design (REQ-D-26a), so this codec "
+            f"would silently return a PREFIX of every file while reporting success, and "
+            f"the manifest checksum -- taken over compressed bytes -- would still match. "
+            f"Do not ingest with this codec. For zstd, upgrade: pip install -U zstandard"
+        )
+
+    # Chop mid-final-frame. Everything before the cut must survive.
+    cut = blob.rfind(ZSTD_MAGIC) if codec.name == "zstd" else int(len(blob) * 0.9)
+    if cut <= 0 or cut >= len(blob):
+        cut = int(len(blob) * 0.9)
+    damaged = blob[:cut] + blob[cut : cut + max(1, (len(blob) - cut) // 2)]
+    recovered = codec.decompress_truncated(damaged)
+    if not recovered.startswith(b"frame-0\n"):
+        raise RuntimeError(
+            f"codec {codec.name!r} recovered NOTHING from a truncated file. "
+            f"REQ-D-26a's crash-safety guarantee does not hold with this codec on "
+            f"this machine; a process killed mid-write would lose the whole file."
+        )
 
 
 def get_codec(name: str, level: int | None = None) -> Codec:

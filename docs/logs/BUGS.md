@@ -187,84 +187,53 @@ lives — the file the operator runs first.
 
 ---
 
-## Validator review of PR #1 — 2026-09-09 · MERGE BLOCKED
+## Validator review of PR #1 — 2026-09-09 · MERGE WAS BLOCKED, NOW RESOLVED
 
 Independent adversarial review by the `validator` agent (opus, not the author).
-15 findings, 5 blocking. Full detail in the review; blockers logged individually
-below. **Every blocker is in code that is 66/66 green and passed a live smoke
-test against the OpenSea API.**
+15 findings, 5 blocking. **Every blocker was in code that was 66/66 green and
+had passed a live smoke test against the OpenSea API.**
 
-### BUG-20260909-005 · S1 · ING · open · BLOCKING
+All five are now fixed, plus the must-settle zstd question (BUG-010). Each fix
+carries a regression test that was **demonstrated to fail against the unfixed
+code** before being accepted — see `docs/logs/bugs.yaml` for the per-bug detail
+and `docs/logs/BUGS.xlsx` for the sortable view.
 
-| | |
-|---|---|
-| **Summary** | A rejected `phx_join` is invisible: control frames return before landing, and the reply is never read |
-| **Location** | `src/navanax/stream.py:256-257`, `:343-345` |
-| **Data impact** | **Potentially total.** Expired key or bad slug → the process runs for days at 0 events with `open gaps 0` and healthy stats. Every event in that window is lost, and the evidence of *why* was never written to disk |
-| **Monitor gap** | Nothing asserts that a subscription was accepted. BUG-002's own closing note said confirming the join was "the next thing to establish" — and it still is not established in code |
+> Reverted-code run of the new tests: **14 assertions failed**, including
+> `clean close: backoff is applied` — which reported **5,965 reconnect attempts
+> in 0.4 seconds** on the old clean-close path.
 
-### BUG-20260909-006 · S2→S1 · ING · open · BLOCKING · **worst of the five**
+| ID | Sev | Summary | Regression test |
+|---|---|---|---|
+| BUG-20260909-005 | S1 | A rejected `phx_join` was invisible | `test_join_reply_is_read` |
+| BUG-20260909-006 | S1 | REQ-D-26a's time-based flush did not exist | `test_idle_flush_cadence` |
+| BUG-20260909-007 | S2 | `verify_manifest` could not see orphaned files | `test_verify_sees_orphans_and_open_files` |
+| BUG-20260909-008 | S1 | Clean close: no gap, no backoff | `test_clean_close_records_gap_and_backs_off` |
+| BUG-20260909-009 | S1 | No gap recorded across a restart | `test_restart_records_downtime_gap` |
+| BUG-20260909-010 | S1 | zstd could silently return only the first frame | `test_codec_multiframe_contract` |
 
-| | |
-|---|---|
-| **Summary** | REQ-D-26a's time-based frame flush does not exist |
-| **Location** | `src/navanax/landing.py:303-310` |
-| **Data impact** | `_maybe_flush_frame` is reachable only from `write()`. Repro: one event, then 7200 simulated idle seconds → **0 bytes on disk**, no manifest, and after a simulated SIGKILL `read_file` recovered **0 events** while `verify_manifest` returned "clean" |
-| **Monitor gap** | The self-test drives the flush by writing events. It never tests the *idle* case, which is the normal regime for a thin collection |
-
-**Why this is the most dangerous.** Preflight saw zero events in 60 seconds on
-Argonauts. An `item_cancelled` arrives, the laptop sleeps — the event is gone,
-and `item_cancelled` is in the IRRECOVERABLE set (REQ-D-09a) that REST can never
-return. That is the exact event class observed live today. The docstring's
-"bounding crash loss to seconds" is false: loss is bounded by the inter-event
-interval, which is unbounded.
-
-Same shape as BUG-001 and BUG-003 — requirement, docstring, and bug log all
-agreed on behaviour the code did not have.
-
-### BUG-20260909-007 · S2 · ING · open · BLOCKING
+### BUG-20260909-010 · S1 · ING · fixed
 
 | | |
 |---|---|
-| **Summary** | `verify_manifest` walks manifest→disk only; complete files with no manifest entry are invisible and reported clean |
-| **Location** | `src/navanax/landing.py:402-432`; `FileRecord` written only in `_close_current` (`:358`) |
-| **Data impact** | Killed before `close()` → 553 bytes, 6 events readable, `_manifest/` empty, `cli verify` prints "landing zone verified clean." Every ungraceful termination orphans its final file, permanently unreachable via the manifest path `ManifestWriter` documents as mandatory |
+| **Summary** | `ZstdCodec` could silently return only the FIRST FRAME of a multi-frame file, depending on the installed `python-zstandard` version |
+| **Detected by** | `validator`, raised as must-settle-before-merge |
+| **Location** | `src/navanax/codec.py:160`, `pyproject.toml:12` |
+| **Data impact** | `stream_reader`'s `read_across_frames` defaulted to **False** before python-zstandard 0.23.0, and `pyproject.toml` pinned `>=0.22.0`. On an older install, `read_file` on a healthy 64 MB production `.zst` would return roughly the first five seconds of it, raise nothing, and verify clean — the manifest checksum is over the **compressed** bytes and would still match |
+| **Status** | fixed |
+| **Resolution** | The dependency on the flag is gone: the codec walks frames itself, validating each candidate boundary rather than trusting a magic-byte search. `verify_codec_roundtrip()` writes a multi-frame file, reads it back, truncates it and recovers it — **run at `navanax ingest` startup**, so the process refuses to start rather than recording data it cannot read back. `pyproject.toml` also pinned to `>=0.23.0`, as a second line rather than the only one |
+| **Regression test** | `tests/selftest.py::test_codec_multiframe_contract` |
+| **Monitor gap** | The self-test used gzip exclusively; the production codec had **zero** coverage. The sandbox where the code is written cannot install `zstandard`, so no amount of local testing could have caught it. The startup self-check exists because the test suite structurally cannot |
 
-### BUG-20260909-008 · S1 · ING · open · BLOCKING
-
-| | |
-|---|---|
-| **Summary** | A clean WebSocket close records no gap and reconnects with zero backoff |
-| **Location** | `src/navanax/stream.py:319-336` — `_open_gap` is called only from `except Exception` |
-| **Data impact** | OpenSea drops idle subscriptions gracefully; `async for` then returns normally. Repro: `reconnects` = 0, gap records = **0**, and the loop spun hot enough that a concurrent `asyncio.sleep(0.2)` never resumed. REQ-D-14 is satisfied only on the crash path |
-
-### BUG-20260909-009 · S1 · ING · open · BLOCKING
-
-| | |
-|---|---|
-| **Summary** | No gap is recorded across a process restart; the checkpoint table is never written by production code |
-| **Location** | `opstore.save_checkpoint` (`:149`) and `log_rest` (`:202`) are called only from `tests/selftest.py`; `cli.py:45-96` calls neither |
-| **Data impact** | Stop Friday, restart Monday → `open gaps 0`, a 72-hour hole with nothing marking it and no `last_event_ts` to bound it. Downstream reads a continuous record. §2.1 escalation: an unrecoverable gap spanning analysed data is S1 |
-
-### Non-blocking, tracked
+### Still open — non-blocking, tracked
 
 - **S3→S2** one 429 permanently bricks the governor: `server_remaining` is set to 0 and only a successful response can raise it, which requires a slot. `server_reset_at` parsed and never read
-- **S1** `IRRECOVERABLE` referenced only by a test; every gap recorded `backfillable=True`, contradicting `GapRecord`'s own docstring. `_close_gap` logs that backfill was enqueued — nothing is enqueued
-- **S1** `preflight_report.json` still writes `est_minutes_at_600_per_hour` — BUG-003's 5× error survives in the machine-readable artifact the docs are corrected from
-- **S1** BUG-003 marked `fixed` while `README.md:33` and `setup.command:48` still say 600 — the two files the operator reads first
-- **S3** `config/base.yaml` `rest_budget` block is parsed by nothing; values live in code (REQ-N-09 violated)
-- **S3** governor `_Waiter`/`_waiters`/`_seq` are dead; ordering is emergent from reserve floors, so MAINTENANCE can beat an earlier INTERACTIVE
+- **S1** `IRRECOVERABLE` referenced only by a test; gaps still record `backfillable=True` in the general case. `_close_gap` logs that backfill was enqueued — nothing is enqueued yet
+- **S1** `preflight_report.json` still writes `est_minutes_at_600_per_hour`
+- **S1** `README.md:33` and `setup.command:48` still say 600
+- **S3** `config/base.yaml` `rest_budget` block is parsed by nothing (REQ-N-09 violated)
+- **S3** governor `_Waiter`/`_waiters`/`_seq` are dead code
 - **S1** an event with no parseable `event_timestamp` lands silently and drops out of every manifest-driven range query
 - **S3** a landing-zone write failure (disk full) is misrecorded as a stream gap and retried forever
-
-### Must settle before merge
-
-`ZstdCodec.decompress` uses `stream_reader` without `read_across_frames`, which
-defaulted to **False** before python-zstandard 0.23.0. `pyproject.toml` pins
-`>=0.22.0`. If an install lands on the old default, `read_file` on a healthy
-production `.zst` returns **only the first frame** — no exception, verifies
-clean. Not executable in the sandbox. Pin `>=0.23.0`, pass the flag explicitly,
-and assert a ≥3-frame round-trip.
 
 ### The lesson
 
@@ -273,6 +242,13 @@ and assert a ≥3-frame round-trip.
 > join outcome, or any control frame — which is why all five blocking findings are
 > in code that is 66/66 green.
 
-Process change: `tech-lead` (L3, opus) added as a second gate. The Validator
-hunts defects; the Tech Lead checks coherence and requirement traceability.
-`docs/02_AGENT_HIERARCHY.md` §3.6, WF-D-01.
+**Process changes made in response:**
+
+1. `tech-lead` (L3, opus) — a second gate. Validator hunts defects; Tech Lead
+   checks coherence, requirement traceability, and whether a finding was really
+   fixed or dodged. `docs/02_AGENT_HIERARCHY.md` §3.6, WF-D-01.
+2. `qa-auditor` (L2, sonnet) — reconciles what was *said* against what is *in
+   the repo*, continuously. §3.7.
+3. This log is now generated from `docs/logs/bugs.yaml`, and
+   `tools/buglog.py --check` fails CI if a bug is marked fixed while the
+   regression test it names does not exist.

@@ -146,6 +146,7 @@ def check_stream(key: str, slug: str, seconds: int) -> bool:
         return True
 
     import asyncio
+
     import websockets
 
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
@@ -170,7 +171,7 @@ def check_stream(key: str, slug: str, seconds: int) -> bool:
                     last_hb = time.monotonic()
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 if isinstance(raw, bytes):
                     raw = raw.decode()
@@ -199,7 +200,7 @@ def check_stream(key: str, slug: str, seconds: int) -> bool:
 
     try:
         asyncio.run(asyncio.wait_for(run(), timeout=seconds + 30))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - preflight must report ANY failure, never abort
         say(BAD, f"Stream failed: {type(exc).__name__}: {exc}")
         report["checks"]["stream"] = {"error": f"{type(exc).__name__}: {exc}"}
         return False
@@ -219,8 +220,8 @@ def check_stream(key: str, slug: str, seconds: int) -> bool:
         rate_day = len(events) * 86400 / seconds
         res["implied_events_per_day"] = round(rate_day)
         say(OK, f"Implied rate: ~{rate_day:,.0f} events/day for {slug}",
-            f"docs/07 §2.3 ESTIMATED 2,000/day for Argonauts. This is a measurement --\n"
-            f"a short sample, so treat it as indicative, but it beats a guess.")
+            "docs/07 §2.3 ESTIMATED 2,000/day for Argonauts. This is a measurement --\n"
+            "a short sample, so treat it as indicative, but it beats a guess.")
         say(OK, f"Mean frame: {res['mean_frame_bytes']} bytes "
                 f"(docs/07 assumed ~1,150)")
         say(OK, f"Event types seen: {', '.join(res['event_types'])}")

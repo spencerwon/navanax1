@@ -18,7 +18,7 @@ from enum import Enum
 from typing import Any
 
 
-class Severity(str, Enum):
+class Severity(str, Enum):  # noqa: UP042 - StrEnum is 3.11+; this must run on 3.10
     """docs/05_BUG_TAXONOMY.md §2."""
 
     S0A = "S0a"  # data corruption      -> HALT INGESTION
@@ -29,7 +29,7 @@ class Severity(str, Enum):
     S4 = "S4"  # degradation / cosmetic
 
 
-class ErrorClass(str, Enum):
+class ErrorClass(str, Enum):  # noqa: UP042 - StrEnum is 3.11+; this must run on 3.10
     """docs/05_BUG_TAXONOMY.md §3."""
 
     ING = "ING"
@@ -179,6 +179,23 @@ class InsufficientSampleError(SilentWrongnessError):
     cannot support, which is what makes "never a point estimate without its
     uncertainty" structural rather than aspirational.
     """
+
+
+class SubscriptionRejectedError(SilentWrongnessError):
+    """A Phoenix `phx_join` was refused, or never answered.
+
+    S1 rather than S3 because nothing appears broken. The socket is open, the
+    heartbeat is answered, the process logs no error, `status` shows a healthy
+    run -- and not one market event is being recorded, because the process is
+    subscribed to nothing. An expired key presents exactly this way
+    (REQ-D-06: free instant keys expire after 7 days), and the cost is not an
+    outage, it is a hole in a historical record that cannot be bought back.
+
+    BUG-20260909-005: the reply frame was returned from `handle_frame` before
+    anything read its status.
+    """
+
+    error_class = ErrorClass.ING
 
 
 class GovernorBypassError(SilentWrongnessError):

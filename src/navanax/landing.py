@@ -32,10 +32,11 @@ import os
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from collections.abc import Callable, Iterator
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from .codec import Codec, get_codec
 
@@ -71,6 +72,13 @@ class FileRecord:
     last_seq: int | None = None
     frames: int = 0
     truncated: bool = False
+    # BUG-20260909-007. A file used to enter the manifest only when it CLOSED,
+    # so a file being written right now -- or one whose process was killed --
+    # was invisible to `verify_manifest`, which then reported "clean". The
+    # record is now written when the file OPENS and updated on every frame
+    # flush, so the manifest always describes what is on disk.
+    status: str = "open"          # open | closed
+    last_flush_at: str | None = None
 
 
 @dataclass
@@ -191,6 +199,7 @@ class LandingZoneWriter:
         clock: Callable[[], datetime] = _utcnow,
         monotonic: Callable[[], float] = time.monotonic,
         subdir: str = "stream",
+        auto_flush: bool = True,
     ) -> None:
         self.root = Path(root)
         self.base = self.root / subdir
@@ -211,16 +220,59 @@ class LandingZoneWriter:
         self._w = None
         self._rec: FileRecord | None = None
         self._path: Path | None = None
-        self._hasher: "hashlib._Hash | None" = None
+        self._hasher: hashlib._Hash | None = None
         self._raw_since_frame = 0
         self._events_since_frame = 0
         self._last_frame_at = monotonic()
         self._current_key: tuple[str, str] | None = None
 
+        # BUG-20260909-006. REQ-D-26a promises a frame every `flush_seconds`.
+        # It used to be checked ONLY inside write(), which means the timer only
+        # fired when the NEXT event arrived. For a thin collection -- the target
+        # market, where preflight saw zero events in 60 seconds -- that is the
+        # normal regime: one event lands, the laptop sleeps, and the event is
+        # gone with nothing on disk recording that it existed.
+        #
+        # A daemon thread ticks the clock so an idle writer still closes frames.
+        # Tests pass auto_flush=False and drive tick() from a fake clock, so the
+        # cadence is asserted deterministically rather than by sleeping.
+        self._closed = threading.Event()
+        self._flusher: threading.Thread | None = None
+        if auto_flush and flush_seconds > 0 and flush_seconds < 1e6:
+            interval = max(0.25, min(flush_seconds / 2.0, 5.0))
+            self._flusher = threading.Thread(
+                target=self._flush_loop, args=(interval,),
+                name=f"navanax-flusher-{run_id}", daemon=True,
+            )
+            self._flusher.start()
+
     # -- public ------------------------------------------------------------
     @property
     def sequence(self) -> int:
         return self._seq
+
+    def tick(self) -> None:
+        """Advance the time-based flush cadence without writing anything.
+
+        This is the half of REQ-D-26a that write() cannot provide. Safe to call
+        as often as you like: it is a no-op unless a frame is both non-empty and
+        older than `flush_seconds`.
+        """
+        with self._lock:
+            self._maybe_flush_frame()
+
+    def _flush_loop(self, interval: float) -> None:
+        while not self._closed.wait(interval):
+            try:
+                self.tick()
+            except Exception:  # noqa: BLE001 - a flusher that dies silently is
+                # worse than one that logs: the writer would keep accepting
+                # events and buffering them forever with no frame ever closed.
+                import logging
+                logging.getLogger("navanax.landing").exception(
+                    "landing-zone flush thread failed; frames are NOT being closed "
+                    "on the time cadence (REQ-D-26a). Crash loss is now unbounded."
+                )
 
     def write(
         self,
@@ -285,6 +337,10 @@ class LandingZoneWriter:
             self._flush_frame()
 
     def close(self) -> None:
+        self._closed.set()
+        f = self._flusher
+        if f is not None and f.is_alive() and f is not threading.current_thread():
+            f.join(timeout=5.0)
         with self._lock:
             self._close_current()
 
@@ -293,7 +349,7 @@ class LandingZoneWriter:
         dt = gap.started_at[:10]
         self.manifest.record_gap(dt, gap)
 
-    def __enter__(self) -> "LandingZoneWriter":
+    def __enter__(self) -> LandingZoneWriter:
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -315,6 +371,14 @@ class LandingZoneWriter:
         self._w.flush_frame()
         if self._rec is not None:
             self._rec.frames += 1
+            # BUG-20260909-007: publish progress to the manifest as the file
+            # grows. A crash now leaves a manifest that says how many events
+            # SHOULD be recoverable from the file, which is what turns "the
+            # file is short" into a detectable fact rather than a silent one.
+            self._rec.last_flush_at = _iso(self._clock())
+            if self._path is not None and self._path.exists():
+                self._rec.stored_bytes = self._path.stat().st_size
+            self.manifest.record_file(self._rec)
         self._events_since_frame = 0
         self._raw_since_frame = 0
         self._last_frame_at = self._monotonic()
@@ -340,7 +404,13 @@ class LandingZoneWriter:
             run_id=self.run_id,
             codec=self.codec.name,
             opened_at=_iso(now),
+            status="open",
         )
+        # Register the file the moment it exists. Previously the manifest only
+        # learned about a file when it closed, so any file the process was
+        # killed while writing was an orphan that `verify_manifest` could not
+        # see and therefore certified clean (BUG-20260909-007).
+        self.manifest.record_file(self._rec)
 
     def _close_current(self) -> None:
         if self._fh is None:
@@ -355,6 +425,7 @@ class LandingZoneWriter:
         self._rec.stored_bytes = len(raw_bytes)
         self._rec.sha256 = hashlib.sha256(raw_bytes).hexdigest()
         self._rec.closed_at = _iso(self._clock())
+        self._rec.status = "closed"
         self.manifest.record_file(self._rec)
         self._fh = None
         self._w = None
@@ -399,12 +470,35 @@ def read_file(
         yield json.loads(line)
 
 
-def verify_manifest(root: str | Path) -> list[str]:
-    """Re-verify every recorded sha256. Returns a list of problems.
+#: Problem prefixes that mean the historical record itself is in question.
+#: Everything else verify_manifest returns is a NOTE the operator should read
+#: but which does not, on its own, mean stop.
+INTEGRITY_PREFIXES = ("MISSING", "CHECKSUM MISMATCH", "ORPHAN", "UNREADABLE", "no _manifest")
 
-    A mismatch means a landing-zone file was modified, which is an S0a: the
-    append-only guarantee is what the reprocessing path rests on, and a silent
-    modification invalidates it. Called by the weekly integrity audit
+
+def is_integrity_failure(problem: str) -> bool:
+    return problem.startswith(INTEGRITY_PREFIXES)
+
+
+def verify_manifest(root: str | Path) -> list[str]:
+    """Reconcile the manifest against the disk, in BOTH directions.
+
+    BUG-20260909-007. This used to walk manifest -> disk only. That direction
+    alone cannot see a file that exists on disk and is absent from the manifest,
+    which was exactly what an ungracefully-killed process left behind, because
+    files were only recorded when they closed. The audit whose entire job is to
+    notice that something is wrong with the landing zone returned "verified
+    clean" on a landing zone with unrecorded data files in it.
+
+    Now:
+      manifest -> disk   every recorded file exists and its sha256 still matches
+      disk -> manifest   every file on disk is recorded (ORPHAN otherwise)
+
+    Returns a list of problem strings. Entries matching INTEGRITY_PREFIXES are
+    S0a -- the append-only guarantee is what the whole reprocessing path rests
+    on. OPEN entries are notes: a file recorded but not yet closed is normal
+    while ingestion is running, and a sign of an unclean shutdown when it is
+    not. Called by the weekly integrity audit
     (docs/03_VALIDATION_AND_TESTING.md §3.4).
     """
     root = Path(root)
@@ -412,16 +506,27 @@ def verify_manifest(root: str | Path) -> list[str]:
     mdir = root / "_manifest"
     if not mdir.exists():
         return ["no _manifest directory"]
+
+    recorded: set[str] = set()
     for mp in sorted(mdir.glob("*.json")):
         with mp.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
         for f in data.get("files", []):
+            recorded.add(f["filename"])
             fp = root / f["filename"]
             if not fp.exists():
                 problems.append(f"MISSING {f['filename']}")
                 continue
             if f.get("sha256") is None:
-                problems.append(f"NO CHECKSUM {f['filename']} (file was never closed cleanly)")
+                # Open (or abandoned) file: no final checksum exists yet, by
+                # design. Report what is actually recoverable from it, so the
+                # operator sees a number rather than an absence.
+                n = _recoverable_event_count(fp)
+                problems.append(
+                    f"OPEN {f['filename']} -- not closed cleanly; "
+                    f"{n} events recoverable, manifest last recorded "
+                    f"{f.get('event_count', 0)} at {f.get('last_flush_at') or f.get('opened_at')}"
+                )
                 continue
             actual = hashlib.sha256(fp.read_bytes()).hexdigest()
             if actual != f["sha256"]:
@@ -429,4 +534,29 @@ def verify_manifest(root: str | Path) -> list[str]:
                     f"CHECKSUM MISMATCH {f['filename']} "
                     f"manifest={f['sha256'][:12]} actual={actual[:12]}"
                 )
+
+    # disk -> manifest. Anything here is data nothing knows about.
+    for fp in sorted(root.rglob("*")):
+        if not fp.is_file():
+            continue
+        rel = str(fp.relative_to(root))
+        if rel.startswith("_manifest" + os.sep) or rel.startswith("."):
+            continue
+        if fp.name.startswith(".tmp-"):
+            continue
+        if rel not in recorded:
+            n = _recoverable_event_count(fp)
+            problems.append(
+                f"ORPHAN {rel} -- on disk, absent from the manifest "
+                f"({n} events recoverable, {fp.stat().st_size} bytes)"
+            )
     return problems
+
+
+def _recoverable_event_count(fp: Path) -> int | str:
+    try:
+        return sum(1 for _ in read_file(fp, tolerate_truncation=True))
+    except Exception as exc:  # noqa: BLE001 - reporting, never raising: the
+        # audit must finish and list every problem, not stop at the first
+        # unreadable file.
+        return f"unreadable: {type(exc).__name__}"

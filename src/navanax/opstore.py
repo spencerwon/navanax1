@@ -20,10 +20,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -171,13 +172,26 @@ class OperationalStore:
 
     # -- gaps --------------------------------------------------------------
     def open_gap(
-        self, run_id: str, reason: str, topics: list[str] | None = None, backfillable: bool = True
+        self,
+        run_id: str,
+        reason: str,
+        topics: list[str] | None = None,
+        backfillable: bool = True,
+        started_at: str | None = None,
     ) -> int:
+        """Open a gap. `started_at` defaults to now.
+
+        It is passed explicitly for a downtime gap, whose start is the previous
+        run's last checkpoint rather than the moment we noticed
+        (BUG-20260909-009). A gap that claims to start when the new process
+        booted would understate the hole by exactly its duration.
+        """
         with self.connect() as c:
             cur = c.execute(
                 """INSERT INTO gap_register(run_id, started_at, reason, topics, backfillable)
                    VALUES (?,?,?,?,?)""",
-                (run_id, _now(), reason, json.dumps(topics or []), 1 if backfillable else 0),
+                (run_id, started_at or _now(), reason,
+                 json.dumps(topics or []), 1 if backfillable else 0),
             )
             return int(cur.lastrowid)
 
