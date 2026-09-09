@@ -27,3 +27,7 @@ build/
 # preflight output -- report is safe, but sample frames are real market data
 tools/preflight_report.json
 tools/sample_frames.jsonl
+
+# market-analyst output: local only, never published
+docs/market/
+data/market/

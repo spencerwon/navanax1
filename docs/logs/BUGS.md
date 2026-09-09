@@ -352,9 +352,119 @@ A security gate with no precision has no authority: one that fires on
 grep is now a checker that knows what a key looks like, with its own test —
 and `tests/` is not exempt from it.
 
+### Round 7 — the first double-click
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-035 | S3 | P0 | fixed | First live run failed CERTIFICATE_VERIFY_FAILED seven times — python.org macOS Python ships no root certificates, and the consumer blamed the stream |
+
+Everything the code did was right by its own rules: one gap, correct
+backoff, correct class labelling. The rules were aimed at the wrong diagnosis.
+Same family as BUG-018 — a local problem in an upstream error's clothes. The
+consumer now says so once, in words that name the fix, and `certifi` makes the
+fix unnecessary on a fresh install.
+
+### Round 8 — the first two minutes of real data
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-036 | S1 | P0 | fixed | Storage sizing assumed 2,000 events/day for Argonauts; measured steady-state rate is ~48/second |
+| BUG-20260909-037 | S3 | P1 | fixed | Closing the Terminal window killed ingestion without a clean stop |
+| BUG-20260909-038 | S1 | P0 | fixed | The self-test ran from a hand-maintained list; three tests were written, reviewed, and never executed |
+
+**BUG-036 is BUG-003 again, three orders of magnitude bigger.** An unsourced
+estimate, repeated until it read as fact, falsified by the first real
+measurement — 7,240 events in 152 seconds, 51% bids and 46% cancellations,
+from ten makers of which three placed 88%. The stream-first architecture is
+vindicated harder than anyone argued for: nearly half this market's activity
+cannot be fetched by any REST call at any budget.
+
+**BUG-038 is the uncomfortable one.** The codec gate's self-test was named in
+the ledger as BUG-032's regression test, the ledger check confirmed it existed,
+and it had never run. The ledger's own evidence had the claim-versus-reality
+gap the ledger exists to catch. Test discovery replaces the list.
+
+### Round 9 — the dashboard, validated against real data before shipping
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-039 | S1 | P0 | fixed | `payment_token.eth_price` is the order's value on bids/listings but the token's rate on sales — a trusting parser records a 1.43 ETH sale as 1.00 |
+| BUG-20260909-040 | S3 | P0 | fixed | Order-lifecycle joins used the wrong index; 2,000 bid lifetimes took 29 s and the dashboard hung |
+
+Both caught by running the new code over **every real frame on the
+operator's machine** (74,286) before it shipped — the check that BUG-002
+taught and that is now how a parser gets accepted. First real numbers from
+the same run: bids on Argonauts stand for a **median of 9 seconds** (p10 3.2 s,
+p90 234 s, n = 38,286).
+
+### Round 10 — the first time a human looked at the page
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-041 | S3 | P1 | fixed | Native `<select>` painted white with light text on macOS — `color-scheme: dark` was never declared |
+| BUG-20260909-042 | S3 | P1 | fixed | Every on-screen time was UTC; docs/06 sets America/Chicago and the page never read it |
+| BUG-20260909-043 | S4 | P1 | fixed | Hover cards illegible (light on light); USD rounded to whole dollars |
+
+All three were found by Spencer in his first minute with the page, none by
+an agent — the page was built and tested in a Linux container and never
+rendered in the browser it was for. The fix beyond the code: a **design-lead**
+role that owns the look, screenshots the page on the target machine before
+handover, and asks the operator design questions (colour, units, hover,
+chart style) as their own thread rather than defaulting them.
+
+### Round 11 — the tech-lead gate on the trait/screener PR
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-044 | S1 | P0 | fixed | Series omitted empty buckets instead of returning null — charts bridged unobserved hours while the footer claimed holes |
+| BUG-20260909-045 | S1 | P0 | fixed | Trait offers passed every trait filter; a filtered spread mixed a filtered ask with a collection-wide bid without saying so |
+| BUG-20260909-046 | S1 | P0 | fixed | Trait loader fetched `metadata_url` with no host check — an OpenSea-hosted collection would have bypassed the governor 9,212 times |
+| BUG-20260909-047 | S1 | P1 | fixed | "REST reads spent" counted calls, not attempts; retries under-reported the budget up to 4× |
+| BUG-20260909-048 | S2 | P0 | fixed | Third-party strings (trait values, names, token ids, wallets) rendered as raw HTML |
+
+All five found by the **tech-lead** reviewing the branch before the PR was
+opened — the gate doing what it was added for in Round 3. Three of the five
+fail *plausibly*: nothing crashes, the chart looks right, and the error is in
+the optimistic direction. That is the shape the project rules call a
+surprisingly good result. The fixes came with 30 new assertions, including
+the zero-match filter, the retried 429, and a screener-vs-live-book
+agreement check on one store with cancelled, expired and filled orders.
+
+### Round 12 — the standing book (PR-2 / PR-4)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-049 | S1 | P0 | fixed | `bid_lifetimes` cross-produced bids against cancels — `n = 38,286` was a count of *pairs*, not of bids |
+| BUG-20260909-050 | S1 | P0 | fixed | The `dead` predicate ignored `order_revalidate` and `quantity`, and never matched a NULL-`valid_ts` terminator |
+| BUG-20260909-051 | S1 | P0 | fixed | Trait-offer criteria were parsed by nothing, so every trait offer was blanket-excluded under every filter |
+
+All three were found by **reading**, not by running: quant-research raised 049
+and 050 as T1 and T3, the data-engineer proposal raised 051, and the tech-lead
+fact-check confirmed each against the source before any code was written. None
+of them could have been found by running the suite, because the suite was green
+and the fixtures contained no duplicate terminator, no revalidate (1 frame in
+85,775), no untimed cancel and no quantity above 1. **Rarity is what made them
+invisible**, and rarity is not the same as harmlessness: a revalidate that is
+never seen is depth missing from the book, and an untimed cancel is a price on
+the screen that cannot be hit.
+
+The root fix is one relation. `order_lives` — one row per `order_hash`, with
+`t_place`, `t_term`, `exit_reason`, `quantity`, `placement_seen` — replaces the
+**four** different notions of "ended" that were live in `metrics.py`
+(`cancel_count` counted two event types, `bid_lifetimes` one, and the `dead`
+subquery listed three, in two copies). `standing_sql()` is now the only
+predicate, and the live book, the screener and the bid-lifetime panel all read
+it.
+
+Two numbers in this log are now known to be wrong and are kept for the record:
+**median bid life 9 s, n = 38,286** (Round 9) came from the defective estimator
+and is biased in both directions at once. When the panel is rebuilt on real
+data the median may move **either** way. That is the expected consequence of two
+known defects — not a discovery, and not a new bug.
+
 ### Still open
 
-**None.** All 28 logged bugs are fixed.
+**None.** All 51 logged bugs are fixed.
 
 ### The lesson
 

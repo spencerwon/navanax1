@@ -1179,3 +1179,510 @@ bugs:
   regression_test: "CI itself -- the deprecation annotation disappears"
   monitor_gap: "Nothing in the project tracks external end-of-life dates. The research agent's charter covers the OpenSea API contract; it should cover the CI runtime too."
   pr: 2
+
+- id: BUG-20260909-035
+  summary: First live run failed CERTIFICATE_VERIFY_FAILED seven times -- python.org macOS Python ships no root certificates, and the consumer blamed the stream
+  severity: S3
+  priority: P0
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T10:20:00-05:00"
+  occurred_at: "2026-09-09T10:16:49-05:00"
+  resolved_at: "2026-09-09T10:45:00-05:00"
+  detected_by: "Spencer, first double-click of start.command"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/tls.py, line: 1}
+  - {file: src/navanax/stream.py, line: 755}
+  - {file: tools/preflight.py, line: 52}
+  requirement: REQ-D-06
+  data_impact: >-
+    No data recorded for the duration -- a real gap, correctly registered.
+    But the log said "stream error" and reconnected with backoff (1.2s, 3s,
+    6s, 10s, 13.5s, 22s, 78s), which is the right response to an upstream
+    failure and a useless one here: nothing on OpenSea's end had changed and
+    nothing on the retry path could fix it. Everything the code did was
+    correct by its own rules (BUG-008 backoff, BUG-013 gap classification,
+    BUG-025 one gap not seven). The rules were pointed at the wrong diagnosis.
+  root_cause: >-
+    The Python from python.org on macOS ships with NO root certificates wired
+    up until the operator runs the "Install Certificates.command" that comes
+    with it. Nothing in the project mentioned this, because the earlier smoke
+    test ran under a conda Python that bundles its own CA store. The operator
+    had just upgraded to 3.14 -- at the project's suggestion -- and the very
+    first run hit it. A local configuration problem wearing an upstream error's
+    clothes, the same family as BUG-018 (disk full recorded as a stream gap).
+  resolution: >-
+    src/navanax/tls.py: a verifying SSL context that loads certifi's CA bundle
+    when present -- certifi is now a declared dependency, so start.command
+    installs it and a bare python.org build verifies without the operator
+    knowing the installer exists. The stream consumer and preflight both use
+    it. When a certificate-verification failure is caught, the consumer logs
+    ONCE at ERROR that this is not an outage and names the two fixes, then
+    keeps its normal backoff. The gap is still recorded, because we really
+    were not recording.
+  regression_test: tests/selftest.py::test_cert_failure_names_the_fix_once
+  monitor_gap: >-
+    The live smoke test ran under one Python; the operator's launcher ran
+    under another. No test, and no launcher, checked that the interpreter it
+    found could verify a certificate before pointing it at the internet.
+  pr: 3
+
+- id: BUG-20260909-036
+  summary: Storage sizing assumed 2,000 events/day for Argonauts; measured steady-state rate is ~48/second -- off by three orders of magnitude
+  severity: S1
+  priority: P0
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T10:35:00-05:00"
+  occurred_at: "2026-09-09T00:15:00-05:00"
+  resolved_at: "2026-09-09T11:00:00-05:00"
+  detected_by: "orchestrator, reading the first two minutes of live landing-zone data (7,240 events in 152 s)"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: docs/07_STORAGE_AND_RECORDING.md, line: 108}
+  requirement: REQ-D-26
+  data_impact: >-
+    None to recorded data -- the writer, frames, manifest and codec all held at
+    48 events/s without complaint. The impact is to every disk-planning
+    statement in the project: "15 GB/year for 200 collections", "free on any
+    laptop", "will not for many years". At the measured rate Argonauts ALONE is
+    ~660 MB/day, ~240 GB/year, on a MacBook Air. Same family as BUG-003: an
+    unsourced estimate repeated until it read as fact, falsified by the first
+    real measurement.
+  root_cause: >-
+    The 2,000/day figure was a guess about a "thin collection" that never
+    considered automated market-making. 51% of the flow is item_received_bid
+    and 46% item_cancelled, from 10 makers of which 3 account for 88% -- bots
+    re-quoting 30-minute bids across hundreds of items continuously. Nobody
+    had measured because nothing had ever connected.
+  resolution: >-
+    docs/07 §2.3 replaced with the measurement, its provenance (run id, window,
+    sample size), its limits (one 2-minute sample, one hour, one collection,
+    bot-dominated), and the implied daily/yearly figures labelled as
+    extrapolations. Old figures withdrawn wherever they appeared in that
+    document. Compression measured at 13.8x (not 5.6x) and 2,205 raw
+    bytes/event (not 1,150), both now stated with provenance.
+  regression_test: tests/selftest.py::test_no_superseded_rate_limit_in_operator_text
+  monitor_gap: >-
+    The table itself said "replace with measurements in the first week". No
+    mechanism made that happen; the qa-auditor charter now covers numbers with
+    provenance ASSUMED that are older than the first live data. A 24-hour
+    per-collection rate measurement is the first Phase 1 task.
+  pr: 3
+
+- id: BUG-20260909-037
+  summary: Closing the Terminal window killed ingestion without a clean stop -- last frame lost, no checkpoint, file left open
+  severity: S3
+  priority: P1
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T10:35:00-05:00"
+  occurred_at: "2026-09-09T10:20:40-05:00"
+  resolved_at: "2026-09-09T11:00:00-05:00"
+  detected_by: "orchestrator, from the first run's manifest: file status open, gap register checkpoint 10 s before the next run"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/cli.py, line: 118}
+  requirement: REQ-D-26a
+  data_impact: >-
+    Up to one frame (~7.5 s of events at the shipped cadence) unflushed, no
+    final checkpoint, and the file marked open in the manifest. Recovery
+    worked as designed -- 4 frames were flushed and every event in them is
+    readable -- so the loss was bounded exactly as REQ-D-26a promises. But a
+    bounded loss on every window close is a loss the operator did not choose.
+  root_cause: "Ctrl-C (KeyboardInterrupt) was handled; SIGHUP from a closing Terminal window and SIGTERM from kill/launchd were not, so no finally ran."
+  resolution: "_install_shutdown_handlers registers SIGTERM and SIGHUP on the event loop to stop the consumer and cancel the run task, so the same finally that Ctrl-C reaches runs for a window close too."
+  regression_test: tests/selftest.py::test_window_close_is_a_clean_stop
+  monitor_gap: "No test sent the process a signal. The only stop path exercised was Ctrl-C."
+  pr: 3
+
+- id: BUG-20260909-038
+  summary: The self-test ran from a hand-maintained list; three tests in one day were written, reviewed, and never executed -- including the codec gate's own self-test
+  severity: S1
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T10:50:00-05:00"
+  occurred_at: "2026-09-09T05:00:00-05:00"
+  resolved_at: "2026-09-09T11:00:00-05:00"
+  detected_by: "orchestrator, noticing the pass count did not rise after adding a test -- for the third time"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: tests/selftest.py, line: 1660}
+  requirement: REQ-N-13
+  data_impact: >-
+    None to data. But BUG-032's ledger entry named
+    test_startup_gate_refuses_a_lying_codec as its regression test, and
+    tools/buglog.py --check confirmed the function EXISTED -- which is all it
+    checks -- while the function had never once run. "The gate has its own
+    regression test" was true of the file and false of the run. This is the
+    exact claim-versus-reality shape the whole ledger exists to prevent,
+    inside the ledger's own evidence.
+  root_cause: >-
+    main() ran tests from an explicit tuple of names. Registering a test was a
+    second step, done by string replacement against a line that other edits
+    kept changing, so the replacement silently matched nothing. Three times.
+  resolution: >-
+    main() now discovers every test_* function in the module and runs them in
+    definition order, passing the temp dir when the signature takes a
+    parameter. There is no list to forget. The summary line now also prints
+    the number of test FUNCTIONS, so a test that exists but does not run is
+    visible as a count that did not move.
+  regression_test: "tests/selftest.py itself -- the summary line reports 41 functions and every one of them runs"
+  monitor_gap: >-
+    buglog.py --check verifies a named test exists; it cannot verify it ran.
+    The closest honest check is the function count in the summary line, and
+    CI could assert it never decreases. Left as a Phase 1 improvement.
+  pr: 3
+
+- id: BUG-20260909-039
+  summary: OpenSea's payment_token.eth_price is the ORDER'S VALUE on bids/listings but the TOKEN'S RATE on sales; a parser trusting it records a 1.43 ETH sale as 1.00
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-09T11:20:00-05:00"
+  occurred_at: "2026-09-09T11:05:00-05:00"
+  resolved_at: "2026-09-09T11:40:00-05:00"
+  detected_by: "orchestrator, validating the new parser against every real frame on the operator's machine before shipping (74,286 frames) -- the first real item_sold"
+  detection_channel: validator
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 153}
+  requirement: REQ-F-02
+  data_impact: >-
+    None -- caught before the normalizer ever ran for real. Had it shipped:
+    every sale price in the store would have been the WETH/ETH exchange rate
+    (~1.0009) instead of the sale value, a ~30% error on the first real sale,
+    silent, in the one event type every downstream metric cares about most.
+    Same field, different meaning, per event type, documented nowhere. Also
+    found: multi-item collection offers report the TOTAL (0.906 for 2 x 0.453);
+    29 rows in the first hour.
+  root_cause: "The field was trusted as a value. The stream is not internally consistent about what it means."
+  resolution: >-
+    _resolve_price() checks rather than trusts: wei / 10^decimals is always the
+    per-item token amount; if eth_price matches units x quantity it is a total
+    value (per-item = value / quantity); if not and it looks like a per-unit
+    rate, value = units x rate. The basis used is stored on every row
+    (price_basis) so an audit can list every row where the forms disagreed.
+    Fixtures replaced with the REAL sale and listing.
+  regression_test: tests/selftest.py::test_normalizer_parses_real_frames
+  monitor_gap: >-
+    The sale and listing fixtures were written from OpenSea's documentation
+    before any had been observed -- the BUG-002 shape. Running the parser over
+    all real frames before shipping is what caught it, and that check is now
+    how new parsers are accepted.
+  pr: 3
+
+- id: BUG-20260909-040
+  summary: Order-lifecycle joins used the wrong index -- 2,000 bid lifetimes took 29 s on one hour of data; the dashboard hung
+  severity: S3
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T11:30:00-05:00"
+  occurred_at: "2026-09-09T11:10:00-05:00"
+  resolved_at: "2026-09-09T11:45:00-05:00"
+  detected_by: "orchestrator, end-to-end run of the dashboard against the real landing zone (gzip mirror) on the operator's machine"
+  detection_channel: validator
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 76}
+  - {file: src/navanax/metrics.py, line: 280}
+  requirement: REQ-N-07
+  data_impact: "None to data. The /api/lifetimes request blocked the store lock for 29+ s, which stalled every other panel -- the page would have appeared dead."
+  root_cause: >-
+    SQLite's planner chose the (event_type, valid_ts) index for the join side
+    of a self-join on order_hash and scanned every cancellation for every bid.
+    A composite index existed only in the author's intent.
+  resolution: "Composite index ix_events_lifecycle(order_hash, event_type, valid_ts), pinned with INDEXED BY on both lifecycle queries; ANALYZE after each sync that adds rows. 38,286 lifetimes in 0.09 s."
+  regression_test: tests/selftest.py::test_metric_engine_contract
+  monitor_gap: "The unit test's store had six rows. Nothing about a query plan shows at six rows; it showed at 85,713."
+  pr: 3
+
+- id: BUG-20260909-041
+  summary: Dashboard controls rendered as white boxes with near-white text on macOS -- the native <select> ignored the dark page and was unreadable
+  severity: S3
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-09T12:05:00-05:00"
+  occurred_at: "2026-09-09T11:55:00-05:00"
+  resolved_at: "2026-09-09T12:40:00-05:00"
+  detected_by: "Spencer, first look at the dashboard on his Mac"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-09
+  data_impact: "None. Display only."
+  root_cause: >-
+    The page set a dark palette by CSS but never declared `color-scheme: dark`,
+    so Safari/Chrome on macOS painted the native form controls in their light
+    theme (white box) while the page's light text colour was inherited into
+    them -- light on light. Built in a Linux container where the control is
+    drawn by the page, so it never showed here.
+  resolution: "color-scheme: dark declared (meta + CSS); selects/buttons/inputs are custom-drawn (appearance:none) with explicit dark backgrounds, option backgrounds, borders, a drawn chevron and a Verde focus ring. Every text/background pair in the palette checked to >= 4.5:1."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "The page was never rendered in a real macOS browser before it was shown to the operator. Rule going forward: the designer role screenshots the page in Safari/Chrome on the Mac before it is handed over."
+  pr: 4
+
+- id: BUG-20260909-042
+  summary: Every timestamp on the dashboard was shown in UTC although docs/06 sets the display timezone to America/Chicago
+  severity: S3
+  priority: P1
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-09T12:05:00-05:00"
+  occurred_at: "2026-09-09T11:55:00-05:00"
+  resolved_at: "2026-09-09T12:40:00-05:00"
+  detected_by: "Spencer, first look at the dashboard"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  - {file: src/navanax/dashboard.py, line: 112}
+  requirement: REQ-F-08
+  data_impact: "None to stored data (which is UTC and must stay UTC). Every on-screen time and every chart x-axis was six hours off from the operator's clock."
+  root_cause: >-
+    The API returns ISO-8601 UTC (correct), and the page passed those strings
+    straight to Plotly and to the tables. Plotly plots date strings as given,
+    with no timezone conversion. The display timezone existed in config and was
+    used for bucket alignment, but the page never read it.
+  resolution: "/api/status carries display_timezone; the page formats every timestamp with Intl.DateTimeFormat in that zone and converts chart x values to local wall-clock strings before handing them to Plotly. The zone is printed in the header, the footer and every basis line."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "docs/06 §1 states the rule; no test pinned the page to it. Now one does."
+  pr: 4
+
+- id: BUG-20260909-043
+  summary: Chart hover cards were illegible (light text on a light card) and USD values were rounded to whole dollars
+  severity: S4
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-09T12:30:00-05:00"
+  occurred_at: "2026-09-09T12:20:00-05:00"
+  resolved_at: "2026-09-09T12:40:00-05:00"
+  detected_by: "Spencer, hovering the price chart; asked for OpenSea-style cards and cents"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-09
+  data_impact: "None. Display only, but the whole-dollar rounding hid the cent-level moves that matter on a floor near $100."
+  root_cause: >-
+    Plotly's default hover label takes the trace colour as its background and
+    the page's font colour as its text -- on a light trace that is light on
+    light. No hovertemplate was set, so values printed at Plotly's default
+    precision. USD formatting used maximumFractionDigits 0.
+  resolution: "Explicit hoverlabel (dark card, light monospace text, no name truncation) and per-trace hovertemplates ($x,xxx.xx / x.xxxx Ξ / counts); axis tick formats carry the unit; USD everywhere is min/max 2 fraction digits."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "Same as BUG-041: no human looked at the page on the target machine before handover. The design-lead role now owns that look."
+  pr: 4
+
+- id: BUG-20260909-044
+  summary: Time series omitted empty buckets instead of returning null -- charts drew a straight line across hours with no observation while the footer claimed holes
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review of the dashboard PR (finding 1); reproduced with two listings 4 h apart on 1 h bars: 2 points, 0 undefined"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 284}
+  - {file: src/navanax/ui/index.html, line: 131}
+  requirement: REQ-F-15
+  data_impact: "None to stored data. Every price chart bridged unobserved time; `undefined_buckets` was always 0 so the basis line asserted the opposite of the truth. Interpolation by omission on the most decision-relevant chart."
+  root_cause: >-
+    `series()` built its key set from the buckets that had observations. A
+    bucket with none was absent rather than null, so `connectgaps:false` on the
+    page had nothing to act on. The unit test's fixture had one observation per
+    metric, which cannot show a bridge.
+  resolution: "`bucket_grid()` materialises every bucket in the range; prices with no observation are null, COUNT/SUM buckets are 0 while listening, and every bucket overlapping an ingestion gap from the manifest is null for every metric (`gaps=` on series, `gap_masked_buckets` in the basis). Absurd grids (>20,000 buckets) are refused, not thinned."
+  regression_test: tests/selftest.py::test_series_gap_masking
+  monitor_gap: "test_ui_contract asserted the STRING connectgaps:false, which passes against a series that never has a gap. A test of the page must assert the data the page is given."
+  pr: 4
+
+- id: BUG-20260909-045
+  summary: Trait offers (token_id NULL) passed every trait filter, so a filtered bid_count included offers on unrelated traits
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 2); reproduced: filter matching zero tokens still counted 2 of 3 bids"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 233}
+  requirement: REQ-F-07
+  data_impact: "Display only, in the optimistic direction: under a trait filter the spread mixed a filtered ask with a collection-wide bid and the bid count was padded by trait offers on other traits -- a manufactured 'surprisingly good' result."
+  root_cause: >-
+    The token-less exemption was `token_id IS NULL`, written for collection
+    offers (which do bid on every token) but also true of trait offers, whose
+    criteria the store does not yet hold.
+  resolution: "Only `collection_offer` is exempt; `trait_offer` is excluded under any filter and the basis says so. The derived spread carries a `legs` field naming which leg is trait-filtered and which is collection-wide, rendered as a warning line under the chart."
+  regression_test: tests/selftest.py::test_trait_filtered_metrics
+  monitor_gap: "No test filtered to a trait that no token has. The zero-match case is the one that exposes an exemption."
+  pr: 4
+
+- id: BUG-20260909-046
+  summary: The trait loader fetched any metadata_url directly, host unchecked -- a collection whose metadata lives on an OpenSea domain would have made up to 9,212 metered calls outside the governor
+  severity: S1
+  priority: P0
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 4)"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/traits.py, line: 165}
+  requirement: REQ-D-01
+  data_impact: "None occurred (never run). Had it run against an OpenSea-hosted collection: an account-wide 429 while the recorder was listening -- a real S2 gap in the market record, unrecoverable."
+  root_cause: >-
+    The design assumed metadata hosts are IPFS/Arweave/the project's own
+    server and never checked. OpenSea hosts metadata for many collections
+    itself.
+  resolution: "`is_opensea_host()` rejects opensea.io / seadn.io / openseauserdata.com (and subdomains) before any direct fetch; such tokens take the governed, budgeted fallback. Response bodies capped at 2 MB. Token-list loop guards against a repeated cursor and a page cap."
+  regression_test: tests/selftest.py::test_traits_pipeline
+  monitor_gap: "The test monkeypatched the fetch, so the network path never ran. It now exercises the host check through the real method."
+  pr: 4
+
+- id: BUG-20260909-047
+  summary: "'REST reads spent' counted calls, not attempts -- a retried 429 under-reported the budget by up to 4x, in the optimistic direction"
+  severity: S1
+  priority: P1
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 5)"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/rest.py, line: 58}
+  - {file: src/navanax/traits.py, line: 130}
+  requirement: REQ-D-03
+  data_impact: "The number the Operator reads in the sidebar and in onboarding was wrong whenever a call was retried; the governor's own ledger was right all along."
+  root_cause: "`RestClient.get` re-enters the governor on every retry (correct), while `TraitsJob` counted one per call."
+  resolution: "`RestClient.requests_made` counts attempts; `TraitsJob` reports the delta of that counter. `traits.command` and the sidebar state the real budget: 47 list reads + up to 50 fallback, more if retried."
+  regression_test: tests/selftest.py::test_rest_client_accounting
+  monitor_gap: "rest.py shipped with no test. New file on the REST path now has one."
+  pr: 4
+
+- id: BUG-20260909-048
+  summary: Trait values, token names, image URLs, token ids and wallet addresses -- all chosen by third parties -- were rendered into the page as raw HTML
+  severity: S2
+  priority: P0
+  error_class: SEC
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 6)"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 223}
+  requirement: REQ-N-13
+  data_impact: "None occurred. A crafted trait value in a token's metadata could have run script inside a page with read access to every dashboard endpoint. Loopback-only limits who reaches the page, not what its own content can do."
+  root_cause: "Template literals interpolated store values into innerHTML. The values are stored verbatim (correctly) and come from arbitrary hosts."
+  resolution: "`esc()` on every interpolated third-party string (token ids come from the Seaport order, so whoever places an order chooses them; wallets, names, values, reasons likewise); `img.src` allow-listed to https:/data:image. Pinned by test_ui_contract as a PROPERTY over every innermost ${...} interpolation, not a list of call sites -- the first version of the test listed sites and missed three."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "The secrets check looks for credentials leaving; nothing looked for content coming in. The first regression test pinned the fixed call sites and was blind to the unfixed ones (tech-lead re-review); it now scans every interpolation and was shown to fail when one is unescaped."
+  pr: 4
+
+- id: BUG-20260909-049
+  summary: "`bid_lifetimes` joined events to events with no first-termination restriction -- one bid with two cancel rows produced a cross product, so `n = 38,286` was a count of bid x cancel PAIRS, not of bids"
+  severity: S1
+  priority: P0
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-09T18:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T18:40:00-05:00"
+  detected_by: "quant-research (T1), confirmed by tech-lead fact-check Q-V2"
+  detection_channel: quant-research
+  branch: data-engineer
+  locations:
+  - {file: src/navanax/metrics.py, line: 447}
+  requirement: REQ-F-19
+  data_impact: "Every published bid-lifetime figure. The median 9 s / p10 3.2 s / p90 234 s / n = 38,286 in this log is from the defective estimator: inflated n, distribution skewed LONG by the duplicate pairs and SHORT by dropped right-censoring, so the net sign of the error is unknown. The number must not be quoted as a market fact."
+  root_cause: >-
+    The join had no MIN(c.valid_ts), no LIMIT 1 and no first-termination
+    restriction, and there was no relation that held one row per order for it
+    to read. It also silently dropped every bid still standing at window end
+    (an inner join), and every pair where the terminator's valid_ts was NULL.
+  resolution: "`order_lives` -- one row per order_hash, terminated by the FIRST qualifying termination -- is folded in `Normalizer.sync()` and `bid_lifetimes` reads it. Durations are ended lives only; still-standing lives are reported as `censored_n`, untimed terminators as `unknown_terminator_n`, and terminations whose placement was never seen as `orphan_terminations` with `terminations_in_window` beside the rate (project rule 4)."
+  regression_test: tests/selftest.py::test_bid_lifetimes_censoring_and_orphans
+  monitor_gap: "The only lifetime test used one bid and one cancel, so a duplicate terminator could not appear. The new test asserts the old join still returns 2 pairs for 1 bid, so the defect it fixes stays visible."
+  pr: 5
+
+- id: BUG-20260909-050
+  summary: "The `dead` predicate ignored `order_revalidate`, ignored `quantity`, and never matched a terminator whose `valid_ts` was NULL -- a revalidated order was dead forever, a quantity-5 offer counted as one unit of depth, and an untimed cancel left its order standing forever"
+  severity: S1
+  priority: P0
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-09T18:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T18:40:00-05:00"
+  detected_by: "quant-research (T3), confirmed by tech-lead fact-check Q-V5/Q-V6/Q-V7"
+  detection_channel: quant-research
+  branch: data-engineer
+  locations:
+  - {file: src/navanax/metrics.py, line: 394}
+  - {file: src/navanax/metrics.py, line: 478}
+  requirement: REQ-F-13a
+  data_impact: "The live book and the screener, both directions at once. An order invalidated then revalidated is missing from the book (depth understated); an order whose cancel carried no `event_timestamp` stands in the book forever (depth overstated, and the price shown cannot be hit); every multi-unit collection offer counted as one unit. `d.valid_ts >= e.valid_ts` is NULL when the terminator is untimed -- not TRUE -- so the terminator was never seen."
+  root_cause: >-
+    Three places in one module each carried their own list of what ends an
+    order (`cancel_count` two types, `bid_lifetimes` one, the `dead` subquery
+    three) and none of them was a relation, so none could express "the first
+    termination", "unless revalidated", or "we saw it end but cannot say when".
+  resolution: "One predicate, `metrics.standing_sql(alias, now_ts)`, over the `order_lives` relation, used by `live_book`, `screener` and `bid_lifetimes`. A revalidate strictly after an invalidate supersedes it; a terminator with a NULL `valid_ts` makes the life `unknown`, which is excluded from the book AND counted; `quantity` is carried from the placement and `live_book` reports depth in units. Expiry is a derived exit at `expiration_ts` with `exit_source='derived'` and writes no row to `events`."
+  regression_test: tests/selftest.py::test_order_lives_primitive
+  monitor_gap: "The lifecycle test covered cancelled, expired and filled asks -- the three cases the predicate already handled. Nothing exercised a revalidate (1 in 85,775 frames), a NULL-`valid_ts` terminator, or a quantity above 1. Rarity is what made these invisible, so the fixtures now contain all three."
+  pr: 5
+
+- id: BUG-20260909-051
+  summary: "`trait_offer` criteria were parsed by nothing and stored nowhere, so every trait offer was blanket-excluded under every trait filter -- 58.5 offers/hour of pure revealed demand discarded, and the exclusion could not distinguish an offer that does not apply from one we simply could not read"
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-09T18:10:00-05:00"
+  occurred_at: "2026-09-09T13:40:00-05:00"
+  resolved_at: "2026-09-09T18:40:00-05:00"
+  detected_by: "data-engineer proposal §4, confirmed by tech-lead fact-check E-V10"
+  detection_channel: tech-lead
+  branch: data-engineer
+  locations:
+  - {file: src/navanax/normalize.py, line: 241}
+  - {file: src/navanax/metrics.py, line: 269}
+  requirement: REQ-F-07
+  data_impact: "Bid depth under any trait filter was understated by every trait offer that genuinely applied -- the exact signal a trait-pricing view is built on. BUG-045's blanket exclusion was the correct placeholder while the criteria were unstored; it became wrong the moment they could be stored."
+  root_cause: >-
+    `parse_event` never read `trait_criteria`, `trait_criteria_list` or
+    `numeric_trait_criteria_list`, and there was no criteria table, so
+    `_bucketed` had no evidence to match on and could only exclude the whole
+    class.
+  resolution: "`order_criteria(run, seq, idx, kind, trait_type, value, num_min, num_max)` plus `criteria_n`/`criteria_numeric_n` on `events`, parsed in `parse_event`, written by `sync()`, values verbatim and never case-folded. The blanket exclusion becomes the COVERS rule (docs/08 §4a): an offer counts iff `criteria_n > 0 AND criteria_numeric_n = 0` and every criterion is guaranteed by the filter's clauses. PARTIAL, DISJOINT, UNKNOWN and UNPARSED are reported separately by `trait_offer_verdicts` and never summed into the depth number."
+  regression_test: tests/selftest.py::test_trait_offer_matching_rule
+  monitor_gap: "The guard is one line from being a disaster: an unparsed offer has no criteria rows, which makes the match's NOT EXISTS vacuously true, so it would match every filter and every token -- silently, and in the direction that manufactures an edge. That failure mode has a named property test (`criteria_n = 0` matches nothing, over every shape of filter) rather than a code comment."
+  pr: 5

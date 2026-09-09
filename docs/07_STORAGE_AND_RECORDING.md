@@ -107,24 +107,69 @@ The ratio difference is modest, and at these settings so is the compression spee
 
 ### 2.3 Sizing
 
-Using the **measured 5.6× ratio** and an average event of ~1,150 bytes. (Earlier drafts rounded this to 6×; the table below is computed at 5.6×, and the honest number is the measured one.)
+> **MEASURED 2026-09-09 (BUG-20260909-036).** The first two minutes of live
+> ingestion falsified every number that was in this table. What follows is the
+> measurement, its provenance, and its limits. The previous table -- 2,000
+> events/day for Argonauts, 1,150 bytes/event, 5.6× compression -- was an
+> estimate that had never been sourced, and it was wrong by three orders of
+> magnitude in the direction that matters.
+
+**What was measured** (`data/landing/stream/dt=2026-09-09/hour=10/`,
+run `20260909T102050Z-bc378c2b`, 122 s of steady state after excluding the
+30 s connect burst):
+
+| Quantity | Measured | Was assumed |
+|---|---|---|
+| Event rate, Argonauts, steady state | **47.6/s mean, 49/s median, 58/s p90, 68/s max** (7,240 events / 152 s) | 2,000/day ≈ 0.02/s |
+| Raw bytes per event (envelope + verbatim frame) | **2,205** | 1,150 |
+| Compression ratio, zstd-9, 5 s frames | **13.8×** (14.1 MB → 1.02 MB) | 5.6× |
+| Stored bytes per event | **~160** | ~205 |
+| Event mix | `item_received_bid` 51%, `item_cancelled` 46%, `order_invalidate` 2%, `collection_offer` <1% (of 7,240) | not estimated |
+| Source concentration | 10 distinct makers; the top 3 placed **88%** of events (644 of 728 in the first file) | not estimated |
+
+**What it implies, if the rate held** (it will not hold uniformly -- see limits):
 
 | Scenario | Events/day | Raw/day | Stored/day | Stored/year |
 |---|---|---|---|---|
-| Argonauts only | 2,000 | 2.3 MB | 0.4 MB | **0.15 GB** |
-| 25-collection watchlist | 25,000 | 29 MB | 5.1 MB | **1.9 GB** |
-| 200-collection watchlist | 200,000 | 231 MB | 41 MB | **15 GB** |
-| Firehose (all of OpenSea) | 5,000,000 | 5.8 GB | 1.03 GB | **376 GB** |
+| Argonauts only, at the measured rate | ~4,100,000 | 9.1 GB | **660 MB** | **~240 GB** |
+| Argonauts only, at one-tenth of it | ~410,000 | 0.9 GB | 66 MB | ~24 GB |
+| 25 collections, if each were like Argonauts | ~100,000,000 | 230 GB | 16 GB | ~6 TB |
 
-Event-rate figures are estimates and should be replaced with measurements in the first week of Phase 0 — this table is a planning tool, not a finding.
+**Limits of the measurement, stated so nobody plans off it blindly:**
 
-**The operational consequence is the last row: subscribe per-collection, not to the wildcard firehose.** A 200-collection watchlist costs about 15 GB a year, which is free on any laptop and trivially backed up. The firehose costs 373 GB a year and buys you events about collections you are not analyzing. Subscribe to what is on the watchlist; add a collection's subscription when it joins.
+- **One sample, two minutes, one hour of one day.** Bot bid churn is likely to
+  vary by hour and by day; the daily figure is an extrapolation, not a count.
+  Replace it with a 24-hour measurement before any procurement decision.
+- **One collection.** Argonauts is evidently bot-market-made; there is no
+  evidence yet that other collections churn at anything like this rate. The
+  25-collection row is the assumption the old table made, applied to the new
+  rate, and it is labelled as such.
+- **46% of the flow is `item_cancelled`** -- REQ-D-09a IRRECOVERABLE. This is
+  the strongest evidence yet for the stream-first architecture: nearly half of
+  this market's activity cannot be fetched by any REST call at any budget.
+- Compression at 13.8× is *better* than planned because bot bids are
+  repetitive. A less bot-dominated collection will compress worse.
+
+**What this changes operationally:**
+
+1. Disk is a real constraint on a laptop within months, not years. The
+   `roll_bytes` of 64 MiB raw now rolls a file roughly every **10 minutes**
+   (~144 files/day), which the manifest handles but which makes an external
+   volume for `data/landing/` worth considering early.
+2. Nothing here argues for dropping event classes. The cancellations *are* the
+   signal for the price of immediacy, and they are the ones that cannot be
+   re-fetched.
+3. The first thing Phase 1 should build is the 24-hour rate measurement, per
+   collection, so that adding a collection to the watchlist comes with a
+   storage cost that was measured rather than guessed.
+
+**The operational consequence is the last row: subscribe per-collection, not to the wildcard firehose.** The old 15 GB/year figure for a 200-collection watchlist is withdrawn -- see the measurement above; the honest per-collection cost is unknown until a 24-hour measurement exists, and for a bot-market-made collection it is two orders of magnitude higher. The firehose figure of 373 GB a year was built on the same falsified estimate and buys you events about collections you are not analyzing. Subscribe to what is on the watchlist; add a collection's subscription when it joins.
 
 ### 2.4 Cost
 
 **Zero.** Local disk, open-source formats, no service dependency. If you later want off-machine backup, the compressed landing zone at watchlist scale fits in the free tier of most object storage.
 
-**A re-compression pass is *not* a free action and is out of scope for v1.** Rewriting a landing-zone file at `zstd-19` changes its SHA-256, which the weekly integrity audit (§2.6, REQ-D-28) would correctly flag as an S0a, and modifying landing-zone records is forbidden to every agent at every level (`04_ENVIRONMENTS.md` §3.2). If archive compression is ever wanted, it requires a governed procedure that re-issues the manifest with both the old and new checksums and a signed record of the operation — which does not exist and should not be improvised. At 15 GB/year the pressure to do this will not arrive for a long time.
+**A re-compression pass is *not* a free action and is out of scope for v1.** Rewriting a landing-zone file at `zstd-19` changes its SHA-256, which the weekly integrity audit (§2.6, REQ-D-28) would correctly flag as an S0a, and modifying landing-zone records is forbidden to every agent at every level (`04_ENVIRONMENTS.md` §3.2). If archive compression is ever wanted, it requires a governed procedure that re-issues the manifest with both the old and new checksums and a signed record of the operation — which does not exist and should not be improvised. At the measured Argonauts rate (~240 GB/year for one collection, §2.3) the pressure to do this will arrive within months, and the governed procedure should be designed before it does rather than improvised when it does.
 
 ### 2.5 The landing zone *is* the replay corpus
 
@@ -212,4 +257,4 @@ OpenSea operates a rate-limit increase request form for eligible users, and paid
 | SHADOW store | Discard after cutover | Disposable by design |
 | Operational store | Rolling, with backup | Small; losing it costs a resync, not data |
 
-**Nothing in the landing zone is ever deleted.** If disk becomes a real constraint — which at 15 GB/year it will not for many years — the answer is colder storage and heavier compression, never deletion.
+**Nothing in the landing zone is ever deleted.** If disk becomes a real constraint — which at the measured rate it will, within months — the answer is colder storage and heavier compression, never deletion.
