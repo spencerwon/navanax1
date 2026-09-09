@@ -55,7 +55,9 @@ CREATE TABLE IF NOT EXISTS gap_register (
     ended_at      TEXT,
     reason        TEXT NOT NULL,
     topics        TEXT NOT NULL DEFAULT '[]',
-    backfillable  INTEGER NOT NULL DEFAULT 1,
+    backfillable  INTEGER NOT NULL DEFAULT 1,   -- "FULLY repairable" (BUG-013)
+    backfillable_classes   TEXT NOT NULL DEFAULT '[]',   -- BUG-031
+    irrecoverable_classes  TEXT NOT NULL DEFAULT '[]',
     backfilled_at TEXT,
     notes         TEXT
 );
@@ -125,6 +127,11 @@ class OperationalStore:
         self._local = threading.local()
         with self.connect() as c:
             c.executescript(_SCHEMA)
+            # BUG-031: a store created before the class-list columns existed.
+            have = {r[1] for r in c.execute("PRAGMA table_info(gap_register)")}
+            for col in ("backfillable_classes", "irrecoverable_classes"):
+                if col not in have:
+                    c.execute(f"ALTER TABLE gap_register ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'")
             row = c.execute("SELECT MAX(version) FROM schema_version").fetchone()
             if row is None or row[0] is None:
                 c.execute(
@@ -178,6 +185,8 @@ class OperationalStore:
         topics: list[str] | None = None,
         backfillable: bool = True,
         started_at: str | None = None,
+        backfillable_classes: list[str] | None = None,
+        irrecoverable_classes: list[str] | None = None,
     ) -> int:
         """Open a gap. `started_at` defaults to now.
 
@@ -188,10 +197,13 @@ class OperationalStore:
         """
         with self.connect() as c:
             cur = c.execute(
-                """INSERT INTO gap_register(run_id, started_at, reason, topics, backfillable)
-                   VALUES (?,?,?,?,?)""",
+                """INSERT INTO gap_register(run_id, started_at, reason, topics, backfillable,
+                                            backfillable_classes, irrecoverable_classes)
+                   VALUES (?,?,?,?,?,?,?)""",
                 (run_id, started_at or _now(), reason,
-                 json.dumps(topics or []), 1 if backfillable else 0),
+                 json.dumps(topics or []), 1 if backfillable else 0,
+                 json.dumps(backfillable_classes or []),
+                 json.dumps(irrecoverable_classes or [])),
             )
             return int(cur.lastrowid)
 
@@ -206,11 +218,31 @@ class OperationalStore:
                 "SELECT * FROM gap_register WHERE ended_at IS NULL ORDER BY started_at")]
 
     def unbackfilled_gaps(self) -> list[dict[str, Any]]:
+        """Closed gaps that still have recoverable work in them.
+
+        BUG-20260909-031. BUG-013 redefined `backfillable` from "any of this is
+        recoverable" to "ALL of it is" -- which under the default ALL_EVENTS
+        subscription is never true, because it always includes cancellations.
+        This query still filtered `backfillable=1`, so `navanax status` read
+        "awaiting backfill 0" permanently while six re-fetchable event classes
+        sat in every reconnect gap. No data was lost -- the manifest carried
+        the class lists -- but the operator's only view of pending work went
+        vacuous, and a future backfiller reading this would find nothing to do.
+
+        The worklist is now "closed, not yet backfilled, and has at least one
+        recoverable class" -- which is the question a backfiller actually asks.
+        """
         with self.connect() as c:
-            return [dict(r) for r in c.execute(
+            rows = [dict(r) for r in c.execute(
                 """SELECT * FROM gap_register
-                   WHERE ended_at IS NOT NULL AND backfilled_at IS NULL AND backfillable=1
+                   WHERE ended_at IS NOT NULL AND backfilled_at IS NULL
                    ORDER BY started_at""")]
+        out = []
+        for r in rows:
+            classes = json.loads(r.get("backfillable_classes") or "[]")
+            if r.get("backfillable") == 1 or classes:
+                out.append(r)
+        return out
 
     # -- REST ledger -------------------------------------------------------
     def log_rest(

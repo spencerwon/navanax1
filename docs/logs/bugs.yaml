@@ -562,7 +562,7 @@ bugs:
 
 - id: BUG-20260909-018
   summary: A landing-zone write failure (disk full) is misrecorded as a stream gap and retried forever
-  severity: S3
+  severity: S2
   priority: P2
   error_class: INF
   status: fixed
@@ -937,4 +937,122 @@ bugs:
     A check with a hardcoded scope, described in the ledger as having universal
     scope. The description is the part that did the damage: it converted an
     unexamined gap into a settled question.
+  pr: 1
+
+# ---------------------------------------------------------------------------
+# BUG-029..031: the tech lead's THIRD gate review, on the hardening pass.
+# All three were introduced or left standing by the hardening pass itself.
+# ---------------------------------------------------------------------------
+
+- id: BUG-20260909-029
+  summary: config/base.yaml said the governor reads x-ratelimit-limit and adapts; nothing read it
+  severity: S2
+  priority: P0
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T11:40:00-05:00"
+  occurred_at: "2026-09-09T02:50:00-05:00"
+  resolved_at: "2026-09-09T12:00:00-05:00"
+  detected_by: "tech-lead agent (opus), third gate review"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: config/base.yaml, line: 22}
+  - {file: src/navanax/governor.py, line: 169}
+  requirement: REQ-D-02
+  data_impact: >-
+    None to data. But the config block told the operator the governor "reads
+    x-ratelimit-limit on every response and adapts, so a wrong default
+    self-corrects on the first uncached reply" -- and named that as the reason
+    it was safe that 120 came from a Cloudflare cache HIT. observe_headers read
+    only -remaining and -reset. capacity was fixed at construction. REQ-D-02's
+    "adapt when limits change" clause traced to nothing. Fifth instance of an
+    operator-facing file asserting behaviour the code did not have, in the same
+    subsystem as BUG-003/014/028, attached to a number already known to be
+    uncertain.
+  root_cause: "The config comment was written from the design, not from the code."
+  resolution: >-
+    observe_headers now reads x-ratelimit-limit, adapts capacity and the refill
+    rate, clamps outstanding tokens on a lower limit, records
+    capacity_source and capacity_changes, and logs the change at WARNING. The
+    config comment now names the mechanism and the test that holds the code to
+    it.
+  regression_test: tests/selftest.py::test_governor_adapts_capacity_from_server
+  monitor_gap: "No test asserted that any header changed capacity. The qa-auditor's numbers check compares values, not claimed mechanisms."
+  pr: 1
+
+- id: BUG-20260909-030
+  summary: BUG-012's fix discarded a truthful "remaining 0" reported on a successful response
+  severity: S2
+  priority: P0
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T11:40:00-05:00"
+  occurred_at: "2026-09-09T11:20:00-05:00"
+  resolved_at: "2026-09-09T12:00:00-05:00"
+  detected_by: "tech-lead agent (opus), third gate review; the pre-existing 'server header caps local optimism' assertion caught the first attempt at the fix"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/governor.py, line: 217}
+  - {file: src/navanax/governor.py, line: 360}
+  requirement: REQ-D-02
+  data_impact: >-
+    observe_response applied headers, then observe_success cleared any
+    server_remaining reading 0 -- including when a 200 had JUST said
+    "remaining: 0", meaning "that was your last one". The governor then granted
+    against its local model and earned a 429 it had been explicitly warned
+    about. A new regression introduced by the BUG-012 fix: the old
+    observe_success only cleared consecutive_429. Self-correcting via the
+    now-recovering 429, so bounded -- but it burned a budget this project
+    treats as scarce, and contradicted the requirement the BUG-012 fix cited.
+  root_cause: >-
+    One field carried two meanings -- a ceiling WE imposed after a 429, and one
+    the SERVER reported -- and the fix lifted both. The first attempt at
+    fixing this made the block expiry do the same thing, which the
+    pre-existing test caught.
+  resolution: >-
+    BudgetState.remaining_from_429 records who set the ceiling. Only a
+    self-imposed one is lifted on success or on block expiry; a server-reported
+    one stands until the server says otherwise. Reset headers are sanity
+    checked: a value under a year is a delta, not a 1970 epoch. available()
+    now expires the block too, so recovery is no longer order-dependent.
+  regression_test: tests/selftest.py::test_truthful_zero_remaining_is_not_discarded
+  monitor_gap: "BUG-012's test asserted recovery and never asserted that the server's own 'no' was still honoured."
+  pr: 1
+
+- id: BUG-20260909-031
+  summary: BUG-013 redefined backfillable and made the backfill worklist permanently empty
+  severity: S2
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T11:40:00-05:00"
+  occurred_at: "2026-09-09T11:20:00-05:00"
+  resolved_at: "2026-09-09T12:00:00-05:00"
+  detected_by: "tech-lead agent (opus), third gate review"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/opstore.py, line: 208}
+  - {file: src/navanax/cli.py, line: 194}
+  requirement: REQ-D-09a
+  data_impact: >-
+    BUG-013 changed backfillable from "any of this is recoverable" to "ALL of
+    it is" -- never true under the default subscription. unbackfilled_gaps()
+    still filtered backfillable=1, so `navanax status` read "awaiting backfill
+    0" permanently while six re-fetchable classes sat in every reconnect gap.
+    No data lost -- the manifest carried the class lists -- but the operator's
+    only view of pending work went vacuous, and a future backfiller reading
+    this query would have found nothing to do. BUG-013's own test missed it
+    because it called store.open_gap() directly with the True default rather
+    than going through the consumer.
+  root_cause: "A field's meaning changed and one of its readers was not revisited."
+  resolution: >-
+    The gap register now carries backfillable_classes and irrecoverable_classes
+    (with an in-place migration for existing stores). unbackfilled_gaps()
+    returns closed, un-backfilled gaps with at least one recoverable class --
+    the question a backfiller actually asks.
+  regression_test: tests/selftest.py::test_backfill_worklist_is_not_vacuous
+  monitor_gap: "No test asserted what `navanax status` shows after a real reconnect gap."
   pr: 1

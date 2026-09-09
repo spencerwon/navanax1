@@ -61,6 +61,14 @@ class BudgetState:
     # BUG-20260909-012: when the server's "no" expires. None means not blocked.
     # Monotonic seconds, not wall clock, so a clock change cannot extend it.
     server_block_until: float | None = None
+    # BUG-20260909-029: where the current capacity came from, and how often
+    # the server has overridden it. "config" until a header says otherwise.
+    capacity_source: str = "config"
+    capacity_changes: int = 0
+    # BUG-20260909-030: was server_remaining==0 set by a 429 (our ceiling,
+    # safe to lift on success) or REPORTED by the server on a 200 (the truth,
+    # never to be discarded)?
+    remaining_from_429: bool = False
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -91,6 +99,7 @@ class TokenBucket:
         start_full: bool = True,
     ) -> None:
         self._clock = clock
+        self._per_seconds = per_seconds
         self.state = BudgetState(
             capacity=capacity,
             tokens=capacity if start_full else 0.0,
@@ -112,6 +121,7 @@ class TokenBucket:
     def available(self) -> float:
         with self._lock:
             self._refill()
+            self._expire_server_block()
             if self.state.server_remaining is not None:
                 # Trust the server over the local model when we have it, but
                 # never let it inflate our estimate above the local one --
@@ -144,7 +154,13 @@ class TokenBucket:
         until = self.state.server_block_until
         if until is not None and self._clock() >= until:
             self.state.server_block_until = None
-            self.state.server_remaining = None
+            # Only lift a ceiling WE imposed. A `remaining` the server reported
+            # after the 429 is its statement, not our guess, and stands
+            # (caught by the pre-existing "server header caps local optimism"
+            # assertion the moment this fix was written the naive way).
+            if self.state.remaining_from_429:
+                self.state.server_remaining = None
+                self.state.remaining_from_429 = False
         reset = self.state.server_reset_at
         if (reset is not None and self.state.server_remaining == 0
                 and time.time() >= reset):
@@ -177,15 +193,56 @@ class TokenBucket:
                 if k in headers:
                     try:
                         self.state.server_remaining = int(headers[k])
+                        # The server SAID this. It is not a ceiling we imposed
+                        # after a 429, and observe_success must not lift it.
+                        self.state.remaining_from_429 = False
                     except (TypeError, ValueError):
                         pass
+                    break
+            # BUG-20260909-029. config/base.yaml promised the governor "reads
+            # x-ratelimit-limit on every response and adapts, so a wrong
+            # default self-corrects on the first uncached reply" -- and named
+            # that as the reason it was safe that 120 came from a Cloudflare
+            # cache HIT. Nothing read the header. Fifth instance of the
+            # operator-facing-claim-vs-code shape in this project.
+            for k in ("x-ratelimit-limit", "X-RateLimit-Limit", "ratelimit-limit"):
+                if k in headers:
+                    try:
+                        limit = float(headers[k])
+                    except (TypeError, ValueError):
+                        break
+                    if limit > 0 and limit != self.state.capacity:
+                        old = self.state.capacity
+                        self.state.capacity = limit
+                        self.state.refill_per_second = limit / self._per_seconds
+                        self.state.tokens = min(self.state.tokens, limit)
+                        self.state.capacity_source = f"header {k}"
+                        self.state.capacity_changes += 1
+                        import logging
+                        logging.getLogger("navanax.governor").warning(
+                            "REST capacity ADAPTED from %s to %s per %ds (server "
+                            "header %s). The configured default was wrong; the "
+                            "server's figure is now in force.",
+                            old, limit, int(self._per_seconds), k,
+                        )
                     break
             for k in ("x-ratelimit-reset", "X-RateLimit-Reset", "ratelimit-reset"):
                 if k in headers:
                     try:
-                        self.state.server_reset_at = float(headers[k])
+                        v = float(headers[k])
                     except (TypeError, ValueError):
-                        pass
+                        break
+                    # The header may be an epoch timestamp OR seconds-remaining;
+                    # the contract is unpublished. A value under a year is a
+                    # delta (an epoch that small is 1970, which would lift every
+                    # block immediately). A value more than a day in the past
+                    # is stale and ignored.
+                    now = time.time()
+                    if v < 366 * 86400:
+                        v = now + v
+                    if v < now - 86400:
+                        break
+                    self.state.server_reset_at = v
                     break
 
     def observe_429(self) -> None:
@@ -206,6 +263,7 @@ class TokenBucket:
         with self._lock:
             self.state.tokens = 0.0
             self.state.server_remaining = 0
+            self.state.remaining_from_429 = True
             self.state.consecutive_429 += 1
             if self.state.server_reset_at is None:
                 # No Retry-After / reset header: exponential, capped at 15 min.
@@ -226,8 +284,16 @@ class TokenBucket:
         with self._lock:
             self.state.consecutive_429 = 0
             self.state.server_block_until = None
-            if self.state.server_remaining == 0:
+            # BUG-20260909-030. Clearing the ceiling used to happen whenever it
+            # read 0 -- including when a 200 response had JUST said
+            # "remaining: 0", i.e. "that was your last one". The governor then
+            # granted against its local model and earned a 429 it had been
+            # explicitly warned about. Only a ceiling WE imposed after a 429 is
+            # ours to lift; one the server reported stands until it says
+            # otherwise.
+            if self.state.server_remaining == 0 and self.state.remaining_from_429:
                 self.state.server_remaining = None
+                self.state.remaining_from_429 = False
 
 
 # BUG-20260909-016. A `_Waiter` dataclass and a `self._waiters` list used to

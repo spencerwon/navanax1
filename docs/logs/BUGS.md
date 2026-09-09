@@ -304,6 +304,23 @@ invalidations are gone for good. Not editable later, only annotated.
 new expiry but left `server_remaining = 0`, so the block expired and the ceiling
 did not. The regression test found it; reading the code had not.
 
+### Round 5 — the Tech Lead on the hardening pass
+
+Blocked a third time. All three findings were **introduced or left standing by
+the hardening pass itself**.
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-029 | S2 | P0 | fixed | config/base.yaml said the governor reads x-ratelimit-limit and adapts; nothing read it |
+| BUG-20260909-030 | S2 | P0 | fixed | BUG-012's fix discarded a truthful "remaining 0" reported on a successful response |
+| BUG-20260909-031 | S2 | P0 | fixed | BUG-013 redefined backfillable and made the backfill worklist permanently empty |
+
+**BUG-030 was caught twice.** The Tech Lead found that `observe_success`
+discarded a truthful `remaining: 0`. The first attempt at fixing it made the
+block *expiry* do the same thing — and the pre-existing assertion *"server
+header caps local optimism"* failed the moment it was written. The old suite
+caught the new fix's flaw.
+
 ### Still open
 
 **None.** All 28 logged bugs are fixed.

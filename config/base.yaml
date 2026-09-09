@@ -18,9 +18,13 @@ rest_budget:
   # unchallenged. One real request falsified it.
   #
   # Caveat: that response was a Cloudflare cache HIT, so the headers may be a
-  # cached reading rather than live. 120 is used as the conservative default;
-  # the governor reads x-ratelimit-limit on every response and adapts, so a
-  # wrong default self-corrects on the first uncached reply.
+  # cached reading rather than live. 120 is used as the conservative default.
+  # The governor reads x-ratelimit-limit on every response and adapts
+  # (TokenBucket.observe_headers, governor.py -- BUG-20260909-029: this line
+  # claimed that for a day before any code did it; a test now holds the code
+  # to it), so a wrong default self-corrects on the first uncached reply, and
+  # BudgetState.capacity_source records whether config or the server is in
+  # force.
   capacity: 120
   per_seconds: 3600
   # Floors keep low-priority work from consuming the last of the budget, so an

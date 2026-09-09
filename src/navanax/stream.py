@@ -415,7 +415,11 @@ class StreamConsumer:
         """
         try:
             self.writer.write(raw, **kw)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 - deliberate: ANY failure from
+            # the writer is a LOCAL failure. OSError is the disk; anything else
+            # is the compressor binding raising its own type (codec.py already
+            # notes "any binding raises its own type"). Both are ours, neither
+            # is OpenSea's, and neither is fixed by reconnecting.
             raise LandingZoneWriteError(
                 f"could not write to the landing zone: {exc}",
                 expected="a writable landing zone",
@@ -535,7 +539,8 @@ class StreamConsumer:
             return
         recoverable, lost, full = self._gap_classes()
         self._open_gap_id = self.opstore.open_gap(
-            self.run_id, reason, topics=self._topics(), backfillable=full
+            self.run_id, reason, topics=self._topics(), backfillable=full,
+            backfillable_classes=recoverable, irrecoverable_classes=lost,
         )
         self._open_gap_record = GapRecord(
             started_at=_iso(_now()),
@@ -613,6 +618,8 @@ class StreamConsumer:
             f"so this gap is over-recorded rather than under-recorded)",
             topics=self._topics(),
             backfillable=self._gap_classes()[2],
+            backfillable_classes=self._gap_classes()[0],
+            irrecoverable_classes=self._gap_classes()[1],
             started_at=since,
         )
         self.opstore.close_gap(gid)

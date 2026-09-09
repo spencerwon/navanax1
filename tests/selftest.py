@@ -1327,6 +1327,103 @@ def test_dead_priority_queue_is_gone() -> None:
           "INTERACTIVE must be able to draw when MAINTENANCE cannot")
 
 
+def test_governor_adapts_capacity_from_server(tmp: Path) -> None:
+    """BUG-029. config/base.yaml said the governor reads x-ratelimit-limit and adapts.
+
+    Nothing read the header. capacity was fixed at construction. The same
+    config block records that 120 came from a Cloudflare cache HIT and may be
+    wrong -- and named this non-existent mechanism as the reason that was safe.
+    Fifth instance of the operator-facing-claim-versus-code shape.
+    """
+    t = [0.0]
+    b = TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t[0])
+    check("BUG-029: starts on the configured capacity",
+          b.state.capacity == 120.0 and b.state.capacity_source == "config")
+
+    b.observe_headers({"x-ratelimit-limit": "300", "x-ratelimit-remaining": "299"})
+    check("BUG-029: capacity ADAPTS to the server's stated limit",
+          b.state.capacity == 300.0, f"got {b.state.capacity}")
+    check("BUG-029: the refill rate follows it",
+          abs(b.state.refill_per_second - 300 / 3600) < 1e-9)
+    check("BUG-029: provenance records that the server overrode config",
+          b.state.capacity_source.startswith("header") and b.state.capacity_changes == 1)
+
+    b.observe_headers({"x-ratelimit-limit": "60"})
+    check("BUG-029: a LOWER server limit clamps outstanding tokens too",
+          b.state.capacity == 60.0 and b.state.tokens <= 60.0,
+          f"capacity={b.state.capacity} tokens={b.state.tokens}")
+    b.observe_headers({"x-ratelimit-limit": "garbage"})
+    check("BUG-029: an unparseable header changes nothing", b.state.capacity == 60.0)
+
+
+def test_truthful_zero_remaining_is_not_discarded() -> None:
+    """BUG-030. A 200 carrying `remaining: 0` -- "that was your last one" -- was erased.
+
+    observe_response applied headers, then observe_success cleared any
+    server_remaining that read 0. The governor then granted against its local
+    model and earned a 429 it had been explicitly warned about. Only a ceiling
+    WE imposed after a 429 is ours to lift.
+    """
+    t = [0.0]
+    g = RestGovernor(bucket=TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t[0]))
+    g.observe_response(200, {"x-ratelimit-remaining": "0"})
+    check("BUG-030: the server's 'remaining: 0' on a SUCCESS stands",
+          g.bucket.state.server_remaining == 0, f"got {g.bucket.state.server_remaining}")
+    check("BUG-030: and the governor does NOT grant against it",
+          not g.bucket.try_consume(1),
+          "granting here earns a 429 the server just warned about")
+
+    # ...but a ceiling we imposed ourselves after a 429 IS lifted on success.
+    g2 = RestGovernor(bucket=TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t[0]))
+    g2.observe_response(429, {})
+    check("BUG-030: a 429 imposes our own ceiling",
+          g2.bucket.state.server_remaining == 0 and g2.bucket.state.remaining_from_429)
+    g2.observe_response(200, {})
+    check("BUG-030: a later success lifts OUR ceiling",
+          g2.bucket.state.server_remaining is None)
+
+    # ...and a delta-seconds reset header is not mistaken for a 1970 epoch.
+    g3 = RestGovernor(bucket=TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t[0]))
+    g3.observe_response(429, {"x-ratelimit-reset": "60"})
+    check("BUG-030 (item 6): a delta reset header is treated as seconds from now",
+          g3.bucket.state.server_reset_at is not None
+          and g3.bucket.state.server_reset_at > time.time() + 30,
+          f"got {g3.bucket.state.server_reset_at}")
+
+
+def test_backfill_worklist_is_not_vacuous(tmp: Path) -> None:
+    """BUG-031. BUG-013 redefined backfillable and the worklist query never noticed.
+
+    `unbackfilled_gaps()` filtered `backfillable=1`, which under the default
+    subscription is never true -- so `navanax status` read "awaiting backfill
+    0" permanently while six re-fetchable classes sat in every reconnect gap.
+    """
+    store = OperationalStore(tmp / "worklist.db")
+    w = FakeWriter()
+    c = StreamConsumer("k", ["argonauts"], w, store, run_id="run-wl")
+    c._open_gap("peer closed")
+    c._close_gap()
+
+    work = store.unbackfilled_gaps()
+    check("BUG-031: a closed reconnect gap IS on the backfill worklist",
+          len(work) == 1, f"got {len(work)} -- the old query returned 0 forever")
+    check("BUG-031: the worklist row names what can be recovered",
+          "item_sold" in json.loads(work[0]["backfillable_classes"]),
+          f"got {work[0].get('backfillable_classes')}")
+    check("BUG-031: ...and what cannot",
+          "item_cancelled" in json.loads(work[0]["irrecoverable_classes"]))
+    check("BUG-031: the gap is still honestly NOT fully backfillable",
+          work[0]["backfillable"] == 0)
+
+    # A gap with NOTHING recoverable must stay off the worklist.
+    gid = store.open_gap("run-wl", "rejected", topics=["collection:x"],
+                         backfillable=False, backfillable_classes=[],
+                         irrecoverable_classes=["item_cancelled"])
+    store.close_gap(gid)
+    check("BUG-031: a gap with no recoverable classes is NOT worklisted",
+          len(store.unbackfilled_gaps()) == 1)
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError,
@@ -1383,13 +1480,17 @@ def main() -> int:
             test_gaps_are_labelled_by_what_can_actually_be_recovered,
             test_missing_event_timestamp_is_counted,
             test_disk_failure_is_not_blamed_on_the_stream,
+            # --- tech-lead round 3 ---
+            test_governor_adapts_capacity_from_server,
+            test_backfill_worklist_is_not_vacuous,
         ):
             print(f"\n--- {fn.__name__} ---")
             fn(tmp)
         for fn0 in (test_governor_budget, test_governor_priority, test_stream_parsing,
                     test_irrecoverable_classification, test_phoenix_v2_arrays,
                     test_codec_multiframe_contract, test_governor_recovers_from_a_429,
-                    test_dead_priority_queue_is_gone, test_error_hierarchy):
+                    test_dead_priority_queue_is_gone,
+                    test_truthful_zero_remaining_is_not_discarded, test_error_hierarchy):
             print(f"\n--- {fn0.__name__} ---")
             fn0()
         print("\n" + "=" * 72)
