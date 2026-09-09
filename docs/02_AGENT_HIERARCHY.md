@@ -231,6 +231,8 @@ Operator states intent
   → Specialist: implement with tests written alongside
   → Validator: independent review (correctness, leakage, provenance, performance)
   → [BLOCK if failed → return to specialist with findings]
+  → tech-lead: coherence + requirement traceability + were findings really fixed
+  → [BLOCK if failed → back to the specialist with specifics]
   → Open PR. Post to #opensea-dev.
   → ⛔ SPENCER APPROVES THE PR — no exceptions, no auto-merge
   → Integrator: merge
