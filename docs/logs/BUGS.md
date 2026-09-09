@@ -412,9 +412,27 @@ role that owns the look, screenshots the page on the target machine before
 handover, and asks the operator design questions (colour, units, hover,
 chart style) as their own thread rather than defaulting them.
 
+### Round 11 — the tech-lead gate on the trait/screener PR
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-044 | S1 | P0 | fixed | Series omitted empty buckets instead of returning null — charts bridged unobserved hours while the footer claimed holes |
+| BUG-20260909-045 | S1 | P0 | fixed | Trait offers passed every trait filter; a filtered spread mixed a filtered ask with a collection-wide bid without saying so |
+| BUG-20260909-046 | S1 | P0 | fixed | Trait loader fetched `metadata_url` with no host check — an OpenSea-hosted collection would have bypassed the governor 9,212 times |
+| BUG-20260909-047 | S1 | P1 | fixed | "REST reads spent" counted calls, not attempts; retries under-reported the budget up to 4× |
+| BUG-20260909-048 | S2 | P0 | fixed | Third-party strings (trait values, names, token ids, wallets) rendered as raw HTML |
+
+All five found by the **tech-lead** reviewing the branch before the PR was
+opened — the gate doing what it was added for in Round 3. Three of the five
+fail *plausibly*: nothing crashes, the chart looks right, and the error is in
+the optimistic direction. That is the shape the project rules call a
+surprisingly good result. The fixes came with 30 new assertions, including
+the zero-match filter, the retried 429, and a screener-vs-live-book
+agreement check on one store with cancelled, expired and filled orders.
+
 ### Still open
 
-**None.** All 43 logged bugs are fixed.
+**None.** All 48 logged bugs are fixed.
 
 ### The lesson
 

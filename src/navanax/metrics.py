@@ -2,7 +2,9 @@
 
     MetricRequest = {metric, scope, denomination, transform, interval, range}
 
-Any chart is that tuple. This module serves the tuple; the UI never contains
+Any chart is that tuple. Phase 0 implements `scope = collection`, with an
+orthogonal `traits` filter narrowing the token set (docs/08 §4a); token,
+peer-group and universe scopes are not implemented yet. This module serves the tuple; the UI never contains
 a bespoke calculation. Intervals come from `config/intervals.yaml` (REQ-N-09),
 anchored ranges (HTD/DTD/MTD/YTD) use the DISPLAY timezone because "today"
 means your today (docs/06 §1.3), and every response carries its basis --
@@ -147,6 +149,37 @@ def bucket_of(ts: float, interval: dict[str, Any], tz_name: str) -> float:
     raise ValueError(f"unsupported interval {interval}")
 
 
+MAX_BUCKETS = 20_000   # 1-minute bars over two weeks; beyond this the chart is noise and the JSON is megabytes
+
+
+def bucket_grid(start: float, end: float, interval: dict[str, Any], tz_name: str) -> list[float]:
+    """Every bucket start in [start, end), observed or not.
+
+    A series is reported on this grid so that an interval with no observation
+    is an explicit null -- a hole on the chart -- rather than a missing point
+    that the line silently bridges (docs/06 §1.1: a regular-grid series must
+    mark its gaps). Steps by the interval for sub-day buckets and by one day
+    otherwise, so calendar buckets (months, years) come out of bucket_of.
+    """
+    step = int(interval["duration"]) if "duration" in interval and int(interval["duration"]) < 86400 else 86400
+    if end <= start:
+        return []
+    if (end - start) / step > MAX_BUCKETS * 4:
+        raise ValueError(f"{interval.get('id', '?')} bars over this range is more than {MAX_BUCKETS:,} buckets; choose a larger interval")
+    grid: list[float] = []
+    t = start
+    last = None
+    while t < end:
+        b = bucket_of(t, interval, tz_name)
+        if b != last:
+            grid.append(b)
+            last = b
+        t += step
+    if len(grid) > MAX_BUCKETS:
+        raise ValueError(f"{len(grid):,} buckets is more than {MAX_BUCKETS:,}; choose a larger interval")
+    return grid
+
+
 # ---------------------------------------------------------------------------
 # transforms
 # ---------------------------------------------------------------------------
@@ -187,7 +220,7 @@ def parse_trait_filter(spec: str | None) -> dict[str, list[str]]:
         if ":" not in part:
             continue
         t, vals = part.split(":", 1)
-        vs = [v for v in vals.split("|") if v != ""]
+        vs = [v.strip() for v in vals.split("|") if v.strip() != ""]
         if t.strip() and vs:
             out[t.strip()] = vs
     return out
@@ -227,12 +260,15 @@ class MetricEngine:
         if spec["price"]:
             where.append(f"e.{col} IS NOT NULL")
         tf, targs = token_filter_sql(collection, traits or {})
-        # A collection_offer has no token_id: under a trait filter it still
-        # applies to every matching token (that is what a collection offer IS).
-        # So token-level events must match every clause; token-less events pass.
+        # Under a trait filter, three kinds of event exist:
+        #   token-level (listing, item bid, sale, cancel...) -> must match every clause;
+        #   collection_offer (no token_id) -> a bid on EVERY token, so it passes;
+        #   trait_offer (no token_id) -> a bid on SOME trait we do not yet store
+        #     the criteria for, so it is EXCLUDED rather than counted under a
+        #     filter it may not match (BUG-044).
         if tf and not (spec["types"] and set(spec["types"]) <= {"collection_offer"}):
             clauses = tf[len(" AND "):]                     # "A AND B AND C"
-            where.append(f"(e.token_id IS NULL OR ({clauses}))")
+            where.append(f"((e.token_id IS NULL AND e.event_type = 'collection_offer') OR ({clauses}))")
             args.extend(targs)
         sql = f"SELECT e.valid_ts, e.{col} FROM events e WHERE {' AND '.join(where)} ORDER BY e.valid_ts"
         groups: dict[float, list[float]] = {}
@@ -258,7 +294,16 @@ class MetricEngine:
 
     def series(self, *, metric: str, collection: str, denomination: str = "ETH",
                transform: str = "ABS", interval: str = "1h", range_: str = "24h",
-               now: datetime | None = None, traits: dict[str, list[str]] | None = None) -> dict[str, Any]:
+               now: datetime | None = None, traits: dict[str, list[str]] | None = None,
+               gaps: list[tuple[float, float | None]] | None = None) -> dict[str, Any]:
+        """One metric on the full bucket grid of the range.
+
+        A price bucket with no observation is None (undefined). A COUNT/SUM
+        bucket with no event is 0.0 -- zero sales in an hour we were listening
+        is a fact, not a hole -- EXCEPT inside an ingestion gap, where every
+        metric is None: we were not listening, so we do not know (REQ-F-15).
+        `gaps` is [(start_ts, end_ts_or_None)] from the landing-zone manifest.
+        """
         if metric not in METRICS:
             raise ValueError(f"unknown metric {metric!r}; one of {sorted(METRICS)}")
         if denomination not in DENOMS:
@@ -271,20 +316,41 @@ class MetricEngine:
         ispec = self.intervals["intervals"][interval]
 
         spec = METRICS[metric]
+        keys = bucket_grid(start, end, ispec, self.tz)
+        legs: dict[str, str] = {}
         if "derived" in spec:
             a, b = spec["derived"]
             ga = self._bucketed(a, collection, denomination, start, end, ispec, traits)
             gb = self._bucketed(b, collection, denomination, start, end, ispec, traits)
-            keys = sorted(set(ga) | set(gb))
             raw = [(ga[k] - gb[k]) if (k in ga and k in gb) else None for k in keys]
             parts = {"floor_ask": [ga.get(k) for k in keys],
                      "collection_bid": [gb.get(k) for k in keys]}
             pct = [((ga[k] - gb[k]) / ga[k]) if (k in ga and k in gb and ga[k]) else None for k in keys]
+            if traits:
+                # The ask leg is trait-filtered (listings carry a token). The bid
+                # leg is the collection-wide offer, because a collection offer is
+                # the only standing bid those tokens have. Said out loud, every time.
+                legs = {"floor_ask": "trait-filtered: lowest ask on tokens matching the filter",
+                        "collection_bid": "collection-wide: collection offers carry no token and apply to every token; "
+                                          "trait offers are excluded (criteria not stored)"}
         else:
             g = self._bucketed(metric, collection, denomination, start, end, ispec, traits)
-            keys = sorted(g)
-            raw = [g[k] for k in keys]
+            empty = 0.0 if spec["agg"] in ("COUNT", "SUM") else None
+            raw = [g.get(k, empty) for k in keys]
             parts, pct = {}, None
+        gap_masked = 0
+        if gaps and keys:
+            widths = [keys[i + 1] - keys[i] for i in range(len(keys) - 1)] + [end - keys[-1]]
+            for i, k in enumerate(keys):
+                k_end = k + widths[i]
+                if any(gs < k_end and (ge is None or ge > k) for gs, ge in gaps):
+                    gap_masked += 1                # every bucket we were not listening in, valued or not
+                    raw[i] = None
+                    if parts:
+                        for leg in parts.values():
+                            leg[i] = None
+                        if pct is not None:
+                            pct[i] = None
 
         values, basis = apply_transform(raw, transform)
         basis.update({
@@ -299,7 +365,12 @@ class MetricEngine:
                             if basis.get("baseline_index") is not None and keys else None),
             "buckets": len(keys),
             "undefined_buckets": sum(1 for v in raw if v is None),
+            "gap_masked_buckets": gap_masked,
+            "bucket_alignment": ("UTC" if "duration" in ispec and int(ispec["duration"]) < 86400
+                                 else f"local midnight ({self.tz})"),
         })
+        if legs:
+            basis["legs"] = legs
         out = {"t": [datetime.fromtimestamp(k, tz=timezone.utc).isoformat() for k in keys],
                "v": values, "raw": raw, "basis": basis}
         if parts:
@@ -315,7 +386,9 @@ class MetricEngine:
         Lifecycle by order_hash. This is the closest thing to "the book right
         now" that the stream supports without a REST snapshot.
         """
-        now_iso = (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+        now_dt = now or datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat().replace("+00:00", "Z")
+        now_ts = now_dt.timestamp()
         # INDEXED BY: the planner otherwise picks the (event_type, valid_ts)
         # index for the correlated side and scans every cancellation per order.
         dead = """NOT EXISTS (SELECT 1 FROM events d INDEXED BY ix_events_lifecycle
@@ -326,13 +399,13 @@ class MetricEngine:
                           e.maker, e.expiration_at, e.order_hash
                    FROM events e
                    WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL
-                     AND (e.expiration_at IS NULL OR e.expiration_at > ?) AND {dead}"""
+                     AND (e.expiration_ts IS NULL OR e.expiration_ts > ?) AND {dead}"""
         tf, targs = token_filter_sql(collection, traits or {})
 
         def rows(etype: str, order: str) -> list[dict[str, Any]]:
             extra = tf if etype != "collection_offer" else ""
             cur = self.conn.execute(base + extra + f" ORDER BY e.price_eth {order} LIMIT ?",
-                                    (collection, etype, now_iso, *(targs if extra else []), limit))
+                                    (collection, etype, now_ts, *(targs if extra else []), limit))
             keys = ("valid_at", "event_type", "token_id", "price_eth", "price_usd",
                     "maker", "expiration_at", "order_hash")
             return [dict(zip(keys, r, strict=True)) for r in cur]
@@ -390,7 +463,9 @@ class MetricEngine:
         sortable by any column -- token, name, any trait type, lowest ask, highest bid,
         last sale (REQ-F-07). Computed from the store; no REST."""
         col = "price_usd" if denom == "USD" else "price_eth"
-        now_iso = (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+        now_dt = now or datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat().replace("+00:00", "Z")
+        now_ts = now_dt.timestamp()
         tf, targs = token_filter_sql(collection, traits or {}, alias="t")
         toks = self.conn.execute(
             f"SELECT t.token_id, t.name, t.image_url FROM tokens t WHERE t.collection = ?{tf}",
@@ -405,9 +480,9 @@ class MetricEngine:
                       AND d.valid_ts >= e.valid_ts)"""
         live = f"""SELECT e.token_id, MIN(e.{col}), MAX(e.{col}) FROM events e
                    WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL AND e.token_id IS NOT NULL
-                     AND (e.expiration_at IS NULL OR e.expiration_at > ?) AND {dead} GROUP BY e.token_id"""
-        ask = {t: lo for t, lo, _ in self.conn.execute(live, (collection, "item_listed", now_iso))}
-        bid = {t: hi for t, _, hi in self.conn.execute(live, (collection, "item_received_bid", now_iso))}
+                     AND (e.expiration_ts IS NULL OR e.expiration_ts > ?) AND {dead} GROUP BY e.token_id"""
+        ask = {t: lo for t, lo, _ in self.conn.execute(live, (collection, "item_listed", now_ts))}
+        bid = {t: hi for t, _, hi in self.conn.execute(live, (collection, "item_received_bid", now_ts))}
         last_sale: dict[str, tuple[float, str]] = {}
         for t, p, at in self.conn.execute(
                 f"""SELECT token_id, {col}, valid_at FROM events WHERE collection = ? AND event_type = 'item_sold'
@@ -427,21 +502,21 @@ class MetricEngine:
         def key(r: dict[str, Any]):
             if sort == "token_id":
                 try:
-                    return (0, int(r["token_id"]))
+                    return (0, 0, int(r["token_id"]))
                 except ValueError:
-                    return (1, r["token_id"])
+                    return (0, 1, r["token_id"])
             if sort in ("lowest_ask", "highest_bid", "last_sale"):
                 v = r[sort]
-                return (1, 0) if v is None else (0, v)
+                return (1, 0, 0.0) if v is None else (0, 0, v)
             if sort == "name":
-                return (0, r["name"] or "")
+                return (1, 0, "") if not r["name"] else (0, 1, r["name"].lower())
             v = r["traits"].get(sort)
             if v is None:
-                return (1, "")
+                return (1, 0, "")
             try:
-                return (0, float(v))
+                return (0, 0, float(v))          # numbers before words, each kind compared with its own
             except ValueError:
-                return (0, v.lower())
+                return (0, 1, v.lower())
         rows.sort(key=key, reverse=(direction == "desc"))
         if direction == "desc":
             # keep "no value" rows at the bottom in either direction

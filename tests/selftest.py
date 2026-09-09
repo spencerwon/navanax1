@@ -1946,16 +1946,31 @@ def test_metric_engine_contract(tmp: Path) -> None:
     now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
 
     s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h", range_="6h", now=now)
+    defined = [(t, v) for t, v in zip(s["t"], s["raw"], strict=True) if v is not None]
     check("metrics: immediacy_cost = lowest ask - highest collection offer, in the ONE interval with both",
-          len(s["t"]) == 1 and abs(s["raw"][0] - (1.59 - 0.348)) < 1e-9, f"got {s['raw']}")
+          len(defined) == 1 and abs(defined[0][1] - (1.59 - 0.348)) < 1e-9, f"got {s['raw']}")
+    check("metrics: the series is on the FULL bucket grid -- 6 hourly buckets in a 6h window, 5 of them null holes (tech-lead F1)",
+          len(s["t"]) == 6 and s["basis"]["buckets"] == 6 and s["basis"]["undefined_buckets"] == 5, f"got {s['t']}")
     check("metrics: ...and % of ask alongside (REQ-F-13a: both percentage and absolute)",
-          abs(s["pct_of_ask"][0] - (1.59 - 0.348) / 1.59) < 1e-9)
+          abs([p for p in s["pct_of_ask"] if p is not None][0] - (1.59 - 0.348) / 1.59) < 1e-9)
     s5 = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h", now=now)
     check("metrics: at 5m the offer and the listing fall in different buckets -> UNDEFINED, not filled",
-          all(v is None for v in s5["raw"]) and s5["basis"]["undefined_buckets"] == len(s5["raw"]) and len(s5["raw"]) >= 2,
-          f"got {s5['raw']}")
+          all(v is None for v in s5["raw"]) and s5["basis"]["undefined_buckets"] == len(s5["raw"]) and len(s5["raw"]) == 72,
+          f"got {len(s5['raw'])}")
     u = eng.series(metric="floor_ask", collection="argonauts", denomination="USD", interval="1h", range_="6h", now=now)
-    check("metrics: USD denomination uses the event's own USD at its timestamp", u["raw"] == [3959.5929])
+    check("metrics: USD denomination uses the event's own USD at its timestamp",
+          [v for v in u["raw"] if v is not None] == [3959.5929] and u["raw"].count(None) == 5)
+    fa = eng.series(metric="floor_ask", collection="argonauts", interval="1h", range_="6h", now=now)
+    check("metrics: a plain metric with two observations hours apart has holes between them, not a line",
+          fa["raw"].index(1.59) > 0 and None in fa["raw"], f"got {fa['raw']}")
+    try:
+        eng.series(metric="floor_ask", collection="argonauts", interval="1m", range_="YTD", now=now)
+        check("metrics: an absurd grid is refused, not silently thinned", False)
+    except ValueError as exc:
+        check("metrics: an absurd grid is refused, not silently thinned", "buckets" in str(exc))
+    check("metrics: basis says how buckets are aligned (UTC sub-day, local midnight day+)",
+          s["basis"]["bucket_alignment"] == "UTC"
+          and eng.series(metric="floor_ask", collection="argonauts", interval="1d", range_="7d", now=now)["basis"]["bucket_alignment"].startswith("local midnight"))
     check("metrics: every response carries its basis (docs/06 §2.2)",
           all(k in u["basis"] for k in ("metric", "denomination", "transform", "interval", "range", "wash_filter",
                                         "as_of", "display_timezone", "baseline_value")))
@@ -2067,8 +2082,10 @@ def test_traits_pipeline(tmp: Path) -> None:
         """Two pages of tokens, then a per-token endpoint. Counts every call."""
         def __init__(self) -> None:
             self.calls: list[str] = []
+            self.requests_made = 0
         async def get(self, path, params=None, *, priority=None, retries=3):
             self.calls.append(path)
+            self.requests_made += 1
             if path.endswith("/nfts") and "collection/" in path:
                 if not (params or {}).get("next"):
                     return 200, {"nfts": [{"identifier": "1", "contract": "0xc", "name": "Argo #1",
@@ -2105,15 +2122,173 @@ def test_traits_pipeline(tmp: Path) -> None:
     check("traits: onboarding reaches complete", any(r["state"] == "complete" for r in ops.onboarding_status()))
     conn.close()
 
+    from navanax.traits import is_opensea_host
+    check("traits: OpenSea-hosted metadata is recognised (subdomains too), other hosts are not",
+          is_opensea_host("https://api.opensea.io/api/v2/x") and is_opensea_host("https://i.seadn.io/a.json")
+          and not is_opensea_host("https://ipfs.io/ipfs/Qm") and not is_opensea_host("https://notopensea.io/x"))
+
+    # -- second store: a token on an OpenSea host, a token whose host fails, a two-valued trait
+    conn = open_store(tmp / "an2.sqlite")
+    ensure_schema(conn)
+    ops2 = OperationalStore(tmp / "traits-ops2.db")
+
+    class Rest2(FakeRest):
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.calls.append(path)
+            self.requests_made += 1
+            if path.endswith("/nfts") and "collection/" in path:
+                return 200, {"nfts": [
+                    {"identifier": "10", "contract": "0xc", "name": "OS-hosted", "metadata_url": "https://api.opensea.io/meta/10"},
+                    {"identifier": "11", "contract": "0xc", "name": "flaky", "metadata_url": "https://flaky.example/11"},
+                    {"identifier": "12", "contract": "0xc", "name": "two-hats", "metadata_url": "https://ok.example/12"}], "next": None}
+            if "/contract/0xc/nfts/10" in path:
+                return 200, {"nft": {"traits": [{"trait_type": "Eyes", "value": "Laser"}]}}
+            return 500, {}
+
+    rest2 = Rest2()
+    job2 = TraitsJob(conn, rest2, ops2, slug="argonauts", opensea_fallback_budget=1)
+    attempts = {"flaky": 0}
+    real_fetch = job2._fetch_json
+    def fetch(url):
+        if "opensea" in url:
+            return real_fetch(url)                # must raise before any network
+        if "flaky" in url:
+            attempts["flaky"] += 1
+            raise OSError("gateway down")
+        return {"attributes": [{"trait_type": "Hat", "value": "Red"}, {"trait_type": "Hat", "value": "Blue"}]}
+    job2._fetch_json = fetch
+    asyncio.run(job2.list_tokens())
+    res2 = asyncio.run(job2.fetch_traits())
+    check("traits: a metadata_url on an OpenSea host is never fetched directly -- it goes through the governed fallback (F4)",
+          rest2.calls.count("/chain/ethereum/contract/0xc/nfts/10") == 1
+          and conn.execute("SELECT traits_source FROM tokens WHERE token_id='10'").fetchone()[0] == "opensea_nft", str(rest2.calls))
+    check("traits: the fallback budget binds -- with budget 1 already spent, the flaky token gets NO OpenSea read",
+          not any("/nfts/11" in c for c in rest2.calls), str(rest2.calls))
+    check("traits: a token that failed keeps traits_at NULL so the next run retries it (F12)",
+          conn.execute("SELECT traits_at, traits_error FROM tokens WHERE token_id='11'").fetchone()[0] is None
+          and res2["failed"] == 1 and res2["ok"] == 2)
+    check("traits: a two-valued trait keeps BOTH values (F13)",
+          sorted(v for (v,) in conn.execute("SELECT value FROM traits WHERE token_id='12' AND trait_type='Hat'")) == ["Blue", "Red"])
+    st2 = next(r for r in ops2.onboarding_status() if r["collection_slug"] == "argonauts")
+    check("traits: onboarding stays 'traits' (not complete) while a token is unresolved, and reads spent = 1 list + 1 fallback",
+          st2["state"] == "traits" and st2["requests_spent"] == 2, str(st2))
+    asyncio.run(job2.fetch_traits())
+    check("traits: the re-run retries only the unresolved token", attempts["flaky"] == 2)
+    conn.close()
+
+
+def test_trait_filtered_metrics(tmp: Path) -> None:
+    """Under a trait filter: item bids on matching tokens count, collection offers
+    count (they bid on every token), trait offers do NOT (criteria unknown), and
+    a derived spread says which leg is filtered (tech-lead F2, F3)."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import COLS, Normalizer, parse_event
+    from navanax.traits import ensure_schema
+
+    iv = load_intervals(ROOT / "config" / "intervals.yaml")
+    n = Normalizer(tmp / "empty-lz", tmp / "tf.sqlite")
+    ensure_schema(n.conn)
+    n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES ('argonauts','1','a','x')")
+    n.conn.execute("INSERT INTO traits VALUES ('argonauts','1','Background','Blue')")
+    def put(raw, recv, seq, **over):
+        rr = parse_event(_env(seq, raw, recv))
+        rr["file"] = "f"
+        rr.update(over)
+        n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})", tuple(rr.get(c) for c in COLS))
+    put(REAL_BID, "2026-09-09T10:20:16Z", 1, token_id="1", price_eth=0.3)
+    put(REAL_COLL_OFFER, "2026-09-09T10:20:17Z", 2, price_eth=0.348)
+    put(REAL_COLL_OFFER, "2026-09-09T10:20:18Z", 3, event_type="trait_offer", token_id=None, price_eth=0.9)
+    put(DOC_LISTING, "2026-09-09T10:30:01Z", 4, token_id="1", price_eth=1.59)
+    n.conn.commit()
+    eng = MetricEngine(n.conn, iv, "America/Chicago")
+    now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+    last = lambda s: [v for v in s["raw"] if v is not None][-1]  # noqa: E731
+    check("trait metrics: unfiltered bid_count sees all three bids",
+          last(eng.series(metric="bid_count", collection="argonauts", interval="1h", range_="6h", now=now)) == 3.0)
+    f = {"Background": ["Blue"]}
+    check("trait metrics: filtered to a matching trait -> item bid + collection offer, trait offer excluded = 2",
+          last(eng.series(metric="bid_count", collection="argonauts", interval="1h", range_="6h", now=now, traits=f)) == 2.0)
+    none = {"Background": ["Red"]}
+    check("trait metrics: filtered to a trait no token has -> only the collection offer = 1 (F2)",
+          last(eng.series(metric="bid_count", collection="argonauts", interval="1h", range_="6h", now=now, traits=none)) == 1.0)
+    s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h", range_="6h", now=now, traits=f)
+    check("trait metrics: the derived spread under a filter declares its legs (F3)",
+          "legs" in s["basis"] and "trait-filtered" in s["basis"]["legs"]["floor_ask"]
+          and "collection-wide" in s["basis"]["legs"]["collection_bid"], str(s["basis"].get("legs")))
+    check("trait metrics: no legs line when there is no filter",
+          "legs" not in eng.series(metric="immediacy_cost", collection="argonauts", interval="1h", range_="6h", now=now)["basis"])
+    n.close()
+
+
+def test_rest_client_accounting(tmp: Path) -> None:
+    """rest.py: a retried call is two governor acquisitions, two ledger rows and
+    two on the attempt counter -- the number the budget saw, not the number the
+    caller asked for (tech-lead F5)."""
+    import asyncio
+
+    from navanax.governor import RestGovernor, TokenBucket
+    from navanax.rest import RestClient
+
+    clock = [1000.0]
+    async def fake_sleep(sec):          # advance a fake clock instead of waiting: backoff is real, the test is instant
+        clock[0] += max(sec, 0.01)
+    gov = RestGovernor(TokenBucket(capacity=120, per_seconds=3600, clock=lambda: clock[0]), sleep=fake_sleep)
+    acquired = {"n": 0}
+    real_acquire = gov.acquire
+    async def counting_acquire(*a, **k):
+        acquired["n"] += 1
+        return await real_acquire(*a, **k)
+    gov.acquire = counting_acquire
+    ledger: list[tuple] = []
+    rc = RestClient("k", gov, ledger=lambda *a, **k: ledger.append((a, k)), run_id="t")
+    responses = [(429, {"retry-after": "0"}, {"e": "slow down"}), (200, {"x-ratelimit-remaining": "7"}, {"ok": 1})]
+    rc._do = lambda path, params: responses.pop(0)
+    status, body = asyncio.run(rc.get("/x", {"a": 1}))
+    check("rest: 429 then 200 returns the 200", status == 200 and body == {"ok": 1})
+    check("rest: two attempts = two governor acquisitions", acquired["n"] == 2)
+    check("rest: two attempts = two ledger rows, the last with remaining=7",
+          len(ledger) == 2 and ledger[-1][1]["remaining"] == 7, str(ledger))
+    check("rest: requests_made counts attempts, not calls", rc.requests_made == 2)
+    check("rest: the governor saw the 429", gov.stats["denied_429"] == 1)
+
+
+def test_series_gap_masking(tmp: Path) -> None:
+    """REQ-F-15: a bucket inside an ingestion gap is undefined for EVERY metric,
+    counts included -- zero sales while we were not listening is not a fact."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import COLS, Normalizer, parse_event
+
+    iv = load_intervals(ROOT / "config" / "intervals.yaml")
+    n = Normalizer(tmp / "empty-lz", tmp / "gap.sqlite")
+    row = parse_event(_env(1, DOC_SALE, "2026-09-09T10:40:01Z"))
+    row["file"] = "f"
+    n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})", tuple(row.get(c) for c in COLS))
+    n.conn.commit()
+    eng = MetricEngine(n.conn, iv, "America/Chicago")
+    now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+    s = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now)
+    check("metrics: a COUNT bucket with no event while listening is 0, not a hole",
+          s["raw"][:5] == [0.0] * 5 and s["raw"][5] == 1.0 and s["basis"]["undefined_buckets"] == 0, f"got {s['raw']}")
+    gap_start = datetime(2026, 9, 9, 7, 30, tzinfo=timezone.utc).timestamp()
+    gap_end = datetime(2026, 9, 9, 8, 10, tzinfo=timezone.utc).timestamp()
+    s = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now, gaps=[(gap_start, gap_end)])
+    check("metrics: the two hourly buckets a 07:30-08:10 gap touches are undefined; the rest untouched",
+          s["raw"] == [0.0, 0.0, None, None, 0.0, 1.0] and s["basis"]["gap_masked_buckets"] == 2, f"got {s['raw']}")
+    s = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now, gaps=[(gap_start, None)])
+    check("metrics: an OPEN gap masks every bucket from its start onward, the sale included",
+          s["raw"] == [0.0, 0.0, None, None, None, None], f"got {s['raw']}")
+    n.close()
+
 
 def test_screener_sort_and_filter(tmp: Path) -> None:
     """REQ-F-07: single and multi-trait filters (AND across types, OR within a type),
     every column sortable, nulls last, live prices from the store."""
     from navanax.metrics import MetricEngine, load_intervals, parse_trait_filter, token_filter_sql
-    from navanax.normalize import COLS, Normalizer, parse_event
+    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
     from navanax.traits import ensure_schema
 
     f = parse_trait_filter("Background:Blue|Red;Eyes:Laser")
+    check("screener: filter values are trimmed like types are (F16)", parse_trait_filter("Background: Blue | Red") == {"Background": ["Blue", "Red"]})
     check("screener: filter grammar parses type:val|val;type:val", f == {"Background": ["Blue", "Red"], "Eyes": ["Laser"]})
     check("screener: blank spec means no filter", parse_trait_filter("") == {} and parse_trait_filter(None) == {})
     sql, args = token_filter_sql("argonauts", f, alias="e")
@@ -2159,6 +2334,43 @@ def test_screener_sort_and_filter(tmp: Path) -> None:
     check("screener: pagination", r["total"] == 3 and len(r["rows"]) == 1 and r["page"] == 1)
     r = eng.screener("argonauts", sort="DROP TABLE tokens", now=now)
     check("screener: unknown sort column falls back safely", r["sort"] == "token_id")
+
+    # -- lifecycle: a cancelled ask, an expired ask, a sold token, a mixed-type trait column
+    def put(raw, recv, seq, **over):
+        rr = parse_event(_env(seq, raw, recv))
+        rr["file"] = "f"
+        rr["valid_at"], rr["valid_ts"] = recv, iso_to_ts(recv)     # the fixture frames carry their own event time; pin ours
+        rr.update(over)
+        n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})", tuple(rr.get(c) for c in COLS))
+    put(DOC_LISTING, "2026-09-09T10:31:00Z", 10, token_id="2", order_hash="0xcancelme", price_eth=0.7, price_usd=1750.0)
+    put(REAL_CANCEL, "2026-09-09T10:32:00Z", 11, token_id="2", order_hash="0xcancelme")
+    put(DOC_LISTING, "2026-09-09T10:33:00Z", 12, token_id="3", order_hash="0xexpired", price_eth=0.9, price_usd=2250.0,
+        expiration_at="2026-09-09T10:50:00Z", expiration_ts=iso_to_ts("2026-09-09T10:50:00Z"))
+    put(DOC_LISTING, "2026-09-09T10:34:00Z", 13, token_id="3", order_hash="0xsoldme", price_eth=0.8, price_usd=2000.0)
+    put(DOC_SALE, "2026-09-09T10:35:00Z", 14, token_id="3", order_hash="0xsoldme", price_eth=0.8, price_usd=2000.0)
+    n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", "1", "Level", "5"))
+    n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", "2", "Level", "Unranked"))
+    n.conn.commit()
+    r = eng.screener("argonauts", sort="lowest_ask", now=now)
+    asks = {x["token_id"]: x["lowest_ask"] for x in r["rows"]}
+    check("screener: cancelled, expired and filled asks are NOT standing; only token 1's survives",
+          asks == {"1": 0.5, "2": None, "3": None}, str(asks))
+    check("screener: last sale is recorded for the sold token", {x["token_id"]: x["last_sale"] for x in r["rows"]}["3"] == 0.8)
+    book = eng.live_book("argonauts", now=now)
+    check("screener and live book agree on the same store: one standing ask, token 1 at 0.5",
+          [(a["token_id"], a["price_eth"]) for a in book["asks"]] == [("1", 0.5)], str(book["asks"]))
+    later = datetime(2026, 9, 9, 10, 40, tzinfo=timezone.utc)
+    check("screener: expiry is compared numerically -- before 10:50 the expiring ask still stands",
+          eng.screener("argonauts", now=later)["rows"][2]["lowest_ask"] == 0.9)
+    r = eng.screener("argonauts", sort="Level", now=now)
+    check("screener: a trait column mixing numbers and words sorts (numbers first, then words, then missing) instead of 500ing",
+          [x["token_id"] for x in r["rows"]] == ["1", "2", "3"])
+    n.conn.execute("UPDATE tokens SET name=NULL WHERE token_id='1'")
+    n.conn.commit()
+    r = eng.screener("argonauts", sort="name", now=now)
+    check("screener: a missing name sorts LAST ascending", [x["token_id"] for x in r["rows"]][-1] == "1")
+    r = eng.screener("argonauts", sort="name", direction="desc", now=now)
+    check("screener: ...and last descending too", [x["token_id"] for x in r["rows"]][-1] == "1")
     n.close()
 
 
@@ -2179,6 +2391,35 @@ def test_ui_contract() -> None:
           "/api/traits" in html and "/api/screener" in html and "traits:traitSpec()" in html)
     check("ui: no curve is drawn between observations (no spline interpolation)", "shape:'spline'" not in html)
     check("ui: undefined values stay holes", "connectgaps:false" in html and "connectgaps:true" not in html)
+    # The PROPERTY, not a list of call sites (tech-lead re-review): every ${...}
+    # interpolation that touches a store-derived, third-party-controlled field
+    # must pass through esc()/safeImg() or a numeric/time formatter. token_id
+    # comes from the Seaport order (chosen by whoever placed it), maker/taker are
+    # wallets, names/values/urls come from metadata hosts, reasons from manifests.
+    import re
+    tainted = (".token_id", ".maker", ".taker", ".name", ".reason", ".value", ".traits[", ".image_url",
+               ".error", "irrecoverable", ".event_type")
+    safe = ("esc(", "safeImg(", "fmt(", "money(", "money2(", "clock(", "age(", "hhmm(",
+            ".includes(")                          # a boolean test emits 'checked' or '', never the value
+    leaks = []
+    exprs: list[str] = []
+    work = html
+    inner = re.compile(r"\$\{([^{}]*)\}")          # innermost first: nested ${} would let an outer esc( vouch for an inner leak
+    while True:
+        found = inner.findall(work)
+        if not found:
+            break
+        exprs.extend(found)
+        work = inner.sub("@@", work)
+    for expr in exprs:
+        if any(f in expr for f in tainted) and not any(w in expr for w in safe):
+            leaks.append(expr[:70])
+    check("ui: EVERY interpolation of a third-party field is escaped or formatted (F6, property not call-site list)",
+          not leaks and "const esc=" in html and "const safeImg=" in html, "; ".join(leaks))
+    check("ui: esc() covers the five HTML metacharacters",
+          all(c in html.split("const esc=")[1].split("\n")[0] for c in ("&amp;", "&lt;", "&gt;", "&quot;", "&#39;")))
+    check("ui: the basis line prints the bucket alignment and, under a filter, which leg is filtered",
+          "bucket_alignment" in html and "b.legs" in html)
 
 
 if __name__ == "__main__":

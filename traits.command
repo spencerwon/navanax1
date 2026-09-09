@@ -2,9 +2,14 @@
 # Navanax TRAITS — double-click to load every Argonaut's traits into the store.
 #
 # Two passes: (1) the collection's token list from OpenSea, ~47 governed reads
-# (about 40% of one hour's budget) -- (2) each token's metadata from where it
-# is hosted, NOT metered by OpenSea. Takes 10-20 minutes for 9,212 tokens.
-# Stop any time with Ctrl + C; run again to resume where it stopped.
+# -- (2) each token's metadata from where it is hosted (IPFS/Arweave/HTTP),
+# NOT metered by OpenSea. Tokens whose metadata cannot be read fall back to
+# OpenSea's per-token endpoint, capped at 50 per run (config traits.opensea_fallback_budget).
+# Budget: 47 reads for the list + up to 50 fallback = up to 97 of the 120/hour,
+# more if calls are retried after a 429. It shares the budget with the recorder's
+# backfill, so run it when the recorder shows no gaps awaiting backfill.
+# Takes 10-20 minutes for 9,212 tokens. Stop any time with Ctrl + C; run again
+# to resume -- failed tokens are retried, finished ones are not refetched.
 # The dashboard's trait filters light up as the data arrives.
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1

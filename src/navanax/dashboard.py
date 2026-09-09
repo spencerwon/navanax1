@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .landing import is_integrity_failure, verify_manifest
 from .metrics import METRICS, MetricEngine, load_intervals, parse_range, parse_trait_filter
-from .normalize import Normalizer
+from .normalize import Normalizer, iso_to_ts
 from .opstore import OperationalStore
 from .traits import ensure_schema as ensure_traits_schema
 from .traits import trait_values
@@ -121,16 +121,23 @@ class Dashboard:
             "gaps": {"open": len(self.store.open_gaps()), "awaiting_backfill": len(self.store.unbackfilled_gaps())},
         }
 
+    def _slug(self, q: dict[str, str]) -> str:
+        slug = q.get("collection") or (self.slugs[0] if self.slugs else "")
+        if not slug:
+            raise ValueError("no collection: the watchlist in config/base.yaml is empty")
+        return slug
+
     def api_series(self, q: dict[str, str]) -> dict[str, Any]:
         with self.lock:
             return self.engine.series(
                 metric=q.get("metric", "immediacy_cost"),
-                collection=q.get("collection", self.slugs[0] if self.slugs else ""),
+                collection=self._slug(q),
                 denomination=q.get("denom", "ETH"),
                 transform=q.get("transform", "ABS"),
                 interval=q.get("interval", "5m"),
                 range_=q.get("range", "6h"),
-                traits=parse_trait_filter(q.get("traits")))
+                traits=parse_trait_filter(q.get("traits")),
+                gaps=self._gap_spans())
 
     def api_multi(self, q: dict[str, str]) -> dict[str, Any]:
         """Several metrics on one time base, for the overlay chart (REQ-F-09)."""
@@ -149,23 +156,23 @@ class Dashboard:
 
     def api_book(self, q: dict[str, str]) -> dict[str, Any]:
         with self.lock:
-            return self.engine.live_book(q.get("collection", self.slugs[0]), limit=int(q.get("limit", "25")),
+            return self.engine.live_book(self._slug(q), limit=int(q.get("limit", "25")),
                                          traits=parse_trait_filter(q.get("traits")))
 
     def api_tape(self, q: dict[str, str]) -> list[dict[str, Any]]:
         with self.lock:
-            return self.engine.tape(q.get("collection", self.slugs[0]), limit=int(q.get("limit", "50")),
+            return self.engine.tape(self._slug(q), limit=int(q.get("limit", "50")),
                                     traits=parse_trait_filter(q.get("traits")))
 
     def api_makers(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
         with self.lock:
-            return self.engine.makers(q.get("collection", self.slugs[0]), s, e)
+            return self.engine.makers(self._slug(q), s, e)
 
     def api_lifetimes(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
         with self.lock:
-            return self.engine.bid_lifetimes(q.get("collection", self.slugs[0]), s, e)
+            return self.engine.bid_lifetimes(self._slug(q), s, e)
 
     def api_mix(self, q: dict[str, str]) -> list[dict[str, Any]]:
         s, e = self._window(q)
@@ -173,7 +180,7 @@ class Dashboard:
             return self.engine.event_mix(q.get("collection"), s, e)
 
     def api_traits(self, q: dict[str, str]) -> dict[str, Any]:
-        slug = q.get("collection", self.slugs[0])
+        slug = self._slug(q)
         with self.lock:
             vals = trait_values(self.norm.conn, slug)
             n_tokens = self.norm.conn.execute("SELECT COUNT(*) FROM tokens WHERE collection=?", (slug,)).fetchone()[0]
@@ -185,10 +192,33 @@ class Dashboard:
     def api_screener(self, q: dict[str, str]) -> dict[str, Any]:
         with self.lock:
             return self.engine.screener(
-                q.get("collection", self.slugs[0]), traits=parse_trait_filter(q.get("traits")),
+                self._slug(q), traits=parse_trait_filter(q.get("traits")),
                 sort=q.get("sort", "token_id"), direction=q.get("dir", "asc"),
                 page=int(q.get("page", "0")), page_size=min(200, int(q.get("size", "50"))),
                 denom=q.get("denom", "ETH"))
+
+    def _gap_spans(self) -> list[tuple[float, float | None]]:
+        """Ingestion gaps as epoch spans, for masking buckets we were not listening in.
+        Cached on the manifest directory's mtime: api_multi asks once per metric.
+        The key is sound ONLY because ManifestWriter writes via mkstemp + os.replace,
+        which moves the directory mtime. An in-place rewrite would leave this cache
+        serving stale gaps silently -- keep the writer atomic (tech-lead, round 3)."""
+        mdir = self.landing / "_manifest"
+        try:
+            stamp = mdir.stat().st_mtime_ns
+        except OSError:
+            stamp = None
+        cached = getattr(self, "_gap_cache", None)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        out = []
+        for g in self.api_gaps():
+            gs = iso_to_ts(g.get("started_at"))
+            if gs is None:
+                continue
+            out.append((gs, iso_to_ts(g.get("ended_at"))))
+        self._gap_cache = (stamp, out)
+        return out
 
     def api_gaps(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

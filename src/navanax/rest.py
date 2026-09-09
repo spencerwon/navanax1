@@ -34,6 +34,9 @@ class RestClient:
         self.run_id = run_id
         self.ledger = ledger          # OperationalStore.log_rest, when present
         self._ctx = ssl_context()
+        # Every ATTEMPT, retries included -- the number the budget actually saw.
+        # Callers report this, never their own count of calls (tech-lead F5).
+        self.requests_made = 0
 
     def _do(self, path: str, params: dict[str, Any] | None) -> tuple[int, dict[str, str], Any]:
         url = self.base + path + (("?" + urllib.parse.urlencode(params)) if params else "")
@@ -56,7 +59,14 @@ class RestClient:
         """One governed GET. Retries 429/5xx through the governor's backoff."""
         loop = asyncio.get_running_loop()
         for attempt in range(retries + 1):
+            wait = self.gov.bucket.seconds_until(1.0 + self.gov.reserve.get(priority, 0.0))
+            if wait > 5:
+                # Say so: a six-minute silence while the bucket refills above the
+                # BACKFILL floor reads as a hang to a human watching a terminal.
+                log.warning("waiting on the REST budget: ~%.0f s until a %s slot (this is the governor, not a hang)",
+                            wait, priority.name)
             async with self.gov.slot(priority):
+                self.requests_made += 1
                 status, headers, body = await loop.run_in_executor(None, self._do, path, params)
                 self.gov.observe_response(status, headers)
             if self.ledger is not None:

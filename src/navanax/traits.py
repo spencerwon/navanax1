@@ -31,6 +31,7 @@ import json
 import logging
 import sqlite3
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,20 @@ from typing import Any
 from .governor import Priority
 from .rest import RestClient
 from .tls import ssl_context
+
+# Hosts the governor exists to protect. A metadata_url pointing here is NOT
+# fetched directly: that would be a metered call outside the budget (REQ-D-01,
+# tech-lead F4). Such tokens go through the governed fallback instead.
+OPENSEA_HOSTS = ("opensea.io", "seadn.io", "openseauserdata.com")
+MAX_METADATA_BYTES = 2_000_000
+
+
+def is_opensea_host(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith("." + h) for h in OPENSEA_HOSTS)
 
 log = logging.getLogger("navanax.traits")
 
@@ -61,7 +76,7 @@ CREATE TABLE IF NOT EXISTS traits (
     token_id    TEXT NOT NULL,
     trait_type  TEXT NOT NULL,
     value       TEXT NOT NULL,
-    PRIMARY KEY (collection, token_id, trait_type)
+    PRIMARY KEY (collection, token_id, trait_type, value)   -- a token may carry two values of one type; keep both
 );
 CREATE INDEX IF NOT EXISTS ix_traits_lookup ON traits(collection, trait_type, value, token_id);
 """
@@ -101,7 +116,7 @@ def parse_attributes(meta: dict[str, Any]) -> list[tuple[str, str]]:
 class TraitsJob:
     def __init__(self, conn: sqlite3.Connection, rest: RestClient, opstore, *, slug: str,
                  ipfs_gateway: str = "https://ipfs.io/ipfs/", concurrency: int = 6,
-                 timeout: float = 20.0, opensea_fallback_budget: int = 50) -> None:
+                 timeout: float = 20.0, opensea_fallback_budget: int = 50, max_pages: int = 500) -> None:
         self.conn = conn
         self.rest = rest
         self.opstore = opstore
@@ -110,6 +125,7 @@ class TraitsJob:
         self.concurrency = concurrency
         self.timeout = timeout
         self.fallback_budget = opensea_fallback_budget
+        self.max_pages = max_pages           # 500 x 200 = 100k tokens; larger collections raise it in config
         self.conn.executescript(SCHEMA)
         self._ctx = ssl_context()
 
@@ -120,14 +136,17 @@ class TraitsJob:
         if row and row.get("state") in ("traits", "complete"):
             return {"pages": 0, "tokens": 0, "skipped": "token list already complete"}
         self.opstore.upsert_onboarding(self.slug, state="tokens")
-        spent = int(row["requests_spent"]) if row else 0
+        spent0 = int(row["requests_spent"]) if row else 0
+        made0 = self.rest.requests_made
+        spent = spent0
         pages = tokens = 0
+        seen_cursors: set[str] = set()
         while True:
             params: dict[str, Any] = {"limit": 200}
             if cursor:
                 params["next"] = cursor
             status, body = await self.rest.get(f"/collection/{self.slug}/nfts", params, priority=Priority.BACKFILL)
-            spent += 1
+            spent = spent0 + (self.rest.requests_made - made0)     # attempts, retries included
             if status != 200:
                 self.opstore.upsert_onboarding(self.slug, state="failed", error=f"{status}: {json.dumps(body)[:200]}",
                                                requests_spent=spent)
@@ -151,6 +170,13 @@ class TraitsJob:
             log.info("token list: page %d, %d tokens so far (%d reads)", pages, total, spent)
             if not cursor or not batch:
                 break
+            if cursor in seen_cursors or pages >= self.max_pages:
+                # A server handing back the same cursor forever would otherwise
+                # spend the whole budget one governed read at a time (tech-lead F14).
+                self.opstore.upsert_onboarding(self.slug, state="failed", requests_spent=spent,
+                                               error=f"token list stopped: repeated cursor or > {self.max_pages} pages")
+                raise RuntimeError(f"token list stopped after {pages} pages: repeated cursor or page cap")
+            seen_cursors.add(cursor)
         self.opstore.upsert_onboarding(self.slug, state="traits", last_cursor=None, items_total=total)
         return {"pages": pages, "tokens": tokens, "requests_spent": spent}
 
@@ -163,9 +189,15 @@ class TraitsJob:
         return url
 
     def _fetch_json(self, url: str) -> dict[str, Any]:
-        req = urllib.request.Request(self._resolve_url(url), headers={"User-Agent": "navanax/0.1", "Accept": "application/json"})
+        target = self._resolve_url(url)
+        if is_opensea_host(target):
+            # Never fetched here. The caller routes it through the governed fallback.
+            raise PermissionError(f"metadata_url on an OpenSea host is a metered call: {target[:80]}")
+        req = urllib.request.Request(target, headers={"User-Agent": "navanax/0.1", "Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx) as r:
-            data = r.read()
+            data = r.read(MAX_METADATA_BYTES + 1)
+        if len(data) > MAX_METADATA_BYTES:
+            raise ValueError(f"metadata larger than {MAX_METADATA_BYTES} bytes")
         return json.loads(data)
 
     def _store(self, token_id: str, pairs: list[tuple[str, str]], source: str, error: str | None) -> None:
@@ -174,8 +206,10 @@ class TraitsJob:
                 self.conn.execute("DELETE FROM traits WHERE collection=? AND token_id=?", (self.slug, token_id))
                 self.conn.executemany("INSERT OR REPLACE INTO traits (collection, token_id, trait_type, value) VALUES (?,?,?,?)",
                                       [(self.slug, token_id, t, v) for t, v in pairs])
+            # traits_at is set only on success: a token that failed keeps
+            # traits_at NULL and is retried on the next run (tech-lead F12).
             self.conn.execute("UPDATE tokens SET traits_at=?, traits_source=?, traits_error=? WHERE collection=? AND token_id=?",
-                              (_now() if (pairs or error) else None, source, error, self.slug, token_id))
+                              (_now() if pairs else None, source, error, self.slug, token_id))
 
     async def fetch_traits(self, *, limit: int | None = None) -> dict[str, int]:
         rows = self.conn.execute(
@@ -187,6 +221,9 @@ class TraitsJob:
         sem = asyncio.Semaphore(self.concurrency)
         done = ok = failed = 0
         fallback_left = self.fallback_budget
+        row = next((r for r in self.opstore.onboarding_status() if r["collection_slug"] == self.slug), None)
+        spent0 = int(row["requests_spent"]) if row else 0
+        made0 = self.rest.requests_made
 
         async def one(token_id: str, url: str | None) -> None:
             nonlocal done, ok, failed, fallback_left
@@ -229,7 +266,8 @@ class TraitsJob:
                     total = self.conn.execute(
                         "SELECT COUNT(*) FROM tokens WHERE collection=? AND traits_at IS NOT NULL AND traits_error IS NULL",
                         (self.slug,)).fetchone()[0]
-                    self.opstore.upsert_onboarding(self.slug, state="traits", items_done=total)
+                    self.opstore.upsert_onboarding(self.slug, state="traits", items_done=total,
+                                                   requests_spent=spent0 + (self.rest.requests_made - made0))
                     log.info("traits: %d/%d this run (%d ok, %d failed); %d tokens have traits", done, len(rows), ok, failed, total)
 
         await asyncio.gather(*(one(t, u) for t, u in rows))

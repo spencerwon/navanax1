@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS events (
     payment_symbol TEXT,
     quantity       INTEGER,
     expiration_at  TEXT,
+    expiration_ts  REAL,                 -- expiration_at as epoch seconds: compared numerically, never as text
     tx_hash        TEXT,
     PRIMARY KEY (run, seq)
 );
@@ -260,6 +261,7 @@ def parse_event(envelope: dict[str, Any]) -> dict[str, Any] | None:
         "payment_symbol": pt.get("symbol"),
         "quantity": p.get("quantity"),
         "expiration_at": p.get("expiration_date"),
+        "expiration_ts": iso_to_ts(p.get("expiration_date")),
         "tx_hash": tx.get("hash") if isinstance(tx, dict) else None,
     }
 
@@ -268,7 +270,20 @@ COLS = ["run", "seq", "file", "observed_at", "valid_at", "observed_ts", "valid_t
         "event_type", "collection",
         "chain", "contract", "token_id", "order_hash", "maker", "taker", "price_wei",
         "price_eth", "price_usd", "implied_ethusd", "price_basis", "payment_symbol", "quantity",
-        "expiration_at", "tx_hash"]
+        "expiration_at", "expiration_ts", "tx_hash"]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive migrations for stores built by earlier versions. The analytical
+    store is DERIVED from the landing zone (docs/07 §1); adding a column and
+    filling it from a column already present is a re-fold, not an edit of the
+    record. Nothing here touches the landing zone."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+    if cols and "expiration_ts" not in cols:
+        conn.create_function("nvx_iso_ts", 1, iso_to_ts)
+        with conn:
+            conn.execute("ALTER TABLE events ADD COLUMN expiration_ts REAL")
+            conn.execute("UPDATE events SET expiration_ts = nvx_iso_ts(expiration_at) WHERE expiration_at IS NOT NULL")
 
 
 class Normalizer:
@@ -281,6 +296,7 @@ class Normalizer:
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        _migrate(self.conn)
         self.conn.executescript(SCHEMA)
 
     # -- manifest-driven file discovery ------------------------------------

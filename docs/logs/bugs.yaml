@@ -1484,3 +1484,125 @@ bugs:
   regression_test: tests/selftest.py::test_ui_contract
   monitor_gap: "Same as BUG-041: no human looked at the page on the target machine before handover. The design-lead role now owns that look."
   pr: 4
+
+- id: BUG-20260909-044
+  summary: Time series omitted empty buckets instead of returning null -- charts drew a straight line across hours with no observation while the footer claimed holes
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review of the dashboard PR (finding 1); reproduced with two listings 4 h apart on 1 h bars: 2 points, 0 undefined"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 284}
+  - {file: src/navanax/ui/index.html, line: 131}
+  requirement: REQ-F-15
+  data_impact: "None to stored data. Every price chart bridged unobserved time; `undefined_buckets` was always 0 so the basis line asserted the opposite of the truth. Interpolation by omission on the most decision-relevant chart."
+  root_cause: >-
+    `series()` built its key set from the buckets that had observations. A
+    bucket with none was absent rather than null, so `connectgaps:false` on the
+    page had nothing to act on. The unit test's fixture had one observation per
+    metric, which cannot show a bridge.
+  resolution: "`bucket_grid()` materialises every bucket in the range; prices with no observation are null, COUNT/SUM buckets are 0 while listening, and every bucket overlapping an ingestion gap from the manifest is null for every metric (`gaps=` on series, `gap_masked_buckets` in the basis). Absurd grids (>20,000 buckets) are refused, not thinned."
+  regression_test: tests/selftest.py::test_series_gap_masking
+  monitor_gap: "test_ui_contract asserted the STRING connectgaps:false, which passes against a series that never has a gap. A test of the page must assert the data the page is given."
+  pr: 4
+
+- id: BUG-20260909-045
+  summary: Trait offers (token_id NULL) passed every trait filter, so a filtered bid_count included offers on unrelated traits
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 2); reproduced: filter matching zero tokens still counted 2 of 3 bids"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 233}
+  requirement: REQ-F-07
+  data_impact: "Display only, in the optimistic direction: under a trait filter the spread mixed a filtered ask with a collection-wide bid and the bid count was padded by trait offers on other traits -- a manufactured 'surprisingly good' result."
+  root_cause: >-
+    The token-less exemption was `token_id IS NULL`, written for collection
+    offers (which do bid on every token) but also true of trait offers, whose
+    criteria the store does not yet hold.
+  resolution: "Only `collection_offer` is exempt; `trait_offer` is excluded under any filter and the basis says so. The derived spread carries a `legs` field naming which leg is trait-filtered and which is collection-wide, rendered as a warning line under the chart."
+  regression_test: tests/selftest.py::test_trait_filtered_metrics
+  monitor_gap: "No test filtered to a trait that no token has. The zero-match case is the one that exposes an exemption."
+  pr: 4
+
+- id: BUG-20260909-046
+  summary: The trait loader fetched any metadata_url directly, host unchecked -- a collection whose metadata lives on an OpenSea domain would have made up to 9,212 metered calls outside the governor
+  severity: S1
+  priority: P0
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 4)"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/traits.py, line: 165}
+  requirement: REQ-D-01
+  data_impact: "None occurred (never run). Had it run against an OpenSea-hosted collection: an account-wide 429 while the recorder was listening -- a real S2 gap in the market record, unrecoverable."
+  root_cause: >-
+    The design assumed metadata hosts are IPFS/Arweave/the project's own
+    server and never checked. OpenSea hosts metadata for many collections
+    itself.
+  resolution: "`is_opensea_host()` rejects opensea.io / seadn.io / openseauserdata.com (and subdomains) before any direct fetch; such tokens take the governed, budgeted fallback. Response bodies capped at 2 MB. Token-list loop guards against a repeated cursor and a page cap."
+  regression_test: tests/selftest.py::test_traits_pipeline
+  monitor_gap: "The test monkeypatched the fetch, so the network path never ran. It now exercises the host check through the real method."
+  pr: 4
+
+- id: BUG-20260909-047
+  summary: "'REST reads spent' counted calls, not attempts -- a retried 429 under-reported the budget by up to 4x, in the optimistic direction"
+  severity: S1
+  priority: P1
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 5)"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/rest.py, line: 58}
+  - {file: src/navanax/traits.py, line: 130}
+  requirement: REQ-D-03
+  data_impact: "The number the Operator reads in the sidebar and in onboarding was wrong whenever a call was retried; the governor's own ledger was right all along."
+  root_cause: "`RestClient.get` re-enters the governor on every retry (correct), while `TraitsJob` counted one per call."
+  resolution: "`RestClient.requests_made` counts attempts; `TraitsJob` reports the delta of that counter. `traits.command` and the sidebar state the real budget: 47 list reads + up to 50 fallback, more if retried."
+  regression_test: tests/selftest.py::test_rest_client_accounting
+  monitor_gap: "rest.py shipped with no test. New file on the REST path now has one."
+  pr: 4
+
+- id: BUG-20260909-048
+  summary: Trait values, token names, image URLs, token ids and wallet addresses -- all chosen by third parties -- were rendered into the page as raw HTML
+  severity: S2
+  priority: P0
+  error_class: SEC
+  status: fixed
+  logged_at: "2026-09-09T13:10:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T13:40:00-05:00"
+  detected_by: "tech-lead, pre-merge review (finding 6)"
+  detection_channel: tech-lead
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 223}
+  requirement: REQ-N-13
+  data_impact: "None occurred. A crafted trait value in a token's metadata could have run script inside a page with read access to every dashboard endpoint. Loopback-only limits who reaches the page, not what its own content can do."
+  root_cause: "Template literals interpolated store values into innerHTML. The values are stored verbatim (correctly) and come from arbitrary hosts."
+  resolution: "`esc()` on every interpolated third-party string (token ids come from the Seaport order, so whoever places an order chooses them; wallets, names, values, reasons likewise); `img.src` allow-listed to https:/data:image. Pinned by test_ui_contract as a PROPERTY over every innermost ${...} interpolation, not a list of call sites -- the first version of the test listed sites and missed three."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "The secrets check looks for credentials leaving; nothing looked for content coming in. The first regression test pinned the fixed call sites and was blind to the unfixed ones (tech-lead re-review); it now scans every interpolation and was shown to fail when one is unescaped."
+  pr: 4
