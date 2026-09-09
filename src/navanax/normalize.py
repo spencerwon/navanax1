@@ -457,7 +457,7 @@ _LIFE_SELECT = """
 """
 
 
-def _fold_one_life(hash_: str, rows: list[tuple]) -> tuple:
+def _fold_one_life(hash_: str, rows: list[tuple], now_ts: float | None = None) -> tuple:
     """Every event naming one order_hash -> one order_lives row. DERIVATION: no
     thresholds, no imputation, no opinion about what matters.
 
@@ -472,9 +472,14 @@ def _fold_one_life(hash_: str, rows: list[tuple]) -> tuple:
         is `unknown` and counted (BUG-050c).
       * `quantity` is carried from the placement. A collection offer good for
         five is five units of depth (BUG-050b).
-      * Expiry is INFERRED, never observed: when no termination is seen and the
-        order carried an expiration, the life ends there with
-        `exit_source='derived'`. No row is written to `events`.
+      * Expiry is INFERRED, never observed: when no termination is seen, the
+        order carried an expiration, AND that expiration has ALREADY PASSED
+        (`expiration_ts < now`), the life ends there with `exit_source='derived'`.
+        An expiration still in the future is not a termination -- the order is
+        `censored` (still standing as far as we know). Recording a future end
+        would be imputing the future (docs/06 §4.3; tech-lead PR-2 review, S1:
+        it fabricated 5% of lives and drained the censored bucket to 1).
+        No row is written to `events`.
       * A termination with no placement is an orphan: `placement_seen=0`,
         excluded from durations, counted (orphan_rate, quant metric 12).
         `t_place` is never imputed.
@@ -509,7 +514,7 @@ def _fold_one_life(hash_: str, rows: list[tuple]) -> tuple:
         # A terminator exists but cannot be placed in time (NULL valid_ts, or
         # earlier than the placement we saw). Unknown -- counted, never standing.
         t_term, reason, source, exit_type = None, "unknown", "observed", terms[0][3]
-    elif place is not None and place[12] is not None:
+    elif place is not None and place[12] is not None and now_ts is not None and place[12] < now_ts:
         t_term, reason, source, exit_type = place[12], "expired", "derived", None
     else:
         t_term, reason, source, exit_type = None, "censored", None, None
@@ -528,33 +533,46 @@ def _fold_one_life(hash_: str, rows: list[tuple]) -> tuple:
     )
 
 
-def refresh_order_lives(conn: sqlite3.Connection, hashes: list[str] | None = None) -> int:
+def refresh_order_lives(conn: sqlite3.Connection, hashes: list[str] | None = None,
+                        now_ts: float | None = None) -> int:
     """(Re)compute order_lives for `hashes`, or for every order when None.
 
     Called at the end of every sync(), so the standing book is never more than
     one fold behind the events table. docs/07 §1: the normalizer is the one
     writer to this store; readers attach read-only and see whatever the last
     fold produced.
+
+    `now_ts` is the fold time (default: wall clock). An incremental refresh
+    ALSO re-folds every life still `censored` whose expiration has since
+    passed -- otherwise an order nobody touched again would stay "standing"
+    in this table forever, while `standing_sql` (which re-checks expiry at
+    query time) already knew better.
     """
+    import time as _time
+    now_ts = _time.time() if now_ts is None else now_ts
     sql, args = _LIFE_SELECT, []
     if hashes is not None:
-        hs = sorted(set(hashes))
+        hs = set(hashes)
+        hs.update(h for (h,) in conn.execute(
+            "SELECT order_hash FROM order_lives WHERE exit_reason='censored' "
+            "AND expiration_ts IS NOT NULL AND expiration_ts < ?", (now_ts,)))
+        hs = sorted(hs)
         if not hs:
             return 0
         out = 0
         for i in range(0, len(hs), 400):        # SQLite's parameter limit
             chunk = hs[i:i + 400]
-            out += _refresh_chunk(conn, sql + f" AND order_hash IN ({','.join('?' * len(chunk))})", chunk)
+            out += _refresh_chunk(conn, sql + f" AND order_hash IN ({','.join('?' * len(chunk))})", chunk, now_ts)
         return out
-    return _refresh_chunk(conn, sql, args)
+    return _refresh_chunk(conn, sql, args, now_ts)
 
 
-def _refresh_chunk(conn: sqlite3.Connection, sql: str, args: list[Any]) -> int:
+def _refresh_chunk(conn: sqlite3.Connection, sql: str, args: list[Any], now_ts: float) -> int:
     cur = conn.execute(sql + " ORDER BY order_hash", args)
     grouped: dict[str, list[tuple]] = {}
     for row in cur:
         grouped.setdefault(row[0], []).append(row)
-    lives = [_fold_one_life(h, rows) for h, rows in grouped.items()]
+    lives = [_fold_one_life(h, rows, now_ts) for h, rows in grouped.items()]
     if lives:
         with conn:
             conn.executemany(
