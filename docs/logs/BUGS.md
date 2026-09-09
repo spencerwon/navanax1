@@ -364,6 +364,26 @@ Same family as BUG-018 — a local problem in an upstream error's clothes. The
 consumer now says so once, in words that name the fix, and `certifi` makes the
 fix unnecessary on a fresh install.
 
+### Round 8 — the first two minutes of real data
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-036 | S1 | P0 | fixed | Storage sizing assumed 2,000 events/day for Argonauts; measured steady-state rate is ~48/second |
+| BUG-20260909-037 | S3 | P1 | fixed | Closing the Terminal window killed ingestion without a clean stop |
+| BUG-20260909-038 | S1 | P0 | fixed | The self-test ran from a hand-maintained list; three tests were written, reviewed, and never executed |
+
+**BUG-036 is BUG-003 again, three orders of magnitude bigger.** An unsourced
+estimate, repeated until it read as fact, falsified by the first real
+measurement — 7,240 events in 152 seconds, 51% bids and 46% cancellations,
+from ten makers of which three placed 88%. The stream-first architecture is
+vindicated harder than anyone argued for: nearly half this market's activity
+cannot be fetched by any REST call at any budget.
+
+**BUG-038 is the uncomfortable one.** The codec gate's self-test was named in
+the ledger as BUG-032's regression test, the ledger check confirmed it existed,
+and it had never run. The ledger's own evidence had the claim-versus-reality
+gap the ledger exists to catch. Test discovery replaces the list.
+
 ### Still open
 
 **None.** All 28 logged bugs are fixed.

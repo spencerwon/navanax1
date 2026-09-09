@@ -1228,3 +1228,114 @@ bugs:
     under another. No test, and no launcher, checked that the interpreter it
     found could verify a certificate before pointing it at the internet.
   pr: 3
+
+- id: BUG-20260909-036
+  summary: Storage sizing assumed 2,000 events/day for Argonauts; measured steady-state rate is ~48/second -- off by three orders of magnitude
+  severity: S1
+  priority: P0
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T10:35:00-05:00"
+  occurred_at: "2026-09-09T00:15:00-05:00"
+  resolved_at: "2026-09-09T11:00:00-05:00"
+  detected_by: "orchestrator, reading the first two minutes of live landing-zone data (7,240 events in 152 s)"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: docs/07_STORAGE_AND_RECORDING.md, line: 108}
+  requirement: REQ-D-26
+  data_impact: >-
+    None to recorded data -- the writer, frames, manifest and codec all held at
+    48 events/s without complaint. The impact is to every disk-planning
+    statement in the project: "15 GB/year for 200 collections", "free on any
+    laptop", "will not for many years". At the measured rate Argonauts ALONE is
+    ~660 MB/day, ~240 GB/year, on a MacBook Air. Same family as BUG-003: an
+    unsourced estimate repeated until it read as fact, falsified by the first
+    real measurement.
+  root_cause: >-
+    The 2,000/day figure was a guess about a "thin collection" that never
+    considered automated market-making. 51% of the flow is item_received_bid
+    and 46% item_cancelled, from 10 makers of which 3 account for 88% -- bots
+    re-quoting 30-minute bids across hundreds of items continuously. Nobody
+    had measured because nothing had ever connected.
+  resolution: >-
+    docs/07 §2.3 replaced with the measurement, its provenance (run id, window,
+    sample size), its limits (one 2-minute sample, one hour, one collection,
+    bot-dominated), and the implied daily/yearly figures labelled as
+    extrapolations. Old figures withdrawn wherever they appeared in that
+    document. Compression measured at 13.8x (not 5.6x) and 2,205 raw
+    bytes/event (not 1,150), both now stated with provenance.
+  regression_test: tests/selftest.py::test_no_superseded_rate_limit_in_operator_text
+  monitor_gap: >-
+    The table itself said "replace with measurements in the first week". No
+    mechanism made that happen; the qa-auditor charter now covers numbers with
+    provenance ASSUMED that are older than the first live data. A 24-hour
+    per-collection rate measurement is the first Phase 1 task.
+  pr: 3
+
+- id: BUG-20260909-037
+  summary: Closing the Terminal window killed ingestion without a clean stop -- last frame lost, no checkpoint, file left open
+  severity: S3
+  priority: P1
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T10:35:00-05:00"
+  occurred_at: "2026-09-09T10:20:40-05:00"
+  resolved_at: "2026-09-09T11:00:00-05:00"
+  detected_by: "orchestrator, from the first run's manifest: file status open, gap register checkpoint 10 s before the next run"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/cli.py, line: 118}
+  requirement: REQ-D-26a
+  data_impact: >-
+    Up to one frame (~7.5 s of events at the shipped cadence) unflushed, no
+    final checkpoint, and the file marked open in the manifest. Recovery
+    worked as designed -- 4 frames were flushed and every event in them is
+    readable -- so the loss was bounded exactly as REQ-D-26a promises. But a
+    bounded loss on every window close is a loss the operator did not choose.
+  root_cause: "Ctrl-C (KeyboardInterrupt) was handled; SIGHUP from a closing Terminal window and SIGTERM from kill/launchd were not, so no finally ran."
+  resolution: "_install_shutdown_handlers registers SIGTERM and SIGHUP on the event loop to stop the consumer and cancel the run task, so the same finally that Ctrl-C reaches runs for a window close too."
+  regression_test: tests/selftest.py::test_window_close_is_a_clean_stop
+  monitor_gap: "No test sent the process a signal. The only stop path exercised was Ctrl-C."
+  pr: 3
+
+- id: BUG-20260909-038
+  summary: The self-test ran from a hand-maintained list; three tests in one day were written, reviewed, and never executed -- including the codec gate's own self-test
+  severity: S1
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T10:50:00-05:00"
+  occurred_at: "2026-09-09T05:00:00-05:00"
+  resolved_at: "2026-09-09T11:00:00-05:00"
+  detected_by: "orchestrator, noticing the pass count did not rise after adding a test -- for the third time"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: tests/selftest.py, line: 1660}
+  requirement: REQ-N-13
+  data_impact: >-
+    None to data. But BUG-032's ledger entry named
+    test_startup_gate_refuses_a_lying_codec as its regression test, and
+    tools/buglog.py --check confirmed the function EXISTED -- which is all it
+    checks -- while the function had never once run. "The gate has its own
+    regression test" was true of the file and false of the run. This is the
+    exact claim-versus-reality shape the whole ledger exists to prevent,
+    inside the ledger's own evidence.
+  root_cause: >-
+    main() ran tests from an explicit tuple of names. Registering a test was a
+    second step, done by string replacement against a line that other edits
+    kept changing, so the replacement silently matched nothing. Three times.
+  resolution: >-
+    main() now discovers every test_* function in the module and runs them in
+    definition order, passing the temp dir when the signature takes a
+    parameter. There is no list to forget. The summary line now also prints
+    the number of test FUNCTIONS, so a test that exists but does not run is
+    visible as a count that did not move.
+  regression_test: "tests/selftest.py itself -- the summary line reports 41 functions and every one of them runs"
+  monitor_gap: >-
+    buglog.py --check verifies a named test exists; it cannot verify it ran.
+    The closest honest check is the function count in the summary line, and
+    CI could assert it never decreases. Left as a Phase 1 improvement.
+  pr: 3

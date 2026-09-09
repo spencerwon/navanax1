@@ -115,6 +115,36 @@ def _single_instance(lock_path: Path):
         fh.close()
 
 
+def _install_shutdown_handlers(loop, task, consumer) -> None:
+    """Make closing the Terminal window a clean stop, not a kill.
+
+    BUG-20260909-037. Ctrl-C was handled (KeyboardInterrupt); closing the
+    window was not. macOS sends SIGHUP when a Terminal window closes, and an
+    unhandled SIGHUP ends the process without running any `finally`: the last
+    frame (up to ~7.5 s of events) is lost, no checkpoint is written, and the
+    file stays `open` in the manifest. The first live run ended exactly this
+    way. Recovery handled it -- 4 frames were flushed and readable -- but a
+    clean stop is cheap and loses nothing. SIGTERM is included for the same
+    reason (a `kill`, a launchd stop, a sleep-triggered shutdown).
+    """
+    import signal
+
+    def _stop(signame: str) -> None:
+        print(f"\n{signame} received; stopping cleanly and flushing the final frame...",
+              file=sys.stderr, flush=True)
+        consumer.stop()
+        task.cancel()
+
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, _stop, name)
+        except (NotImplementedError, RuntimeError):
+            pass  # Windows, or not the main thread: Ctrl-C still works
+
+
 def cmd_ingest(args) -> int:
     root = Path(args.root)
     cfg, slugs = _config(root)
@@ -163,6 +193,7 @@ def cmd_ingest(args) -> int:
 
     async def main() -> None:
         task = asyncio.create_task(consumer.run())
+        _install_shutdown_handlers(asyncio.get_running_loop(), task, consumer)
         try:
             await task
         except asyncio.CancelledError:

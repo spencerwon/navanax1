@@ -1611,6 +1611,55 @@ def test_cert_failure_names_the_fix_once(tmp: Path) -> None:
           len(store.open_gaps()) == 1)
 
 
+def test_window_close_is_a_clean_stop() -> None:
+    """BUG-037. Closing the Terminal window (SIGHUP) killed the process
+    without running any finally: last frame lost, no checkpoint, file left
+    `open`. The first live run ended exactly that way. A signal must become
+    an orderly stop.
+    """
+    import os
+    import signal
+
+    from navanax.cli import _install_shutdown_handlers
+
+    class Stoppable:
+        def __init__(self): self.stopped = False
+        def stop(self): self.stopped = True
+
+    outcome = {}
+
+    async def drive():
+        c = Stoppable()
+        async def forever():
+            await asyncio.sleep(3600)
+        task = asyncio.create_task(forever())
+        loop = asyncio.get_running_loop()
+        _install_shutdown_handlers(loop, task, c)
+        loop.call_later(0.05, os.kill, os.getpid(), signal.SIGTERM)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+            outcome["how"] = "returned"
+        except asyncio.CancelledError:
+            outcome["how"] = "cancelled"
+        except asyncio.TimeoutError:
+            outcome["how"] = "timeout -- the signal did nothing"
+        outcome["stopped"] = c.stopped
+        # restore default so the rest of the suite is unaffected
+        for name in ("SIGTERM", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                try:
+                    loop.remove_signal_handler(sig)
+                except (NotImplementedError, RuntimeError):
+                    pass
+
+    asyncio.run(drive())
+    check("BUG-037: SIGTERM cancels the run task instead of killing the process",
+          outcome.get("how") == "cancelled", f"got {outcome}")
+    check("BUG-037: ...and asks the consumer to stop cleanly first",
+          outcome.get("stopped") is True)
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError,
@@ -1638,52 +1687,34 @@ def test_error_hierarchy() -> None:
 
 
 def main() -> int:
+    """Run every `test_*` function in this module, in definition order.
+
+    BUG-20260909-038. The suite used to run from a HAND-MAINTAINED list of
+    function names. Three times in one day a test was written, passed a
+    review, and never executed, because adding it to the list is a separate
+    step that a string-replace silently skipped. One of them was the codec
+    gate's own self-test -- the claim "the gate has a regression test" was
+    true of the file and false of the run. Discovery removes the step.
+    """
+    import inspect
+
     tmp = Path(tempfile.mkdtemp(prefix="navanax-selftest-"))
     try:
         print("=" * 72)
         print("NAVANAX PHASE 0 SELF-TEST  (stdlib only: gzip codec stands in for zstd)")
         print("=" * 72)
-        for fn in (
-            test_roundtrip_and_verbatim, test_crash_recovery, test_hour_rolling,
-            test_manifest_integrity, test_event_time_range_resolution, test_gap_recording,
-            test_dotenv_loading,
-            # --- regressions for the five blocking findings on PR #1 ---
-            test_idle_flush_cadence, test_verify_sees_orphans_and_open_files,
-            test_join_reply_is_read, test_clean_close_records_gap_and_backs_off,
-            test_restart_records_downtime_gap,
-            # --- regressions for the SECOND validator review (V1..V6) ---
-            test_verify_detects_decoder_truncation,
-            test_control_frames_do_not_inflate_event_count,
-            test_gap_is_filed_under_every_day_it_spans,
-            test_concurrent_manifest_writes_lose_nothing,
-            test_rejection_gap_is_not_reopened_every_reconnect,
-            test_flusher_thread_runs_on_a_real_clock,
-            # --- regressions for the TECH LEAD gate ---
-            test_gap_spans_every_day_through_the_consumer_path,
-            test_rest_budget_config_is_actually_read,
-            test_no_superseded_rate_limit_in_operator_text,
-            test_single_instance_degrades_on_unsupported_filesystem,
-            # --- the full hardening pass: the five remaining open bugs ---
-            test_gaps_are_labelled_by_what_can_actually_be_recovered,
-            test_missing_event_timestamp_is_counted,
-            test_disk_failure_is_not_blamed_on_the_stream,
-            # --- tech-lead round 3 ---
-            test_governor_adapts_capacity_from_server,
-            test_backfill_worklist_is_not_vacuous,
-            test_secrets_gate_knows_what_a_key_looks_like,
-            test_cert_failure_names_the_fix_once,
-        ):
-            print(f"\n--- {fn.__name__} ---")
-            fn(tmp)
-        for fn0 in (test_governor_budget, test_governor_priority, test_stream_parsing,
-                    test_irrecoverable_classification, test_phoenix_v2_arrays,
-                    test_codec_multiframe_contract, test_governor_recovers_from_a_429,
-                    test_dead_priority_queue_is_gone,
-                    test_truthful_zero_remaining_is_not_discarded, test_error_hierarchy):
-            print(f"\n--- {fn0.__name__} ---")
-            fn0()
+        g = globals()
+        tests = [(name, fn) for name, fn in g.items()
+                 if name.startswith("test_") and callable(fn)]
+        tests.sort(key=lambda nf: inspect.getsourcelines(nf[1])[1])
+        for name, fn in tests:
+            print(f"\n--- {name} ---")
+            if inspect.signature(fn).parameters:
+                fn(tmp)
+            else:
+                fn()
         print("\n" + "=" * 72)
-        print(f"{len(PASS)} passed, {len(FAIL)} failed")
+        print(f"{len(tests)} test functions, {len(PASS)} passed, {len(FAIL)} failed")
         if FAIL:
             print("\nFAILURES:")
             for f in FAIL:
