@@ -1424,6 +1424,88 @@ def test_backfill_worklist_is_not_vacuous(tmp: Path) -> None:
           len(store.unbackfilled_gaps()) == 1)
 
 
+def test_startup_gate_refuses_a_lying_codec() -> None:
+    """BUG-032. The gate is what stands between a bad binding and lost data.
+
+    CI's first run against real zstandard turned the gate red for the wrong
+    reason: its "find the last frame" heuristic assumed the writer emits no
+    epilogue frame on close(), which gzip's does not and zstd's does. The
+    cut damaged an empty frame, all five content frames survived, and the gate
+    -- correctly by its own rule -- refused. A gate whose expectation is wrong
+    is worse than no gate, so this proves the rewritten gate on two things:
+    that it PASSES honest codecs, and that it FAILS each of the three ways a
+    codec can lie, using deliberately broken wrappers.
+    """
+    from navanax.codec import GzipCodec, verify_codec_roundtrip
+
+    class FirstFrameOnly(GzipCodec):
+        """BUG-010's shape: a healthy multi-frame file reads back as frame 0."""
+        name = "gzip-firstframe"
+
+        def decompress(self, data):
+            return super().decompress_truncated(data[: data.find(b"\x1f\x8b\x08", 1)])
+
+    class RecoversOnlyFrameZero(GzipCodec):
+        """The crash-recovery failure: truncation loses everything but frame 0."""
+        name = "gzip-recover0"
+
+        def decompress_truncated(self, data):
+            full = super().decompress_truncated(data)
+            return full[: full.find(b"\n") + 1]
+
+    class ReturnsPrefixOnDamage(GzipCodec):
+        """V5 / BUG-024: strict mode hands back a partial result instead of raising."""
+        name = "gzip-lenient"
+
+        def decompress(self, data):
+            try:
+                return super().decompress(data)
+            except Exception:  # noqa: BLE001 - the lie under test
+                return super().decompress_truncated(data)
+
+    class EpilogueWriter(GzipCodec):
+        """A writer that, like real zstd, appends an empty frame on close()."""
+        name = "gzip-epilogue"
+
+        def writer(self, fh):
+            inner = super().writer(fh)
+
+            class W:
+                def write(self, d): inner.write(d)
+                def flush_frame(self): inner.flush_frame()
+                def close(self):
+                    inner.close()
+                    inner.write(b"")
+                    import gzip as _g
+                    import io as _io
+                    m = _io.BytesIO()
+                    with _g.GzipFile(fileobj=m, mode="wb", mtime=0):
+                        pass
+                    fh.write(m.getvalue())
+            return W()
+
+    def outcome(codec):
+        try:
+            verify_codec_roundtrip(codec, frames=5)
+            return "PASS"
+        except RuntimeError as exc:
+            return str(exc)
+
+    check("gate: passes an honest codec", outcome(GzipCodec()) == "PASS")
+    check("gate: passes a writer that appends an empty epilogue frame (the CI failure)",
+          outcome(EpilogueWriter()) == "PASS",
+          "the first gate cut into the epilogue, damaged nothing, and refused")
+    r = outcome(FirstFrameOnly())
+    check("gate: REFUSES a codec that reads back only the first frame",
+          "multi-frame round-trip" in r, r[:120])
+    r = outcome(RecoversOnlyFrameZero())
+    check("gate: REFUSES a codec whose recovery keeps only frame 0",
+          "recovered" in r and "not a pass" in r, r[:120])
+    r = outcome(ReturnsPrefixOnDamage())
+    check("gate: REFUSES a codec that returns a prefix instead of raising",
+          "did NOT raise" in r, r[:120])
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError,

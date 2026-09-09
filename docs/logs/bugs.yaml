@@ -1056,3 +1056,58 @@ bugs:
   regression_test: tests/selftest.py::test_backfill_worklist_is_not_vacuous
   monitor_gap: "No test asserted what `navanax status` shows after a real reconnect gap."
   pr: 1
+
+- id: BUG-20260909-032
+  summary: First real-zstandard CI run turned the codec gate red -- the gate's "last frame" heuristic assumed gzip's writer behaviour, and the frame walk still guessed boundaries by magic scanning
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T12:10:00-05:00"
+  occurred_at: "2026-09-09T09:05:00-05:00"
+  resolved_at: "2026-09-09T12:40:00-05:00"
+  detected_by: "GitHub Actions CI on the tester branch -- the first time the production codec was ever executed by anything"
+  detection_channel: ci
+  branch: tester
+  locations:
+  - {file: src/navanax/codec.py, line: 150}
+  - {file: src/navanax/codec.py, line: 168}
+  - {file: src/navanax/codec.py, line: 300}
+  requirement: REQ-D-26a
+  data_impact: >-
+    None to data -- the gate refused, which is the safe direction. But it
+    refused for the WRONG reason: the truncation test found "the last frame"
+    by scanning for the last zstd magic, and real zstandard's close() appends
+    an EMPTY epilogue frame after the last FLUSH_FRAME, which gzip's writer
+    does not. The cut landed in the epilogue, all five content frames
+    survived (40 bytes where 32 were expected), and the gate said no. A gate
+    whose expectation is wrong is a gate nobody trusts. Meanwhile the walk
+    itself still located frames by magic-byte scanning, the residual hazard
+    BUG-024 could only exclude with a startup check rather than remove.
+  root_cause: >-
+    Two assumptions inherited from the stand-in codec. (1) The gate's cut
+    heuristic was written against gzip, whose writer emits nothing on close,
+    and was never run against the real binding -- the sandbox cannot install
+    it. (2) Frame boundaries were guessed from magic bytes and validated by
+    trial, because it was not known that zstandard.decompressobj() exposes
+    `eof` and `unused_data` exactly as zlib.decompressobj does. Same family
+    as BUG-002: the fixture inherited the author's assumption.
+  resolution: >-
+    Three changes. The zstd writer no longer closes the compressor when no
+    frame is open, so no empty epilogue frame is written. The frame walk now
+    uses decompressobj(): a frame ends where the decoder says it ends
+    (`unused_data`), and a frame is complete only if the decoder says it is
+    (`eof`) -- truncation detection is ours, not the binding's, and the
+    false-magic hazard is gone structurally rather than checked for. The gate
+    records the last content frame's byte range BEFORE close() and cuts inside
+    it two ways (tail and header), and a new test proves the gate refuses
+    three deliberately lying codecs while passing an honest one that appends
+    an epilogue. tools/zstd_probe.py runs first in CI and prints what the
+    binding actually does, so a red X arrives with its reason.
+  regression_test: tests/selftest.py::test_startup_gate_refuses_a_lying_codec
+  monitor_gap: >-
+    The production codec had never been executed by anything until CI ran it.
+    Every local assertion about zstd behaviour was reasoning, and two of them
+    were wrong. Nothing short of running the real binding could have caught
+    this, which is what CI is for -- and why the probe step now exists.
+  pr: 2

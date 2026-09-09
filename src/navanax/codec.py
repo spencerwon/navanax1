@@ -22,7 +22,7 @@ from __future__ import annotations
 import gzip
 import io
 import zlib
-from typing import Any, BinaryIO, Protocol
+from typing import BinaryIO, Protocol
 
 
 class FrameWriter(Protocol):
@@ -133,62 +133,62 @@ class _ZstdFrameWriter:
         self._cctx = zstandard.ZstdCompressor(level=level)
         self._w = self._cctx.stream_writer(fh, closefd=False)
 
+        self._pending = 0
+
     def write(self, data: bytes) -> None:
         self._w.write(data)
+        self._pending += len(data)
 
     def flush_frame(self) -> None:
         # FLUSH_FRAME ends the current frame; the next write starts a new one.
         # This is the recovery point REQ-D-26a requires.
-        self._w.flush(self._zstd.FLUSH_FRAME)
+        if self._pending:
+            self._w.flush(self._zstd.FLUSH_FRAME)
+            self._pending = 0
         self._fh.flush()
 
     def close(self) -> None:
-        self._w.close()
+        # BUG-20260909-032. `ZstdCompressionWriter.close()` ends the stream by
+        # emitting a frame -- even when nothing has been written since the last
+        # FLUSH_FRAME, which for this writer is always. The result was an EMPTY
+        # epilogue frame at the end of every landing-zone file. Harmless to
+        # read, but it is a frame that carries no data, and the startup gate's
+        # "find the last frame" heuristic landed on it instead of on the last
+        # frame that held anything. Only close the compressor if a frame is
+        # actually open; otherwise there is nothing to end.
+        if self._pending:
+            self._w.close()
+        self._pending = 0
         self._fh.flush()
 
 
-ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-
-
-def _zstd_one_frame(dctx: Any, blob: bytes) -> bytes:
-    """Decompress exactly one zstd frame from the front of `blob`.
-
-    Uses stream_reader with its DEFAULT frame behaviour, which is the one thing
-    that is stable across every python-zstandard version. Whether that default
-    is "stop at the first frame" (<0.23) or "read across frames" (>=0.23) does
-    not matter here, because `blob` is sliced to a single frame by the caller.
-    """
-    out = bytearray()
-    with dctx.stream_reader(io.BytesIO(blob)) as r:
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            out.extend(chunk)
-    return bytes(out)
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"   # kept for tooling; the walk no longer depends on it
 
 
 def _zstd_walk(data: bytes, *, strict: bool) -> bytes:
     """Decompress a concatenation of zstd frames, one frame at a time.
 
-    BUG-20260909-010. `ZstdDecompressor.stream_reader` gained a
-    `read_across_frames` parameter whose DEFAULT CHANGED in python-zstandard
-    0.23.0: before that release a multi-frame file silently decompressed to its
-    first frame only. Every landing-zone file we write is multi-frame by
-    design (REQ-D-26a), so on an older binding `decompress` would have returned
-    the first ~5 seconds of a 64 MB file and reported success. Nothing in the
-    system would have noticed: the manifest checksum is over the COMPRESSED
-    bytes and would still have matched.
+    BUG-20260909-010: `stream_reader`'s `read_across_frames` default changed
+    between python-zstandard releases, so a multi-frame file could silently
+    read back as its first frame. This walk never relies on that flag.
 
-    Rather than depend on a version whose behaviour we cannot check at import
-    time, this walks the frames explicitly. Frame boundaries are found by the
-    4-byte magic; a magic sequence occurring by chance inside compressed data
-    is handled by validation, not by trust -- a slice that does not decompress
-    cleanly is extended to the next candidate boundary before being believed.
+    BUG-20260909-024 / -032: the first version of this walk found frame
+    boundaries by SCANNING for the 4-byte magic and validating candidates,
+    which left a residual hazard -- a chance magic inside compressed data plus
+    a binding that returns partial output instead of raising -- that could
+    only be excluded by a startup check. This version has no such hazard,
+    because it does not guess where frames end: `decompressobj()` reports it.
+    After a frame is fully decoded `obj.eof` is True and `obj.unused_data` is
+    every byte after it. That is the same contract `zlib.decompressobj`
+    provides, and the gzip walk in this module has used it from the start.
 
-    `strict=True` raises on a damaged or truncated trailing frame (the normal
-    read path). `strict=False` stops there and returns everything recovered so
-    far, which is the crash-recovery path REQ-D-26a exists to provide.
+    Truncation detection is therefore OURS, not the binding's: a frame whose
+    input ran out before `eof` is incomplete, whether or not the library
+    chooses to raise about it.
+
+    `strict=True` raises on a damaged or incomplete frame (the normal read
+    path). `strict=False` stops there and returns everything recovered so far,
+    which is the crash-recovery path REQ-D-26a exists to provide.
     """
     import zstandard
 
@@ -198,37 +198,33 @@ def _zstd_walk(data: bytes, *, strict: bool) -> bytes:
     n = len(data)
 
     while pos < n:
-        # Candidate ends: every later frame magic, then end-of-file.
-        ends: list[int] = []
-        probe = pos + 4
-        while len(ends) < 64:
-            nxt = data.find(ZSTD_MAGIC, probe)
-            if nxt == -1:
-                break
-            ends.append(nxt)
-            probe = nxt + 4
-        ends.append(n)
-
-        frame: bytes | None = None
-        consumed = 0
-        last_exc: Exception | None = None
-        for end in ends:
-            try:
-                frame = _zstd_one_frame(dctx, data[pos:end])
-            except Exception as exc:  # noqa: BLE001 - any binding raises its own type
-                last_exc = exc
-                continue
-            consumed = end - pos
-            break
-
-        if frame is None:
+        obj = dctx.decompressobj()
+        if not (hasattr(obj, "eof") and hasattr(obj, "unused_data")):
+            raise RuntimeError(
+                "this python-zstandard build's decompressobj() does not expose "
+                "`eof` and `unused_data`, which the landing-zone reader needs to "
+                "find frame boundaries without guessing. Upgrade: "
+                "pip install -U 'zstandard>=0.23.0'"
+            )
+        try:
+            chunk = obj.decompress(data[pos:])
+        except zstandard.ZstdError as exc:
             if strict:
                 raise ValueError(
-                    f"zstd frame at byte {pos} does not decompress "
-                    f"({type(last_exc).__name__}: {last_exc})"
+                    f"zstd frame at byte {pos} is damaged: {exc}"
+                ) from exc
+            break
+        if not obj.eof:
+            # Input ended mid-frame. This is exactly what a process killed
+            # mid-write leaves behind, and exactly what strict mode must refuse.
+            if strict:
+                raise ValueError(
+                    f"zstd frame at byte {pos} is incomplete: input ended before "
+                    f"the frame did (file truncated)"
                 )
-            break  # truncated trailing frame -- recovery path, keep what we have
-        out.extend(frame)
+            break
+        out.extend(chunk)
+        consumed = (n - pos) - len(obj.unused_data)
         if consumed <= 0:
             break
         pos += consumed
@@ -308,7 +304,7 @@ def verify_codec_roundtrip(codec: Codec, *, frames: int = 3) -> None:
     A 200-microsecond check at startup answers the question for the machine
     that is about to record data it cannot re-fetch.
 
-    Asserts four things:
+    Asserts, for every codec:
       1. A file of `frames` closed frames reads back COMPLETE. (A binding that
          stops at frame one returns 1/frames of the file and raises nothing.)
       2. That same file with its trailing frame chopped still yields every
@@ -330,12 +326,20 @@ def verify_codec_roundtrip(codec: Codec, *, frames: int = 3) -> None:
     buf = io.BytesIO()
     w = codec.writer(buf)
     lines = [f"frame-{i}\n".encode() for i in range(frames)]
-    for line in lines:
+    for i, line in enumerate(lines):
+        if i == frames - 1:
+            last_frame_start = len(buf.getvalue())
         w.write(line)
         w.flush_frame()
+    # Recorded BEFORE close(): a binding may append an epilogue frame on close,
+    # and a cut that lands in an epilogue damages nothing (BUG-20260909-032 --
+    # the first version of this gate found "the last frame" by scanning for
+    # the magic and hit exactly that).
+    last_frame_end = len(buf.getvalue())
     w.close()
     blob = buf.getvalue()
     expected = b"".join(lines)
+    complete = b"".join(lines[: frames - 1])
 
     got = codec.decompress(blob)
     if got != expected:
@@ -348,53 +352,42 @@ def verify_codec_roundtrip(codec: Codec, *, frames: int = 3) -> None:
             f"Do not ingest with this codec. For zstd, upgrade: pip install -U zstandard"
         )
 
-    # Chop mid-final-frame. Every COMPLETE frame before the cut must survive,
-    # and all of them -- recovering only frame 0 is the failure mode, not a pass.
-    cut = _last_frame_start(codec, blob)
-    damaged = blob[:cut] + blob[cut : cut + max(1, (len(blob) - cut) // 2)]
-    complete = b"".join(lines[: frames - 1])
-    recovered = codec.decompress_truncated(damaged)
-    if recovered != complete:
-        raise RuntimeError(
-            f"codec {codec.name!r} recovered {len(recovered)} bytes from a truncated "
-            f"file; the {frames - 1} complete frames before the cut hold "
-            f"{len(complete)}. REQ-D-26a's crash-safety guarantee does not hold "
-            f"with this codec on this machine. Recovering only the first frame is "
-            f"the BUG-20260909-010 failure mode, not a pass."
-        )
-
-    # (3) A damaged frame must RAISE in strict mode, not return a prefix.
-    try:
-        got = codec.decompress(damaged)
-        raised = False
-    except Exception:  # noqa: BLE001 - any binding raises its own type
-        raised = True
-        got = b""
-    if not raised:
-        raise RuntimeError(
-            f"codec {codec.name!r} did NOT raise on a truncated file -- it returned "
-            f"{len(got)} of {len(expected)} bytes and reported success.\n"
-            f"  This binding cannot be used to record data that cannot be re-fetched.\n"
-            f"  The frame walk finds boundaries by the 4-byte zstd magic, which "
-            f"occurs by chance inside compressed data roughly once per 64 MB of "
-            f"output. With a binding that returns partial results instead of "
-            f"raising, that false boundary silently truncates the file and the "
-            f"checksum -- taken over compressed bytes -- still matches.\n"
-            f"  For zstd: pip install -U zstandard  (>=0.23.0)"
-        )
-
-
-def _last_frame_start(codec: Codec, blob: bytes) -> int:
-    """Byte offset where the final frame begins, for the truncation test."""
-    if codec.name == "zstd":
-        cut = blob.rfind(ZSTD_MAGIC)
-    elif codec.name == "gzip":
-        cut = blob.rfind(b"\x1f\x8b\x08")
-    else:
-        cut = blob.rfind(b"\n", 0, len(blob) - 1) + 1
-    if cut <= 0 or cut >= len(blob):
-        cut = int(len(blob) * 0.9)
-    return cut
+    # Two truncations of the last CONTENT frame, both of which a kill can
+    # produce: (a) the frame's last three bytes missing -- inside its data or
+    # trailer, the case where a lazy decoder might hand back a partial result
+    # and call it done; (b) only the first six bytes present -- a kill during
+    # the header. Every complete frame before the cut must be recovered, ALL of
+    # them, and strict mode must refuse the file outright.
+    cuts = {
+        "tail": blob[: last_frame_end - 3],
+        "head": blob[: last_frame_start + min(6, last_frame_end - last_frame_start - 1)],
+    }
+    for label, damaged in cuts.items():
+        recovered = codec.decompress_truncated(damaged)
+        if recovered != complete:
+            raise RuntimeError(
+                f"codec {codec.name!r} recovered {len(recovered)} bytes from a file "
+                f"truncated at its {label}; the {frames - 1} complete frames before "
+                f"the cut hold {len(complete)}. REQ-D-26a's crash-safety guarantee "
+                f"does not hold with this codec on this machine. Recovering only the "
+                f"first frame -- or a partial last one -- is the BUG-20260909-010 "
+                f"failure mode, not a pass."
+            )
+        try:
+            got = codec.decompress(damaged)
+            raised = False
+        except Exception:  # noqa: BLE001 - any binding raises its own type
+            raised = True
+            got = b""
+        if not raised:
+            raise RuntimeError(
+                f"codec {codec.name!r} did NOT raise on a file truncated at its "
+                f"{label} -- it returned {len(got)} of {len(expected)} bytes and "
+                f"reported success.\n"
+                f"  A reader that turns 'this file is damaged' into 'this file is "
+                f"short' cannot be used to record data that cannot be re-fetched.\n"
+                f"  For zstd: pip install -U 'zstandard>=0.23.0'"
+            )
 
 
 def get_codec(name: str, level: int | None = None) -> Codec:

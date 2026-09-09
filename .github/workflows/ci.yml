@@ -22,6 +22,11 @@ jobs:
       # BUG-20260909-010: the production codec had ZERO test coverage because
       # the sandbox the code was written in cannot install zstandard. CI can,
       # so CI is where the multi-frame contract is actually proven.
+      # Facts first, verdict second: if the gate below goes red, this step
+      # says WHY in terms of what the binding actually does (BUG-20260909-032).
+      - name: What does this zstandard build actually do?
+        run: python3 tools/zstd_probe.py
+
       - name: Codec multi-frame contract (real zstandard)
         run: |
           python3 - <<'PY'

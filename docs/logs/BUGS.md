@@ -321,6 +321,21 @@ block *expiry* do the same thing — and the pre-existing assertion *"server
 header caps local optimism"* failed the moment it was written. The old suite
 caught the new fix's flaw.
 
+### Round 5 — CI runs the real compressor for the first time
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-032 | S1 | P0 | fixed | First real-zstandard CI run turned the codec gate red — the gate's "last frame" heuristic assumed gzip's writer behaviour, and the frame walk still guessed boundaries by magic scanning |
+
+**The first time the production codec was executed by anything.** Neither
+development environment can install `zstandard`, so every assertion about it
+had been reasoning. Two of those assertions were wrong: real zstd appends an
+empty frame on `close()` (gzip does not), and `decompressobj()` reports frame
+boundaries directly — no magic scanning needed. The gate refused in the safe
+direction, but for the wrong reason. Fixed at the root: the walk now trusts
+the decoder's `eof`/`unused_data`, exactly as the gzip path always has, and
+the gate has its own regression test proving it refuses three lying codecs.
+
 ### Still open
 
 **None.** All 28 logged bugs are fixed.
