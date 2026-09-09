@@ -1,0 +1,28 @@
+# Chart intervals and anchored ranges (REQ-N-09).
+# Canonical source: docs/06_TIME_UNITS_AND_LAYERING.md §1.2 -- keep in sync.
+# `intervals` are BUCKET SIZES; `anchored_ranges` are WINDOW BOUNDS.
+# Conflating the two is a common source of off-by-one chart bugs.
+
+intervals:
+  # fixed-duration buckets
+  - {id: 1m,   label: "1 min",   duration: 60}
+  - {id: 5m,   label: "5 min",   duration: 300}
+  - {id: 15m,  label: "15 min",  duration: 900}
+  - {id: 1h,   label: "1 hour",  duration: 3600}
+  - {id: 3h,   label: "3 hour",  duration: 10800}
+  - {id: 6h,   label: "6 hour",  duration: 21600}
+  - {id: 1d,   label: "1 day",   duration: 86400}
+  - {id: 2d,   label: "2 day",   duration: 172800}
+  - {id: 1w,   label: "1 week",  duration: 604800}
+  - {id: 1mo,  label: "1 month", calendar: month,  n: 1}
+  - {id: 2mo,  label: "2 month", calendar: month,  n: 2}
+  - {id: 3mo,  label: "3 month", calendar: month,  n: 3}
+  - {id: 6mo,  label: "6 month", calendar: month,  n: 6}
+  - {id: 1y,   label: "1 year",  calendar: year,   n: 1}
+  - {id: 2y,   label: "2 year",  calendar: year,   n: 2}
+
+anchored_ranges:            # "to date" — a range, not a bucket size
+  - {id: HTD, label: "Hour to date",  anchor: hour}
+  - {id: DTD, label: "Day to date",   anchor: day}
+  - {id: MTD, label: "Month to date", anchor: month}
+  - {id: YTD, label: "Year to date",  anchor: year}

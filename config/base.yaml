@@ -1,0 +1,50 @@
+# Base configuration. Per-environment files override these.
+# REQ-N-09: no threshold, weight, interval or assumption lives in code.
+# REQ-N-10: every change here is logged with timestamp and rationale.
+
+version: 1
+environment: local
+
+opensea:
+  stream_url: "wss://stream.openseabeta.com/socket/websocket"
+  rest_base: "https://api.opensea.io/api/v2"
+  heartbeat_seconds: 30
+  max_backoff_seconds: 60
+
+rest_budget:
+  # Free tier: 600 reads/hr, 30 writes/hr, 5 fulfillments/min.
+  # Token bucket, shared across every key on the account.
+  capacity: 600
+  per_seconds: 3600
+  # Floors keep low-priority work from consuming the last of the budget, so an
+  # INTERACTIVE request arriving later still finds something left.
+  reserve:
+    INTERACTIVE: 0
+    SIGNAL: 20
+    BACKFILL: 60
+    MAINTENANCE: 120
+
+landing:
+  root: "data/landing"
+  codec: zstd            # gzip is a deliberate fallback, never a silent one
+  codec_level: 9
+  roll_bytes: 67108864   # 64 MiB uncompressed
+  # REQ-D-26a: frame flush cadence. This is what makes the crash-safety
+  # property real rather than decorative -- it bounds loss to seconds.
+  flush_seconds: 5
+  flush_events: 1000
+
+opstore:
+  path: "data/ops.db"
+
+analytical:
+  path: "data/navanax.duckdb"
+
+reconciliation:
+  # REQ-D-10 + 07 §3.3: rotate, do not sweep. Checking every collection hourly
+  # would cost a third of the budget permanently; daily rotation costs ~1.4%.
+  rotation_hours: 24
+  drift_alert_threshold_pct: 2.0
+
+display:
+  timezone: "America/Chicago"   # storage is always UTC; this is display only

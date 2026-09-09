@@ -1,0 +1,53 @@
+name: CI
+on:
+  push: {branches: [main]}
+  pull_request: {branches: [main]}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      # Runs with no third-party deps at all -- it is the floor of correctness
+      # and must pass before anything else is attempted.
+      - name: Self-test (stdlib only)
+        run: python3 tests/selftest.py
+
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src tests
+      - name: Tests
+        run: pytest -q
+
+      # REQ-N-11 / REQ-N-14: standing checks, not one-time reviews.
+      - name: No credentials in repo
+        run: |
+          if grep -rInE '(OPENSEA_API_KEY|PRIVATE_KEY|SEED_PHRASE|MNEMONIC)[[:space:]]*=[[:space:]]*[A-Za-z0-9]' \
+             --include='*.py' --include='*.yaml' --include='*.yml' --include='*.toml' \
+             --exclude='.env.example' . ; then
+            echo "::error::credential-shaped assignment found in tracked files (REQ-N-11)"; exit 1
+          fi
+      - name: No transaction-signing capability
+        run: |
+          if grep -rInE '\b(eth_sendRawTransaction|signTransaction|sign_transaction|from_mnemonic|Account\.from_key)\b' \
+             --include='*.py' src/ ; then
+            echo "::error::transaction-signing capability present (REQ-N-14)"; exit 1
+          fi
+      - name: DataIntegrityError is never swallowed
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          bad = []
+          for p in pathlib.Path("src").rglob("*.py"):
+              src = p.read_text()
+              for m in re.finditer(r"except\s+DataIntegrityError[^\n]*:\n((?:\s+.*\n)+?)(?=\S|\Z)", src):
+                  if "raise" not in m.group(1):
+                      bad.append(f"{p}:{src[:m.start()].count(chr(10))+1}")
+          if bad:
+              print("::error::DataIntegrityError caught without re-raise (S1):", *bad, sep="\n  "); sys.exit(1)
+          print("ok")
+          PY

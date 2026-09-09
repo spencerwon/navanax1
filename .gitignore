@@ -1,0 +1,29 @@
+# Secrets -- REQ-N-11. CI runs a secret scan; a hit fails the build.
+.env
+.env.*
+!.env.example
+*.key
+
+# Data -- the landing zone is irreplaceable but it is NOT source code.
+# Back it up separately; never commit it.
+data/
+*.duckdb
+*.db
+*.jsonl.zst
+*.jsonl.gz
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.DS_Store
+
+# preflight output -- report is safe, but sample frames are real market data
+tools/preflight_report.json
+tools/sample_frames.jsonl
