@@ -271,6 +271,54 @@ def cmd_normalize(args) -> int:
     return 0
 
 
+def cmd_traits(args) -> int:
+    """Onboard a collection's tokens and traits (REQ-F-01 / REQ-F-07a). Resumable."""
+    from .governor import governor_from_config
+    from .opstore import OperationalStore
+    from .rest import RestClient
+    from .traits import TraitsJob, open_store
+    root = Path(args.root)
+    cfg, slugs = _config(root)
+    slug = args.slug or (slugs[0] if slugs else None)
+    if not slug:
+        print("no collection on the watchlist", file=sys.stderr)
+        return 2
+    try:
+        key = require("OPENSEA_API_KEY", path=root / ".env")
+    except DotenvError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    tcfg = cfg.get("traits") or {}
+    store = OperationalStore(root / cfg["opstore"]["path"])
+    gov = governor_from_config(cfg)
+    rest = RestClient(key, gov, run_id="traits", ledger=store.log_rest)
+    conn = open_store(root / cfg["analytical"]["path"])
+    job = TraitsJob(conn, rest, store, slug=slug,
+                    ipfs_gateway=tcfg.get("ipfs_gateway", "https://ipfs.io/ipfs/"),
+                    concurrency=int(tcfg.get("concurrency", 6)),
+                    timeout=float(tcfg.get("timeout_seconds", 20)),
+                    opensea_fallback_budget=int(tcfg.get("opensea_fallback_budget", 50)))
+    print(f"collection   {slug}")
+    print(f"budget       {gov.bucket.state.capacity:.0f} reads/hr; the token list costs ~1 read per 200 tokens")
+    print("metadata     fetched directly from each token's metadata_url (not metered by OpenSea)")
+    print()
+
+    async def run() -> None:
+        r1 = await job.list_tokens()
+        print("token list  ", json.dumps(r1))
+        r2 = await job.fetch_traits(limit=args.limit)
+        print("traits      ", json.dumps(r2))
+        print("summary     ", json.dumps(job.summary()))
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        print("\nstopped; progress is saved -- run again to resume")
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_dashboard(args) -> int:
     from .dashboard import serve
     root = Path(args.root)
@@ -302,6 +350,10 @@ def main(argv=None) -> int:
                         "(fast, but cannot detect a short decode)")
     v.set_defaults(fn=cmd_verify)
     sub.add_parser("normalize").set_defaults(fn=cmd_normalize)
+    t = sub.add_parser("traits")
+    t.add_argument("--slug", default=None)
+    t.add_argument("--limit", type=int, default=None, help="fetch traits for at most N tokens this run")
+    t.set_defaults(fn=cmd_traits)
     d = sub.add_parser("dashboard")
     d.add_argument("--port", type=int, default=None)
     d.add_argument("--no-browser", action="store_true")

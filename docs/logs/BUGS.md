@@ -397,9 +397,24 @@ taught and that is now how a parser gets accepted. First real numbers from
 the same run: bids on Argonauts stand for a **median of 9 seconds** (p10 3.2 s,
 p90 234 s, n = 38,286).
 
+### Round 10 — the first time a human looked at the page
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-041 | S3 | P1 | fixed | Native `<select>` painted white with light text on macOS — `color-scheme: dark` was never declared |
+| BUG-20260909-042 | S3 | P1 | fixed | Every on-screen time was UTC; docs/06 sets America/Chicago and the page never read it |
+| BUG-20260909-043 | S4 | P1 | fixed | Hover cards illegible (light on light); USD rounded to whole dollars |
+
+All three were found by Spencer in his first minute with the page, none by
+an agent — the page was built and tested in a Linux container and never
+rendered in the browser it was for. The fix beyond the code: a **design-lead**
+role that owns the look, screenshots the page on the target machine before
+handover, and asks the operator design questions (colour, units, hover,
+chart style) as their own thread rather than defaulting them.
+
 ### Still open
 
-**None.** All 28 logged bugs are fixed.
+**None.** All 43 logged bugs are fixed.
 
 ### The lesson
 

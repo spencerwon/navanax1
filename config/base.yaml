@@ -56,6 +56,17 @@ analytical:
   # Every query is plain SQL DuckDB also accepts; the swap is this one line.
   path: "data/analytics.sqlite"
 
+traits:
+  # Token metadata is fetched from each token's own metadata_url -- not from
+  # OpenSea, so it costs no REST budget. ipfs:// URLs go through this gateway.
+  ipfs_gateway: "https://ipfs.io/ipfs/"
+  concurrency: 6
+  timeout_seconds: 20
+  # When a token's metadata cannot be fetched, OpenSea's per-token endpoint is
+  # tried instead -- but at most this many times per run, because that one IS
+  # metered and 9,212 of them would be 77 hours of budget.
+  opensea_fallback_budget: 50
+
 dashboard:
   host: "127.0.0.1"      # REQ-N-13: loopback only. The server REFUSES anything else.
   port: 8765

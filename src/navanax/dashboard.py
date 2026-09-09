@@ -33,9 +33,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .landing import is_integrity_failure, verify_manifest
-from .metrics import METRICS, MetricEngine, load_intervals, parse_range
+from .metrics import METRICS, MetricEngine, load_intervals, parse_range, parse_trait_filter
 from .normalize import Normalizer
 from .opstore import OperationalStore
+from .traits import ensure_schema as ensure_traits_schema
+from .traits import trait_values
 
 log = logging.getLogger("navanax.dashboard")
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -50,6 +52,7 @@ class Dashboard:
         self.tz = (cfg.get("display") or {}).get("timezone", "UTC")
         self.intervals = load_intervals(root / "config" / "intervals.yaml")
         self.norm = Normalizer(self.landing, root / cfg["analytical"]["path"])
+        ensure_traits_schema(self.norm.conn)
         self.engine = MetricEngine(self.norm.conn, self.intervals, self.tz)
         self.store = OperationalStore(root / cfg["opstore"]["path"])
         self.lock = threading.Lock()
@@ -126,7 +129,8 @@ class Dashboard:
                 denomination=q.get("denom", "ETH"),
                 transform=q.get("transform", "ABS"),
                 interval=q.get("interval", "5m"),
-                range_=q.get("range", "6h"))
+                range_=q.get("range", "6h"),
+                traits=parse_trait_filter(q.get("traits")))
 
     def api_multi(self, q: dict[str, str]) -> dict[str, Any]:
         """Several metrics on one time base, for the overlay chart (REQ-F-09)."""
@@ -145,11 +149,13 @@ class Dashboard:
 
     def api_book(self, q: dict[str, str]) -> dict[str, Any]:
         with self.lock:
-            return self.engine.live_book(q.get("collection", self.slugs[0]), limit=int(q.get("limit", "25")))
+            return self.engine.live_book(q.get("collection", self.slugs[0]), limit=int(q.get("limit", "25")),
+                                         traits=parse_trait_filter(q.get("traits")))
 
     def api_tape(self, q: dict[str, str]) -> list[dict[str, Any]]:
         with self.lock:
-            return self.engine.tape(q.get("collection", self.slugs[0]), limit=int(q.get("limit", "50")))
+            return self.engine.tape(q.get("collection", self.slugs[0]), limit=int(q.get("limit", "50")),
+                                    traits=parse_trait_filter(q.get("traits")))
 
     def api_makers(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
@@ -165,6 +171,24 @@ class Dashboard:
         s, e = self._window(q)
         with self.lock:
             return self.engine.event_mix(q.get("collection"), s, e)
+
+    def api_traits(self, q: dict[str, str]) -> dict[str, Any]:
+        slug = q.get("collection", self.slugs[0])
+        with self.lock:
+            vals = trait_values(self.norm.conn, slug)
+            n_tokens = self.norm.conn.execute("SELECT COUNT(*) FROM tokens WHERE collection=?", (slug,)).fetchone()[0]
+            n_traited = self.norm.conn.execute("SELECT COUNT(DISTINCT token_id) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
+        onboarding = next((r for r in self.store.onboarding_status() if r["collection_slug"] == slug), None)
+        return {"collection": slug, "tokens": n_tokens, "with_traits": n_traited,
+                "onboarding": onboarding, "traits": vals}
+
+    def api_screener(self, q: dict[str, str]) -> dict[str, Any]:
+        with self.lock:
+            return self.engine.screener(
+                q.get("collection", self.slugs[0]), traits=parse_trait_filter(q.get("traits")),
+                sort=q.get("sort", "token_id"), direction=q.get("dir", "asc"),
+                page=int(q.get("page", "0")), page_size=min(200, int(q.get("size", "50"))),
+                denom=q.get("denom", "ETH"))
 
     def api_gaps(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -225,6 +249,8 @@ def make_handler(dash: Dashboard):
         "/api/lifetimes": dash.api_lifetimes,
         "/api/mix": dash.api_mix,
         "/api/gaps": lambda q: dash.api_gaps(),
+        "/api/traits": dash.api_traits,
+        "/api/screener": dash.api_screener,
         "/api/audit": lambda q: dash.api_audit(),
     }
 

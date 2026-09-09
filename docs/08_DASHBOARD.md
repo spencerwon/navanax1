@@ -72,15 +72,43 @@ Non-series views: the **live book** (orders placed, not since cancelled/invalida
 
 `wash_filter` is always `raw` and the response says so: no wash-trade filter exists yet, and the page must not imply one.
 
+## 4a. Traits and the screener (`rest.py`, `traits.py`, `metrics.screener`)
+
+**Loading traits costs REST reads; the design spends as few as possible.** OpenSea's per-token endpoint would cost one read per token — 9,212 reads for Argonauts, three days of the measured 120/hour budget. Instead:
+
+1. **Token list** — `GET /collection/{slug}/nfts?limit=200`, about 47 governed reads, resumable from the saved cursor if interrupted (`ops.db` → `onboarding.last_cursor`). Records each token's `metadata_url`.
+2. **Traits** — fetched **directly from each token's `metadata_url`** (IPFS through the configured gateway, Arweave, or HTTP). These are not OpenSea calls and are not metered. Six at a time (`traits.concurrency`).
+3. **Fallback** — for tokens whose metadata cannot be read, the OpenSea per-token endpoint, capped at `traits.opensea_fallback_budget` (50) per run so a dead metadata host cannot spend the hour.
+
+Double-click **`traits.command`** once per collection; it reports pages, tokens, reads spent and the trait-type summary, and is safe to re-run (the list step is skipped once complete; only tokens without traits are fetched). Progress is written to `onboarding` so the page can show *"onboarding: 63% of tokens have traits — metrics are provisional"* (REQ-F-07a) while it runs.
+
+Values are stored **verbatim**: `"Blue"` and `"blue"` are two values until a human says otherwise. That is structure, not judgement.
+
+**Filters.** The sidebar lists every trait type with every value and its count. Selections are **AND across types, OR within a type**: `Background:Blue|Red;Eyes:Laser` means (Blue or Red) and Laser. The same filter (`traits=` on the API) applies to the price charts, the live book, the tape and the screener; events with no `token_id` (collection offers) always pass, because they are bids on every token.
+
+**Screener.** Every token matching the filter with its traits, the **lowest standing ask**, the **highest standing item bid** (placed, not cancelled or invalidated or sold, not expired — the same lifecycle join as the live book) and its **last sale**. Sortable on every column — token, name, every trait type, and the three prices — with "no value" always at the bottom in either direction. Paged at 50. An unknown sort column falls back to `token_id`; sort is applied in Python, never interpolated into SQL.
+
+## 4b. The page — the design rules
+
+Set by the Operator on 2026-09-09; pinned by `test_ui_contract` so they cannot regress silently.
+
+- **Layout language:** OpenSea/Coinbase — near-black ground, cards with 14 px radii, quiet grid, strong marks. Accent is **Austin FC Verde `#00B140`**. Colour roles: asks orange, item bids blue, collection offers green, spread yellow, gaps shaded red.
+- **Contrast:** every text/background pair ≥ 4.5:1. `color-scheme: dark` is declared so macOS cannot paint native controls white (BUG-041); selects and buttons are custom-drawn.
+- **Time:** everything on screen is in `display.timezone` (America/Chicago) and says so — header, footer, every basis line. Stored data stays UTC (BUG-042). Sub-day buckets are UTC-aligned; day-and-longer buckets align to local midnight (docs/06).
+- **Numbers:** USD to the cent, always. ETH to 3–4 decimals with Ξ. Counts with thousands separators. Hover cards are dark with light monospace text and carry the unit (BUG-043).
+- **Honesty over smoothness:** lines are straight between observations; undefined intervals are holes. A moving-average overlay, labelled with its window, is planned once there is ≥ 24 h of data — it will be an overlay, never a replacement.
+- **KPI cards** at the top: lowest ask now, collection offer now, 24 h volume, 24 h sales — each with a 24-hour sparkline and, for the prices, change versus the first hour of the window with the count of hours that had an observation.
+
 ## 5. What it does not do yet — read this before trusting a number
 
 - **SQLite, not DuckDB.** docs/07 specifies DuckDB + Parquet for the analytical store. The environment this was built in cannot install DuckDB, and shipping an untested store for irreplaceable data is how BUG-010 happened. Every query is plain SQL DuckDB accepts; the swap is the `analytical.path` line. Revisit when the store passes ~50 M rows or a query is slow.
 - **No wash filter, no `qa_index`, no trait model.** Prices are raw observations. Methodology §4.4 and REQ-F-13 are Phase 1.
 - **`immediacy_cost` uses the highest collection offer *seen in the interval*,** not the standing best offer at each instant. At 5-minute intervals on a bot-made book the difference is small; at 1-day intervals it is not. A resting-book reconstruction is the next step.
-- **No screener, no cross-sectional views, no heatmap** (REQ-F-05..11) — one collection so far.
+- **No cross-sectional views, no heatmap, no rarity or trait pricing model** (REQ-F-05..11) — one collection so far. The screener shows observed prices per token; it does not yet estimate what a trait is worth.
+- **No moving average yet** — waiting for 24 h of data so the window is a choice, not a guess.
 - **No alerts.** The page shows; it does not tell.
 - **Gaps are shaded** on every time chart (REQ-F-15) from the manifest. A chart drawn over shaded time is drawn over time we were not listening.
 
 ## 6. Files
 
-`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/ui/index.html` · `dashboard.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`) — fixtures are **real frames** from the 2026-09-09 capture.
+`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/rest.py` · `src/navanax/traits.py` · `src/navanax/ui/index.html` · `dashboard.command` · `traits.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`, `test_traits_pipeline`, `test_screener_sort_and_filter`, `test_ui_contract`) — fixtures are **real frames** from the 2026-09-09 capture.

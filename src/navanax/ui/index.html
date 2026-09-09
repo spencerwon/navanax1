@@ -1,108 +1,254 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Navanax</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <style>
-:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--ask:#f0883e;--bid:#58a6ff;--coll:#3fb950;--acc:#a371f7}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-header{display:flex;align-items:center;gap:18px;padding:12px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5;flex-wrap:wrap}
-header h1{font-size:18px;margin:0;letter-spacing:.5px}header h1 span{color:var(--dim);font-weight:400;font-size:12px;margin-left:8px}
-.tiles{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}.tile{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 12px;min-width:110px}
-.tile b{display:block;font-size:17px;font-variant-numeric:tabular-nums}.tile small{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.4px}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--dim)}.dot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}.dot.bad{background:var(--bad)}
-.controls{display:flex;gap:10px;padding:10px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap;align-items:center}
-.controls label{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.4px}select,button{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:5px 8px;font:inherit}
-button{cursor:pointer}button:hover{border-color:var(--acc)}
-main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:14px 20px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
-.card h2{font-size:13px;margin:0 0 6px;color:var(--fg);text-transform:uppercase;letter-spacing:.5px}.card h2 em{color:var(--dim);font-style:normal;font-weight:400;text-transform:none;letter-spacing:0;margin-left:8px}
-.basis{color:var(--dim);font-size:11px;margin-top:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
-.c12{grid-column:span 12}.c8{grid-column:span 8}.c6{grid-column:span 6}.c4{grid-column:span 4}.c3{grid-column:span 3}
-@media(max-width:1100px){.c8,.c6,.c4,.c3{grid-column:span 12}}
-.plot{width:100%;height:300px}.plot.tall{height:360px}
-table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}th{color:var(--dim);font-weight:500;text-transform:uppercase;font-size:10px;letter-spacing:.4px}
-td.num{text-align:right}.ask{color:var(--ask)}.bid{color:var(--bid)}.coll{color:var(--coll)}.mono{font-family:ui-monospace,Menlo,monospace}
-.empty{color:var(--dim);font-style:italic;padding:8px 0}.note{color:var(--warn)}.fail{color:var(--bad);font-weight:600}
-footer{color:var(--dim);font-size:11px;padding:10px 20px 30px;border-top:1px solid var(--line)}
+/* ---- palette: Austin FC Verde on near-black. Every text/background pair below is >= 4.5:1. ---- */
+:root{
+  --bg:#0B0F0D; --bg-2:#10161300; --surface:#141B17; --surface-2:#1A231E; --border:#25332B; --border-2:#30423A;
+  --text:#F1F5F2; --text-2:#B7C4BC; --muted:#8A9891; --faint:#5E6B65;
+  --verde:#00B140; --verde-2:#19C95A; --verde-dim:rgba(0,177,64,.14); --verde-glow:0 0 0 3px rgba(0,177,64,.22);
+  --ask:#FF8A65; --bid:#7CC4FF; --coll:#19C95A; --spread:#FFD166; --bad:#FF6B6B; --warn:#FFB84D;
+  --r:14px; --r-s:9px;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",Segoe UI,Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--verde-2)}
+h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+
+/* ---- header ---- */
+header{position:sticky;top:0;z-index:20;background:rgba(11,15,13,.86);backdrop-filter:saturate(160%) blur(10px);border-bottom:1px solid var(--border)}
+.hwrap{display:flex;align-items:center;gap:16px;padding:12px 24px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px}
+.logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(145deg,var(--verde),#007A2C);box-shadow:0 4px 14px rgba(0,177,64,.35);display:grid;place-items:center;font-weight:800;color:#03140A;font-size:15px}
+.brand h1{font-size:17px}.brand small{display:block;color:var(--muted);font-size:11.5px;font-weight:500;letter-spacing:.02em}
+.tiles{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-s);padding:7px 12px;min-width:112px}
+.tile small{display:block;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.tile b{display:block;font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;margin-top:1px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--faint);margin-right:7px;vertical-align:1px}
+.dot.ok{background:var(--verde);box-shadow:0 0 0 3px rgba(0,177,64,.2),0 0 10px var(--verde)}.dot.bad{background:var(--bad);box-shadow:0 0 0 3px rgba(255,107,107,.18)}
+
+/* ---- controls: custom selects so macOS cannot paint them white ---- */
+.controls{display:flex;gap:14px;padding:12px 24px;border-bottom:1px solid var(--border);flex-wrap:wrap;align-items:flex-end;background:var(--bg);position:sticky;top:var(--hdr,80px);z-index:19}
+.ctl{display:flex;flex-direction:column;gap:4px}
+.ctl label{color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+select,button,input[type=search]{appearance:none;-webkit-appearance:none;background:var(--surface-2);color:var(--text);border:1px solid var(--border-2);border-radius:var(--r-s);padding:7px 30px 7px 11px;font:inherit;font-size:13px;min-width:120px;outline:none;cursor:pointer}
+select{background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%23B7C4BC' stroke-width='1.8' stroke-linecap='round'/></svg>");background-repeat:no-repeat;background-position:right 10px center}
+select option{background:#1A231E;color:var(--text)}
+select:focus,button:focus,input:focus{border-color:var(--verde);box-shadow:var(--verde-glow)}
+button{padding:7px 14px;min-width:0}button:hover{border-color:var(--verde)}button.primary{background:var(--verde);color:#03140A;border-color:var(--verde);font-weight:650}button.primary:hover{background:var(--verde-2)}
+input[type=search]{padding:6px 10px;min-width:0;width:100%;cursor:text}
+.seg{display:inline-flex;background:var(--surface-2);border:1px solid var(--border-2);border-radius:var(--r-s);padding:2px}
+.seg button{border:0;background:transparent;border-radius:7px;padding:5px 11px;color:var(--text-2);min-width:0}.seg button.on{background:var(--verde);color:#03140A;font-weight:650}
+.asof{color:var(--muted);font-size:12px;margin-left:auto;align-self:center}
+
+/* ---- layout ---- */
+.wrap{display:grid;grid-template-columns:272px 1fr;gap:0}
+aside{border-right:1px solid var(--border);padding:16px;position:sticky;top:var(--top,160px);height:calc(100vh - var(--top,160px));overflow:auto;background:var(--bg)}
+main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:16px 24px 32px;min-width:0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;min-width:0;box-shadow:0 1px 0 rgba(255,255,255,.02) inset,0 8px 24px rgba(0,0,0,.25)}
+.card h2{font-size:13.5px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.card h2 em{color:var(--muted);font-style:normal;font-weight:500;font-size:12px}
+.basis{color:var(--faint);font-size:11px;margin-top:6px;font-family:ui-monospace,"SF Mono",Menlo,monospace;white-space:pre-wrap;line-height:1.45}
+.c12{grid-column:span 12}.c8{grid-column:span 8}.c7{grid-column:span 7}.c6{grid-column:span 6}.c5{grid-column:span 5}.c4{grid-column:span 4}
+@media(max-width:1250px){.c8,.c7,.c6,.c5,.c4{grid-column:span 12}.wrap{grid-template-columns:1fr}aside{position:static;height:auto;border-right:0;border-bottom:1px solid var(--border)}}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}@media(max-width:1250px){.kpis{grid-template-columns:repeat(2,1fr)}}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px 8px;min-width:0}
+.kpi small{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.kpi b{display:block;font-size:26px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin:2px 0 0}
+.kpi .chg{font-size:12px;font-weight:600;margin-left:8px;vertical-align:4px}.up{color:var(--verde-2)}.down{color:var(--bad)}.flat{color:var(--muted)}
+.kpi svg{display:block;width:100%;height:44px;margin-top:6px}.kpi .sub{color:var(--faint);font-size:11px;margin-top:2px}
+.plot{width:100%;height:300px}.plot.tall{height:360px}.plot.short{height:200px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+th{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:10.5px;letter-spacing:.06em;position:sticky;top:0;background:var(--surface)}
+th.sortable{cursor:pointer;user-select:none}th.sortable:hover{color:var(--text)}th.sorted{color:var(--verde-2)}
+tr:hover td{background:var(--surface-2)}
+.ask{color:var(--ask)}.bid{color:var(--bid)}.coll{color:var(--coll)}
+.empty{color:var(--muted);padding:10px 0;font-size:13px}.note{color:var(--warn)}.fail{color:var(--bad);font-weight:600}.ok{color:var(--verde-2)}
+.pill{display:inline-block;background:var(--verde-dim);color:var(--verde-2);border:1px solid rgba(0,177,64,.35);border-radius:999px;padding:2px 9px;font-size:11.5px;font-weight:600;margin:2px 4px 2px 0}
+.pill button{all:unset;cursor:pointer;margin-left:6px;color:var(--verde-2);font-weight:800}
+.progress{height:6px;background:var(--surface-2);border-radius:999px;overflow:hidden;margin-top:6px}.progress i{display:block;height:100%;background:var(--verde);border-radius:999px}
+
+/* ---- trait sidebar ---- */
+aside h3{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px}
+.tgroup{border:1px solid var(--border);border-radius:var(--r-s);margin-bottom:8px;background:var(--surface);overflow:hidden}
+.tgroup > summary{list-style:none;cursor:pointer;padding:9px 11px;display:flex;justify-content:space-between;font-weight:600;font-size:13px}
+.tgroup > summary::-webkit-details-marker{display:none}.tgroup > summary span{color:var(--muted);font-weight:500;font-size:11.5px}
+.tvals{padding:2px 6px 8px;max-height:230px;overflow:auto}
+.tval{display:flex;align-items:center;gap:8px;padding:4px 5px;border-radius:6px;cursor:pointer;font-size:12.5px}.tval:hover{background:var(--surface-2)}
+.tval input{accent-color:var(--verde);width:14px;height:14px;margin:0}.tval .n{margin-left:auto;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.tsearch{padding:6px 6px 4px}
+.thumb{width:26px;height:26px;border-radius:6px;object-fit:cover;background:var(--surface-2);vertical-align:middle;margin-right:8px}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;color:var(--muted);font-size:12px}
+footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px solid var(--border)}
 </style></head><body>
-<header><h1>NAVANAX <span id="hdr-sub">phase 0 · live record</span></h1>
+<header><div class="hwrap">
+ <div class="brand"><div class="logo">N</div><div><h1>Navanax</h1><small>argonauts · live market record · <span id="tzlabel">Central</span></small></div></div>
  <div class="tiles">
   <div class="tile"><small>recorder</small><b><span class="dot" id="rec-dot"></span><span id="rec">…</span></b></div>
-  <div class="tile"><small>events in store</small><b id="t-events">…</b></div>
+  <div class="tile"><small>events stored</small><b id="t-events">…</b></div>
   <div class="tile"><small>events / min</small><b id="t-rate">…</b></div>
-  <div class="tile"><small>last event age</small><b id="t-age">…</b></div>
-  <div class="tile"><small>gaps open / to backfill</small><b id="t-gaps">…</b></div>
+  <div class="tile"><small>last event</small><b id="t-age">…</b></div>
+  <div class="tile"><small>gaps open · backfill</small><b id="t-gaps">…</b></div>
+  <div class="tile"><small>ETH / USD in use</small><b id="t-rate-usd">…</b></div>
   <div class="tile"><small>landing zone</small><b id="t-disk">…</b></div>
-  <div class="tile"><small>ETH / USD used</small><b id="t-rate-usd">…</b></div>
-  <div class="tile"><small>normalizer lag</small><b id="t-lag">…</b></div>
- </div></header>
+ </div></div></header>
 <div class="controls">
- <label>collection</label><select id="collection"></select>
- <label>interval</label><select id="interval"></select>
- <label>range</label><select id="range">
-  <option value="1h">last 1h</option><option value="6h" selected>last 6h</option><option value="24h">last 24h</option><option value="7d">last 7d</option><option value="30d">last 30d</option>
-  <option value="HTD">HTD · hour to date</option><option value="DTD">DTD · day to date</option><option value="MTD">MTD · month to date</option><option value="YTD">YTD · year to date</option></select>
- <label>denomination</label><select id="denom"><option>ETH</option><option>USD</option></select>
- <label>transform</label><select id="transform"><option>ABS</option><option>PCT</option><option>LOG</option><option>DIFF</option><option>BPS</option></select>
- <button id="refresh">refresh now</button><span id="asof" class="basis"></span>
+ <div class="ctl"><label>collection</label><select id="collection"></select></div>
+ <div class="ctl"><label>interval</label><select id="interval"></select></div>
+ <div class="ctl"><label>range</label><select id="range">
+  <option value="1h">last hour</option><option value="6h" selected>last 6 hours</option><option value="24h">last 24 hours</option><option value="7d">last 7 days</option><option value="30d">last 30 days</option>
+  <option value="HTD">hour to date</option><option value="DTD">today</option><option value="MTD">month to date</option><option value="YTD">year to date</option></select></div>
+ <div class="ctl"><label>denomination</label><div class="seg" id="denom"><button data-v="ETH" class="on">ETH</button><button data-v="USD">USD</button></div></div>
+ <div class="ctl"><label>transform</label><div class="seg" id="transform"><button data-v="ABS" class="on">level</button><button data-v="PCT">% chg</button><button data-v="LOG">log</button><button data-v="DIFF">diff</button><button data-v="BPS">bps</button></div></div>
+ <div class="ctl"><label>&nbsp;</label><button id="refresh" class="primary">refresh</button></div>
+ <span class="asof" id="asof"></span>
 </div>
+<div class="wrap">
+<aside>
+ <h3>Traits <span id="tsum" style="text-transform:none;letter-spacing:0;font-weight:500"></span></h3>
+ <div id="onboard"></div>
+ <div id="chips"></div>
+ <div id="traits"><div class="empty">no traits loaded yet — run <b>traits.command</b></div></div>
+</aside>
 <main>
+ <div class="kpis c12" id="kpis"></div>
  <div class="card c8"><h2>Prices<em>lowest ask · highest collection offer · highest item bid, per interval</em></h2><div id="p-prices" class="plot tall"></div><div class="basis" id="b-prices"></div></div>
- <div class="card c4"><h2>Live book<em>orders placed, not cancelled, unexpired</em></h2><div id="book"></div></div>
- <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer (REQ-F-13a) · hole = no bid</em></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
- <div class="card c4"><h2>How long a bid stands<em>placed → cancelled, same order</em></h2><div id="life"></div><h2 style="margin-top:14px">Event mix<em>this window</em></h2><div id="p-mix" class="plot" style="height:200px"></div></div>
+ <div class="card c4"><h2>Live book<em>standing orders</em></h2><div id="book"></div></div>
+ <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer · holes = no bid or no ask</em></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
+ <div class="card c4"><h2>How long a bid stands<em>placed → cancelled</em></h2><div id="life"></div><h2 style="margin-top:16px">Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
+ <div class="card c12"><h2>Tokens<em>every token matching the filters · click a column to sort</em></h2><div id="screener"></div></div>
  <div class="card c8"><h2>Activity<em>per interval</em></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
- <div class="card c4"><h2>Who is making this market<em>events by maker, this window</em></h2><div id="makers"></div></div>
+ <div class="card c4"><h2>Who is making this market<em>events by wallet, this window</em></h2><div id="makers"></div></div>
  <div class="card c6"><h2>Sales tape<em>most recent</em></h2><div id="tape"></div></div>
- <div class="card c6"><h2>Ingestion gaps<em>from the manifest · shaded on charts (REQ-F-15)</em></h2><div id="gaps"></div><h2 style="margin-top:14px">Integrity audit<em>shallow, every refresh</em></h2><div id="audit"></div></div>
-</main>
-<footer>Every number on this page comes through the MetricRequest contract (docs/06 §3). Observed quantities only — no fair value, no smoothing, wash filter = raw. Undefined values are drawn as holes, never filled. Display timezone: <span id="tz"></span>.</footer>
+ <div class="card c6"><h2>Ingestion gaps<em>shaded on every chart</em></h2><div id="gaps"></div><h2 style="margin-top:16px">Integrity audit<em>checksums, every refresh</em></h2><div id="audit"></div></div>
+</main></div>
+<footer>Every number comes through the MetricRequest contract (docs/06 §3): observed quantities only, no fair value, no smoothing, wash filter = raw. Undefined values are drawn as holes, never filled. Times shown in <span id="tz"></span>.</footer>
 <script>
-const $=s=>document.querySelector(s);const J=async u=>{const r=await fetch(u);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
-const L={paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:'#e6edf3',size:11},margin:{l:48,r:48,t:10,b:36},xaxis:{gridcolor:'#21262d',zeroline:false},yaxis:{gridcolor:'#21262d',zeroline:false},legend:{orientation:'h',y:1.08},hovermode:'x unified'};
-const C={config:{displaylogo:false,responsive:true}};
-let meta, gaps=[];
+/* ---------- state ---------- */
+const S={denom:'ETH',transform:'ABS',traits:{},tz:'America/Chicago',sort:'token_id',dir:'asc',page:0,traitTypes:[]};
+const $=s=>document.querySelector(s);
+const J=async u=>{const r=await fetch(u);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
+const qs=o=>Object.entries(o).filter(([,v])=>v!==undefined&&v!=='').map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join('&');
+const traitSpec=()=>Object.entries(S.traits).filter(([,v])=>v.length).map(([t,v])=>`${t}:${v.join('|')}`).join(';');
+const base=()=>({collection:$('#collection').value,interval:$('#interval').value,range:$('#range').value,denom:S.denom,transform:S.transform,traits:traitSpec()});
+
+/* ---------- time: everything in the display timezone ---------- */
+const fmtLocal=(iso,opts)=>iso?new Intl.DateTimeFormat('en-US',{timeZone:S.tz,hour12:false,...opts}).format(new Date(iso)):'—';
+const clock=iso=>fmtLocal(iso,{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+const hhmm=iso=>fmtLocal(iso,{hour:'2-digit',minute:'2-digit'});
+// Plotly renders date strings as given: convert UTC ISO -> local "YYYY-MM-DD HH:mm:ss" so the axis is Central.
+const plotT=iso=>{const p=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:S.tz,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(iso)).map(x=>[x.type,x.value]));return `${p.year}-${p.month}-${p.day} ${p.hour==='24'?'00':p.hour}:${p.minute}:${p.second}`};
+const age=s=>{if(!s)return '—';const d=(Date.now()-Date.parse(s))/1000;return d<60?`${d.toFixed(0)}s ago`:d<3600?`${(d/60).toFixed(1)}m ago`:`${(d/3600).toFixed(1)}h ago`};
 const fmt=(v,d=4)=>v==null?'—':(+v).toLocaleString(undefined,{maximumFractionDigits:d});
-const age=s=>{if(!s)return '—';const d=(Date.now()-Date.parse(s))/1000;return d<60?`${d.toFixed(0)}s`:d<3600?`${(d/60).toFixed(1)}m`:`${(d/3600).toFixed(1)}h`};
+const money=v=>v==null?'—':S.denom==='USD'?'$'+(+v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):fmt(v,3)+' Ξ';
+const money2=(v,den)=>v==null?'—':den==='USD'?'$'+(+v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):fmt(v,3)+' Ξ';
+const compact=v=>v==null?'—':S.denom==='USD'?'$'+(+v).toLocaleString(undefined,{notation:'compact',maximumFractionDigits:2}):(+v).toLocaleString(undefined,{maximumFractionDigits:2})+' Ξ';
 const short=a=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
 const bytes=b=>b<1e6?(b/1e3).toFixed(0)+' KB':b<1e9?(b/1e6).toFixed(1)+' MB':(b/1e9).toFixed(2)+' GB';
-function q(){return {collection:$('#collection').value,interval:$('#interval').value,range:$('#range').value,denom:$('#denom').value,transform:$('#transform').value}}
-function qs(o){return Object.entries(o).map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join('&')}
-function basis(b){return `${b.label}\n${b.denomination} · ${b.transform}${b.baseline_value!=null&&b.transform!=='ABS'?` · baseline ${fmt(b.baseline_value)} @ ${b.baseline_at}`:''} · interval ${b.interval} · ${b.range.spec} (${b.range.start.slice(0,16)} → ${b.range.end.slice(0,16)} UTC) · wash_filter=${b.wash_filter} · ${b.buckets} buckets, ${b.undefined_buckets} undefined · as_of ${b.as_of.slice(0,19)}`}
-function gapShapes(){return gaps.filter(g=>g.started_at).map(g=>({type:'rect',xref:'x',yref:'paper',x0:g.started_at,x1:g.ended_at||new Date().toISOString(),y0:0,y1:1,fillcolor:'rgba(248,81,73,0.12)',line:{width:0}}))}
-async function status(){const s=await J('/api/status');$('#rec').textContent=s.recorder.running?'recording':'stopped';$('#rec-dot').className='dot '+(s.recorder.running?'ok':'bad');
+
+/* ---------- chart theme (Tableau-ish: quiet grid, strong marks, unified hover) ---------- */
+const L=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:'#B7C4BC',size:11.5,family:'-apple-system,BlinkMacSystemFont,Inter,Segoe UI,Roboto,sans-serif'},
+ margin:{l:56,r:56,t:8,b:40},xaxis:{gridcolor:'#1E2923',zeroline:false,linecolor:'#25332B',tickfont:{color:'#8A9891'}},yaxis:{gridcolor:'#1E2923',zeroline:false,linecolor:'#25332B',tickfont:{color:'#8A9891'}},
+ legend:{orientation:'h',y:1.1,x:0,font:{color:'#F1F5F2'}},hovermode:'x unified',hoverlabel:{bgcolor:'#1A231E',bordercolor:'#3B5044',font:{color:'#F1F5F2',size:12.5,family:'ui-monospace,SF Mono,Menlo,monospace'},namelength:-1,align:'left'}});
+const CFG={displaylogo:false,responsive:true,modeBarButtonsToRemove:['lasso2d','select2d']};
+let gaps=[];
+const gapShapes=()=>gaps.filter(g=>g.started_at).map(g=>({type:'rect',xref:'x',yref:'paper',x0:plotT(g.started_at),x1:plotT(g.ended_at||new Date().toISOString()),y0:0,y1:1,fillcolor:'rgba(255,107,107,0.10)',line:{width:0}}));
+const basis=b=>`${b.label}\n${b.denomination} · ${b.transform}${b.baseline_value!=null&&b.transform!=='ABS'?` · baseline ${fmt(b.baseline_value)} at ${clock(b.baseline_at)}`:''} · ${b.interval} bars · ${b.range.spec} (${clock(b.range.start)} → ${clock(b.range.end)} ${S.tz}) · ${b.buckets} buckets, ${b.undefined_buckets} undefined${Object.keys(b.trait_filter||{}).length?` · traits: ${traitSpec()}`:''} · wash filter ${b.wash_filter}`;
+const yTitle=()=>S.transform==='ABS'?(S.denom==='USD'?'USD':'ETH'):S.transform==='PCT'?'% change vs baseline':S.transform==='LOG'?'log return vs baseline':S.transform==='DIFF'?'difference vs baseline':'bps vs baseline';
+const scale=v=>S.transform==='PCT'?v.map(x=>x==null?null:x*100):v;
+const yfmt=()=>S.transform!=='ABS'?{tickformat:',.2f'}:S.denom==='USD'?{tickprefix:'$',tickformat:',.2f'}:{ticksuffix:' Ξ',tickformat:',.3f'};
+const hov=()=>S.transform!=='ABS'?'%{y:,.2f}':S.denom==='USD'?'$%{y:,.2f}':'%{y:,.4f} Ξ';
+
+/* ---------- KPI cards: value now, 24h sparkline, change vs 24h ago ---------- */
+function spark(v,color){const pts=v.map((y,i)=>[i,y]).filter(([,y])=>y!=null);if(pts.length<2)return '<svg viewBox="0 0 100 30"></svg>';
+ const ys=pts.map(p=>p[1]),lo=Math.min(...ys),hi=Math.max(...ys),n=v.length-1||1;const X=i=>(i/n*100).toFixed(2),Y=y=>(28-(hi===lo?14:(y-lo)/(hi-lo)*26)).toFixed(2);
+ let d='',prev=null;v.forEach((y,i)=>{if(y==null){prev=null;return}d+=(prev==null?'M':'L')+X(i)+' '+Y(y)+' ';prev=y});
+ return `<svg viewBox="0 0 100 30" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`}
+function chg(a,b){if(a==null||b==null||!a)return '';const p=(b-a)/a*100;return `<span class="chg ${p>0?'up':p<0?'down':'flat'}">${p>0?'+':''}${p.toFixed(1)}%</span>`}
+async function kpis(){const p=base();const m=await J('/api/multi?'+qs({collection:p.collection,traits:p.traits,denom:S.denom,transform:'ABS',interval:'1h',range:'24h',metrics:'floor_ask,collection_bid,volume,sales_count'}));
+ const last=v=>{for(let i=v.length-1;i>=0;i--)if(v[i]!=null)return v[i];return null};const first=v=>{for(const x of v)if(x!=null)return x;return null};
+ const sum=v=>v.reduce((a,x)=>a+(x||0),0);const n=v=>v.filter(x=>x!=null).length;
+ const card=(t,val,c,v,sub)=>`<div class="kpi"><small>${t}</small><b>${val}${c}</b>${spark(v,'#19C95A')}<div class="sub">${sub}</div></div>`;
+ $('#kpis').innerHTML=card('lowest ask now',money2(last(m.floor_ask.v),S.denom),chg(first(m.floor_ask.v),last(m.floor_ask.v)),m.floor_ask.v,`24h · ${n(m.floor_ask.v)} of 24 hours had a listing`)
+  +card('collection offer now',money2(last(m.collection_bid.v),S.denom),chg(first(m.collection_bid.v),last(m.collection_bid.v)),m.collection_bid.v,`24h · ${n(m.collection_bid.v)} of 24 hours had an offer`)
+  +card('volume 24h',compact(sum(m.volume.v)),'',m.volume.v,`${fmt(sum(m.sales_count.v),0)} sales · hourly bars`)
+  +card('sales 24h',fmt(sum(m.sales_count.v),0),'',m.sales_count.v,`hourly bars · price change = last hour vs first hour with an observation`)}
+
+/* ---------- panels ---------- */
+async function status(){const s=await J('/api/status');S.tz=s.display_timezone||S.tz;
+ $('#rec').textContent=s.recorder.running?'recording':'stopped';$('#rec-dot').className='dot '+(s.recorder.running?'ok':'bad');
  $('#t-events').textContent=fmt(s.store.events,0);$('#t-rate').textContent=fmt(s.store.events_last_60s,0);$('#t-age').textContent=age(s.store.last_observed_at);
- $('#t-gaps').textContent=`${s.gaps.open} / ${s.gaps.awaiting_backfill}`;$('#t-disk').textContent=bytes(s.landing_bytes);
- const n=s.normalizer;$('#t-lag').textContent=n.error?'ERROR':`${n.took_ms} ms`;$('#t-lag').title=n.error||JSON.stringify(n.stats);$('#tz').textContent=s.display_timezone;$('#t-rate-usd').textContent=s.ethusd.rate?'$'+fmt(s.ethusd.rate,0):'—';$('#t-rate-usd').title=s.ethusd.rate?`${s.ethusd.provider}, as of ${s.ethusd.at}`:'no priced event yet';$('#asof').textContent='as of '+s.now.slice(0,19)+'Z'}
-async function prices(){const p=q();const m=await J('/api/multi?'+qs({...p,metrics:'floor_ask,collection_bid,top_item_bid'}));
- const tr=[['floor_ask','lowest ask','#f0883e'],['collection_bid','collection offer','#3fb950'],['top_item_bid','top item bid','#58a6ff']].map(([k,n,c])=>({x:m[k].t,y:m[k].v,name:n,mode:'lines+markers',line:{color:c,width:2},marker:{size:5},connectgaps:false}));
- Plotly.react('p-prices',tr,{...L,shapes:gapShapes(),yaxis:{...L.yaxis,title:p.transform==='ABS'?p.denom:p.transform}},C.config);$('#b-prices').textContent=basis(m.floor_ask.basis)}
-async function imm(){const p=q();const s=await J('/api/series?'+qs({...p,metric:'immediacy_cost'}));
- const tr=[{x:s.t,y:s.v,name:'spread ('+(p.transform==='ABS'?p.denom:p.transform)+')',mode:'lines+markers',line:{color:'#a371f7',width:2},connectgaps:false},
-  {x:s.t,y:(s.pct_of_ask||[]).map(v=>v==null?null:v*100),name:'% of ask',yaxis:'y2',mode:'lines',line:{color:'#8b949e',dash:'dot'},connectgaps:false}];
- Plotly.react('p-imm',tr,{...L,shapes:gapShapes(),yaxis2:{overlaying:'y',side:'right',title:'% of ask',gridcolor:'rgba(0,0,0,0)'}},C.config);
+ $('#t-gaps').textContent=`${s.gaps.open} · ${s.gaps.awaiting_backfill}`;$('#t-disk').textContent=bytes(s.landing_bytes);
+ $('#t-rate-usd').textContent=s.ethusd.rate?'$'+fmt(s.ethusd.rate,0):'—';$('#t-rate-usd').title=s.ethusd.rate?`${s.ethusd.provider} · ${clock(s.ethusd.at)}`:'no priced event yet';
+ $('#tz').textContent=S.tz;$('#tzlabel').textContent=S.tz.replace('America/','').replace('_',' ');$('#asof').textContent='as of '+clock(s.now)+(s.normalizer.error?' · normalizer ERROR':'')}
+async function prices(){if(!window.Plotly)return;const m=await J('/api/multi?'+qs({...base(),metrics:'floor_ask,collection_bid,top_item_bid'}));
+ const tr=[['floor_ask','lowest ask','#FF8A65'],['collection_bid','collection offer','#19C95A'],['top_item_bid','top item bid','#7CC4FF']].map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:'lines+markers',line:{color:c,width:2.2},marker:{size:5},connectgaps:false,hovertemplate:hov()}));
+ Plotly.react('p-prices',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:'#8A9891'}}}},CFG);$('#b-prices').textContent=basis(m.floor_ask.basis)}
+async function imm(){if(!window.Plotly)return;const s=await J('/api/series?'+qs({...base(),metric:'immediacy_cost'}));
+ const tr=[{x:s.t.map(plotT),y:scale(s.v),name:'spread',mode:'lines+markers',line:{color:'#FFD166',width:2.2},marker:{size:5},connectgaps:false,hovertemplate:hov()},
+  {x:s.t.map(plotT),y:(s.pct_of_ask||[]).map(v=>v==null?null:v*100),name:'% of ask',yaxis:'y2',mode:'lines',line:{color:'#8A9891',dash:'dot',width:1.5},connectgaps:false,hovertemplate:'%{y:.1f}%'}];
+ Plotly.react('p-imm',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:'#8A9891'}}},yaxis2:{overlaying:'y',side:'right',title:{text:'% of ask',font:{color:'#8A9891'}},gridcolor:'rgba(0,0,0,0)',tickfont:{color:'#8A9891'}}},CFG);
  $('#b-imm').textContent=basis(s.basis)+(s.basis.undefined_buckets?`\n${s.basis.undefined_buckets} interval(s) undefined: no collection offer or no listing observed — shown as holes, never filled.`:'')}
-async function act(){const p={...q(),transform:'ABS'};const m=await J('/api/multi?'+qs({...p,metrics:'bid_count,cancel_count,listing_count,sales_count'}));
- const tr=[['bid_count','bids','#58a6ff'],['cancel_count','cancels','#f85149'],['listing_count','listings','#f0883e'],['sales_count','sales','#3fb950']].map(([k,n,c])=>({x:m[k].t,y:m[k].v,name:n,type:'bar',marker:{color:c}}));
- Plotly.react('p-act',tr,{...L,barmode:'stack',shapes:gapShapes()},C.config);$('#b-act').textContent=basis(m.bid_count.basis).replace(/^.*\n/,'counts per interval\n')}
-async function mix(){const p=q();const m=await J('/api/mix?'+qs({collection:p.collection,range:p.range}));
- Plotly.react('p-mix',[{x:m.map(r=>r.n),y:m.map(r=>r.event_type),type:'bar',orientation:'h',marker:{color:'#a371f7'}}],{...L,margin:{l:130,r:10,t:4,b:24}},C.config)}
-async function book(){const p=q();const b=await J('/api/book?'+qs({collection:p.collection,limit:8}));const d=p.denom==='USD'?'price_usd':'price_eth';
- const row=(r,c)=>`<tr class="${c}"><td>#${r.token_id||'coll'}</td><td class="num">${fmt(r[d])}</td><td class="mono">${short(r.maker)}</td><td>${age(r.valid_at)} ago</td><td>${r.expiration_at?'exp '+age(r.expiration_at).replace(/^-/,'in '):''}</td></tr>`;
- const sec=(t,rows,c)=>`<h2 style="margin-top:8px">${t}<em>${rows.length} shown</em></h2>`+(rows.length?`<table><tr><th>item</th><th>${p.denom}</th><th>maker</th><th>placed</th><th></th></tr>${rows.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`);
+async function act(){if(!window.Plotly)return;const m=await J('/api/multi?'+qs({...base(),transform:'ABS',metrics:'bid_count,cancel_count,listing_count,sales_count'}));
+ const tr=[['bid_count','bids','#7CC4FF'],['cancel_count','cancels','#FF6B6B'],['listing_count','listings','#FF8A65'],['sales_count','sales','#19C95A']].map(([k,n,c])=>({x:m[k].t.map(plotT),y:m[k].v,name:n,type:'bar',marker:{color:c,line:{width:0}},hovertemplate:'%{y:,d}'}));
+ Plotly.react('p-act',tr,{...L(),barmode:'stack',bargap:.25,shapes:gapShapes()},CFG);$('#b-act').textContent='counts per interval\n'+basis(m.bid_count.basis).split('\n')[1]}
+async function mix(){if(!window.Plotly)return;const p=base();const m=await J('/api/mix?'+qs({collection:p.collection,range:p.range}));
+ Plotly.react('p-mix',[{x:m.map(r=>r.n),y:m.map(r=>r.event_type.replace('item_','')),type:'bar',orientation:'h',marker:{color:'#19C95A'},text:m.map(r=>fmt(r.n,0)),textposition:'outside',textfont:{color:'#B7C4BC'}}],{...L(),margin:{l:110,r:50,t:4,b:24},xaxis:{...L().xaxis,showgrid:false,showticklabels:false}},CFG)}
+async function book(){const p=base();const b=await J('/api/book?'+qs({collection:p.collection,traits:p.traits,limit:7}));const d=S.denom==='USD'?'price_usd':'price_eth';
+ const row=(r,c)=>`<tr><td class="${c}">${r.token_id?'#'+r.token_id:'collection'}</td><td class="num ${c}">${money(r[d])}</td><td class="mono">${short(r.maker)}</td><td>${age(r.valid_at)}</td></tr>`;
+ const sec=(t,rows,c)=>`<h2 style="margin-top:8px">${t}<em>${rows.length}</em></h2>`+(rows.length?`<table><tr><th>item</th><th class="num">${S.denom}</th><th>maker</th><th>placed</th></tr>${rows.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`);
  $('#book').innerHTML=sec('asks',b.asks,'ask')+sec('collection offers',b.collection_offers,'coll')+sec('item bids',b.item_bids,'bid')}
-async function tape(){const p=q();const t=await J('/api/tape?'+qs({collection:p.collection,limit:25}));const d=p.denom==='USD'?'price_usd':'price_eth';
- $('#tape').innerHTML=t.length?`<table><tr><th>when</th><th>item</th><th>${p.denom}</th><th>seller</th><th>buyer</th><th>tx</th></tr>${t.map(r=>`<tr><td>${r.valid_at.slice(5,19)}</td><td>#${r.token_id||'?'}</td><td class="num">${fmt(r[d])}</td><td class="mono">${short(r.maker)}</td><td class="mono">${short(r.taker)}</td><td class="mono">${short(r.tx_hash)}</td></tr>`).join('')}</table>`:`<div class="empty">no sales recorded in the store yet — a thin market can go hours between them</div>`}
-async function makers(){const p=q();const m=await J('/api/makers?'+qs({collection:p.collection,range:p.range}));const T=m.total_events_with_maker||1;
- $('#makers').innerHTML=m.top.length?`<table><tr><th>maker</th><th>events</th><th>share</th><th>bids</th><th>cancels</th><th>listings</th></tr>${m.top.map(r=>`<tr><td class="mono">${short(r.maker)}</td><td class="num">${fmt(r.events,0)}</td><td class="num">${(100*r.events/T).toFixed(1)}%</td><td class="num">${r.bids}</td><td class="num">${r.cancels}</td><td class="num">${r.listings}</td></tr>`).join('')}</table><div class="basis">of ${fmt(T,0)} events with a maker in this window</div>`:'<div class="empty">nothing in window</div>'}
-async function life(){const p=q();const l=await J('/api/lifetimes?'+qs({collection:p.collection,range:p.range}));
- $('#life').innerHTML=l.n?`<table><tr><th>n</th><th>p10</th><th>median</th><th>p90</th></tr><tr><td class="num">${fmt(l.n,0)}</td><td class="num">${fmt(l.p10_s,0)}s</td><td class="num">${fmt(l.median_s,0)}s</td><td class="num">${fmt(l.p90_s,0)}s</td></tr></table><div class="basis">${l.percentiles_reliable?'':'⚠ n < '+l.min_n_for_percentiles+': percentiles not reliable (REQ-F-19)'}</div>`:'<div class="empty">no bid→cancel pairs in window</div>'}
+async function tape(){const p=base();const t=await J('/api/tape?'+qs({collection:p.collection,traits:p.traits,limit:25}));const d=S.denom==='USD'?'price_usd':'price_eth';
+ $('#tape').innerHTML=t.length?`<table><tr><th>when</th><th>item</th><th class="num">${S.denom}</th><th>seller</th><th>buyer</th></tr>${t.map(r=>`<tr><td>${clock(r.valid_at)}</td><td>#${r.token_id||'?'}</td><td class="num">${money(r[d])}</td><td class="mono">${short(r.maker)}</td><td class="mono">${short(r.taker)}</td></tr>`).join('')}</table>`:`<div class="empty">no sales in the store yet — a thin market can go hours between them</div>`}
+async function makers(){const p=base();const m=await J('/api/makers?'+qs({collection:p.collection,range:p.range}));const T=m.total_events_with_maker||1;
+ $('#makers').innerHTML=m.top.length?`<table><tr><th>wallet</th><th class="num">events</th><th class="num">share</th><th class="num">bids</th><th class="num">cancels</th></tr>${m.top.map(r=>`<tr><td class="mono">${short(r.maker)}</td><td class="num">${fmt(r.events,0)}</td><td class="num">${(100*r.events/T).toFixed(1)}%</td><td class="num">${fmt(r.bids,0)}</td><td class="num">${fmt(r.cancels,0)}</td></tr>`).join('')}</table><div class="basis">of ${fmt(T,0)} events with a wallet in this window</div>`:'<div class="empty">nothing in window</div>'}
+async function life(){const p=base();const l=await J('/api/lifetimes?'+qs({collection:p.collection,range:p.range}));
+ $('#life').innerHTML=l.n?`<table><tr><th class="num">n</th><th class="num">p10</th><th class="num">median</th><th class="num">p90</th></tr><tr><td class="num">${fmt(l.n,0)}</td><td class="num">${fmt(l.p10_s,0)} s</td><td class="num"><b>${fmt(l.median_s,0)} s</b></td><td class="num">${fmt(l.p90_s,0)} s</td></tr></table><div class="basis">${l.percentiles_reliable?'':'⚠ n < '+l.min_n_for_percentiles+': percentiles not reliable (REQ-F-19)'}</div>`:'<div class="empty">no bid→cancel pairs in window</div>'}
 async function gapsAudit(){gaps=await J('/api/gaps');const a=await J('/api/audit');
- $('#gaps').innerHTML=gaps.length?`<table><tr><th>started</th><th>ended</th><th>reason</th><th>lost for good</th></tr>${gaps.slice(-12).reverse().map(g=>`<tr><td>${(g.started_at||'').slice(5,19)}</td><td>${g.ended_at?g.ended_at.slice(5,19):'<span class=note>open</span>'}</td><td title="${g.reason}">${(g.reason||'').slice(0,60)}</td><td>${(g.irrecoverable_classes||[]).length?(g.irrecoverable_classes||[]).map(c=>c.replace('item_','')).join(', '):'—'}</td></tr>`).join('')}</table>`:'<div class="empty">no gaps recorded</div>';
- $('#audit').innerHTML=(a.failures.length?a.failures.map(f=>`<div class="fail">${f}</div>`).join(''):'<div style="color:var(--ok)">clean</div>')+a.notes.map(n=>`<div class="note">${n}</div>`).join('')+`<div class="basis">${a.mode} · ${a.at.slice(11,19)}Z</div>`}
-async function all(){try{await status();await gapsAudit();await Promise.all([prices(),imm(),act(),mix(),book(),tape(),makers(),life()])}catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
-async function init(){meta=await J('/api/meta');$('#collection').innerHTML=meta.watchlist.map(s=>`<option>${s}</option>`).join('');
+ $('#gaps').innerHTML=gaps.length?`<table><tr><th>started</th><th>ended</th><th>reason</th><th>lost for good</th></tr>${gaps.slice(-10).reverse().map(g=>`<tr><td>${clock(g.started_at)}</td><td>${g.ended_at?clock(g.ended_at):'<span class=note>open</span>'}</td><td title="${g.reason}">${(g.reason||'').slice(0,48)}</td><td>${(g.irrecoverable_classes||[]).map(c=>c.replace('item_','')).join(', ')||'—'}</td></tr>`).join('')}</table>`:'<div class="empty">no gaps recorded</div>';
+ $('#audit').innerHTML=(a.failures.length?a.failures.map(f=>`<div class="fail">${f}</div>`).join(''):'<div class="ok">clean</div>')+a.notes.map(n=>`<div class="note">${n}</div>`).join('')+`<div class="basis">${a.mode} · ${clock(a.at)}</div>`}
+
+/* ---------- traits sidebar ---------- */
+async function traits(){const p=base();const t=await J('/api/traits?'+qs({collection:p.collection}));S.traitTypes=Object.keys(t.traits);
+ const ob=t.onboarding;const pct=t.tokens?Math.round(100*t.with_traits/t.tokens):0;
+ $('#tsum').textContent=t.tokens?`${fmt(t.with_traits,0)} / ${fmt(t.tokens,0)} tokens`:'';
+ $('#onboard').innerHTML=(t.tokens&&t.with_traits<t.tokens)||(ob&&ob.state!=='complete'&&ob.state!=='queued')?`<div class="basis" style="color:var(--warn)">onboarding ${ob?ob.state:''}: ${pct}% of tokens have traits${ob&&ob.requests_spent?` · ${ob.requests_spent} REST reads spent`:''} — metrics below are provisional (REQ-F-07a)<div class="progress"><i style="width:${pct}%"></i></div></div>`:'';
+ if(!S.traitTypes.length){$('#traits').innerHTML='<div class="empty">no traits loaded yet — double-click <b>traits.command</b> to load them (≈15 min, ≈40% of one hour\'s REST budget)</div>';return}
+ $('#traits').innerHTML=S.traitTypes.map(tt=>{const vals=t.traits[tt];const sel=S.traits[tt]||[];return `<details class="tgroup" ${sel.length?'open':''}><summary>${tt}<span>${sel.length?sel.length+' selected · ':''}${vals.length}</span></summary>${vals.length>12?`<div class="tsearch"><input type="search" placeholder="search ${tt}…" data-t="${tt}"></div>`:''}<div class="tvals">${vals.map(v=>`<label class="tval" data-v="${v.value.replace(/"/g,'&quot;')}"><input type="checkbox" data-t="${tt}" value="${v.value.replace(/"/g,'&quot;')}" ${sel.includes(v.value)?'checked':''}><span>${v.value}</span><span class="n">${fmt(v.n,0)}</span></label>`).join('')}</div></details>`}).join('');
+ $('#traits').querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{const tt=cb.dataset.t;S.traits[tt]=S.traits[tt]||[];if(cb.checked)S.traits[tt].push(cb.value);else S.traits[tt]=S.traits[tt].filter(x=>x!==cb.value);S.page=0;chips();all()}));
+ $('#traits').querySelectorAll('input[type=search]').forEach(inp=>inp.addEventListener('input',()=>{const q=inp.value.toLowerCase();inp.closest('.tgroup').querySelectorAll('.tval').forEach(l=>l.style.display=l.dataset.v.toLowerCase().includes(q)?'':'none')}));
+ chips()}
+function chips(){const active=Object.entries(S.traits).flatMap(([t,vs])=>vs.map(v=>[t,v]));
+ $('#chips').innerHTML=active.length?active.map(([t,v])=>`<span class="pill">${t}: ${v}<button data-t="${t}" data-v="${v}" title="remove">×</button></span>`).join('')+`<div><button id="clear" style="margin:6px 0 10px;font-size:12px">clear all</button></div>`:'';
+ $('#chips').querySelectorAll('.pill button').forEach(b=>b.addEventListener('click',()=>{S.traits[b.dataset.t]=(S.traits[b.dataset.t]||[]).filter(x=>x!==b.dataset.v);S.page=0;traits();all()}));
+ const c=$('#clear');if(c)c.addEventListener('click',()=>{S.traits={};S.page=0;traits();all()})}
+
+/* ---------- screener ---------- */
+async function screener(){const p=base();const r=await J('/api/screener?'+qs({collection:p.collection,traits:p.traits,sort:S.sort,dir:S.dir,page:S.page,size:50,denom:S.denom}));
+ if(!r.total){$('#screener').innerHTML=`<div class="empty">${S.traitTypes.length?'no tokens match these filters':'token list not loaded yet — run traits.command'}</div>`;return}
+ const cols=[['token_id','token'],['name','name'],...r.trait_types.map(t=>[t,t]),['lowest_ask','lowest ask'],['highest_bid','highest bid'],['last_sale','last sale']];
+ const th=cols.map(([k,l])=>`<th class="sortable ${S.sort===k?'sorted':''} ${['lowest_ask','highest_bid','last_sale'].includes(k)?'num':''}" data-k="${k}">${l}${S.sort===k?(S.dir==='asc'?' ▲':' ▼'):''}</th>`).join('');
+ const rows=r.rows.map(x=>`<tr><td>${x.image_url?`<img class="thumb" loading="lazy" src="${x.image_url}" alt="">`:''}#${x.token_id}</td><td>${x.name||''}</td>${r.trait_types.map(t=>`<td>${x.traits[t]??'<span style="color:var(--faint)">—</span>'}</td>`).join('')}<td class="num ask">${money(x.lowest_ask)}</td><td class="num bid">${money(x.highest_bid)}</td><td class="num" title="${x.last_sale_at?clock(x.last_sale_at):''}">${money(x.last_sale)}</td></tr>`).join('');
+ const pages=Math.ceil(r.total/r.page_size);
+ $('#screener').innerHTML=`<div style="overflow:auto;max-height:520px"><table><thead><tr>${th}</tr></thead><tbody>${rows}</tbody></table></div><div class="pager"><span>${fmt(r.total,0)} tokens · page ${r.page+1} of ${pages}</span><button id="pg-prev" ${r.page===0?'disabled':''}>‹</button><button id="pg-next" ${r.page+1>=pages?'disabled':''}>›</button></div><div class="basis">lowest ask / highest bid = standing orders right now (placed, not cancelled, unexpired) · last sale = most recent item_sold · ${S.denom} · as of ${clock(r.as_of)}</div>`;
+ $('#screener').querySelectorAll('th.sortable').forEach(h=>h.addEventListener('click',()=>{const k=h.dataset.k;if(S.sort===k)S.dir=S.dir==='asc'?'desc':'asc';else{S.sort=k;S.dir=['lowest_ask','highest_bid','last_sale'].includes(k)?'desc':'asc'}S.page=0;screener()}));
+ const pv=$('#pg-prev'),nx=$('#pg-next');if(pv)pv.addEventListener('click',()=>{S.page--;screener()});if(nx)nx.addEventListener('click',()=>{S.page++;screener()})}
+
+/* ---------- orchestration ---------- */
+async function all(){try{await status();await gapsAudit();await Promise.all([kpis(),prices(),imm(),act(),mix(),book(),tape(),makers(),life(),screener()])}catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
+function seg(id,key,cb){$('#'+id).querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{$('#'+id).querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');S[key]=b.dataset.v;cb()}))}
+function layout(){const h=document.querySelector('header').offsetHeight,c=document.querySelector('.controls').offsetHeight;document.documentElement.style.setProperty('--hdr',h+'px');document.documentElement.style.setProperty('--top',(h+c)+'px')}
+window.addEventListener('resize',layout);
+async function init(){layout();
+ if(!window.Plotly){document.querySelectorAll('.plot').forEach(el=>el.innerHTML='<div class="empty">charts need Plotly from cdn.plot.ly — this computer could not reach it. Tables and cards still work.</div>')}const meta=await J('/api/meta');$('#collection').innerHTML=meta.watchlist.map(s=>`<option>${s}</option>`).join('');
  $('#interval').innerHTML=meta.intervals.map(i=>`<option ${i==='5m'?'selected':''}>${i}</option>`).join('');
- document.querySelectorAll('.controls select').forEach(s=>s.addEventListener('change',all));$('#refresh').addEventListener('click',all);await all();setInterval(all,10000)}
+ ['collection','interval','range'].forEach(id=>$('#'+id).addEventListener('change',all));seg('denom','denom',all);seg('transform','transform',all);$('#refresh').addEventListener('click',()=>{traits();all()});
+ await traits();await all();setInterval(all,10000);setInterval(traits,30000)}
 init();
 </script></body></html>

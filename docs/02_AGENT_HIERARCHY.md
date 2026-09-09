@@ -92,6 +92,9 @@ genuinely operator-level decisions reach Spencer.
                           it reviews. Reports to the Operator.
         QA AUDITOR (L2) ─ independent. Routes findings DOWN to the level that
                           can fix them; up to the Operator only when needed.
+        DESIGN LEAD (L2) ─ sees every user-facing change RENDERED before the
+                          Operator does; asks him design questions as their
+                          own thread. Reports to the Orchestrator.
 ```
 
 **The escalation rules, stated plainly:**
@@ -103,6 +106,7 @@ genuinely operator-level decisions reach Spencer.
 | A fix would change scope, architecture, or a requirement | Tech Lead → **Orchestrator** | Spencer directly |
 | Environment, CI, secrets, budget, repo settings, Slack, agent definitions | **Orchestrator** | Tech Lead |
 | A requirement is ambiguous or contradicts another | Orchestrator → **Spencer** | guessing |
+| A design choice — colour, units, hover, chart style, what a card shows | **Design Lead** asks Spencer, as a separate short thread with options | a developer's default |
 | A trade-off between cost, scope, and risk | Orchestrator → **Spencer**, with a recommendation | deciding it internally |
 | Anything touching capital, keys, or a transaction | **Spencer, always** | anyone |
 
@@ -349,7 +353,34 @@ what would settle it. Never marks it verified.
 
 **Runs continuously**, not only before a PR.
 
-### 3.15 Context boundaries — summary
+### 3.15 Design Lead (L2) — `design-lead`, opus
+
+**Purpose.** Owns how the product **looks and reads**: the dashboard, chart
+labels, number formats, timestamps, launcher output. Screenshots every
+user-facing change in the browser it is for **before** the Operator sees it,
+and asks the Operator design questions as their own short thread instead of
+letting a developer default them.
+
+**Exists because** BUG-041/042/043 — a white control box, UTC on every clock,
+illegible hover cards — were found by Spencer in his first minute with the
+page and by no agent. All three were invisible in the Linux container the page
+was built in.
+
+**Reference points** are the Operator's words, kept verbatim in the charter:
+OpenSea/Coinbase layout with Austin FC Verde `#00B140`, Tableau-grade charts,
+≥ 4.5:1 contrast everywhere, USD to the cent, hover cards readable, Central
+time shown with its zone, a labelled moving-average overlay once there is
+≥ 24 h of data (never smoothing the raw series in place).
+
+**May** edit CSS and formatting directly. **Files** logic defects to the Tech
+Lead as `PRS` (or `TMP` for timezone) bugs with a screenshot. **Never** changes
+what a number means to make it prettier, hides an undefined value or a small-n
+warning, or signs off a page it has not seen rendered.
+
+**Reports to** the orchestrator. Design questions for Spencer go through the
+orchestrator as a separate thread with two or three concrete options.
+
+### 3.16 Context boundaries — summary
 
 | Agent | Landing zone | Normalized | Train | Validation | Test | Config | Code | Live capital |
 |---|---|---|---|---|---|---|---|---|
@@ -392,6 +423,7 @@ Operator states intent
        what was deferred
   → [BLOCK if failed → back to the specialist with specifics]
   → qa-auditor: does the repo match everything that was CLAIMED about it
+  → design-lead: has a human-shaped eye SEEN it rendered where the Operator will see it (UI changes only)
   → [route findings down: dev → tech-lead, ops → orchestrator]
   → Open PR. Post to #opensea-dev.
   → ⛔ SPENCER APPROVES THE PR — no exceptions, no auto-merge

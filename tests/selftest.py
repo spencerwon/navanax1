@@ -2037,13 +2037,148 @@ def test_dashboard_serves_localhost_only(tmp: Path) -> None:
         check("dashboard: a bad request is a 400 with the reason, not a crash",
               st == 400 and b"unknown metric" in body)
         st, body = get("/")
-        check("dashboard: serves the page", st == 200 and b"NAVANAX" in body)
+        check("dashboard: serves the page", st == 200 and b"navanax" in body.lower())
         st, _ = get("/../pyproject.toml")
         check("dashboard: no path traversal out of the ui dir", st == 404)
     finally:
         httpd.shutdown()
         httpd.server_close()
         dash.norm.close()
+
+
+def test_traits_pipeline(tmp: Path) -> None:
+    """Trait onboarding (REQ-F-07): metadata parsing tolerates the common shapes,
+    the token list resumes from its cursor, and the fallback is budgeted so a
+    broken metadata host cannot spend the hour's REST allowance."""
+    import asyncio
+
+    from navanax.opstore import OperationalStore
+    from navanax.traits import TraitsJob, ensure_schema, open_store, parse_attributes, trait_values
+
+    check("traits: ERC-721 attributes list parses, numbers become strings",
+          parse_attributes({"attributes": [{"trait_type": "Eyes", "value": "Laser"}, {"trait_type": "Level", "value": 3}]})
+          == [("Eyes", "Laser"), ("Level", "3")])
+    check("traits: dict-shaped and `traits`-keyed metadata both parse",
+          parse_attributes({"traits": {"Background": "Blue"}}) == [("Background", "Blue")])
+    check("traits: junk metadata yields no traits, no crash",
+          parse_attributes({"attributes": "nope"}) == [] and parse_attributes({}) == [])
+
+    class FakeRest:
+        """Two pages of tokens, then a per-token endpoint. Counts every call."""
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.calls.append(path)
+            if path.endswith("/nfts") and "collection/" in path:
+                if not (params or {}).get("next"):
+                    return 200, {"nfts": [{"identifier": "1", "contract": "0xc", "name": "Argo #1",
+                                           "metadata_url": "ipfs://Qm1"}], "next": "page2"}
+                return 200, {"nfts": [{"identifier": "2", "contract": "0xc", "name": "Argo #2",
+                                       "metadata_url": None}], "next": None}
+            if "/contract/0xc/nfts/2" in path:
+                return 200, {"nft": {"traits": [{"trait_type": "Eyes", "value": "Laser"}]}}
+            return 404, {}
+
+    conn = open_store(tmp / "an.sqlite")
+    ensure_schema(conn)
+    ops = OperationalStore(tmp / "traits-ops.db")
+    rest = FakeRest()
+    job = TraitsJob(conn, rest, ops, slug="argonauts", opensea_fallback_budget=1)
+    job._fetch_json = lambda url: {"attributes": [{"trait_type": "Background", "value": "Blue"}]}  # no network
+    out = asyncio.run(job.list_tokens())
+    check("traits: token list walks every page through the governed client", out["pages"] == 2 and out["tokens"] == 2)
+    st = next(r for r in ops.onboarding_status() if r["collection_slug"] == "argonauts")
+    check("traits: onboarding advances tokens -> traits and records reads spent",
+          st["state"] == "traits" and st["requests_spent"] == 2, str(st))
+    check("traits: a second list_tokens is a no-op, not a second 47-read walk",
+          asyncio.run(job.list_tokens()).get("skipped") and len(rest.calls) == 2)
+
+    res = asyncio.run(job.fetch_traits())
+    check("traits: direct metadata_url is used when present; OpenSea fallback only when it is not",
+          res["ok"] == 2 and rest.calls.count("/chain/ethereum/contract/0xc/nfts/2") == 1
+          and not any("/nfts/1" in c for c in rest.calls), str(rest.calls))
+    vals = trait_values(conn, "argonauts")
+    check("traits: filter panel sees every trait type with counts",
+          vals == {"Background": [{"value": "Blue", "n": 1}], "Eyes": [{"value": "Laser", "n": 1}]}, str(vals))
+    check("traits: ipfs:// resolves through the configured gateway",
+          job._resolve_url("ipfs://Qm1/meta.json") == "https://ipfs.io/ipfs/Qm1/meta.json")
+    check("traits: onboarding reaches complete", any(r["state"] == "complete" for r in ops.onboarding_status()))
+    conn.close()
+
+
+def test_screener_sort_and_filter(tmp: Path) -> None:
+    """REQ-F-07: single and multi-trait filters (AND across types, OR within a type),
+    every column sortable, nulls last, live prices from the store."""
+    from navanax.metrics import MetricEngine, load_intervals, parse_trait_filter, token_filter_sql
+    from navanax.normalize import COLS, Normalizer, parse_event
+    from navanax.traits import ensure_schema
+
+    f = parse_trait_filter("Background:Blue|Red;Eyes:Laser")
+    check("screener: filter grammar parses type:val|val;type:val", f == {"Background": ["Blue", "Red"], "Eyes": ["Laser"]})
+    check("screener: blank spec means no filter", parse_trait_filter("") == {} and parse_trait_filter(None) == {})
+    sql, args = token_filter_sql("argonauts", f, alias="e")
+    check("screener: AND across trait types, OR (IN) within one, all parameterised",
+          sql.count("token_id IN (SELECT") == 2 and "value IN (?,?)" in sql and args.count("argonauts") == 2 and "Blue" in args, sql)
+    check("screener: no filter -> no SQL", token_filter_sql("argonauts", {}) == ("", []))
+
+    n = Normalizer(tmp / "empty-lz", tmp / "sc.sqlite")
+    ensure_schema(n.conn)
+    toks = [("1", "Argo #1", "Blue", "Laser"), ("2", "Argo #2", "Red", "Plain"), ("3", "Argo #3", "Blue", "Plain")]
+    for tid, name, bg, eyes in toks:
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)", ("argonauts", tid, name, "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Background", bg), ("argonauts", tid, "Eyes", eyes)])
+    # one live listing on token 1 at 0.5 ETH (from the real listing frame, token id patched)
+    row = parse_event(_env(1, DOC_LISTING, "2026-09-09T10:30:01Z"))
+    row["file"] = "f"
+    row["token_id"] = "1"
+    row["price_eth"] = 0.5
+    row["price_usd"] = 1250.0
+    n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})", tuple(row.get(c) for c in COLS))
+    n.conn.commit()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+
+    r = eng.screener("argonauts", now=now)
+    check("screener: unfiltered returns every token with its trait dict and the trait columns",
+          r["total"] == 3 and r["trait_types"] == ["Background", "Eyes"] and r["rows"][0]["traits"] == {"Background": "Blue", "Eyes": "Laser"})
+    r = eng.screener("argonauts", traits={"Background": ["Blue"]}, now=now)
+    check("screener: single filter", [x["token_id"] for x in r["rows"]] == ["1", "3"])
+    r = eng.screener("argonauts", traits={"Background": ["Blue"], "Eyes": ["Laser"]}, now=now)
+    check("screener: multi-filter is AND across types", [x["token_id"] for x in r["rows"]] == ["1"])
+    r = eng.screener("argonauts", traits={"Background": ["Blue", "Red"]}, now=now)
+    check("screener: multi-value within a type is OR", r["total"] == 3)
+    r = eng.screener("argonauts", sort="Eyes", direction="desc", now=now)
+    check("screener: sort by a trait column", [x["traits"]["Eyes"] for x in r["rows"]] == ["Plain", "Plain", "Laser"])
+    r = eng.screener("argonauts", sort="lowest_ask", direction="asc", now=now)
+    check("screener: sort by price puts the priced token first and nulls last, ETH by default",
+          r["rows"][0]["token_id"] == "1" and r["rows"][0]["lowest_ask"] == 0.5 and r["rows"][-1]["lowest_ask"] is None, str(r["rows"]))
+    r = eng.screener("argonauts", sort="lowest_ask", denom="USD", now=now)
+    check("screener: USD denomination uses price_usd", r["rows"][0]["lowest_ask"] == 1250.0)
+    r = eng.screener("argonauts", page=1, page_size=2, now=now)
+    check("screener: pagination", r["total"] == 3 and len(r["rows"]) == 1 and r["page"] == 1)
+    r = eng.screener("argonauts", sort="DROP TABLE tokens", now=now)
+    check("screener: unknown sort column falls back safely", r["sort"] == "token_id")
+    n.close()
+
+
+def test_ui_contract() -> None:
+    """The page is the only thing Spencer sees; these are the design rules he set
+    (BUG-041 white control box, BUG-042 UTC on screen) pinned so they cannot regress."""
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    check("ui: dark colour scheme declared so macOS cannot paint native controls white (BUG-041)",
+          'color-scheme" content="dark"' in html and "color-scheme: dark" in html)
+    check("ui: selects are custom-drawn (appearance:none) with an explicit dark option background",
+          "appearance:none" in html and "select option{background:" in html)
+    check("ui: every timestamp goes through the display timezone from /api/status (BUG-042)",
+          "display_timezone" in html and "timeZone:S.tz" in html and "plotT(" in html)
+    check("ui: hover cards have an explicit high-contrast background and font", "hoverlabel:{bgcolor:'#1A231E'" in html and "namelength:-1" in html)
+    check("ui: USD is shown to the cent", "minimumFractionDigits:2,maximumFractionDigits:2" in html)
+    check("ui: Austin FC Verde is the accent; the old blue accent is gone", "#00B140" in html and "#58a6ff" not in html.lower())
+    check("ui: trait filters and the screener are wired to the trait endpoints",
+          "/api/traits" in html and "/api/screener" in html and "traits:traitSpec()" in html)
+    check("ui: no curve is drawn between observations (no spline interpolation)", "shape:'spline'" not in html)
+    check("ui: undefined values stay holes", "connectgaps:false" in html and "connectgaps:true" not in html)
 
 
 if __name__ == "__main__":

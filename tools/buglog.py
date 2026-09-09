@@ -56,6 +56,8 @@ ERROR_CLASS = {
     "TMP": "Temporal / bitemporal",
     "SEC": "Security",
     "INF": "Infrastructure",
+    "PRS": "Presentation",
+    "BTI": "Backtest integrity",
 }
 
 COLUMNS = [

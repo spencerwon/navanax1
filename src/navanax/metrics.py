@@ -176,6 +176,37 @@ def apply_transform(values: list[float | None], transform: str) -> tuple[list[fl
 
 
 # ---------------------------------------------------------------------------
+# trait filters -- AND across trait types, OR within one (OpenSea's semantics)
+# ---------------------------------------------------------------------------
+def parse_trait_filter(spec: str | None) -> dict[str, list[str]]:
+    """'Background:Blue|Red;Eyes:Laser' -> {'Background': ['Blue','Red'], 'Eyes': ['Laser']}"""
+    out: dict[str, list[str]] = {}
+    if not spec:
+        return out
+    for part in spec.split(";"):
+        if ":" not in part:
+            continue
+        t, vals = part.split(":", 1)
+        vs = [v for v in vals.split("|") if v != ""]
+        if t.strip() and vs:
+            out[t.strip()] = vs
+    return out
+
+
+def token_filter_sql(collection: str, traits: dict[str, list[str]], alias: str = "e") -> tuple[str, list[Any]]:
+    """SQL fragment restricting `alias`.token_id to tokens matching every trait clause."""
+    if not traits:
+        return "", []
+    clauses, args = [], []
+    for t, vals in traits.items():
+        clauses.append(
+            f"{alias}.token_id IN (SELECT token_id FROM traits WHERE collection = ? AND trait_type = ? "
+            f"AND value IN ({','.join('?' * len(vals))}))")
+        args += [collection, t, *vals]
+    return " AND " + " AND ".join(clauses), args
+
+
+# ---------------------------------------------------------------------------
 # the engine
 # ---------------------------------------------------------------------------
 class MetricEngine:
@@ -185,17 +216,25 @@ class MetricEngine:
         self.tz = tz_name
 
     def _bucketed(self, metric: str, collection: str, denom: str, start: float, end: float,
-                  interval: dict[str, Any]) -> dict[float, float]:
+                  interval: dict[str, Any], traits: dict[str, list[str]] | None = None) -> dict[float, float]:
         spec = METRICS[metric]
         col = "price_usd" if denom == "USD" else "price_eth"
-        where = ["collection = ?", "valid_ts >= ?", "valid_ts < ?"]
+        where = ["e.collection = ?", "e.valid_ts >= ?", "e.valid_ts < ?"]
         args: list[Any] = [collection, start, end]
         if spec["types"]:
-            where.append(f"event_type IN ({','.join('?' * len(spec['types']))})")
+            where.append(f"e.event_type IN ({','.join('?' * len(spec['types']))})")
             args.extend(spec["types"])
         if spec["price"]:
-            where.append(f"{col} IS NOT NULL")
-        sql = f"SELECT valid_ts, {col} FROM events WHERE {' AND '.join(where)} ORDER BY valid_ts"
+            where.append(f"e.{col} IS NOT NULL")
+        tf, targs = token_filter_sql(collection, traits or {})
+        # A collection_offer has no token_id: under a trait filter it still
+        # applies to every matching token (that is what a collection offer IS).
+        # So token-level events must match every clause; token-less events pass.
+        if tf and not (spec["types"] and set(spec["types"]) <= {"collection_offer"}):
+            clauses = tf[len(" AND "):]                     # "A AND B AND C"
+            where.append(f"(e.token_id IS NULL OR ({clauses}))")
+            args.extend(targs)
+        sql = f"SELECT e.valid_ts, e.{col} FROM events e WHERE {' AND '.join(where)} ORDER BY e.valid_ts"
         groups: dict[float, list[float]] = {}
         for ts, v in self.conn.execute(sql, args):
             b = bucket_of(ts, interval, self.tz)
@@ -219,7 +258,7 @@ class MetricEngine:
 
     def series(self, *, metric: str, collection: str, denomination: str = "ETH",
                transform: str = "ABS", interval: str = "1h", range_: str = "24h",
-               now: datetime | None = None) -> dict[str, Any]:
+               now: datetime | None = None, traits: dict[str, list[str]] | None = None) -> dict[str, Any]:
         if metric not in METRICS:
             raise ValueError(f"unknown metric {metric!r}; one of {sorted(METRICS)}")
         if denomination not in DENOMS:
@@ -234,15 +273,15 @@ class MetricEngine:
         spec = METRICS[metric]
         if "derived" in spec:
             a, b = spec["derived"]
-            ga = self._bucketed(a, collection, denomination, start, end, ispec)
-            gb = self._bucketed(b, collection, denomination, start, end, ispec)
+            ga = self._bucketed(a, collection, denomination, start, end, ispec, traits)
+            gb = self._bucketed(b, collection, denomination, start, end, ispec, traits)
             keys = sorted(set(ga) | set(gb))
             raw = [(ga[k] - gb[k]) if (k in ga and k in gb) else None for k in keys]
             parts = {"floor_ask": [ga.get(k) for k in keys],
                      "collection_bid": [gb.get(k) for k in keys]}
             pct = [((ga[k] - gb[k]) / ga[k]) if (k in ga and k in gb and ga[k]) else None for k in keys]
         else:
-            g = self._bucketed(metric, collection, denomination, start, end, ispec)
+            g = self._bucketed(metric, collection, denomination, start, end, ispec, traits)
             keys = sorted(g)
             raw = [g[k] for k in keys]
             parts, pct = {}, None
@@ -254,6 +293,7 @@ class MetricEngine:
             "range": {"spec": range_, "start": start_dt.isoformat(), "end": end_dt.isoformat()},
             "display_timezone": self.tz,
             "wash_filter": "raw",           # no filter exists yet; say so rather than imply one
+            "trait_filter": traits or {},
             "as_of": now.isoformat(),
             "baseline_at": (datetime.fromtimestamp(keys[basis["baseline_index"]], tz=timezone.utc).isoformat()
                             if basis.get("baseline_index") is not None and keys else None),
@@ -268,7 +308,8 @@ class MetricEngine:
         return out
 
     # -- non-series views ----------------------------------------------------
-    def live_book(self, collection: str, now: datetime | None = None, limit: int = 25) -> dict[str, Any]:
+    def live_book(self, collection: str, now: datetime | None = None, limit: int = 25,
+                  traits: dict[str, list[str]] | None = None) -> dict[str, Any]:
         """Orders placed and not since cancelled/invalidated/filled, and unexpired.
 
         Lifecycle by order_hash. This is the closest thing to "the book right
@@ -286,9 +327,12 @@ class MetricEngine:
                    FROM events e
                    WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL
                      AND (e.expiration_at IS NULL OR e.expiration_at > ?) AND {dead}"""
+        tf, targs = token_filter_sql(collection, traits or {})
+
         def rows(etype: str, order: str) -> list[dict[str, Any]]:
-            cur = self.conn.execute(base + f" ORDER BY e.price_eth {order} LIMIT ?",
-                                    (collection, etype, now_iso, limit))
+            extra = tf if etype != "collection_offer" else ""
+            cur = self.conn.execute(base + extra + f" ORDER BY e.price_eth {order} LIMIT ?",
+                                    (collection, etype, now_iso, *(targs if extra else []), limit))
             keys = ("valid_at", "event_type", "token_id", "price_eth", "price_usd",
                     "maker", "expiration_at", "order_hash")
             return [dict(zip(keys, r, strict=True)) for r in cur]
@@ -297,11 +341,12 @@ class MetricEngine:
                 "item_bids": rows("item_received_bid", "DESC"),
                 "collection_offers": rows("collection_offer", "DESC")}
 
-    def tape(self, collection: str, limit: int = 50) -> list[dict[str, Any]]:
+    def tape(self, collection: str, limit: int = 50, traits: dict[str, list[str]] | None = None) -> list[dict[str, Any]]:
+        tf, targs = token_filter_sql(collection, traits or {})
         cur = self.conn.execute(
-            """SELECT valid_at, token_id, price_eth, price_usd, maker, taker, tx_hash
-               FROM events WHERE collection = ? AND event_type = 'item_sold'
-               ORDER BY valid_ts DESC LIMIT ?""", (collection, limit))
+            f"""SELECT e.valid_at, e.token_id, e.price_eth, e.price_usd, e.maker, e.taker, e.tx_hash
+               FROM events e WHERE e.collection = ? AND e.event_type = 'item_sold'{tf}
+               ORDER BY e.valid_ts DESC LIMIT ?""", (collection, *targs, limit))
         return [dict(zip(("valid_at", "token_id", "price_eth", "price_usd", "maker", "taker", "tx_hash"), r, strict=True))
                 for r in cur]
 
@@ -337,6 +382,75 @@ class MetricEngine:
             return d[min(n - 1, int(p * n))] if n else None
         return {"n": n, "p10_s": pct(0.10), "median_s": pct(0.5), "p90_s": pct(0.9),
                 "min_n_for_percentiles": 30, "percentiles_reliable": n >= 30}
+
+    def screener(self, collection: str, *, traits: dict[str, list[str]] | None = None,
+                 sort: str = "token_id", direction: str = "asc", page: int = 0, page_size: int = 50,
+                 denom: str = "ETH", now: datetime | None = None) -> dict[str, Any]:
+        """Every token matching the filter, with its traits and its live market state,
+        sortable by any column -- token, name, any trait type, lowest ask, highest bid,
+        last sale (REQ-F-07). Computed from the store; no REST."""
+        col = "price_usd" if denom == "USD" else "price_eth"
+        now_iso = (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+        tf, targs = token_filter_sql(collection, traits or {}, alias="t")
+        toks = self.conn.execute(
+            f"SELECT t.token_id, t.name, t.image_url FROM tokens t WHERE t.collection = ?{tf}",
+            (collection, *targs)).fetchall()
+        ids = {r[0] for r in toks}
+        tr: dict[str, dict[str, str]] = {}
+        for tid, tt, v in self.conn.execute("SELECT token_id, trait_type, value FROM traits WHERE collection = ?", (collection,)):
+            if tid in ids:
+                tr.setdefault(tid, {})[tt] = v
+        dead = """NOT EXISTS (SELECT 1 FROM events d INDEXED BY ix_events_lifecycle
+                    WHERE d.order_hash = e.order_hash AND d.event_type IN ('item_cancelled','order_invalidate','item_sold')
+                      AND d.valid_ts >= e.valid_ts)"""
+        live = f"""SELECT e.token_id, MIN(e.{col}), MAX(e.{col}) FROM events e
+                   WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL AND e.token_id IS NOT NULL
+                     AND (e.expiration_at IS NULL OR e.expiration_at > ?) AND {dead} GROUP BY e.token_id"""
+        ask = {t: lo for t, lo, _ in self.conn.execute(live, (collection, "item_listed", now_iso))}
+        bid = {t: hi for t, _, hi in self.conn.execute(live, (collection, "item_received_bid", now_iso))}
+        last_sale: dict[str, tuple[float, str]] = {}
+        for t, p, at in self.conn.execute(
+                f"""SELECT token_id, {col}, valid_at FROM events WHERE collection = ? AND event_type = 'item_sold'
+                    AND token_id IS NOT NULL ORDER BY valid_ts ASC""", (collection,)):
+            last_sale[t] = (p, at)
+        rows = []
+        for tid, name, img in toks:
+            ls = last_sale.get(tid)
+            rows.append({"token_id": tid, "name": name, "image_url": img, "traits": tr.get(tid, {}),
+                         "lowest_ask": ask.get(tid), "highest_bid": bid.get(tid),
+                         "last_sale": ls[0] if ls else None, "last_sale_at": ls[1] if ls else None})
+        trait_types = sorted({tt for d in tr.values() for tt in d})
+        if sort not in ("token_id", "name", "lowest_ask", "highest_bid", "last_sale") and sort not in trait_types:
+            sort = "token_id"   # an unknown column is a caller mistake, not a crash and never SQL
+        direction = "desc" if direction == "desc" else "asc"
+
+        def key(r: dict[str, Any]):
+            if sort == "token_id":
+                try:
+                    return (0, int(r["token_id"]))
+                except ValueError:
+                    return (1, r["token_id"])
+            if sort in ("lowest_ask", "highest_bid", "last_sale"):
+                v = r[sort]
+                return (1, 0) if v is None else (0, v)
+            if sort == "name":
+                return (0, r["name"] or "")
+            v = r["traits"].get(sort)
+            if v is None:
+                return (1, "")
+            try:
+                return (0, float(v))
+            except ValueError:
+                return (0, v.lower())
+        rows.sort(key=key, reverse=(direction == "desc"))
+        if direction == "desc":
+            # keep "no value" rows at the bottom in either direction
+            rows.sort(key=lambda r: key(r)[0] == 1)
+        total = len(rows)
+        page_rows = rows[page * page_size:(page + 1) * page_size]
+        return {"total": total, "page": page, "page_size": page_size, "sort": sort, "direction": direction,
+                "denomination": denom, "trait_types": trait_types, "as_of": now_iso,
+                "trait_filter": traits or {}, "rows": page_rows}
 
     def event_mix(self, collection: str | None, start: float, end: float) -> list[dict[str, Any]]:
         where = "valid_ts>=? AND valid_ts<?" + (" AND collection=?" if collection else "")

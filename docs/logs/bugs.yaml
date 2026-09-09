@@ -1404,3 +1404,83 @@ bugs:
   regression_test: tests/selftest.py::test_metric_engine_contract
   monitor_gap: "The unit test's store had six rows. Nothing about a query plan shows at six rows; it showed at 85,713."
   pr: 3
+
+- id: BUG-20260909-041
+  summary: Dashboard controls rendered as white boxes with near-white text on macOS -- the native <select> ignored the dark page and was unreadable
+  severity: S3
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-09T12:05:00-05:00"
+  occurred_at: "2026-09-09T11:55:00-05:00"
+  resolved_at: "2026-09-09T12:40:00-05:00"
+  detected_by: "Spencer, first look at the dashboard on his Mac"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-09
+  data_impact: "None. Display only."
+  root_cause: >-
+    The page set a dark palette by CSS but never declared `color-scheme: dark`,
+    so Safari/Chrome on macOS painted the native form controls in their light
+    theme (white box) while the page's light text colour was inherited into
+    them -- light on light. Built in a Linux container where the control is
+    drawn by the page, so it never showed here.
+  resolution: "color-scheme: dark declared (meta + CSS); selects/buttons/inputs are custom-drawn (appearance:none) with explicit dark backgrounds, option backgrounds, borders, a drawn chevron and a Verde focus ring. Every text/background pair in the palette checked to >= 4.5:1."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "The page was never rendered in a real macOS browser before it was shown to the operator. Rule going forward: the designer role screenshots the page in Safari/Chrome on the Mac before it is handed over."
+  pr: 4
+
+- id: BUG-20260909-042
+  summary: Every timestamp on the dashboard was shown in UTC although docs/06 sets the display timezone to America/Chicago
+  severity: S3
+  priority: P1
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-09T12:05:00-05:00"
+  occurred_at: "2026-09-09T11:55:00-05:00"
+  resolved_at: "2026-09-09T12:40:00-05:00"
+  detected_by: "Spencer, first look at the dashboard"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  - {file: src/navanax/dashboard.py, line: 112}
+  requirement: REQ-F-08
+  data_impact: "None to stored data (which is UTC and must stay UTC). Every on-screen time and every chart x-axis was six hours off from the operator's clock."
+  root_cause: >-
+    The API returns ISO-8601 UTC (correct), and the page passed those strings
+    straight to Plotly and to the tables. Plotly plots date strings as given,
+    with no timezone conversion. The display timezone existed in config and was
+    used for bucket alignment, but the page never read it.
+  resolution: "/api/status carries display_timezone; the page formats every timestamp with Intl.DateTimeFormat in that zone and converts chart x values to local wall-clock strings before handing them to Plotly. The zone is printed in the header, the footer and every basis line."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "docs/06 §1 states the rule; no test pinned the page to it. Now one does."
+  pr: 4
+
+- id: BUG-20260909-043
+  summary: Chart hover cards were illegible (light text on a light card) and USD values were rounded to whole dollars
+  severity: S4
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-09T12:30:00-05:00"
+  occurred_at: "2026-09-09T12:20:00-05:00"
+  resolved_at: "2026-09-09T12:40:00-05:00"
+  detected_by: "Spencer, hovering the price chart; asked for OpenSea-style cards and cents"
+  detection_channel: operator
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-09
+  data_impact: "None. Display only, but the whole-dollar rounding hid the cent-level moves that matter on a floor near $100."
+  root_cause: >-
+    Plotly's default hover label takes the trace colour as its background and
+    the page's font colour as its text -- on a light trace that is light on
+    light. No hovertemplate was set, so values printed at Plotly's default
+    precision. USD formatting used maximumFractionDigits 0.
+  resolution: "Explicit hoverlabel (dark card, light monospace text, no name truncation) and per-trace hovertemplates ($x,xxx.xx / x.xxxx Ξ / counts); axis tick formats carry the unit; USD everywhere is min/max 2 fraction digits."
+  regression_test: tests/selftest.py::test_ui_contract
+  monitor_gap: "Same as BUG-041: no human looked at the page on the target machine before handover. The design-lead role now owns that look."
+  pr: 4
