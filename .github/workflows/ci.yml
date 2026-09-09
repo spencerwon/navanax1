@@ -7,8 +7,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # BUG-20260909-034: v4/v5 target Node 20, which GitHub removes from
+      # runners on 2026-09-23. v5/v6 run on Node 24.
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: {python-version: "3.12"}
 
       # Runs with no third-party deps at all -- it is the floor of correctness
@@ -55,13 +57,11 @@ jobs:
         run: pytest -q || test $? -eq 5
 
       # REQ-N-11 / REQ-N-14: standing checks, not one-time reviews.
-      - name: No credentials in repo
-        run: |
-          if grep -rInE '(OPENSEA_API_KEY|PRIVATE_KEY|SEED_PHRASE|MNEMONIC)[[:space:]]*=[[:space:]]*[A-Za-z0-9]' \
-             --include='*.py' --include='*.yaml' --include='*.yml' --include='*.toml' \
-             --exclude='.env.example' . ; then
-            echo "::error::credential-shaped assignment found in tracked files (REQ-N-11)"; exit 1
-          fi
+      # BUG-20260909-033: this was a one-line grep that fired on a 14-character
+      # test placeholder the first time it ever ran. The checker knows what a
+      # real key looks like, and has its own regression test.
+      - name: No credentials in repo (REQ-N-11)
+        run: python3 tools/secrets_check.py
       - name: No transaction-signing capability
         run: |
           if grep -rInE '\b(eth_sendRawTransaction|signTransaction|sign_transaction|from_mnemonic|Account\.from_key)\b' \

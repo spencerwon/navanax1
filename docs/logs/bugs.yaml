@@ -1110,4 +1110,72 @@ bugs:
     Every local assertion about zstd behaviour was reasoning, and two of them
     were wrong. Nothing short of running the real binding could have caught
     this, which is what CI is for -- and why the probe step now exists.
+    CONFIRMED: the next CI run passed the codec contract on real zstandard
+    and failed further downstream (BUG-033) -- the first executed proof that
+    the production compressor round-trips multi-frame files and refuses
+    truncated ones.
+  pr: 2
+
+- id: BUG-20260909-033
+  summary: The REQ-N-11 credential gate fired on a 14-character test placeholder the first time it ever ran
+  severity: S3
+  priority: P0
+  error_class: SEC
+  status: fixed
+  logged_at: "2026-09-09T13:05:00-05:00"
+  occurred_at: "2026-09-09T02:40:00-05:00"
+  resolved_at: "2026-09-09T13:30:00-05:00"
+  detected_by: "GitHub Actions CI on PR #2 -- the step had never executed before; every earlier run died upstream of it"
+  detection_channel: ci
+  branch: tester
+  locations:
+  - {file: .github/workflows/ci.yml, line: 61}
+  - {file: tools/secrets_check.py, line: 1}
+  requirement: REQ-N-11
+  data_impact: >-
+    None. But the failure mode is the dangerous kind for a security gate: a
+    check that cries wolf on `OPENSEA_API_KEY=fake_key_value` teaches everyone
+    to click past it, and the day it fires on a real 32-character key nobody
+    looks. A gate with no precision has no authority.
+  root_cause: >-
+    A one-line grep matching NAME=<any alphanumeric>. It could not distinguish
+    a placeholder from a key because it never asked what a key looks like.
+    Written in the same sitting as the rest of ci.yml and, like the pytest
+    step (BUG-019), never run end to end until CI could reach it.
+  resolution: >-
+    tools/secrets_check.py replaces the grep. It flags a credential name
+    assigned a value of 20+ key-alphabet characters, any GitHub token prefix
+    followed by token-shaped text, and any 12-word run beside "mnemonic" or
+    "seed". tests/ is deliberately NOT exempt -- the check was made precise,
+    not blind. Its own regression test proves it stays quiet on the suite's
+    fixtures and fires on a planted 32-char key, a PAT, and a seed phrase.
+  regression_test: tests/selftest.py::test_secrets_gate_knows_what_a_key_looks_like
+  monitor_gap: "A CI step that had never executed. Same shape as BUG-019: the pipeline was written, not run."
+  pr: 2
+
+- id: BUG-20260909-034
+  summary: CI actions target Node 20, which GitHub removes from runners on 2026-09-23 -- two weeks out
+  severity: S3
+  priority: P1
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T13:05:00-05:00"
+  occurred_at: "2026-09-09T02:40:00-05:00"
+  resolved_at: "2026-09-09T13:30:00-05:00"
+  detected_by: "GitHub Actions deprecation warning on PR #2, and GitHub's Actions runners notice (Node20 removal date updated 2026-08-25 to 2026-09-23)"
+  detection_channel: ci
+  branch: tester
+  locations:
+  - {file: .github/workflows/ci.yml, line: 12}
+  requirement: REQ-N-13
+  data_impact: >-
+    None today -- a warning, forced onto Node 24 and working. On 2026-09-23
+    actions/checkout@v4 and actions/setup-python@v5 stop running, and with
+    them every gate in this pipeline: the codec contract, the ledger check,
+    the secrets check. A pipeline that silently stops gating is worse than
+    one that is red.
+  root_cause: "Pinned to the major versions that were current when the workflow was written; the runtime they depend on has a published end date."
+  resolution: "actions/checkout@v5 and actions/setup-python@v6, both Node 24. Dated in the workflow comment so the next person knows why."
+  regression_test: "CI itself -- the deprecation annotation disappears"
+  monitor_gap: "Nothing in the project tracks external end-of-life dates. The research agent's charter covers the OpenSea API contract; it should cover the CI runtime too."
   pr: 2
