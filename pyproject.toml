@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "navanax"
 version = "0.1.0"
 description = "OpenSea data consolidation, analysis and trade-discovery platform"
-# 3.10, not 3.12: the Linux workspace the operator actually runs this in is
+# BUG-20260909-011. 3.10, not 3.12: the Linux workspace the operator actually runs this in is
 # Python 3.10.12, where `datetime.UTC` and `StrEnum` do not exist. A
 # requires-python the real environment cannot satisfy is the same
-# claim-versus-reality failure as a wrong docstring (BUG-20260909-011).
+# claim-versus-reality failure as a wrong docstring.
 requires-python = ">=3.10"
 dependencies = [
   "websockets>=12.0",

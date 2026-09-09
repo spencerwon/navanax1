@@ -40,8 +40,14 @@ jobs:
         run: python3 tools/buglog.py --check
       - name: Lint
         run: ruff check src tests tools   # tools/ was excluded before BUG-20260909-004
-      - name: Tests
-        run: pytest -q
+      # BUG-20260909-019: `pytest -q` collected ZERO tests and exited 5, so the
+      # pipeline could never go green -- and every gate after it, including the
+      # bug-ledger check, never ran. tests/selftest.py is the real suite (it
+      # runs as step one, with no dependencies at all). pytest is scaffolding
+      # for later, so exit code 5 (nothing collected) is tolerated and nothing
+      # else is.
+      - name: Tests (pytest; exit 5 = nothing collected yet, tolerated)
+        run: pytest -q || test $? -eq 5
 
       # REQ-N-11 / REQ-N-14: standing checks, not one-time reviews.
       - name: No credentials in repo

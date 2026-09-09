@@ -356,3 +356,526 @@ bugs:
     zstandard -- so no amount of local testing could have caught it. The startup
     self-check exists because the test suite structurally cannot.
   pr: 1
+
+# ---------------------------------------------------------------------------
+# BUG-011 onwards: findings that were previously loose prose bullets in
+# BUGS.md with no ID, no status, no owner -- outside the file that declares
+# itself the source of truth and that CI validates. V16 (validator, second
+# review) called that "the mechanism by which the next set of findings gets
+# lost". These are those findings, given IDs.
+# ---------------------------------------------------------------------------
+
+- id: BUG-20260909-011
+  summary: pyproject declared requires-python >=3.12 while the operator's actual environment is Python 3.10
+  severity: S3
+  priority: P1
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T08:20:00-05:00"
+  occurred_at: "2026-09-09T00:15:00-05:00"
+  resolved_at: "2026-09-09T08:30:00-05:00"
+  detected_by: "orchestrator, after `ruff --fix` rewrote timezone.utc to datetime.UTC and the target environment was checked"
+  detection_channel: ci
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: pyproject.toml, line: 9}
+  requirement: REQ-N-13
+  data_impact: "None yet. Would have been an ImportError at startup on the operator's machine -- loud, not silent."
+  root_cause: >-
+    requires-python and ruff's target-version both said py312, so ruff
+    autofixed timezone.utc into datetime.UTC, which does not exist before
+    Python 3.11. The workspace the operator actually runs this in reported
+    Python 3.10.12. A requires-python the real environment cannot satisfy is
+    the same claim-versus-reality failure as a wrong docstring.
+  resolution: "Retargeted to >=3.10, reverted the 3.11-only constructs, and added noqa with a reason where StrEnum would otherwise be suggested."
+  regression_test: tests/selftest.py::test_roundtrip_and_verbatim
+  monitor_gap: "Nothing checked the declared Python floor against the environment the operator runs in. CI tests 3.12 only."
+  pr: 1
+
+- id: BUG-20260909-012
+  summary: One 429 permanently bricks the REST governor; server_reset_at is parsed and never read
+  severity: S1
+  priority: P1
+  error_class: RTL
+  status: open
+  logged_at: "2026-09-09T07:40:00-05:00"
+  detected_by: "validator agent (opus), first review; re-confirmed and escalated in the second"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/governor.py, line: 166}
+  - {file: src/navanax/governor.py, line: 150}
+  requirement: REQ-D-02
+  data_impact: >-
+    server_remaining is set to 0 on a 429 and try_consume takes
+    min(tokens, server_remaining). Only a header from a SUCCESSFUL response can
+    raise it, and getting one requires a token. So a single 429 disables REST
+    for the life of the process. Blast radius grew with the BUG-008 and
+    BUG-009 fixes, which now generate far more unbackfilled gaps that can never
+    be serviced.
+  root_cause: "The recovery path requires the very resource the failure removes. server_reset_at is parsed at governor.py:150 and read nowhere."
+  resolution: ""
+  regression_test: ""
+  monitor_gap: "No test ever sent a 429 followed by a recovery attempt."
+  pr: 1
+
+- id: BUG-20260909-013
+  summary: Every gap is recorded backfillable=True even for event classes REQ-D-09a says are permanently unrecoverable
+  severity: S1
+  priority: P1
+  error_class: ING
+  status: open
+  logged_at: "2026-09-09T07:40:00-05:00"
+  detected_by: "validator agent (opus), first review; escalated in the second"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 436}
+  requirement: REQ-D-09a
+  data_impact: >-
+    IRRECOVERABLE is referenced only by a test. _open_gap hardcodes
+    backfillable=True, contradicting GapRecord's own docstring, and _close_gap
+    logs that backfill was enqueued when nothing is enqueued. ESCALATED by the
+    BUG-008 fix, which makes clean closes open these gaps too -- so many more
+    gaps are now mislabelled recoverable. A gap believed backfillable and never
+    backfilled reads downstream as a gap that WAS filled.
+  root_cause: "The classification exists as data and was never wired to the code that records gaps. No backfill queue exists yet at all."
+  resolution: ""
+  regression_test: ""
+  monitor_gap: "Nothing asserts that a recorded gap's backfillable flag matches the event classes it actually spans."
+  pr: 1
+
+- id: BUG-20260909-014
+  summary: BUG-003's 5x rate-limit error survived in three operator-facing artifacts
+  severity: S1
+  priority: P1
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T07:40:00-05:00"
+  detected_by: "validator agent (opus), first review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: tools/preflight.py, line: 129}
+  - {file: README.md, line: 33}
+  - {file: setup.command, line: 48}
+  requirement: REQ-D-02
+  resolved_at: "2026-09-09T10:05:00-05:00"
+  data_impact: >-
+    preflight_report.json still wrote est_minutes_at_600_per_hour -- the
+    machine-readable artifact the docs are corrected FROM. README and
+    setup.command are the two files the operator reads first. BUG-003 is marked
+    fixed while the wrong number is still in front of the operator, which is the
+    same claim-versus-reality shape BUG-003 was about.
+  root_cause: "The fix corrected the docs and the config and stopped at the boundary of what the developer reads."
+  resolution: >-
+    README's headline principle now states the measured 120/hr with its
+    provenance and its caveat; setup.command says 120; preflight emits
+    est_minutes_at_measured_limit with a rate_limit_provenance field instead of
+    the est/10 arithmetic. A test now scans every operator-facing file for a
+    line that ASSERTS the superseded figure, so this class cannot recur
+    silently.
+  regression_test: tests/selftest.py::test_no_superseded_rate_limit_in_operator_text
+  monitor_gap: "No check scanned operator-facing text for superseded numbers. There is one now."
+  pr: 1
+
+- id: BUG-20260909-015
+  summary: config/base.yaml rest_budget was parsed by nothing; the governor hardcoded capacity
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-09-09T10:05:00-05:00"
+  logged_at: "2026-09-09T07:40:00-05:00"
+  detected_by: "validator agent (opus), first review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: config/base.yaml, line: 22}
+  - {file: src/navanax/governor.py, line: 84}
+  requirement: REQ-N-09
+  data_impact: "None directly. But a config block nothing reads looks like a knob and turns nothing -- an operator changing capacity would see no effect and no error."
+  root_cause: "REQ-N-09 says no threshold lives in code. It did."
+  resolution: >-
+    governor_from_config() reads rest_budget.capacity, per_seconds and the
+    reserve floors, and raises on an unknown priority name rather than ignoring
+    it -- a silently ignored config key is how a knob comes to turn nothing.
+  regression_test: tests/selftest.py::test_rest_budget_config_is_actually_read
+  monitor_gap: "No check asserted that every config key is read by something. reconciliation/analytical/display are still unread; they belong to subsystems that do not exist yet."
+  pr: 1
+
+- id: BUG-20260909-016
+  summary: Governor priority queue is dead code; ordering is emergent from reserve floors
+  severity: S3
+  priority: P3
+  error_class: RTL
+  status: open
+  logged_at: "2026-09-09T07:40:00-05:00"
+  detected_by: "validator agent (opus), first review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/governor.py, line: 175}
+  requirement: REQ-D-02
+  data_impact: "MAINTENANCE can beat an earlier INTERACTIVE request. _Waiter/_waiters/_seq are never appended to, so they read as an implemented feature that does not exist."
+  root_cause: "Dead code that implies capability."
+  resolution: ""
+  regression_test: ""
+  monitor_gap: "No test asserts ordering between priorities under contention."
+  pr: 1
+
+- id: BUG-20260909-017
+  summary: An event with no parseable event_timestamp lands silently and drops out of manifest-driven range queries
+  severity: S1
+  priority: P1
+  error_class: TMP
+  status: open
+  logged_at: "2026-09-09T07:40:00-05:00"
+  detected_by: "validator agent (opus), first review; manifestation changed by the V2 fix"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 214}
+  - {file: src/navanax/landing.py, line: 174}
+  requirement: REQ-D-07
+  data_impact: >-
+    REQ-D-07 orders on event_timestamp, never arrival. An event landed without
+    one cannot be ordered, and nothing counts or alerts on how often that
+    happens. The V2 fix narrowed the blast radius -- control-only files are no
+    longer over-selected -- but a MARKET event with an unparseable timestamp is
+    still landed silently.
+  root_cause: "extract_event_timestamp returns None and the caller treats that as ordinary."
+  resolution: ""
+  regression_test: ""
+  monitor_gap: "No counter, no alert, no test for the missing-timestamp rate."
+  pr: 1
+
+- id: BUG-20260909-018
+  summary: A landing-zone write failure (disk full) is misrecorded as a stream gap and retried forever
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: open
+  logged_at: "2026-09-09T07:40:00-05:00"
+  detected_by: "validator agent (opus), first review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 519}
+  requirement: REQ-D-14
+  data_impact: >-
+    run()'s except Exception catches anything, including an OSError from the
+    writer, opens a gap blaming the stream, and reconnects. On a full disk this
+    loops forever recording gaps it cannot write, and the gap register blames
+    OpenSea for a local failure.
+  root_cause: "One handler for two unrelated failure domains: the remote connection and the local filesystem."
+  resolution: ""
+  regression_test: ""
+  monitor_gap: "No test injects a writer failure."
+  pr: 1
+
+- id: BUG-20260909-019
+  summary: CI's pytest step collects zero tests and exits 5, so the pipeline cannot go green
+  severity: S3
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T08:35:00-05:00"
+  occurred_at: "2026-09-09T02:40:00-05:00"
+  resolved_at: "2026-09-09T08:40:00-05:00"
+  detected_by: "validator agent (opus), second review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: .github/workflows/ci.yml, line: 1}
+  requirement: REQ-N-13
+  data_impact: >-
+    None to data. But the buglog --check gate the ledger leans on sits AFTER
+    this step, so the gate that makes the bug log load-bearing never ran. A CI
+    pipeline that cannot go green teaches everyone to ignore CI.
+  root_cause: >-
+    testpaths = ["tests"], and tests/ contains only selftest.py, which matches
+    neither test_*.py nor *_test.py. pytest exits 5 on nothing collected.
+  resolution: "CI tolerates exit code 5 explicitly, with a comment saying selftest.py is the real suite and pytest is scaffolding for later."
+  regression_test: "CI itself"
+  monitor_gap: "The CI file was written but the full pipeline was never run end to end -- only the first step was."
+  pr: 1
+
+# ---------------------------------------------------------------------------
+# BUG-020..027: the SECOND validator review's findings, plus the tech-lead
+# gate's. Every one was introduced or left unbuilt by the fixes for
+# BUG-005..010 -- which is the reason they get IDs rather than code comments.
+# The tech lead's process finding was exact: V16 was raised because findings
+# lived as untracked prose, the fix gave IDs to those eight, and then the
+# round-2 findings became a NEW set of untracked findings living as code
+# comments. `tools/buglog.py --check` now fails on any BUG id referenced
+# anywhere in the repo that is not in this file, which is how this entry
+# came to be written.
+# ---------------------------------------------------------------------------
+
+- id: BUG-20260909-020
+  summary: verify_manifest still could not detect a decoder returning a prefix of an intact file
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T08:05:00-05:00"
+  occurred_at: "2026-09-09T09:05:00-05:00"
+  resolved_at: "2026-09-09T09:40:00-05:00"
+  detected_by: "validator agent (opus), second review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/landing.py, line: 608}
+  requirement: REQ-D-28
+  data_impact: >-
+    The sha256 is over the COMPRESSED bytes, so a byte-perfect file whose
+    decoder returns only the first frame verified clean. Measured on the
+    post-fix code: manifest said 20 events, read_file returned 1, no exception,
+    verify_manifest returned [] and `navanax verify` printed "verified clean".
+    BUG-007 taught the manifest to record the count that catches this and
+    BUG-010's fix did not connect the two halves.
+  root_cause: "Both halves of the detector existed in the same file and nothing compared them."
+  resolution: >-
+    verify_manifest(deep=True) decompresses each closed file and compares the
+    record count against the manifest, reporting COUNT MISMATCH as an integrity
+    failure. read_file's tolerate_truncation now defaults to False, so an
+    ordinary read raises instead of silently returning a prefix. `verify
+    --shallow` is available for the fast path and says what it cannot detect.
+  regression_test: tests/selftest.py::test_verify_detects_decoder_truncation
+  monitor_gap: "The audit checked the property that was easy to check, not the one that had already gone wrong once."
+  pr: 1
+
+- id: BUG-20260909-021
+  summary: BUG-005's fix made control frames count as market events in the manifest
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T08:05:00-05:00"
+  occurred_at: "2026-09-09T09:05:00-05:00"
+  resolved_at: "2026-09-09T09:40:00-05:00"
+  detected_by: "validator agent (opus), second review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/landing.py, line: 310}
+  - {file: src/navanax/stream.py, line: 416}
+  requirement: REQ-D-28
+  data_impact: >-
+    Measured on the exact BUG-005 scenario -- key expired, join refused, one
+    hour of heartbeat replies, ZERO market events -- the manifest read
+    event_count 121. The ING monitor named in 05 3 is "event rate band", so
+    keyed on that field it could never fire on a dead subscription. BUG-005's
+    own failure mode re-entering through the door BUG-005's fix opened. At
+    Argonauts volume control frames would be the MAJORITY of event_count.
+    Second-order: control-only files have first/last_event_timestamp None and
+    were returned by every manifest range query, including one for 2020.
+  root_cause: "Landing control frames was right; routing them through the same counter was not."
+  resolution: "FileRecord gained control_count; write() gained control=True; files_for_event_range excludes files with event_count == 0."
+  regression_test: tests/selftest.py::test_control_frames_do_not_inflate_event_count
+  monitor_gap: "No test asserted what a manifest says after a subscription failure -- only after a successful one."
+  pr: 1
+
+- id: BUG-20260909-022
+  summary: Manifest read-modify-write had no cross-process lock; concurrent writers silently lost gap records
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T08:05:00-05:00"
+  occurred_at: "2026-09-09T00:30:00-05:00"
+  resolved_at: "2026-09-09T09:40:00-05:00"
+  detected_by: "validator agent (opus), second review; cross-process claim independently re-measured by tech-lead"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/landing.py, line: 116}
+  - {file: src/navanax/cli.py, line: 51}
+  requirement: REQ-D-28
+  data_impact: >-
+    threading.Lock is process-local and each writer builds its own.
+    os.replace makes the file never CORRUPT; it does not make the update not
+    LOST. Measured with two writers: 295 of 600 gap records lost, verify clean.
+    A lost FILE record is detectable as an ORPHAN; a lost GAP record is
+    undetectable by anything, forever. BUG-006 and BUG-007 together raised the
+    collision rate from once per file close to once every few seconds from an
+    independent daemon thread per writer.
+  root_cause: "An in-process lock guarding an inter-process critical section."
+  resolution: >-
+    fcntl.flock on _manifest/.manifest.lock around every read-modify-write,
+    plus a single-instance guard in cli.py that refuses a second ingest against
+    the same landing zone. Tech-lead re-measured with four real PROCESSES
+    (the shipped test uses threads): 600 written, 600 held, 0 lost.
+  regression_test: tests/selftest.py::test_concurrent_manifest_writes_lose_nothing
+  monitor_gap: "No test ran two writers against one root at all."
+  pr: 1
+
+- id: BUG-20260909-023
+  summary: A live gap was filed under one day and never recorded when it ended; only the restart path was fixed
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T09:50:00-05:00"
+  occurred_at: "2026-09-09T09:40:00-05:00"
+  resolved_at: "2026-09-09T10:10:00-05:00"
+  detected_by: "tech-lead agent (opus), gate review -- caught what the validator and the author both missed"
+  detection_channel: tech-lead
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 486}
+  - {file: src/navanax/landing.py, line: 447}
+  requirement: REQ-D-14
+  data_impact: >-
+    _open_gap and _reject_join pass ended_at=None at the moment an outage
+    begins, when it has zero duration, so the multi-day fix covered only
+    record_downtime_gap. _close_gap wrote to the SQLite gap register and never
+    touched the manifest. Measured on the real consumer path: a Friday 18:00 to
+    Monday 03:00 disconnect produced ONE manifest file and a gap saying
+    ended_at null forever. docs/07 says a reader MUST resolve through the
+    manifest and classifies the SQLite store as disposable, so this was a
+    permanent hole in the irreplaceable record -- a reader could not tell a
+    three-second reconnect from a lost weekend.
+  root_cause: >-
+    The fix's own regression test called record_gap with BOTH endpoints known,
+    which production never does. It proved the helper, not the path. That is
+    the tech-lead charter's blocking criterion "a test whose assertion would
+    pass against a broken implementation", applied to the author.
+  resolution: >-
+    GapRecord gained gap_id so a closure can complete the record it belongs to
+    rather than orphan it. _close_gap and the join-recovery path both call
+    writer.close_gap_record, which re-files the completed gap across every day
+    it turned out to span. _dates_spanned takes the writer's clock so an
+    open-ended gap is deterministic, validates its date before it becomes a
+    filename, and on a >366-day span keeps BOTH ENDS rather than dropping the
+    most recent dates.
+  regression_test: tests/selftest.py::test_gap_spans_every_day_through_the_consumer_path
+  monitor_gap: >-
+    The test exercised a pure helper. Nothing drove _open_gap and _close_gap,
+    which are the only ways a gap is created in production.
+  pr: 1
+
+- id: BUG-20260909-024
+  summary: A chance frame-magic inside compressed data could silently truncate a file if the zstd binding returned partial data
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T08:05:00-05:00"
+  occurred_at: "2026-09-09T09:05:00-05:00"
+  resolved_at: "2026-09-09T09:40:00-05:00"
+  detected_by: "validator agent (opus), second review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/codec.py, line: 171}
+  - {file: src/navanax/codec.py, line: 366}
+  requirement: REQ-D-26a
+  data_impact: >-
+    _zstd_walk finds frame boundaries by a 4-byte magic, which occurs by chance
+    inside compressed data with probability about 1.5% per 64 MB file -- three
+    or four files a year at the documented 15 GB/year. The hazard needs TWO
+    things: that chance magic, AND a binding whose stream_reader returns a
+    partial result instead of raising on a short frame. With the second, strict
+    mode accepted the false boundary and returned a truncated file reporting
+    success.
+  root_cause: "A correctness property left resting on undocumented third-party behaviour -- the same class as BUG-010, one layer down."
+  resolution: >-
+    verify_codec_roundtrip now asserts that strict decompress RAISES on a
+    truncated file, and refuses to ingest if it returns a prefix -- which
+    eliminates the second precondition, so a false boundary is simply retried
+    against the next candidate. It also asserts that recovery returns ALL
+    complete frames, not just frame 0. RawCodec gained a real truncation
+    detector rather than being exempted. The gate runs at ingest startup and in
+    CI against the real library.
+  regression_test: tests/selftest.py::test_codec_multiframe_contract
+  monitor_gap: >-
+    zstandard cannot be installed in the sandbox this is written in, so the
+    production codec has no local coverage by construction. The startup gate
+    exists because the test suite structurally cannot run there.
+  pr: 1
+
+- id: BUG-20260909-025
+  summary: Join rejections re-opened a gap on every reconnect; measured 4,000 open gaps and 89.6s of fsync inside the event loop
+  severity: S2
+  priority: P1
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T08:05:00-05:00"
+  occurred_at: "2026-09-09T09:05:00-05:00"
+  resolved_at: "2026-09-09T09:40:00-05:00"
+  detected_by: "validator agent (opus), second review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 291}
+  requirement: REQ-D-14
+  data_impact: >-
+    Joins are re-issued on every reconnect and nothing closed a rejection gap.
+    Measured at 200 collections x 20 reconnects: 4,000 permanently-open gaps,
+    a 1.1 MiB manifest, and 89.6 seconds of synchronous read-modify-write-fsync
+    inside the asyncio event loop with no await -- blocking the WebSocket reader
+    long enough to miss the 30s heartbeat and force another reconnect.
+    Self-reinforcing. The trigger is a 7-day key expiring, which is a certainty.
+  root_cause: "A per-event action attached to a per-connection event."
+  resolution: "One open gap per topic, retracted the moment that topic joins successfully -- in the manifest as well as the register, since asserting a hole that does not exist is its own kind of wrong."
+  regression_test: tests/selftest.py::test_rejection_gap_is_not_reopened_every_reconnect
+  monitor_gap: "No test reconnected more than once."
+  pr: 1
+
+- id: BUG-20260909-026
+  summary: stats.heartbeats was always 0 in production; the test fixture asserted the frame we SEND, not the one the server sends
+  severity: S3
+  priority: P1
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-09T08:05:00-05:00"
+  occurred_at: "2026-09-09T00:30:00-05:00"
+  resolved_at: "2026-09-09T09:40:00-05:00"
+  detected_by: "validator agent (opus), second review"
+  detection_channel: validator
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/stream.py, line: 232}
+  requirement: REQ-D-06
+  data_impact: >-
+    The server answers a heartbeat with a phx_reply on topic "phoenix", not
+    with an {"event":"heartbeat"} frame. The heartbeat counter -- one of the few
+    liveness signals an operator has -- read 0 in production and 1 in the test.
+    Exactly BUG-002's shape: the fixture inherited its assumption from the code
+    it was testing.
+  root_cause: "The fixture was written from the sending side of the protocol."
+  resolution: "phx_reply on topic phoenix is counted as a heartbeat; the fixture now uses the frame the server actually sends, and the frame we send is still tolerated."
+  regression_test: tests/selftest.py::test_stream_parsing
+  monitor_gap: "No real captured frame was ever used in a test. tools/sample_frames.jsonl exists for this and is not yet wired in."
+  pr: 1
+
+- id: BUG-20260909-027
+  summary: Ingest refused to start on any filesystem without flock, reporting a second instance that did not exist
+  severity: S2
+  priority: P1
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-09T09:50:00-05:00"
+  occurred_at: "2026-09-09T09:40:00-05:00"
+  resolved_at: "2026-09-09T10:10:00-05:00"
+  detected_by: "tech-lead agent (opus), gate review"
+  detection_channel: tech-lead
+  branch: feat/phase0-ingestion
+  locations:
+  - {file: src/navanax/cli.py, line: 64}
+  requirement: REQ-D-14
+  data_impact: >-
+    The single-instance guard from BUG-022 caught OSError without checking
+    errno. Injecting EOPNOTSUPP -- the reply an SMB/AFP share and some NFS
+    mounts give -- made ingest refuse to start and tell the operator to stop a
+    process that does not exist, offering two useless remedies. On the default
+    local disk it never fires; on a network or external volume it stops
+    collection entirely, and a day not recorded cannot be bought back. Failing
+    closed was the wrong direction for this specific guard.
+  root_cause: "One handler for two unrelated errnos: contention and unsupported."
+  resolution: "EWOULDBLOCK/EAGAIN refuse; EOPNOTSUPP/ENOLCK/EINVAL/ENOSYS proceed with a loud, accurate warning that names the real risk."
+  regression_test: tests/selftest.py::test_single_instance_degrades_on_unsupported_filesystem
+  monitor_gap: "The guard was tested only on the filesystem it was written on."
+  pr: 1

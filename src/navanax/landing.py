@@ -29,22 +29,67 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re as _re
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .codec import Codec, get_codec
 
 _UTC = timezone.utc
+_DATE_RE = _re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _utcnow() -> datetime:
     return datetime.now(_UTC)
+
+
+def _dates_spanned(start_iso: str, end_iso: str | None,
+                   now: Callable[[], datetime] = _utcnow) -> list[str]:
+    """Every UTC date from `start_iso` to `end_iso` inclusive.
+
+    An open-ended gap (`end_iso is None`) spans to today: it is still running,
+    and today's manifest is where a reader will look for it.
+    """
+    try:
+        start = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        # Tech-lead finding: this used to return `start_iso[:10]` verbatim, and
+        # that string becomes a FILENAME. `_dates_spanned("../../../etc/passwd")`
+        # produced `_manifest/../../../e.json` -- a write outside the landing
+        # zone. The input is our own SQLite today, so this is shape rather than
+        # exploit, but a value that becomes a path gets validated regardless.
+        head = str(start_iso)[:10]
+        return [head] if _DATE_RE.fullmatch(head) else [_iso(now())[:10]]
+    if end_iso:
+        try:
+            end = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        except ValueError:
+            end = now()
+    else:
+        end = now()
+    if end < start:
+        end = start
+    first = start.astimezone(_UTC).date()
+    last = end.astimezone(_UTC).date()
+    # Cap the walk: a gap longer than a year is a data problem, not a reason to
+    # write 400 manifest files synchronously at startup. The cap used to keep
+    # the OLDEST 366 days and drop the most recent -- so a gap starting in 2019
+    # produced a list that did not include today, which is the wrong direction
+    # to lose information in. Keep both ENDS and mark the elision, so a reader
+    # sees a gap that begins and ends where it really does.
+    span = (last - first).days + 1
+    if span > 366:
+        head = [(first + timedelta(days=i)).isoformat() for i in range(183)]
+        tail = [(last - timedelta(days=i)).isoformat() for i in range(182, -1, -1)]
+        return head + tail
+    return [(first + timedelta(days=i)).isoformat() for i in range(span)]
 
 
 def _iso(dt: datetime) -> str:
@@ -79,6 +124,15 @@ class FileRecord:
     # flush, so the manifest always describes what is on disk.
     status: str = "open"          # open | closed
     last_flush_at: str | None = None
+    # V2 (validator, second review). BUG-005's fix started landing control
+    # frames -- join replies, heartbeats, channel closes -- through the same
+    # writer as market events, which made `event_count` count them. At the
+    # target volume that is not a rounding error: Argonauts at ~2,000
+    # events/day against 2,880 heartbeat frames/day means control frames would
+    # be the MAJORITY of `event_count`, and the ING monitor keyed on event rate
+    # could never fire on a dead subscription -- which is BUG-005's own failure
+    # mode re-entering through the door BUG-005's fix opened.
+    control_count: int = 0
 
 
 @dataclass
@@ -96,6 +150,16 @@ class GapRecord:
     topics: list[str] = field(default_factory=list)
     backfillable: bool = True
     backfilled_at: str | None = None
+    # BUG-20260909-023. A gap opened live was written with ended_at=None and
+    # NOTHING ever wrote its end into the manifest -- _close_gap only touched
+    # the SQLite operational store, which docs/07 §1 classifies as disposable.
+    # So every live gap in the durable, append-only record said "still open"
+    # forever, and a reader could not tell a three-second reconnect from a
+    # weekend outage. `gap_id` is what lets the closure find the record it
+    # completes. Completing a gap is not editing history: the fact being
+    # recorded is one interval, and its end is simply not knowable when it
+    # starts.
+    gap_id: int | None = None
 
 
 class ManifestWriter:
@@ -114,6 +178,50 @@ class ManifestWriter:
         self.dir = self.root / "_manifest"
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._lockfile = self.dir / ".manifest.lock"
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Serialise read-modify-write across THREADS AND PROCESSES.
+
+        V3 (validator, second review). `threading.Lock` is process-local, and
+        each LandingZoneWriter builds its own ManifestWriter. record_file and
+        record_gap are load -> mutate -> os.replace. os.replace makes the file
+        never CORRUPT; it does not make the update not LOST. Two ingest
+        processes on one root -- a double start, or a restart overlapping a
+        process that has not exited -- silently dropped records: measured at
+        295 of 600 gap records lost, with verify_manifest reporting clean.
+
+        A lost FILE record is detectable as an ORPHAN. A lost GAP record is
+        undetectable by anything, forever, and a missing gap is exactly how
+        "we were not watching" comes to read as "nothing happened".
+
+        BUG-006 and BUG-007 together raised the collision rate from once per
+        file close to once every few seconds from an independent daemon thread
+        per writer, which is what turned a theoretical race into a measured one.
+        """
+        with self._lock:
+            fh = None
+            try:
+                fh = self._lockfile.open("a+b")
+                try:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                except (ImportError, OSError):
+                    # No flock (Windows, or a filesystem that refuses it). The
+                    # in-process lock still holds; cross-process safety is then
+                    # provided by the ingest lockfile in cli.py, which is the
+                    # real single-instance guard.
+                    pass
+                yield
+            finally:
+                if fh is not None:
+                    try:
+                        import fcntl
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    except (ImportError, OSError):
+                        pass
+                    fh.close()
 
     def path_for(self, dt: str) -> Path:
         return self.dir / f"{dt}.json"
@@ -141,7 +249,7 @@ class ManifestWriter:
             raise
 
     def record_file(self, rec: FileRecord) -> None:
-        with self._lock:
+        with self._exclusive():
             data = self._load(rec.dt)
             files = [f for f in data["files"] if f["filename"] != rec.filename]
             files.append(asdict(rec))
@@ -150,9 +258,18 @@ class ManifestWriter:
             self._atomic_write(self.path_for(rec.dt), data)
 
     def record_gap(self, dt: str, gap: GapRecord) -> None:
-        with self._lock:
+        with self._exclusive():
             data = self._load(dt)
-            data["gaps"].append(asdict(gap))
+            rec = asdict(gap)
+            if gap.gap_id is not None:
+                # Replace the open record for this gap rather than appending a
+                # second one. Without this, closing a gap would leave both an
+                # "open forever" and a "closed" record for the same interval.
+                data["gaps"] = [g for g in data["gaps"]
+                                if g.get("gap_id") != gap.gap_id]
+            data["gaps"].append(rec)
+            data["gaps"].sort(key=lambda g: (g.get("started_at") or "",
+                                             g.get("gap_id") or 0))
             self._atomic_write(self.path_for(dt), data)
 
     def files_for_event_range(self, start_iso: str, end_iso: str) -> list[dict[str, Any]]:
@@ -171,7 +288,15 @@ class ManifestWriter:
                 lo = f.get("first_event_timestamp")
                 hi = f.get("last_event_timestamp")
                 if lo is None or hi is None:
-                    out.append(f)  # unknown span -- include rather than risk a miss
+                    # V2 second-order. "Unknown span -> include" is the right
+                    # instinct for a file of market events whose timestamps we
+                    # failed to parse. It is wrong for a file that contains NO
+                    # market events at all -- a control-only file, which the
+                    # flusher now guarantees for every idle hour. Those used to
+                    # be returned by a range query for the year 2020.
+                    if f.get("event_count", 0) == 0:
+                        continue
+                    out.append(f)  # genuinely unknown span -- include, do not risk a miss
                     continue
                 if hi >= start_iso and lo <= end_iso:
                     out.append(f)
@@ -281,11 +406,17 @@ class LandingZoneWriter:
         topic: str | None = None,
         event_timestamp: str | None = None,
         received_at: datetime | None = None,
+        control: bool = False,
     ) -> int:
         """Append one raw frame. Returns its sequence number.
 
         `raw` is the frame exactly as it came off the socket. It is stored
         verbatim; this method never parses it beyond what the caller supplies.
+
+        `control=True` marks a protocol frame (join reply, heartbeat, channel
+        close). It is landed identically -- it is the only on-disk evidence of
+        what this process was subscribed to -- but counted separately, so
+        `event_count` keeps meaning "market events" (V2).
         """
         with self._lock:
             now = received_at or self._clock()
@@ -307,7 +438,10 @@ class LandingZoneWriter:
 
             self._w.write(data)
             assert self._rec is not None
-            self._rec.event_count += 1
+            if control:
+                self._rec.control_count += 1
+            else:
+                self._rec.event_count += 1
             self._rec.raw_bytes += len(data)
             self._raw_since_frame += len(data)
             self._events_since_frame += 1
@@ -345,9 +479,31 @@ class LandingZoneWriter:
             self._close_current()
 
     def record_gap(self, gap: GapRecord) -> None:
-        """Register an ingestion gap. Gaps are recorded, never filled."""
-        dt = gap.started_at[:10]
-        self.manifest.record_gap(dt, gap)
+        """Register an ingestion gap in EVERY daily manifest it spans.
+
+        V4 (validator, second review). This used to file a gap only under
+        `started_at[:10]`. A 57-hour weekend outage -- the headline
+        BUG-20260909-009 scenario -- was therefore recorded only under the
+        Friday, and a reader asking "were there gaps on Sunday?" got none, from
+        the artifact docs/07 tells it it MUST resolve through. The gap register
+        in SQLite is not a substitute: docs/07 1 classifies that store as
+        disposable and reconstructible, and a gap is reconstructible from
+        nothing.
+        """
+        for dt in _dates_spanned(gap.started_at, gap.ended_at, self._clock):
+            self.manifest.record_gap(dt, gap)
+
+    def close_gap_record(self, gap: GapRecord, ended_at: str) -> None:
+        """Write a gap's END into the durable record.
+
+        BUG-20260909-023. `_close_gap` used to update only the SQLite gap
+        register. The manifest -- the artifact docs/07 says a reader MUST
+        resolve through, and the one that is durable -- kept `ended_at: null`
+        forever. Re-filing the completed record covers every day the gap turned
+        out to span, which is only knowable now that it has an end.
+        """
+        gap.ended_at = ended_at
+        self.record_gap(gap)
 
     def __enter__(self) -> LandingZoneWriter:
         return self
@@ -357,7 +513,14 @@ class LandingZoneWriter:
 
     # -- internals ---------------------------------------------------------
     def _maybe_flush_frame(self) -> None:
-        """REQ-D-26a: close a frame every flush_seconds or flush_events."""
+        """REQ-D-26a: close a frame every flush_seconds or flush_events.
+
+        The true worst-case latency is `flush_seconds + flusher_interval`,
+        where the interval is flush_seconds/2 clamped to [0.25, 5.0] -- so ~7.5s
+        at the shipped flush_seconds=5, not 5s. Stated here because the
+        difference between a documented bound and the real one is the exact
+        shape of the last four bugs in this project's log.
+        """
         if self._events_since_frame >= self.flush_events:
             self._flush_frame()
             return
@@ -441,7 +604,7 @@ def read_file(
     path: str | Path,
     codec: Codec | str | None = None,
     *,
-    tolerate_truncation: bool = True,
+    tolerate_truncation: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Yield envelopes from a landing-zone file.
 
@@ -449,6 +612,13 @@ def read_file(
     was never closed still yields every complete frame before it. That is the
     property REQ-D-26a exists to provide, and it is exercised directly by the
     test suite rather than assumed.
+
+    It DEFAULTS TO FALSE (V1, validator second review). It used to default to
+    True, which meant every ordinary read silently downgraded any decompression
+    failure to best-effort recovery and returned a prefix -- turning "this file
+    is damaged" into "this file is short", with no exception anywhere. Recovery
+    is a decision; it should be made deliberately by the caller that wants it,
+    not applied by default to every read in the system.
     """
     p = Path(path)
     if codec is None:
@@ -473,14 +643,15 @@ def read_file(
 #: Problem prefixes that mean the historical record itself is in question.
 #: Everything else verify_manifest returns is a NOTE the operator should read
 #: but which does not, on its own, mean stop.
-INTEGRITY_PREFIXES = ("MISSING", "CHECKSUM MISMATCH", "ORPHAN", "UNREADABLE", "no _manifest")
+INTEGRITY_PREFIXES = ("MISSING", "CHECKSUM MISMATCH", "COUNT MISMATCH", "ORPHAN",
+                      "UNREADABLE", "no _manifest")
 
 
 def is_integrity_failure(problem: str) -> bool:
     return problem.startswith(INTEGRITY_PREFIXES)
 
 
-def verify_manifest(root: str | Path) -> list[str]:
+def verify_manifest(root: str | Path, *, deep: bool = True) -> list[str]:
     """Reconcile the manifest against the disk, in BOTH directions.
 
     BUG-20260909-007. This used to walk manifest -> disk only. That direction
@@ -491,7 +662,9 @@ def verify_manifest(root: str | Path) -> list[str]:
     clean" on a landing zone with unrecorded data files in it.
 
     Now:
-      manifest -> disk   every recorded file exists and its sha256 still matches
+      manifest -> disk   every recorded file exists, its sha256 still matches,
+                         AND it reads back the number of records the manifest
+                         says it holds (`deep=True`, the default)
       disk -> manifest   every file on disk is recorded (ORPHAN otherwise)
 
     Returns a list of problem strings. Entries matching INTEGRITY_PREFIXES are
@@ -516,6 +689,34 @@ def verify_manifest(root: str | Path) -> list[str]:
             fp = root / f["filename"]
             if not fp.exists():
                 problems.append(f"MISSING {f['filename']}")
+                continue
+            if f.get("status") == "closed" and f.get("sha256"):
+                actual = hashlib.sha256(fp.read_bytes()).hexdigest()
+                if actual != f["sha256"]:
+                    problems.append(
+                        f"CHECKSUM MISMATCH {f['filename']} "
+                        f"manifest={f['sha256'][:12]} actual={actual[:12]}"
+                    )
+                    continue
+                # V1. The checksum is over the COMPRESSED bytes, so it proves the
+                # file was not modified -- and proves NOTHING about whether the
+                # decoder can still read all of it. BUG-20260909-010's entire
+                # shape was "byte-perfect file, decoder returns a prefix,
+                # checksum still matches, audit says clean". The manifest has
+                # held the number that catches this since BUG-007; nothing was
+                # comparing against it. Now it does.
+                if deep:
+                    n = _recoverable_event_count(fp)
+                    expected = f.get("event_count", 0) + f.get("control_count", 0)
+                    if isinstance(n, str):
+                        problems.append(f"UNREADABLE {f['filename']} -- {n}")
+                    elif n != expected:
+                        problems.append(
+                            f"COUNT MISMATCH {f['filename']} -- manifest says "
+                            f"{expected} records, the file reads back {n}. The "
+                            f"checksum matches, so the FILE is intact and the "
+                            f"DECODER is returning a prefix (see BUG-20260909-010)."
+                        )
                 continue
             if f.get("sha256") is None:
                 # Open (or abandoned) file: no final checksum exists yet, by
@@ -555,7 +756,7 @@ def verify_manifest(root: str | Path) -> list[str]:
 
 def _recoverable_event_count(fp: Path) -> int | str:
     try:
-        return sum(1 for _ in read_file(fp, tolerate_truncation=True))
+        return sum(1 for _ in read_file(fp, tolerate_truncation=True))  # noqa: E501
     except Exception as exc:  # noqa: BLE001 - reporting, never raising: the
         # audit must finish and list every problem, not stop at the first
         # unreadable file.

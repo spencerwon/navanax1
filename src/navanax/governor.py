@@ -32,9 +32,10 @@ import asyncio
 import random
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Callable
+from typing import Any
 
 
 class Priority(IntEnum):
@@ -179,6 +180,36 @@ class _Waiter:
     cancelled: bool = field(default=False, compare=False)
 
 
+def governor_from_config(cfg: dict, **kw) -> RestGovernor:
+    """Build a governor from `config/base.yaml`'s `rest_budget` block.
+
+    BUG-20260909-015 / REQ-N-09: "no threshold, weight, interval or assumption
+    lives in code." The rest_budget block carried the only provenance-tagged
+    MEASURED numbers in the repo and was parsed by nothing -- an operator could
+    change `capacity: 120` and see no effect and no error. A config block
+    nothing reads is worse than no config: it looks like a knob and turns
+    nothing.
+    """
+    rb = (cfg or {}).get("rest_budget") or {}
+    reserve_cfg = rb.get("reserve") or {}
+    reserve: dict[Priority, float] | None = None
+    if reserve_cfg:
+        reserve = {}
+        for name, value in reserve_cfg.items():
+            try:
+                reserve[Priority[str(name).upper()]] = float(value)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"config rest_budget.reserve has an unknown priority {name!r}. "
+                    f"Valid: {', '.join(p.name for p in Priority)}"
+                ) from exc
+    bucket = TokenBucket(
+        capacity=float(rb.get("capacity", 120.0)),
+        per_seconds=float(rb.get("per_seconds", 3600.0)),
+    )
+    return RestGovernor(bucket=bucket, reserve=reserve, **kw)
+
+
 class RestGovernor:
     """Priority-ordered gate in front of every REST call.
 
@@ -202,7 +233,7 @@ class RestGovernor:
     ) -> None:
         self.bucket = bucket or TokenBucket()
         # Floors that keep low-priority work from consuming the last of the
-        # budget: BACKFILL may not draw the bucket below 60 tokens, so an
+        # budget: BACKFILL may not draw the bucket below 12 tokens, so an
         # INTERACTIVE request arriving later still finds something left.
         self.reserve: dict[Priority, float] = reserve or {
             Priority.INTERACTIVE: 0.0,

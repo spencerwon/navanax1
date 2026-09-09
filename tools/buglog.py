@@ -15,6 +15,7 @@ their head:
   1. every bug id in the ledger appears in docs/logs/BUGS.md, and vice versa
   2. every `locations` file actually exists in the repo
   3. every fixed bug names a regression test, and that test function exists
+  4. every BUG-id mentioned anywhere in the repo exists in the ledger
 
 (3) is the one that matters. "Fixed" without a regression test is a claim, and
 `tech-lead` blocks on exactly that.
@@ -286,6 +287,8 @@ def check(data: dict) -> list[str]:
         if bug.get("status") == "fixed" and not rt:
             problems.append(f"{bid}: marked fixed with NO regression test named")
             continue
+        if bug.get("status") == "fixed" and not bug.get("resolved_at"):
+            problems.append(f"{bid}: marked fixed with no resolved_at")
         if rt and "::" in rt:
             path, fn = rt.split("::", 1)
             p = ROOT / path
@@ -295,6 +298,26 @@ def check(data: dict) -> list[str]:
                 problems.append(
                     f"{bid}: regression test {rt} is named but `def {fn}(` is not in "
                     f"{path} -- a fix whose test does not exist is not a fix")
+    # (4) V15: pyproject.toml cited BUG-20260909-011, which did not exist.
+    # A reference to a bug id nobody can look up is worse than no reference.
+    referenced: dict[str, set[str]] = {}
+    skip = {".git", "__pycache__", ".venv", "node_modules"}
+    for f in ROOT.rglob("*"):
+        if not f.is_file() or f.suffix.lower() in {".xlsx", ".zst", ".gz", ".db", ".pyc"}:
+            continue
+        if any(part in skip for part in f.parts):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for m in set(re.findall(r"BUG-\d{8}-\d{3}", text)):
+            referenced.setdefault(m, set()).add(str(f.relative_to(ROOT)))
+    for ref, where in sorted(referenced.items()):
+        if ref not in ledger_ids:
+            problems.append(
+                f"{ref}: referenced in {', '.join(sorted(where)[:3])} but not in "
+                f"bugs.yaml -- a bug id nobody can look up is worse than none")
     return problems
 
 

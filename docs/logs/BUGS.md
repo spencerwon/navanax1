@@ -224,16 +224,59 @@ and `docs/logs/BUGS.xlsx` for the sortable view.
 | **Regression test** | `tests/selftest.py::test_codec_multiframe_contract` |
 | **Monitor gap** | The self-test used gzip exclusively; the production codec had **zero** coverage. The sandbox where the code is written cannot install `zstandard`, so no amount of local testing could have caught it. The startup self-check exists because the test suite structurally cannot |
 
-### Still open — non-blocking, tracked
+### Round 2 — the Validator and the Tech Lead reviewing the FIXES
 
-- **S3→S2** one 429 permanently bricks the governor: `server_remaining` is set to 0 and only a successful response can raise it, which requires a slot. `server_reset_at` parsed and never read
-- **S1** `IRRECOVERABLE` referenced only by a test; gaps still record `backfillable=True` in the general case. `_close_gap` logs that backfill was enqueued — nothing is enqueued yet
-- **S1** `preflight_report.json` still writes `est_minutes_at_600_per_hour`
-- **S1** `README.md:33` and `setup.command:48` still say 600
-- **S3** `config/base.yaml` `rest_budget` block is parsed by nothing (REQ-N-09 violated)
-- **S3** governor `_Waiter`/`_waiters`/`_seq` are dead code
-- **S1** an event with no parseable `event_timestamp` lands silently and drops out of every manifest-driven range query
-- **S3** a landing-zone write failure (disk full) is misrecorded as a stream gap and retried forever
+Every finding below was **introduced or left unbuilt by the fixes for**
+**BUG-005…010**. That is the reason they carry IDs rather than code comments:
+the tech lead's process finding was that V16 was raised because findings lived
+as untracked prose, the fix gave IDs to those eight, and the round-2 findings
+then became a *new* set of untracked findings. `tools/buglog.py --check` now
+fails on any `BUG-` id referenced anywhere in the repo that is absent here —
+which is literally how these entries came to be written.
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-020 | S1 | P0 | fixed | verify_manifest still could not detect a decoder returning a prefix of an intact file |
+| BUG-20260909-021 | S1 | P0 | fixed | BUG-005's fix made control frames count as market events in the manifest |
+| BUG-20260909-022 | S1 | P0 | fixed | Manifest read-modify-write had no cross-process lock; concurrent writers silently lost gap records |
+| BUG-20260909-023 | S1 | P0 | fixed | A live gap was filed under one day and never recorded when it ended; only the restart path was fixed |
+| BUG-20260909-024 | S1 | P0 | fixed | A chance frame-magic inside compressed data could silently truncate a file if the zstd binding returned partial data |
+| BUG-20260909-025 | S2 | P1 | fixed | Join rejections re-opened a gap on every reconnect; measured 4,000 open gaps and 89.6s of fsync inside the event loop |
+| BUG-20260909-026 | S3 | P1 | fixed | stats.heartbeats was always 0 in production; the test fixture asserted the frame we SEND, not the one the server sends |
+| BUG-20260909-027 | S2 | P1 | fixed | Ingest refused to start on any filesystem without flock, reporting a second instance that did not exist |
+
+**BUG-023 is the one worth reading.** The Tech Lead caught what both the
+Validator and I missed: my multi-day-gap test called `record_gap` with *both*
+endpoints known, which production never does. It proved the helper, not the
+path. Driving the real consumer showed a Friday-to-Monday disconnect still
+producing one day's manifest and a gap saying `ended_at: null` forever — a
+reader could not tell a three-second reconnect from a lost weekend. That is
+the tech-lead charter's own blocking criterion — *"a test whose assertion
+would pass against a broken implementation"* — applied to its author.
+
+### Fixed this round, no longer open
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-011 | S3 | P1 | fixed | pyproject declared requires-python >=3.12 while the operator's actual environment is Python 3.10 |
+| BUG-20260909-014 | S1 | P1 | fixed | BUG-003's 5x rate-limit error survived in three operator-facing artifacts |
+| BUG-20260909-015 | S3 | P2 | fixed | config/base.yaml rest_budget was parsed by nothing; the governor hardcoded capacity |
+| BUG-20260909-019 | S3 | P0 | fixed | CI's pytest step collects zero tests and exits 5, so the pipeline cannot go green |
+
+### Still open
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-012 | S1 | P1 | open | One 429 permanently bricks the REST governor; server_reset_at is parsed and never read |
+| BUG-20260909-013 | S1 | P1 | open | Every gap is recorded backfillable=True even for event classes REQ-D-09a says are permanently unrecoverable |
+| BUG-20260909-016 | S3 | P3 | open | Governor priority queue is dead code; ordering is emergent from reserve floors |
+| BUG-20260909-017 | S1 | P1 | open | An event with no parseable event_timestamp lands silently and drops out of manifest-driven range queries |
+| BUG-20260909-018 | S3 | P2 | open | A landing-zone write failure (disk full) is misrecorded as a stream gap and retried forever |
+
+All six remaining open items are **inactive**: nothing in Phase 0 makes a REST
+call, so BUG-012 and BUG-016 cannot bite yet. BUG-013 is the least comfortable
+— the landing zone is append-only, so every gap written before it is fixed
+carries a known-wrong `backfillable` flag permanently.
 
 ### The lesson
 

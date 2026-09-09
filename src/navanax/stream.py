@@ -203,9 +203,20 @@ class StreamConsumer:
         self._ref = 0
         self._stop = asyncio.Event()
         self._open_gap_id: int | None = None
+        self._open_gap_record: GapRecord | None = None
         # BUG-20260909-005: join replies are now tracked to a conclusion.
         self._pending_joins: dict[str, str] = {}   # ref -> topic
         self._joined: set[str] = set()
+        # V6/V11 (validator, second review). Joins are re-issued on EVERY
+        # reconnect, and a rejection gap was opened each time and never closed.
+        # Measured: 200 collections x 20 reconnects = 4,000 permanently-open
+        # gaps and 89.6s of synchronous manifest fsync inside the event loop,
+        # which blocked the reader long enough to miss the heartbeat and force
+        # another reconnect. Self-reinforcing, and triggered by the certainty
+        # of a 7-day key expiring. One open gap per topic, retracted the moment
+        # that topic joins successfully.
+        self._rejection_gaps: dict[str, int] = {}   # topic -> gap id
+        self._rejection_records: dict[str, GapRecord] = {}   # topic -> manifest record
         self._since_checkpoint = 0
 
     # -- protocol helpers --------------------------------------------------
@@ -225,6 +236,8 @@ class StreamConsumer:
         """
         self._pending_joins.clear()
         self._joined.clear()
+        # NOTE: _rejection_gaps deliberately survives a reconnect. It is what
+        # stops the same rejection opening a new gap on every retry (V6).
         out: list[str] = []
         for t in self._topics():
             ref = self._next_ref()
@@ -236,6 +249,15 @@ class StreamConsumer:
 
     # -- join outcomes -----------------------------------------------------
     def _handle_join_reply(self, msg: dict[str, Any]) -> None:
+        # V9 (validator, second review). The server answers a heartbeat with a
+        # `phx_reply` on topic "phoenix" -- NOT with an `{"event":"heartbeat"}`
+        # frame, which is what we send and what the old test fixture asserted.
+        # So `stats.heartbeats` was 0 in production while the test said 1: the
+        # same failure as BUG-002, where the fixture inherited its assumption
+        # from the code it was testing.
+        if msg.get("topic") == "phoenix":
+            self.stats.heartbeats += 1
+            return
         ref = msg.get("ref")
         ref = str(ref) if ref is not None else None
         topic = self._pending_joins.pop(ref, None) if ref else None
@@ -254,6 +276,19 @@ class StreamConsumer:
             self._joined.add(topic)
             if topic not in self.stats.joined:
                 self.stats.joined.append(topic)
+            # A late reply, or a reconnect that succeeded, retracts the gap the
+            # timeout opened. Leaving it open would assert a hole that does not
+            # exist -- as damaging in its own way as missing one that does.
+            gid = self._rejection_gaps.pop(topic, None)
+            if gid is not None:
+                self.opstore.close_gap(gid)
+                rec = self._rejection_records.pop(topic, None)
+                if rec is not None:
+                    # BUG-023: write the END into the durable record too, not
+                    # just into the disposable one.
+                    self.writer.close_gap_record(rec, _iso(_now()))
+                self.stats.join_rejected.pop(topic, None)
+                log.info("subscription for %s recovered; gap %d closed", topic, gid)
             log.info("subscribed: %s", topic)
             return
 
@@ -267,6 +302,11 @@ class StreamConsumer:
         leaves a healthy-looking process recording nothing, and the first sign
         is an empty chart weeks later.
         """
+        if topic in self._rejection_gaps:
+            # Already open and unresolved. Re-opening it every reconnect is what
+            # produced the gap storm (V6).
+            self.stats.join_rejected[topic] = reason
+            return
         self.stats.join_rejected[topic] = reason
         err = SubscriptionRejectedError(
             f"phx_join refused for {topic}; this process is recording NOTHING for it",
@@ -285,14 +325,15 @@ class StreamConsumer:
             # and we do not know how long it will last.
             backfillable=False,
         )
-        self.stats.gaps_opened += 1
-        self.writer.record_gap(
-            GapRecord(
-                started_at=_iso(_now()), ended_at=None,
-                reason=f"subscription rejected: {reason}",
-                run_id=self.run_id, topics=[topic], backfillable=False,
-            )
+        self._rejection_gaps[topic] = gid
+        self._rejection_records[topic] = GapRecord(
+            started_at=_iso(_now()), ended_at=None,
+            reason=f"subscription rejected: {reason}",
+            run_id=self.run_id, topics=[topic], backfillable=False,
+            gap_id=gid,
         )
+        self.stats.gaps_opened += 1
+        self.writer.record_gap(self._rejection_records[topic])
         log.error(
             "gap %d opened for %s. Check: (1) the API key has not expired -- free "
             "instant keys last 7 days (REQ-D-06); (2) the collection slug is the "
@@ -379,7 +420,7 @@ class StreamConsumer:
             # actually subscribed to at a given moment -- which is precisely
             # the question that could not be answered when BUG-20260909-005
             # made a refused join invisible.
-            self.writer.write(raw, topic="__control__", event_timestamp=None)
+            self.writer.write(raw, topic="__control__", event_timestamp=None, control=True)
             if event == "phx_reply":
                 self._handle_join_reply(msg)
             elif event in ("phx_close", "phx_error"):
@@ -390,7 +431,7 @@ class StreamConsumer:
             return msg
         if topic == "phoenix" or event == "heartbeat":
             self.stats.heartbeats += 1
-            self.writer.write(raw, topic="__control__", event_timestamp=None)
+            self.writer.write(raw, topic="__control__", event_timestamp=None, control=True)
             return msg
 
         ets = self.extract_event_timestamp(msg)
@@ -424,24 +465,36 @@ class StreamConsumer:
         self._open_gap_id = self.opstore.open_gap(
             self.run_id, reason, topics=self._topics(), backfillable=True
         )
-        self.writer.record_gap(
-            GapRecord(
-                started_at=_iso(_now()),
-                ended_at=None,
-                reason=reason,
-                run_id=self.run_id,
-                topics=self._topics(),
-                # The window is partially backfillable: sales/listings/offers can
-                # be recovered, cancellations and order invalidations cannot.
-                backfillable=True,
-            )
+        self._open_gap_record = GapRecord(
+            started_at=_iso(_now()),
+            ended_at=None,
+            reason=reason,
+            run_id=self.run_id,
+            topics=self._topics(),
+            gap_id=self._open_gap_id,
+            # The window is partially backfillable: sales/listings/offers can
+            # be recovered, cancellations and order invalidations cannot.
+            # BUG-20260909-013 tracks wiring IRRECOVERABLE to this flag.
+            backfillable=True,
         )
+        self.stats.gaps_opened += 1
+        self.writer.record_gap(self._open_gap_record)
         log.warning("ingestion gap opened: %s", reason)
 
     def _close_gap(self) -> None:
         if self._open_gap_id is None:
             return
         self.opstore.close_gap(self._open_gap_id)
+        # BUG-20260909-023. This used to update ONLY the SQLite gap register,
+        # which docs/07 §1 classifies as disposable, reconstructible
+        # bookkeeping -- and a gap is reconstructible from nothing. The durable
+        # manifest kept `ended_at: null` forever, so a reader could not tell a
+        # three-second reconnect from a weekend outage. The end is written to
+        # the manifest now, across every day the gap turned out to span, which
+        # is only knowable once it has an end.
+        if self._open_gap_record is not None:
+            self.writer.close_gap_record(self._open_gap_record, _iso(_now()))
+            self._open_gap_record = None
         log.info(
             "ingestion gap closed; backfill enqueued for recoverable classes only "
             "(cancellations and order invalidate/revalidate in this window are "
@@ -475,7 +528,9 @@ class StreamConsumer:
         since = ck.get("updated_at") or ck.get("last_received_at")
         gid = self.opstore.open_gap(
             self.run_id,
-            f"process not running (previous run {ck.get('run_id')} last alive {since})",
+            f"process not running (previous run {ck.get('run_id')} last CHECKPOINTED "
+            f"{since}; it may have been alive up to one heartbeat interval longer, "
+            f"so this gap is over-recorded rather than under-recorded)",
             topics=self._topics(),
             backfillable=True,
             started_at=since,
@@ -490,7 +545,10 @@ class StreamConsumer:
             )
         )
         log.warning(
-            "recorded downtime gap %d: nothing was recorded between %s and now. "
+            "recorded downtime gap %d: the previous run last checkpointed at %s. "
+            "The gap is measured from there, so it is conservative -- it may "
+            "cover up to one heartbeat interval during which events WERE "
+            "recorded. Erring long is the safe direction. "
             "Sales, listings and offers in that window are backfillable; "
             "cancellations and order invalidate/revalidate are NOT (REQ-D-09a).",
             gid, since,

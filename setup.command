@@ -10,9 +10,7 @@
 # It does NOT delete anything else, does NOT touch files outside this project,
 # and does NOT send your API key anywhere except OpenSea.
 
-# Resolve the project folder from this script's own location, so it works
-# whether double-clicked, run by path, or run from anywhere.
-cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+cd "$(dirname "$0")" || exit 1
 echo "======================================================================"
 echo "  NAVANAX SETUP"
 echo "  Working in: $(pwd)"
@@ -47,7 +45,7 @@ echo
 # ---------------------------------------------------------------- 3. preflight
 echo "[3/4] Running preflight against OpenSea."
 echo "      Reads your key from .env (BUG-20260909-001 fixed - it genuinely does now)."
-echo "      Costs 3 of your 600 hourly API requests."
+echo "      Costs 3 of your 120 hourly API requests (measured, not the 600 we assumed)."
 echo "      Watches the live feed for 2 minutes, so this takes ~2.5 min total."
 echo
 python3 tools/preflight.py --slug argonauts --stream-seconds 120

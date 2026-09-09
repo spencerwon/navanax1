@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
 import sys
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .codec import get_codec, verify_codec_roundtrip
@@ -46,6 +49,70 @@ def _config(root: Path) -> tuple[dict, list[str]]:
     wl = _load_yaml(root / "config" / "watchlist.yaml")
     slugs = [c["slug"] for c in wl.get("collections", [])]
     return cfg, slugs
+
+
+@contextmanager
+def _single_instance(lock_path: Path):
+    """Refuse to start a second ingest process against the same landing zone.
+
+    V3 (validator, second review). Two writers on one root silently lose
+    manifest records -- measured at 295 of 600 gap records, with the audit
+    reporting clean. A lost gap record is undetectable forever. The cheapest
+    correct answer is to make the second process refuse to start.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("a+")
+    try:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:
+            print("WARNING: this platform has no flock; a second ingest process "
+                  "against this landing zone cannot be detected.", file=sys.stderr)
+        except OSError as exc:
+            # Tech-lead finding #4. The errno matters. EWOULDBLOCK/EAGAIN means
+            # another process really holds the lock -- refuse. EOPNOTSUPP and
+            # friends mean THIS FILESYSTEM does not implement flock at all,
+            # which is the reply an SMB/AFP share and some NFS mounts give.
+            # Treating those as contention stopped ingestion entirely and told
+            # the operator to stop a process that does not exist -- and a day
+            # not recorded is a day that cannot be bought back, so failing
+            # closed here is the wrong direction.
+            unsupported = {
+                errno.EOPNOTSUPP, errno.ENOLCK, errno.EINVAL, errno.ENOSYS,
+                getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+            }
+            if exc.errno in unsupported:
+                print(
+                    f"WARNING: {lock_path.parent} does not support file locking "
+                    f"({errno.errorcode.get(exc.errno, exc.errno)}). This is normal on a "
+                    f"network share or an external volume.\n"
+                    f"         Ingestion will proceed, but a SECOND ingest process "
+                    f"against this landing zone cannot be detected, and two writers "
+                    f"silently lose manifest records.\n"
+                    f"         Make sure only one is running.",
+                    file=sys.stderr,
+                )
+            else:
+                fh.seek(0)
+                holder = fh.read().strip() or "an unknown process"
+                raise RuntimeError(
+                    f"another navanax ingest is already running against this "
+                    f"landing zone ({holder}).\n"
+                    f"  Two writers on one landing zone silently LOSE manifest "
+                    f"records, including gap records, which nothing can detect "
+                    f"afterwards.\n"
+                    f"  Stop the other process, or point this one at a different "
+                    f"--root.\n"
+                    f"  Lock file: {lock_path}"
+                ) from None
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"pid={os.getpid()} started={datetime.now(timezone.utc).isoformat()}\n")
+        fh.flush()
+        yield
+    finally:
+        fh.close()
 
 
 def cmd_ingest(args) -> int:
@@ -102,13 +169,19 @@ def cmd_ingest(args) -> int:
             pass
 
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nstopping; flushing final frame...")
-    finally:
-        consumer.stop()
+        with _single_instance(root / lz["root"] / ".ingest.lock"):
+            try:
+                asyncio.run(main())
+            except KeyboardInterrupt:
+                print("\nstopping; flushing final frame...")
+            finally:
+                consumer.stop()
+                writer.close()
+                print(json.dumps(consumer.stats.as_dict(), indent=2))
+    except RuntimeError as exc:
+        print(f"REFUSING TO INGEST\n\n{exc}", file=sys.stderr)
         writer.close()
-        print(json.dumps(consumer.stats.as_dict(), indent=2))
+        return 4
     return 0
 
 
@@ -130,7 +203,12 @@ def cmd_status(args) -> int:
 def cmd_verify(args) -> int:
     root = Path(args.root)
     cfg, _ = _config(root)
-    problems = verify_manifest(root / cfg["landing"]["root"])
+    problems = verify_manifest(root / cfg["landing"]["root"],
+                               deep=not getattr(args, "shallow", False))
+    if getattr(args, "shallow", False):
+        print("NOTE  --shallow: checksums only. A file whose bytes are intact but "
+              "whose DECODER returns a prefix (BUG-20260909-010) is NOT detected "
+              "in this mode. Run without --shallow for the real integrity audit.")
     failures = [p for p in problems if is_integrity_failure(p)]
     notes = [p for p in problems if not is_integrity_failure(p)]
 
@@ -155,7 +233,11 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ingest").set_defaults(fn=cmd_ingest)
     sub.add_parser("status").set_defaults(fn=cmd_status)
-    sub.add_parser("verify").set_defaults(fn=cmd_verify)
+    v = sub.add_parser("verify")
+    v.add_argument("--shallow", action="store_true",
+                   help="checksums only; skip decompressing every file "
+                        "(fast, but cannot detect a short decode)")
+    v.set_defaults(fn=cmd_verify)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s  %(message)s")

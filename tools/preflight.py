@@ -124,9 +124,19 @@ def check_key(key: str, slug: str) -> bool:
     if isinstance(supply, int) and supply > 0:
         pages = -(-supply // 200)  # ceil; the NFT endpoint allows limit up to 200
         est = pages + 2
+        # BUG-20260909-014. This used to emit `est_minutes_at_600_per_hour`
+        # computed as est/10, which was the arithmetic for the superseded
+        # (and never sourced) hourly figure, into the MACHINE-READABLE
+        # artifact the documents are corrected FROM, four lines above a print
+        # statement that already said "120/hr (measured)". The same function
+        # published both numbers. At the measured limit the divisor is 2, so the
+        # JSON under-reported onboarding time by 5x.
         report["checks"]["onboarding_estimate"] = {
             "total_supply": supply, "pages_at_200": pages, "est_reads": est,
-            "est_minutes_at_600_per_hour": round(est / 10, 1),
+            "rate_limit_per_hour": 120,
+            "rate_limit_provenance": "MEASURED 2026-09-09 from x-ratelimit-limit "
+                                     "(caveat: cf-cache-status was HIT)",
+            "est_minutes_at_measured_limit": round(est / (120 / 60), 1),
         }
         print()
         say(OK, f"Onboarding estimate: {supply:,} items -> {pages} pages at 200/page",

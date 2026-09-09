@@ -253,7 +253,11 @@ class ZstdCodec:
 
 
 class RawCodec:
-    """No compression. For debugging and for measuring true raw sizes."""
+    """No compression. For debugging and for measuring true raw sizes.
+
+    Its "frame" is a line, which is why docs/07 §2.1's crash-safety claim is
+    trivially true of raw JSONL: every complete line is independently valid.
+    """
 
     name = "raw"
     ext = ".jsonl"
@@ -262,6 +266,17 @@ class RawCodec:
         return _RawFrameWriter(fh)
 
     def decompress(self, data: bytes) -> bytes:
+        # Strict mode must RAISE on truncation rather than quietly returning a
+        # prefix -- the property verify_codec_roundtrip check (3) enforces for
+        # every codec. For a line-oriented format, truncation is exactly "the
+        # last line has no newline". Returning it silently is how a partial
+        # record becomes indistinguishable from a complete one.
+        if data and not data.endswith(b"\n"):
+            raise ValueError(
+                "raw landing-zone file ends mid-line -- the process was killed "
+                "while writing. Use decompress_truncated() to recover the "
+                "complete lines deliberately."
+            )
         return data
 
     def decompress_truncated(self, data: bytes) -> bytes:
@@ -293,11 +308,24 @@ def verify_codec_roundtrip(codec: Codec, *, frames: int = 3) -> None:
     A 200-microsecond check at startup answers the question for the machine
     that is about to record data it cannot re-fetch.
 
-    Asserts two things:
+    Asserts four things:
       1. A file of `frames` closed frames reads back COMPLETE. (A binding that
          stops at frame one returns 1/frames of the file and raises nothing.)
       2. That same file with its trailing frame chopped still yields every
-         COMPLETE frame before the cut. That is REQ-D-26a's whole purpose.
+         COMPLETE frame before the cut, and ONLY those -- not just the first.
+         That is REQ-D-26a's whole purpose.
+      3. A DAMAGED frame RAISES in strict mode rather than returning a prefix.
+         (V5, validator second review.) The frame walk finds boundaries by the
+         4-byte zstd magic, which occurs by chance inside compressed data with
+         probability ~1.5% per 64 MB file -- three or four files a year at the
+         documented volume. If the binding's stream_reader returns a partial
+         result instead of raising on a truncated frame, the walk accepts that
+         false boundary, `decompress` returns a silently truncated file, and
+         nothing raises. That is BUG-20260909-010 all over again, one layer
+         down. A binding that behaves that way cannot be used safely, and this
+         check is what refuses it.
+      4. `decompress` on a healthy file consumes the WHOLE file, so a prefix
+         can never be mistaken for success.
     """
     buf = io.BytesIO()
     w = codec.writer(buf)
@@ -320,18 +348,53 @@ def verify_codec_roundtrip(codec: Codec, *, frames: int = 3) -> None:
             f"Do not ingest with this codec. For zstd, upgrade: pip install -U zstandard"
         )
 
-    # Chop mid-final-frame. Everything before the cut must survive.
-    cut = blob.rfind(ZSTD_MAGIC) if codec.name == "zstd" else int(len(blob) * 0.9)
+    # Chop mid-final-frame. Every COMPLETE frame before the cut must survive,
+    # and all of them -- recovering only frame 0 is the failure mode, not a pass.
+    cut = _last_frame_start(codec, blob)
+    damaged = blob[:cut] + blob[cut : cut + max(1, (len(blob) - cut) // 2)]
+    complete = b"".join(lines[: frames - 1])
+    recovered = codec.decompress_truncated(damaged)
+    if recovered != complete:
+        raise RuntimeError(
+            f"codec {codec.name!r} recovered {len(recovered)} bytes from a truncated "
+            f"file; the {frames - 1} complete frames before the cut hold "
+            f"{len(complete)}. REQ-D-26a's crash-safety guarantee does not hold "
+            f"with this codec on this machine. Recovering only the first frame is "
+            f"the BUG-20260909-010 failure mode, not a pass."
+        )
+
+    # (3) A damaged frame must RAISE in strict mode, not return a prefix.
+    try:
+        got = codec.decompress(damaged)
+        raised = False
+    except Exception:  # noqa: BLE001 - any binding raises its own type
+        raised = True
+        got = b""
+    if not raised:
+        raise RuntimeError(
+            f"codec {codec.name!r} did NOT raise on a truncated file -- it returned "
+            f"{len(got)} of {len(expected)} bytes and reported success.\n"
+            f"  This binding cannot be used to record data that cannot be re-fetched.\n"
+            f"  The frame walk finds boundaries by the 4-byte zstd magic, which "
+            f"occurs by chance inside compressed data roughly once per 64 MB of "
+            f"output. With a binding that returns partial results instead of "
+            f"raising, that false boundary silently truncates the file and the "
+            f"checksum -- taken over compressed bytes -- still matches.\n"
+            f"  For zstd: pip install -U zstandard  (>=0.23.0)"
+        )
+
+
+def _last_frame_start(codec: Codec, blob: bytes) -> int:
+    """Byte offset where the final frame begins, for the truncation test."""
+    if codec.name == "zstd":
+        cut = blob.rfind(ZSTD_MAGIC)
+    elif codec.name == "gzip":
+        cut = blob.rfind(b"\x1f\x8b\x08")
+    else:
+        cut = blob.rfind(b"\n", 0, len(blob) - 1) + 1
     if cut <= 0 or cut >= len(blob):
         cut = int(len(blob) * 0.9)
-    damaged = blob[:cut] + blob[cut : cut + max(1, (len(blob) - cut) // 2)]
-    recovered = codec.decompress_truncated(damaged)
-    if not recovered.startswith(b"frame-0\n"):
-        raise RuntimeError(
-            f"codec {codec.name!r} recovered NOTHING from a truncated file. "
-            f"REQ-D-26a's crash-safety guarantee does not hold with this codec on "
-            f"this machine; a process killed mid-write would lose the whole file."
-        )
+    return cut
 
 
 def get_codec(name: str, level: int | None = None) -> Codec:

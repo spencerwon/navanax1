@@ -1,7 +1,6 @@
 # Navanax
 
-Backtester and analysis platform for illiquid NFT markets — data consolidation,
-visualization, statistical analysis, and trade discovery on OpenSea.
+OpenSea data consolidation, analysis and trade-discovery platform for illiquid NFT markets.
 
 **Status:** Phase 0 — starting the historical record.
 
@@ -31,7 +30,7 @@ python3 tests/selftest.py       # stdlib-only self-test, no dependencies needed
 
 ## The six things that shape every decision here
 
-1. **Stream-first, REST-rationed.** The free tier allows 600 REST reads/hour, shared account-wide — about one every six seconds. The WebSocket stream is unmetered. So the stream is the primary path and REST is a budgeted, priority-queued resource behind a governor that every call passes through.
+1. **Stream-first, REST-rationed.** The free tier allows **120 REST reads/hour**, shared account-wide — one every thirty seconds. (600 was an unsourced assumption repeated across seven documents until one live response falsified it: BUG-20260909-003. The 120 came from `x-ratelimit-limit` on a real reply, and even that arrived on a Cloudflare cache HIT, so it is a measurement with a caveat rather than ground truth.) The WebSocket stream is unmetered. So the stream is the primary path and REST is a budgeted resource behind a governor every call passes through. *Priority ordering between classes is currently emergent from reserve floors rather than a queue — BUG-20260909-016.*
 2. **Land before you parse.** Every frame hits the landing zone verbatim before anything reads it. A normalizer bug is then repairable by reprocessing; without this, a parsing bug means data you cannot re-fetch.
 3. **Gaps are gaps.** Never interpolated, never forward-filled. Some event classes (cancellations, order invalidate/revalidate, metadata updates) cannot be backfilled at all after a disconnect and are recorded as permanently lost.
 4. **The historical record is append-only.** Corrections supersede; they never edit. No agent at any authority level may modify it.

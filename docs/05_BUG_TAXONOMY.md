@@ -86,7 +86,7 @@ Location: `docs/logs/BUGS.md`.
 ### 4.1 Entry format
 
 ```markdown
-### BUG-20260910-001 · S1 · NRM · fixed
+### BUG-YYYYMMDD-NNN · S1 · NRM · fixed
 
 | | |
 |---|---|

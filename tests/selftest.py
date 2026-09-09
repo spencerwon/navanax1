@@ -91,6 +91,7 @@ class FakeWriter:
 
     def __init__(self) -> None:
         self.landed: list[tuple[str, str | None, str | None]] = []
+        self.control: list[str] = []
         self.gaps: list[Any] = []
         self.flushes = 0
 
@@ -98,14 +99,21 @@ class FakeWriter:
     def sequence(self) -> int:
         return len(self.landed)
 
-    def write(self, raw, topic=None, event_timestamp=None, received_at=None):
+    def write(self, raw, topic=None, event_timestamp=None, received_at=None,
+              control=False):
         self.landed.append((raw, topic, event_timestamp))
+        if control:
+            self.control.append(raw)
         return len(self.landed)
 
     def flush(self) -> None:
         self.flushes += 1
 
     def record_gap(self, gap) -> None:
+        self.gaps.append(gap)
+
+    def close_gap_record(self, gap, ended_at) -> None:
+        gap.ended_at = ended_at
         self.gaps.append(gap)
 
 
@@ -149,6 +157,7 @@ def test_crash_recovery(tmp: Path) -> None:
     w.flush()   # frames now closed for the first 10; 2 remain buffered
     path = sorted((tmp / "crash" / "stream").rglob("*.jsonl.gz"))[0]
     blob = path.read_bytes()
+    w.close()   # V13: a writer that is never closed leaks its flusher thread
 
     # Simulate a kill mid-write: lop off the tail.
     truncated = blob[: int(len(blob) * 0.8)]
@@ -368,9 +377,18 @@ def test_stream_parsing() -> None:
           w.landed[-1][2] == "2026-09-09T10:00:00Z", f"got {w.landed[-1][2]}")
     check("stream: lands frame verbatim", w.landed[-1][0] == f1)
 
-    c.handle_frame('{"topic":"phoenix","event":"heartbeat","payload":{},"ref":"1"}')
-    check("stream: heartbeat not counted as event", c.stats.events == 1)
-    check("stream: heartbeat counted", c.stats.heartbeats == 1)
+    # V9: the server answers a heartbeat with a phx_reply on topic "phoenix",
+    # NOT with an {"event":"heartbeat"} frame. The old fixture asserted the
+    # shape we SEND, so stats.heartbeats was 0 in production and 1 in the test.
+    c.handle_frame(json.dumps(["1", "hb", "phoenix", "phx_reply",
+                               {"status": "ok", "response": {}}]))
+    check("stream: a real phoenix phx_reply IS counted as a heartbeat",
+          c.stats.heartbeats == 1,
+          "this is the frame the server actually sends")
+    check("stream: heartbeat not counted as a market event", c.stats.events == 1)
+    check("stream: the frame we SEND is also tolerated",
+          c.handle_frame('{"topic":"phoenix","event":"heartbeat","payload":{},"ref":"1"}')
+          is not None and c.stats.heartbeats == 2)
 
     before = len(w.landed)
     c.handle_frame("{not json")
@@ -723,6 +741,383 @@ def test_codec_multiframe_contract() -> None:
           f"{zstandard.__version__})", ok, why)
 
 
+
+# ===========================================================================
+# Regression tests for the SECOND validator review -- findings V1..V6, all of
+# which were introduced or left unbuilt by the fixes for BUG-005..010.
+# ===========================================================================
+def test_verify_detects_decoder_truncation(tmp: Path) -> None:
+    """V1. The audit could not see BUG-010's failure mode even after BUG-007.
+
+    A byte-perfect file whose DECODER returns a prefix: the sha256 is over the
+    compressed bytes, so it still matches, and the audit reported clean. The
+    manifest has held the event count since BUG-007; nothing compared with it.
+    """
+    clock = FakeClock(datetime(2026, 9, 9, 11, 0, 0, tzinfo=timezone.utc))
+    root = tmp / "trunc"
+    w = LandingZoneWriter(root, "run-t", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic,
+                          flush_events=2, auto_flush=False)
+    for i in range(6):
+        w.write(frame("argonauts", f"2026-09-09T11:00:{i:02d}Z"),
+                event_timestamp=f"2026-09-09T11:00:{i:02d}Z")
+    w.close()
+    check("V1: a healthy closed file verifies clean", verify_manifest(root) == [])
+
+    # Simulate a decoder that returns only the first frame -- BUG-010 exactly.
+    # The FILE is untouched; only the reading of it is short.
+    import navanax.landing as L
+    real = L._recoverable_event_count
+    L._recoverable_event_count = lambda fp: 2          # first frame only
+    try:
+        problems = verify_manifest(root)
+    finally:
+        L._recoverable_event_count = real
+
+    check("V1: DETECTS a decoder returning a prefix of an intact file",
+          any(p.startswith("COUNT MISMATCH") for p in problems), f"got {problems}")
+    check("V1: a count mismatch is an integrity failure, not a note",
+          any(is_integrity_failure(p) for p in problems))
+    check("V1: the message says the file is intact and the decoder is not",
+          any("DECODER" in p for p in problems), f"got {problems}")
+
+
+def test_control_frames_do_not_inflate_event_count(tmp: Path) -> None:
+    """V2. BUG-005's fix started landing control frames as market events.
+
+    The BUG-005 scenario -- expired key, join refused, an hour of heartbeats,
+    zero market data -- produced a manifest reading `event_count: 121`, which
+    is the number the ING event-rate monitor watches. BUG-005's own failure
+    mode, re-entering through the door BUG-005's fix opened.
+    """
+    clock = FakeClock(datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc))
+    root = tmp / "control"
+    w = LandingZoneWriter(root, "run-c2", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic,
+                          flush_events=1, auto_flush=False)
+    for i in range(20):
+        w.write(f'{{"heartbeat":{i}}}', topic="__control__", control=True)
+    w.close()
+
+    mf = json.loads((root / "_manifest" / "2026-09-09.json").read_text())
+    rec = mf["files"][0]
+    check("V2: control frames do NOT count as market events",
+          rec["event_count"] == 0, f"event_count={rec['event_count']}")
+    check("V2: they are counted separately, not discarded",
+          rec["control_count"] == 20, f"control_count={rec.get('control_count')}")
+    check("V2: a control-only file has no event-time span",
+          rec["first_event_timestamp"] is None)
+
+    # ...and must not be returned by every range query for all time.
+    from navanax.landing import ManifestWriter
+    hits = ManifestWriter(root).files_for_event_range(
+        "2020-01-01T00:00:00Z", "2020-12-31T23:59:59Z")
+    check("V2: a control-only file is NOT matched by an unrelated range query",
+          hits == [], f"got {[h['filename'] for h in hits]}")
+
+
+def test_gap_is_filed_under_every_day_it_spans(tmp: Path) -> None:
+    """V4. A 57-hour weekend outage was filed only under the Friday.
+
+    docs/07 says a reader MUST resolve through the manifest. Asking "were there
+    gaps on Sunday?" returned none, from the artifact it was told to trust.
+    """
+    from navanax.landing import GapRecord
+    clock = FakeClock(datetime(2026, 9, 8, 9, 0, 0, tzinfo=timezone.utc))
+    root = tmp / "spangap"
+    w = LandingZoneWriter(root, "run-g2", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    w.record_gap(GapRecord(started_at="2026-09-05T23:50:00Z",
+                           ended_at="2026-09-08T08:00:00Z",
+                           reason="process not running (weekend)",
+                           run_id="run-g2", topics=["collection:argonauts"]))
+    days = sorted(p.stem for p in (root / "_manifest").glob("*.json"))
+    check("V4: the gap appears in EVERY daily manifest it spans",
+          days == ["2026-09-05", "2026-09-06", "2026-09-07", "2026-09-08"],
+          f"got {days}")
+    sunday = json.loads((root / "_manifest" / "2026-09-07.json").read_text())
+    check("V4: a reader asking about the middle day finds the gap",
+          len(sunday["gaps"]) == 1
+          and sunday["gaps"][0]["started_at"] == "2026-09-05T23:50:00Z")
+    w.close()
+
+
+def test_concurrent_manifest_writes_lose_nothing(tmp: Path) -> None:
+    """V3. Manifest read-modify-write had no cross-process lock.
+
+    Measured before the fix: 295 of 600 gap records lost, verify clean. A lost
+    FILE record shows up as an ORPHAN; a lost GAP record is undetectable by
+    anything, forever -- and a missing gap is how "we were not watching" comes
+    to read as "nothing happened".
+    """
+    import threading as th
+
+    from navanax.landing import GapRecord, ManifestWriter
+    root = tmp / "race"
+    root.mkdir(parents=True, exist_ok=True)
+    writers = [ManifestWriter(root) for _ in range(4)]
+    per = 40
+
+    def hammer(mw: ManifestWriter, tag: int) -> None:
+        for i in range(per):
+            mw.record_gap("2026-09-09", GapRecord(
+                started_at="2026-09-09T13:00:00Z", ended_at=None,
+                reason=f"w{tag}-{i}", run_id=f"w{tag}"))
+
+    threads = [th.Thread(target=hammer, args=(mw, i)) for i, mw in enumerate(writers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    data = json.loads((root / "_manifest" / "2026-09-09.json").read_text())
+    check("V3: no gap record is lost under concurrent writers",
+          len(data["gaps"]) == 4 * per,
+          f"wrote {4 * per}, manifest holds {len(data['gaps'])}")
+    check("V3: every record is distinct (no overwrite)",
+          len({g["reason"] for g in data["gaps"]}) == 4 * per)
+
+
+def test_rejection_gap_is_not_reopened_every_reconnect(tmp: Path) -> None:
+    """V6. Joins are re-issued on every reconnect; each rejection opened a gap.
+
+    Measured: 200 collections x 20 reconnects = 4,000 permanently-open gaps and
+    89.6s of synchronous manifest fsync inside the asyncio event loop, blocking
+    the reader long enough to miss the heartbeat and force another reconnect.
+    Trigger is a 7-day key expiring -- a certainty, not a hypothetical.
+    """
+    store = OperationalStore(tmp / "storm.db")
+    w = FakeWriter()
+    c = StreamConsumer("k", ["argonauts"], w, store, run_id="run-storm")
+
+    for _ in range(20):                      # twenty reconnects, all refused
+        joins = [json.loads(m) for m in c.join_messages()]
+        ref = joins[0]["ref"]
+        c.handle_frame(json.dumps([ref, ref, joins[0]["topic"], "phx_reply",
+                                   {"status": "error",
+                                    "response": {"reason": "unauthorized"}}]))
+
+    check("V6: one gap per topic, not one per reconnect",
+          len(store.open_gaps()) == 1,
+          f"20 refused reconnects opened {len(store.open_gaps())} gaps")
+
+    # ...and a topic that later succeeds must have its gap RETRACTED. Asserting
+    # a hole that does not exist is its own kind of wrong.
+    joins = [json.loads(m) for m in c.join_messages()]
+    ref = joins[0]["ref"]
+    c.handle_frame(json.dumps([ref, ref, joins[0]["topic"], "phx_reply",
+                               {"status": "ok", "response": {}}]))
+    check("V6/V11: a recovered subscription closes its rejection gap",
+          store.open_gaps() == [], f"still open: {store.open_gaps()}")
+    check("V6/V11: and clears the rejection from stats",
+          c.stats.join_rejected == {}, f"got {c.stats.join_rejected}")
+
+
+def test_flusher_thread_runs_on_a_real_clock(tmp: Path) -> None:
+    """V8. Every cadence assertion used auto_flush=False and drove tick() by hand.
+
+    tick() was tested; the thread that calls it in production was not. That is
+    this project's recurring shape -- requirement, docstring and log agreeing on
+    behaviour only half of which is exercised -- so this one uses the real
+    clock and the real thread, and pays 1.2 seconds for it.
+    """
+    import threading as th
+    import time as _t
+
+    before = th.active_count()
+    root = tmp / "flusher"
+    w = LandingZoneWriter(root, "run-th", codec=GzipCodec(),
+                          flush_seconds=0.5, flush_events=10_000)  # auto_flush default
+    check("V8: the flusher thread is actually started by default",
+          th.active_count() == before + 1, f"{before} -> {th.active_count()}")
+
+    w.write(frame("argonauts", "2026-09-09T14:00:00Z", event="item_cancelled"),
+            topic="collection:argonauts", event_timestamp="2026-09-09T14:00:00Z")
+    path = sorted((root / "stream").rglob("*.jsonl.gz"))[0]
+
+    deadline = _t.monotonic() + 5.0
+    while path.stat().st_size == 0 and _t.monotonic() < deadline:
+        _t.sleep(0.05)
+
+    check("V8: an idle writer's frame is closed by the THREAD, unaided",
+          path.stat().st_size > 0,
+          "no tick() call, no second write -- only the daemon flusher")
+    recovered = list(read_file(path, GzipCodec(), tolerate_truncation=True))
+    check("V8: and the event is recoverable without a clean shutdown",
+          len(recovered) == 1 and "item_cancelled" in recovered[0]["raw"])
+
+    w.close()
+    _t.sleep(0.1)
+    check("V8: close() stops the thread", th.active_count() == before,
+          f"expected {before}, got {th.active_count()}")
+
+
+def test_gap_spans_every_day_through_the_consumer_path(tmp: Path) -> None:
+    """BUG-023. The tech-lead gate caught what the first fix and its test missed.
+
+    `test_gap_is_filed_under_every_day_it_spans` asserted `_dates_spanned` by
+    calling `record_gap` with BOTH endpoints known. Production never does that:
+    a live gap is opened with `ended_at=None` at the moment the outage starts,
+    when it has zero duration, and `_close_gap` only ever touched the
+    disposable SQLite store. So a 57-hour weekend outage on a RUNNING process
+    still produced one day's manifest and a gap that said `ended_at: null`
+    forever -- a reader could not tell a three-second reconnect from a lost
+    weekend.
+
+    This test drives the REAL consumer methods. That distinction is the whole
+    finding: a test that proves the helper is not a test that proves the path.
+    """
+    store = OperationalStore(tmp / "spanpath.db")
+    clock = FakeClock(datetime(2026, 9, 4, 18, 0, 0, tzinfo=timezone.utc))
+    root = tmp / "spanpath"
+    w = LandingZoneWriter(root, "run-span", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    c = StreamConsumer("k", ["argonauts"], w, store, run_id="run-span")
+
+    import navanax.stream as S
+    real_now = S._now
+    S._now = clock.now
+    try:
+        c._open_gap("connection closed by peer without a stop request")
+        days_at_open = sorted(p.stem for p in (root / "_manifest").glob("*.json"))
+        check("BUG-023: a gap is recorded the moment it opens, not only on close",
+              days_at_open == ["2026-09-04"], f"got {days_at_open}")
+
+        clock.advance(57 * 3600)          # Friday 18:00 -> Monday 03:00
+        c._close_gap()
+    finally:
+        S._now = real_now
+
+    days = sorted(p.stem for p in (root / "_manifest").glob("*.json"))
+    check("BUG-023: on close, the gap appears in EVERY day it spanned",
+          days == ["2026-09-04", "2026-09-05", "2026-09-06", "2026-09-07"],
+          f"got {days} -- the fix that only covered the restart path gave "
+          f"['2026-09-04']")
+
+    sunday = json.loads((root / "_manifest" / "2026-09-06.json").read_text())
+    check("BUG-023: the middle day carries the gap", len(sunday["gaps"]) == 1)
+    check("BUG-023: and it records when the gap ENDED",
+          sunday["gaps"][0]["ended_at"] is not None,
+          "every live gap used to say ended_at: null forever")
+
+    friday = json.loads((root / "_manifest" / "2026-09-04.json").read_text())
+    check("BUG-023: the open record is REPLACED, not duplicated",
+          len(friday["gaps"]) == 1 and friday["gaps"][0]["ended_at"] is not None,
+          f"got {friday['gaps']}")
+    check("BUG-023: the gap carries the id that links it to the register",
+          friday["gaps"][0]["gap_id"] is not None,
+          "without an id, a closure cannot find the record it completes")
+    w.close()
+
+
+def test_rest_budget_config_is_actually_read(tmp: Path) -> None:
+    """BUG-015 / REQ-N-09. The config block that looked like a knob and turned nothing.
+
+    `rest_budget` carried the only provenance-tagged MEASURED numbers in the
+    repo and was parsed by nothing: an operator could change `capacity: 120`
+    and see no effect and no error.
+    """
+    from navanax.governor import governor_from_config
+
+    g = governor_from_config({"rest_budget": {
+        "capacity": 55, "per_seconds": 3600,
+        "reserve": {"INTERACTIVE": 0, "SIGNAL": 2, "BACKFILL": 6, "MAINTENANCE": 11}}})
+    check("BUG-015: capacity comes from config, not from code",
+          g.bucket.state.capacity == 55.0, f"got {g.bucket.state.capacity}")
+    check("BUG-015: reserve floors come from config too",
+          g.reserve[Priority.BACKFILL] == 6.0 and g.reserve[Priority.MAINTENANCE] == 11.0)
+
+    d = governor_from_config({})
+    check("BUG-015: sane measured defaults when the block is absent",
+          d.bucket.state.capacity == 120.0)
+
+    try:
+        governor_from_config({"rest_budget": {"reserve": {"URGENT": 5}}})
+        raised = False
+    except ValueError as exc:
+        raised = "URGENT" in str(exc) and "INTERACTIVE" in str(exc)
+    check("BUG-015: an unknown priority in config FAILS LOUDLY",
+          raised, "a silently ignored config key is how a knob turns nothing")
+
+
+def test_no_superseded_rate_limit_in_operator_text(tmp: Path) -> None:
+    """BUG-014. The falsified 600/hr survived in the files the operator reads first.
+
+    BUG-003 was marked fixed while README line 33, setup.command and
+    preflight's machine-readable JSON still carried the number one live
+    response had falsified -- and preflight's `est/10` arithmetic under-reported
+    onboarding time by 5x in the artifact the docs get corrected FROM.
+    """
+    import re as _re
+    # A line ASSERTS the number if it puts 600 next to a rate word. A line that
+    # says 600 was wrong is the correction, not the defect, so historical
+    # references are allowed and only claims are flagged.
+    asserts = _re.compile(r"600[^\n]{0,40}?(read|request|call|hour|hr|budget)",
+                          _re.IGNORECASE)
+    corrects = _re.compile(r"not the 600|was an|unsourc|assum|previously|falsifi|"
+                           r"were 0/|BUG-2026|rescaled", _re.IGNORECASE)
+    offenders = []
+    for name in ("README.md", "setup.command", "tools/preflight.py",
+                 "src/navanax/governor.py", "config/base.yaml",
+                 "src/navanax/cli.py", "src/navanax/stream.py"):
+        f = ROOT / name
+        if not f.exists():
+            continue
+        for i, line in enumerate(f.read_text().splitlines(), 1):
+            if asserts.search(line) and not corrects.search(line):
+                offenders.append(f"{name}:{i}: {line.strip()[:70]}")
+    check("BUG-014: no operator-facing file still asserts the 600/hr figure",
+          not offenders, "still present -> " + " | ".join(offenders))
+
+
+def test_single_instance_degrades_on_unsupported_filesystem(tmp: Path) -> None:
+    """BUG-027. The single-instance guard could not tell "busy" from "unsupported".
+
+    BUG-022's guard caught OSError without checking errno. EOPNOTSUPP is what
+    an SMB/AFP share and some NFS mounts reply, and treating it as contention
+    made ingest REFUSE TO START, telling the operator to stop a process that
+    does not exist. On a local disk it never fires; on a network volume it
+    stops collection entirely -- and a day not recorded cannot be bought back,
+    so failing closed is the wrong direction for this particular guard.
+    """
+    import errno as _errno
+
+    from navanax.cli import _single_instance
+
+    lock = tmp / "lockdir" / ".ingest.lock"
+
+    def flock_raising(err: int):
+        def _f(_fd, _op):
+            raise OSError(err, _errno.errorcode.get(err, "?"))
+        return _f
+
+    import fcntl as _fcntl
+    real = _fcntl.flock
+    try:
+        # Unsupported filesystem: proceed, loudly.
+        _fcntl.flock = flock_raising(_errno.EOPNOTSUPP)
+        try:
+            with _single_instance(lock):
+                proceeded = True
+        except RuntimeError:
+            proceeded = False
+        check("BUG-027: an unsupported filesystem does NOT stop ingestion",
+              proceeded,
+              "refusing here loses days of history to a filesystem quirk")
+
+        # Real contention: refuse, and say why.
+        _fcntl.flock = flock_raising(_errno.EWOULDBLOCK)
+        try:
+            with _single_instance(lock):
+                refused = False
+        except RuntimeError as exc:
+            refused = "already running" in str(exc)
+        check("BUG-027: genuine contention still REFUSES to start", refused,
+              "two writers on one landing zone lose gap records undetectably")
+    finally:
+        _fcntl.flock = real
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError,
@@ -763,6 +1158,18 @@ def main() -> int:
             test_idle_flush_cadence, test_verify_sees_orphans_and_open_files,
             test_join_reply_is_read, test_clean_close_records_gap_and_backs_off,
             test_restart_records_downtime_gap,
+            # --- regressions for the SECOND validator review (V1..V6) ---
+            test_verify_detects_decoder_truncation,
+            test_control_frames_do_not_inflate_event_count,
+            test_gap_is_filed_under_every_day_it_spans,
+            test_concurrent_manifest_writes_lose_nothing,
+            test_rejection_gap_is_not_reopened_every_reconnect,
+            test_flusher_thread_runs_on_a_real_clock,
+            # --- regressions for the TECH LEAD gate ---
+            test_gap_spans_every_day_through_the_consumer_path,
+            test_rest_budget_config_is_actually_read,
+            test_no_superseded_rate_limit_in_operator_text,
+            test_single_instance_degrades_on_unsupported_filesystem,
         ):
             print(f"\n--- {fn.__name__} ---")
             fn(tmp)

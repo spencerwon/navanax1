@@ -13,7 +13,7 @@ You asked for STAGE, TEST, and PROD and whether you were missing any. You were m
 
 **The non-obvious one — and it matters much more here: code environments and data environments are two separate axes, and this project needs both.**
 
-In a normal web application, "the STAGE environment" means one thing: a copy of the app with a copy of the database. Here that framing breaks, because **the production data is irreplaceable and cannot be copied cheaply.** OpenSea gives 600 REST reads an hour. If you corrupt six months of accumulated floor history, you cannot re-download it. There is no backup at the API — the history exists only because you recorded it.
+In a normal web application, "the STAGE environment" means one thing: a copy of the app with a copy of the database. Here that framing breaks, because **the production data is irreplaceable and cannot be copied cheaply.** OpenSea gives 120 REST reads an hour (measured). If you corrupt six months of accumulated floor history, you cannot re-download it. There is no backup at the API — the history exists only because you recorded it.
 
 So the question "which environment am I in?" has two answers that must be tracked separately:
 
@@ -70,7 +70,7 @@ There is no separate replay-recording path. **REPLAY is a date range of the land
 
 This matters beyond saving work: test data captured by a second, separate code path is not guaranteed to resemble what production actually receives. Here they are the same bytes by construction, so a replay test exercises exactly the payloads the live system saw.
 
-The reason: you cannot afford to integration-test against the live API. At 600 reads an hour, a suite that makes even 60 calls costs 10% of the budget *per run* — and a suite is run many times a day, on every commit, by every agent. That competes directly with production ingestion for the same account-wide bucket. Recorded sessions give you realistic test data — real message shapes, real edge cases, real out-of-order arrivals — for free, forever, and reproducibly.
+The reason: you cannot afford to integration-test against the live API. At 120 reads an hour (measured), a suite that makes even 60 calls costs 10% of the budget *per run* — and a suite is run many times a day, on every commit, by every agent. That competes directly with production ingestion for the same account-wide bucket. Recorded sessions give you realistic test data — real message shapes, real edge cases, real out-of-order arrivals — for free, forever, and reproducibly.
 
 Twelve months from now, a recorded session from Phase 0 will still be catching regressions. It costs almost nothing to start and cannot be created retroactively.
 
@@ -91,7 +91,7 @@ main ─────────────────────────
         │                             ▲          ▲
         ├── feat/rest-governor ───────┘          │
         ├── feat/trait-hedonic ──────────────────┘
-        └── fix/BUG-20260910-001 ────────────────┘
+        └── fix/BUG-YYYYMMDD-NNN ────────────────┘
 ```
 
 | Branch | Rule |
@@ -109,7 +109,7 @@ main ─────────────────────────
 <what changed and why>
 
 Requirement: REQ-D-03
-Bug: BUG-20260910-001        (if applicable)
+Bug: BUG-YYYYMMDD-NNN        (if applicable)
 Validated-by: validator       (if it passed a gate)
 ```
 

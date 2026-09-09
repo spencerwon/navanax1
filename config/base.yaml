@@ -12,17 +12,25 @@ opensea:
   max_backoff_seconds: 60
 
 rest_budget:
-  # Free tier: 600 reads/hr, 30 writes/hr, 5 fulfillments/min.
-  # Token bucket, shared across every key on the account.
-  capacity: 600
+  # MEASURED 2026-09-09 from live response headers (BUG-20260909-003):
+  #   x-ratelimit-limit: 120     <-- not the 600 previously documented
+  # The 600 figure was an assumption that survived into every document
+  # unchallenged. One real request falsified it.
+  #
+  # Caveat: that response was a Cloudflare cache HIT, so the headers may be a
+  # cached reading rather than live. 120 is used as the conservative default;
+  # the governor reads x-ratelimit-limit on every response and adapts, so a
+  # wrong default self-corrects on the first uncached reply.
+  capacity: 120
   per_seconds: 3600
   # Floors keep low-priority work from consuming the last of the budget, so an
   # INTERACTIVE request arriving later still finds something left.
+  # Floors rescaled to the measured 120/hr budget (were 0/20/60/120 at 600).
   reserve:
     INTERACTIVE: 0
-    SIGNAL: 20
-    BACKFILL: 60
-    MAINTENANCE: 120
+    SIGNAL: 4
+    BACKFILL: 12
+    MAINTENANCE: 24
 
 landing:
   root: "data/landing"
