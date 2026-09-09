@@ -263,6 +263,23 @@ would pass against a broken implementation"* — applied to its author.
 | BUG-20260909-015 | S3 | P2 | fixed | config/base.yaml rest_budget was parsed by nothing; the governor hardcoded capacity |
 | BUG-20260909-019 | S3 | P0 | fixed | CI's pytest step collects zero tests and exits 5, so the pipeline cannot go green |
 
+### Round 3 — the QA Auditor reconciling claims against the repo
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-028 | S1 | P1 | fixed | The falsified 600/hr figure survived, unqualified, in five agent charters -- and BUG-014's own test could not see them |
+
+**Third time for this number.** BUG-003 found it. BUG-014 removed it from the
+three files the operator reads. The QA Auditor found it still stated as fact in
+**five agent charters** — the instructions the agents act on — including
+`data-engineer.md`, where it was headed *"the constraint that shapes everything
+you build"*, in the charter of the agent that owns the REST governor.
+
+The reason nobody looked: BUG-014's own ledger entry claimed its test *"scans
+every operator-facing file… so this class cannot recur silently."* It scanned a
+hardcoded list of seven. **The false claim of coverage is what did the damage** —
+it turned an unexamined gap into a settled question. The scan is repo-wide now.
+
 ### Still open
 
 | ID | Sev | Pri | Status | Summary |

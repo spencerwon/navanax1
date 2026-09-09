@@ -89,14 +89,14 @@ The reference UI shown in the project screenshots (thinkorswim) reflects the **E
 | Source | Access | Rate limit | Role |
 |---|---|---|---|
 | **OpenSea Stream API** (WebSocket, `wss://stream.openseabeta.com/socket`) | API key | **None — events do not count against REST limits** | **Primary ingestion path.** Real-time listings, sales, transfers, cancellations, bids, collection/trait offers, order invalidate/revalidate, metadata updates |
-| **OpenSea REST API v2** | `x-api-key` header | **Free tier: 600 reads/hr, 30 writes/hr, 5 fulfillments/min.** Token bucket, shared across all keys on an account. 429 on exhaustion | Backfill, snapshots, reconciliation. **Scarce, must be budgeted** |
+| **OpenSea REST API v2** | `x-api-key` header | **Free tier: 120 reads/hr (measured), 30 writes/hr, 5 fulfillments/min.** Token bucket, shared across all keys on an account. 429 on exhaustion | Backfill, snapshots, reconciliation. **Scarce, must be budgeted** |
 | **On-chain RPC / indexer** (Alchemy, QuickNode, or Dune/Flipside SQL) | Provider key | Provider-dependent | Wallet flow, transfer graphs, mint tracking, holder concentration — data the marketplace API does not expose |
 | **ETH/USD reference price** (an external market-data source; provider TBD) | Provider-dependent | Provider-dependent | Historical and current ETH/USD, required for the dual-denomination rule in REQ-F-02. **Not available from OpenSea** |
 | **Browser scraping** | — | — | **Last resort only.** See §4.6 |
 
 ### 4.2 The rate limit is the central architectural constraint
 
-600 reads/hour is roughly **one request every six seconds**. A single naive "refresh all collections" loop over a 200-collection watchlist costs 200 reads for one field each — a third of the hourly budget — and a realistic refresh touching stats, listings and offers costs three or more reads per collection, exhausting the budget in one pass. Therefore:
+120 reads/hour (measured) is roughly **one request every 30 seconds**. A single naive "refresh all collections" loop over a 200-collection watchlist costs 200 reads for one field each — a third of the hourly budget — and a realistic refresh touching stats, listings and offers costs three or more reads per collection, exhausting the budget in one pass. Therefore:
 
 - **REQ-D-01** The system SHALL treat REST calls as a rationed resource with an explicit, enforced budget allocator. No component may call REST directly; all calls pass through a rate-limit governor.
 - **REQ-D-02** The governor SHALL derive remaining budget from the rate-limit headers returned on responses where present, rather than assuming a fixed number, and SHALL adapt when limits change. Where headers are absent or unreliable, it SHALL fall back to a locally-maintained token-bucket model calibrated from observed 429 responses. It SHALL NOT depend on header presence for correctness.
@@ -148,7 +148,7 @@ Wash trading is endemic in NFT markets and will corrupt every volume-based and p
 ### 4.8 Landing zone and stream recording
 
 - **REQ-D-26** Every stream event SHALL be written to the immutable landing zone **before** normalization, as newline-delimited JSON with an envelope recording `received_at`, `run_id`, and a monotonic sequence number, compressed with zstd and partitioned by UTC date and hour. Rationale and format analysis: `07_STORAGE_AND_RECORDING.md` §2.
-- **REQ-D-26a** The landing-zone writer SHALL close a zstd frame at least every 5 seconds or 1,000 events, whichever comes first, so that a killed process loses at most the current frame. Without this the crash-safety property claimed for JSONL does not hold through the compressor.
+- **REQ-D-26a** The landing-zone writer SHALL close a zstd frame at least every 5 seconds of *elapsed frame age* — worst-case latency is `flush_seconds + flusher_interval` (the interval being `flush_seconds/2` clamped to [0.25, 5.0]), so **~7.5s at the shipped `flush_seconds: 5`**. The bound is stated as the code's real one rather than the aspirational one; see `landing.py::_maybe_flush_frame` or 1,000 events, whichever comes first, so that a killed process loses at most the current frame. Without this the crash-safety property claimed for JSONL does not hold through the compressor.
 - **REQ-D-27** The landing zone SHALL serve as the REPLAY corpus for integration testing. No separate test-recording path SHALL be built — test data captured by a different code path is not guaranteed to resemble production data.
 - **REQ-D-28** Each landing-zone file SHALL have its SHA-256, event count, and first/last `event_timestamp` recorded in a daily manifest on close, and the weekly integrity audit SHALL re-verify them. A mismatch is an S0a.
 - **REQ-D-29** The system SHALL subscribe to the stream **per watchlist collection**, not to the wildcard firehose, and SHALL manage subscriptions as collections enter and leave the watchlist.
@@ -274,7 +274,7 @@ Three tiers, all specified in `01_METHODOLOGY.md`:
 
 | Constraint | Implication |
 |---|---|
-| 600 REST reads/hour free tier | Universe size is bounded by refresh budget. Stream-first architecture is mandatory, not optional |
+| 120 REST reads/hour (measured) free tier | Universe size is bounded by refresh budget. Stream-first architecture is mandatory, not optional |
 | Stream is lossy and unordered | Reconciliation and gap-backfill are core features, not polish |
 | No historical floor series from OpenSea | The platform's own history is an asset that accrues value only with uptime — **start collecting on day one, before the analysis layer exists** |
 | Free instant keys expire in 7 days | Key lifecycle management required |

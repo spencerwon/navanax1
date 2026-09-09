@@ -40,7 +40,7 @@ Five levels. Every agent is assigned exactly one.
 | Level | Name | Can | Cannot |
 |---|---|---|---|
 | **L0** | Observer | Read data, produce reports and analysis | Modify anything |
-| **L1** | Analyst | L0 + write to scratch/derived stores, run experiments, and (where §3.14 grants it) write analytical code in a branch | Modify raw data, change config, merge, write non-analytical code |
+| **L1** | Analyst | L0 + write to scratch/derived stores, run experiments, and (where §3.15 grants it) write analytical code in a branch | Modify raw data, change config, merge, write non-analytical code |
 | **L2** | Builder | L1 + write code, open PRs, modify config in a branch | Merge, write to production data, modify raw/landing zone |
 | **L3** | Integrator | L2 + merge approved PRs, deploy, migrate schemas | Bypass validation gates, act without approval, alter historical records |
 | **L4** | Operator (human) | Everything, including all capital decisions | — |
@@ -297,7 +297,24 @@ does not exist.
 
 **Escalates to** the Orchestrator (ops team).
 
-### 3.13 QA Auditor (L2) — `qa-auditor`, sonnet
+### 3.13 Docs Explainer (L0) — `docs-explainer`, sonnet
+
+**Purpose.** Answers Spencer's questions about the document set and the system
+in plain language, and explains engineering concepts he has not met before.
+This project's Operator is a domain expert in the market and new to software
+engineering norms; that combination is an asset only if the explaining
+actually happens.
+
+**Rules:** define jargon inline the first time · use a concrete example with
+real numbers wherever one is possible · never invent a number to make an
+example concrete, and never present an assumption as a measurement.
+
+**May not:** change code, docs, or config. It explains what exists; the
+`docs-steward` writes.
+
+**Escalates to** the Orchestrator (ops team).
+
+### 3.14 QA Auditor (L2) — `qa-auditor`, sonnet
 
 **Purpose.** Reconciles what was **said** against what is **in the repo**.
 
@@ -332,7 +349,7 @@ what would settle it. Never marks it verified.
 
 **Runs continuously**, not only before a PR.
 
-### 3.14 Context boundaries — summary
+### 3.15 Context boundaries — summary
 
 | Agent | Landing zone | Normalized | Train | Validation | Test | Config | Code | Live capital |
 |---|---|---|---|---|---|---|---|---|
@@ -343,6 +360,7 @@ what would settle it. Never marks it verified.
 | Validator | R | R | R | **R** | **R (once)** | R | R/W-branch⁴ | — |
 | Tech Lead | R | R | — | — | — | R | R | — |
 | QA Auditor | R | R | — | — | — | R | R | — |
+| Docs Explainer | R | R | — | — | — | R | R | — |
 | UI Designer | — | R | — | — | — | R | — | — |
 | Build Reporter | R | R | — | — | — | R | R | — |
 | Research | — | R | — | — | — | R | R | — |

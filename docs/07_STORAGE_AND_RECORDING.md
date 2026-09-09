@@ -84,7 +84,7 @@ Parquet is the right format for the analytical store and the wrong one for the l
 
 **Append-friendliness.** Parquet writes in batches with a footer at the end of the file; a process killed mid-write leaves a file that cannot be read at all. JSONL is a stream of independent lines, so a truncated file still yields every complete line before the cut.
 
-**This property is only preserved if the compressor cooperates**, and plain zstd does not by default: a `.zst` stream killed mid-frame loses the entire unflushed block, which at a 64 MB roll size could be most of the file. So the writer **must close a zstd frame on an explicit cadence** — every 5 seconds or 1,000 events, whichever comes first (REQ-D-26a). A frame boundary is a recovery point: everything up to the last completed frame survives a kill, and the bounded loss window is seconds rather than unbounded. This is the difference between the crash-safety argument being true and being decorative, and it is the kind of detail that only shows up the first time a laptop sleeps mid-write.
+**This property is only preserved if the compressor cooperates**, and plain zstd does not by default: a `.zst` stream killed mid-frame loses the entire unflushed block, which at a 64 MB roll size could be most of the file. So the writer **must close a zstd frame on an explicit cadence** — every 5 seconds or 1,000 events, whichever comes first (REQ-D-26a). The real worst case is `flush_seconds + flusher_interval` — the interval being `flush_seconds/2` clamped to [0.25, 5.0], so **~7.5s at the shipped setting**, not 5s. That gap is stated because a documented bound that is tighter than the code's actual bound is precisely the shape of BUG-001, BUG-003 and BUG-006. A frame boundary is a recovery point: everything up to the last completed frame survives a kill, and the loss window is bounded in seconds rather than by the inter-event interval, which is unbounded. This is the difference between the crash-safety argument being true and being decorative, and it is the kind of detail that only shows up the first time a laptop sleeps mid-write.
 
 **Schema tolerance.** Parquet requires a declared schema. When OpenSea adds a field — and they will — a Parquet writer either drops it or needs a migration. JSONL stores whatever arrived. Since the entire point of the landing zone is *preserving exactly what was received so a future bug can be repaired by reprocessing*, a format that silently drops unrecognized fields defeats it.
 
@@ -150,7 +150,7 @@ The stream tells you what happens *from now on*. It tells you nothing about what
 
 Argonauts has 9,210 items. The NFTs-by-collection endpoint accepts `limit` 1–200 with cursor pagination (verified against the API reference on 2026-09-09), so that is **47 requests for the token list alone**, before traits or listings. Realistically 60–100 requests to onboard one collection properly.
 
-At 600/hour, onboarding a 25-collection watchlist is **2,000+ requests — three to four hours of doing nothing else.** Onboarding 200 collections is a multi-day operation.
+At 120/hour (measured), onboarding a 25-collection watchlist is **2,000+ requests — three to four hours of doing nothing else.** Onboarding 200 collections is a multi-day operation.
 
 *Mitigation:* onboard collections deliberately, a few at a time, at `BACKFILL` priority overnight. Treat adding a collection as a scheduled operation, not something that happens instantly when you click a button. The UI should tell you a new collection is "backfilling, 40% complete, ~2 hours remaining" rather than appearing broken.
 
@@ -192,7 +192,7 @@ Token metadata and traits, collection-level aggregate stats, holder lists, and a
 
 Worth stating plainly, because the constraint is easy to over-fear: **once a collection is onboarded and subscribed, receiving its market data costs zero REST.** Every listing, sale, offer, and transfer arrives on the unmetered stream, and a hundred collections generating a hundred thousand events a day cost nothing to ingest.
 
-Steady state is not *literally* zero, though — §3.3's reconciliation is mandatory and permanent (REQ-D-10), so watching N collections costs N reads per full rotation cycle. At a daily rotation for 200 collections that is roughly 8 reads/hour against a 600/hour budget: about 1.4%, versus the 33% an hourly rotation would cost. **Cheap and bounded, not free.**
+Steady state is not *literally* zero, though — §3.3's reconciliation is mandatory and permanent (REQ-D-10), so watching N collections costs N reads per full rotation cycle. At a daily rotation for 200 collections that is roughly 8 reads/hour against a 120/hour (measured) budget: about 1.4%, versus the 33% an hourly rotation would cost. **Cheap and bounded, not free.**
 
 The rate limit is therefore overwhelmingly a **startup and catch-up** constraint rather than a running one. That is why the architecture front-loads the pain: onboard deliberately, then run at a small, predictable, permanent cost.
 

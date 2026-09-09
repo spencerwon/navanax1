@@ -472,9 +472,11 @@ bugs:
     README's headline principle now states the measured 120/hr with its
     provenance and its caveat; setup.command says 120; preflight emits
     est_minutes_at_measured_limit with a rate_limit_provenance field instead of
-    the est/10 arithmetic. A test now scans every operator-facing file for a
-    line that ASSERTS the superseded figure, so this class cannot recur
-    silently.
+    the est/10 arithmetic. A test scans for lines that ASSERT the superseded
+    figure. NOTE: that test originally scanned a hardcoded list of seven files
+    and this resolution originally claimed it covered "every operator-facing
+    file" -- it did not, and the figure survived in five agent charters. See
+    BUG-20260909-028. The scan is now repo-wide.
   regression_test: tests/selftest.py::test_no_superseded_rate_limit_in_operator_text
   monitor_gap: "No check scanned operator-facing text for superseded numbers. There is one now."
   pr: 1
@@ -878,4 +880,51 @@ bugs:
   resolution: "EWOULDBLOCK/EAGAIN refuse; EOPNOTSUPP/ENOLCK/EINVAL/ENOSYS proceed with a loud, accurate warning that names the real risk."
   regression_test: tests/selftest.py::test_single_instance_degrades_on_unsupported_filesystem
   monitor_gap: "The guard was tested only on the filesystem it was written on."
+  pr: 1
+
+- id: BUG-20260909-028
+  summary: The falsified 600/hr figure survived, unqualified, in five agent charters -- and BUG-014's own test could not see them
+  severity: S1
+  priority: P1
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-09T10:30:00-05:00"
+  occurred_at: "2026-09-09T00:15:00-05:00"
+  resolved_at: "2026-09-09T10:45:00-05:00"
+  detected_by: "qa-auditor agent (sonnet), first run -- reconciling session claims against the repo"
+  detection_channel: qa-auditor
+  branch: tester
+  locations:
+  - {file: .claude/agents/data-engineer.md, line: 18}
+  - {file: .claude/agents/research.md, line: 18}
+  - {file: .claude/agents/orchestrator.md, line: 47}
+  - {file: .claude/agents/build-reporter.md, line: 31}
+  - {file: .claude/agents/docs-explainer.md, line: 23}
+  requirement: REQ-D-02
+  data_impact: >-
+    The number that BUG-003 falsified and BUG-014 was supposed to eliminate was
+    still stated as present fact in five agent charters -- the instructions the
+    agents actually act on. data-engineer.md headed it "The constraint that
+    shapes everything you build", in the charter of the one agent that owns the
+    REST governor. research.md labelled it "verified 2026-09-09" on the exact
+    day it was measured at 120. build-reporter.md's template denominator was
+    /600, so every ingestion-health report Spencer read would have shown him
+    budget consumption at one fifth of its real value.
+  root_cause: >-
+    BUG-014's regression test scanned a HARDCODED LIST of seven files and
+    .claude/agents/*.md was not on it. Worse, the ledger's own resolution text
+    for BUG-014 claimed the test "scans every operator-facing file... so this
+    class cannot recur silently". It recurred silently in five files, and the
+    claim that it could not is what stopped anyone looking. Third occurrence of
+    this number as a defect (BUG-003, BUG-014, this).
+  resolution: >-
+    All five charters corrected to 120 with provenance and the cache-HIT
+    caveat. The scan is now repo-wide -- every tracked text file, the way
+    tools/buglog.py already scans for bug ids -- excluding only the bug log
+    itself, whose job is to record the wrong number.
+  regression_test: tests/selftest.py::test_no_superseded_rate_limit_in_operator_text
+  monitor_gap: >-
+    A check with a hardcoded scope, described in the ledger as having universal
+    scope. The description is the part that did the damage: it converted an
+    unexamined gap into a settled question.
   pr: 1

@@ -28,7 +28,7 @@ Skip entirely on a day with no activity. A digest that arrives every day regardl
 INGESTION
   Uptime <n>% · <n> events landed · <n> MB stored
   Gaps: <n> open, <n> awaiting backfill, <n> irrecoverable
-  REST budget: <n>/600 spent · largest consumer: <priority>
+  REST budget: <n>/120 spent · largest consumer: <priority>
   ⚠️  <anything outside its normal band>
 
 MERGED

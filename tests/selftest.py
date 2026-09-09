@@ -1054,16 +1054,36 @@ def test_no_superseded_rate_limit_in_operator_text(tmp: Path) -> None:
     # references are allowed and only claims are flagged.
     asserts = _re.compile(r"600[^\n]{0,40}?(read|request|call|hour|hr|budget)",
                           _re.IGNORECASE)
+    # A line that shows the CORRECTION is the lesson being recorded, not the
+    # defect. Anything that pairs the old number with the new one, or names it
+    # as superseded, is allowed.
     corrects = _re.compile(r"not the 600|was an|unsourc|assum|previously|falsifi|"
-                           r"were 0/|BUG-2026|rescaled", _re.IGNORECASE)
+                           r"were 0/|BUG-2026|rescaled|->\s*120|→\s*120|"
+                           r"real limit is 120|corrected", _re.IGNORECASE)
+    # QA-AUDIT finding. This used to scan a HARDCODED LIST of seven files, and
+    # .claude/agents/*.md was not on it -- so the falsified figure survived,
+    # unqualified, in FIVE agent charters, including the data-engineer's, where
+    # it was headed "The constraint that shapes everything you build", and
+    # research.md's, where it was labelled "verified 2026-09-09" on the very
+    # day it was measured at 120. The ledger's own resolution text claimed the
+    # test "scans every operator-facing file... so this class cannot recur
+    # silently". It recurred silently in five files. Scan the whole repo, the
+    # way tools/buglog.py already does for bug ids.
+    skip_dirs = {".git", "__pycache__", ".venv", "node_modules", "data"}
     offenders = []
-    for name in ("README.md", "setup.command", "tools/preflight.py",
-                 "src/navanax/governor.py", "config/base.yaml",
-                 "src/navanax/cli.py", "src/navanax/stream.py"):
-        f = ROOT / name
-        if not f.exists():
+    for f in sorted(ROOT.rglob("*")):
+        if not f.is_file() or f.suffix.lower() in {".xlsx", ".gz", ".zst", ".db", ".pyc"}:
             continue
-        for i, line in enumerate(f.read_text().splitlines(), 1):
+        if any(part in skip_dirs for part in f.relative_to(ROOT).parts):
+            continue
+        if f.name in ("BUGS.md", "bugs.yaml", "selftest.py"):
+            continue   # the bug log's job is to RECORD the wrong number
+        name = str(f.relative_to(ROOT))
+        try:
+            lines = f.read_text(encoding="utf-8").splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for i, line in enumerate(lines, 1):
             if asserts.search(line) and not corrects.search(line):
                 offenders.append(f"{name}:{i}: {line.strip()[:70]}")
     check("BUG-014: no operator-facing file still asserts the 600/hr figure",

@@ -15,7 +15,7 @@ You find out what is true outside this repository and report it accurately.
 
 ## Standing responsibilities
 
-- **Monitor the OpenSea API contract.** Rate limits, endpoint changes, deprecations, new event types on the stream. An undetected contract change is an ingestion outage in waiting. Current known state, verified 2026-09-09: free tier 600 reads/hr, 30 writes/hr, 5 fulfillments/min, token bucket shared across keys, 429 on exhaustion, instant agent keys expire after 7 days. Stream API is WebSocket, key-required, unmetered, best-effort. Report any change from this.
+- **Monitor the OpenSea API contract.** Rate limits, endpoint changes, deprecations, new event types on the stream. An undetected contract change is an ingestion outage in waiting. Current known state, MEASURED 2026-09-09 from a live x-ratelimit-limit header (caveat: cf-cache-status was HIT): free tier 120 reads/hr, 30 writes/hr, 5 fulfillments/min, token bucket shared across keys, 429 on exhaustion, instant agent keys expire after 7 days. Stream API is WebSocket, key-required, unmetered, best-effort. Report any change from this.
 - **Collection due diligence** — history, creator, holder base, known incidents, anything that would make a collection unrepresentative or unsafe to trade.
 - **Methodology references** when a statistical technique needs grounding.
 

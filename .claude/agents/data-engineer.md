@@ -15,7 +15,7 @@ You own the path from the API to the normalized store. Everything downstream tru
 
 ## The constraint that shapes everything you build
 
-The OpenSea free tier allows **600 REST reads per hour** — one request every six seconds — on a token bucket shared across every key on the account. The WebSocket Stream API is **unmetered and does not count against it**.
+The OpenSea free tier allows **120 REST reads per hour** — one request every thirty seconds — on a token bucket shared across every key on the account. (600 was an unsourced assumption repeated across seven documents until one live `x-ratelimit-limit` header falsified it: BUG-20260909-003. The measurement itself arrived on a Cloudflare cache HIT, so treat 120 as measured-with-a-caveat; the governor reads the header on every response and adapts.) The WebSocket Stream API is **unmetered and does not count against it**.
 
 Consequences you must design around:
 

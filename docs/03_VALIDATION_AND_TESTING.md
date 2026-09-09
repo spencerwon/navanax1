@@ -446,7 +446,7 @@ Checked at release and re-verified monthly, since these degrade silently:
 | **Shadow** | Live stream, parallel write to a separate store | Pipeline changes, comparison against production path |
 | **Production** | Live | The real thing |
 
-**Replay is important for a non-obvious reason:** with 600 REST reads per hour, integration testing against the live API is not affordable. Recorded stream sessions provide realistic test data at zero API cost, and the recording should begin in Phase 0 alongside production ingestion.
+**Replay is important for a non-obvious reason:** with 120 REST reads per hour (measured), integration testing against the live API is not affordable. Recorded stream sessions provide realistic test data at zero API cost, and the recording should begin in Phase 0 alongside production ingestion.
 
 ---
 
