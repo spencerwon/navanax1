@@ -1,0 +1,5 @@
+{
+  "name": "navanax",
+  "user": "ubuntu",
+  "install": "python3 -m pip install --break-system-packages -e \".[dev]\""
+}
