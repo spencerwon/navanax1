@@ -33,7 +33,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
@@ -58,6 +58,9 @@ class BudgetState:
     server_remaining: int | None = None
     server_reset_at: float | None = None
     consecutive_429: int = 0
+    # BUG-20260909-012: when the server's "no" expires. None means not blocked.
+    # Monotonic seconds, not wall clock, so a clock change cannot extend it.
+    server_block_until: float | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -119,6 +122,7 @@ class TokenBucket:
     def try_consume(self, n: float = 1.0) -> bool:
         with self._lock:
             self._refill()
+            self._expire_server_block()
             effective = self.state.tokens
             if self.state.server_remaining is not None:
                 effective = min(effective, float(self.state.server_remaining))
@@ -129,9 +133,34 @@ class TokenBucket:
                 self.state.server_remaining = max(0, self.state.server_remaining - int(n))
             return True
 
+    def _expire_server_block(self) -> None:
+        """Release a server-imposed block once its deadline has passed.
+
+        Without this the governor never recovers from a 429 (BUG-012). With it,
+        `server_remaining` is cleared -- back to the LOCAL model, which refills
+        on its own -- rather than being set to some guessed positive number we
+        have no evidence for.
+        """
+        until = self.state.server_block_until
+        if until is not None and self._clock() >= until:
+            self.state.server_block_until = None
+            self.state.server_remaining = None
+        reset = self.state.server_reset_at
+        if (reset is not None and self.state.server_remaining == 0
+                and time.time() >= reset):
+            self.state.server_reset_at = None
+            self.state.server_remaining = None
+
     def seconds_until(self, n: float = 1.0) -> float:
         with self._lock:
             self._refill()
+            self._expire_server_block()
+            if self.state.server_remaining == 0:
+                until = self.state.server_block_until
+                if until is not None:
+                    return max(0.0, until - self._clock())
+                if self.state.server_reset_at is not None:
+                    return max(0.0, self.state.server_reset_at - time.time())
             deficit = n - self.state.tokens
             if deficit <= 0:
                 return 0.0
@@ -160,24 +189,61 @@ class TokenBucket:
                     break
 
     def observe_429(self) -> None:
-        """The server said no. Believe it over the local model."""
+        """The server said no. Believe it over the local model -- for a while.
+
+        BUG-20260909-012. This used to set `server_remaining = 0` with no way
+        back: `try_consume` takes `min(tokens, server_remaining)`, and only a
+        header from a SUCCESSFUL response could raise it again -- which
+        required a token. So a single 429 disabled REST for the life of the
+        process, silently, and the failure presented as an unrelated outage.
+        The recovery path required the very resource the failure removed.
+
+        The fix is to make the server's "no" EXPIRE. `server_reset_at` was
+        already being parsed and read nowhere; it is the answer the server
+        itself gives. Absent that header, fall back to a bounded backoff so the
+        governor always recovers on its own.
+        """
         with self._lock:
             self.state.tokens = 0.0
             self.state.server_remaining = 0
             self.state.consecutive_429 += 1
+            if self.state.server_reset_at is None:
+                # No Retry-After / reset header: exponential, capped at 15 min.
+                # Long enough not to hammer a limit we have just hit; short
+                # enough that an unattended process heals itself overnight.
+                delay = min(900.0, 30.0 * (2 ** (self.state.consecutive_429 - 1)))
+                self.state.server_block_until = self._clock() + delay
 
     def observe_success(self) -> None:
+        """A call went through. The server's last "no" is now stale evidence.
+
+        `server_remaining` is cleared to None rather than to a guessed positive
+        number: None means "fall back to the local token bucket", which refills
+        on its own and is the only model we have actual evidence for. Leaving it
+        at 0 was the other half of BUG-012 -- the block expired and the ceiling
+        did not, so REST stayed disabled anyway.
+        """
         with self._lock:
             self.state.consecutive_429 = 0
+            self.state.server_block_until = None
+            if self.state.server_remaining == 0:
+                self.state.server_remaining = None
 
 
-@dataclass(order=True)
-class _Waiter:
-    priority: int
-    seq: int
-    event: asyncio.Event = field(compare=False)
-    cost: float = field(default=1.0, compare=False)
-    cancelled: bool = field(default=False, compare=False)
+# BUG-20260909-016. A `_Waiter` dataclass and a `self._waiters` list used to
+# live here. Nothing ever appended to them and nothing ever read them, so they
+# read as an implemented priority queue that did not exist. Removed rather than
+# implemented, because the reserve floors already produce the ordering that
+# matters and a real queue is not needed until there are concurrent REST
+# callers -- which Phase 0 has none of.
+#
+# The consequence, stated so it is not a surprise later: ordering between
+# classes is EMERGENT from the reserve floors, not guaranteed. INTERACTIVE has
+# a floor of 0 and MAINTENANCE a floor of 24, so INTERACTIVE can always draw
+# when anything is left and MAINTENANCE starves first -- but a MAINTENANCE call
+# arriving while 30 tokens remain will succeed even if an INTERACTIVE call
+# arrived a millisecond earlier and is still being awaited. Fix that with a
+# real queue when concurrent callers exist, not before.
 
 
 def governor_from_config(cfg: dict, **kw) -> RestGovernor:
@@ -243,8 +309,6 @@ class RestGovernor:
         }
         self.max_backoff = max_backoff
         self._sleep = sleep or asyncio.sleep
-        self._waiters: list[_Waiter] = []
-        self._seq = 0
         self._lock = asyncio.Lock()
         self.stats: dict[str, int] = {
             "granted": 0,

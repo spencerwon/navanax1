@@ -272,6 +272,25 @@ class SchemaConformanceError(OperationalError):
     error_class = ErrorClass.NRM
 
 
+class LandingZoneWriteError(OperationalError):
+    """The landing zone could not be written -- disk full, permissions, unmounted.
+
+    BUG-20260909-018. This used to surface as a bare OSError inside
+    `handle_frame`, get caught by the stream loop's `except Exception`, and be
+    recorded as an INGESTION GAP -- blaming OpenSea for a full disk, then
+    reconnecting and failing again, forever, recording gaps it could not write
+    either. Two unrelated failure domains sharing one handler.
+
+    S2 rather than S3 because the consequence is data loss, and it halts
+    ingestion rather than retrying: there is nothing to reconnect to. The
+    operator has to free space or fix the mount.
+    """
+
+    severity = Severity.S2
+    error_class = ErrorClass.INF
+    halts_ingestion = True
+
+
 class PersistenceError(OperationalError):
     pass
 

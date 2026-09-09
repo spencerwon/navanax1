@@ -42,7 +42,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .errors import SubscriptionRejectedError, UpstreamUnavailableError
+from .errors import (
+    LandingZoneWriteError,
+    SubscriptionRejectedError,
+    UpstreamUnavailableError,
+)
 from .landing import GapRecord, LandingZoneWriter
 from .opstore import OperationalStore
 
@@ -130,6 +134,13 @@ class StreamStats:
     unknown_events: dict[str, int] = field(default_factory=dict)
     last_event_ts: str | None = None
     max_event_ts: str | None = None
+    # BUG-20260909-017. REQ-D-07 orders on event_timestamp and never on
+    # arrival, so an event landed without one cannot be ordered and drops out
+    # of every manifest-driven range query. It used to land silently, with
+    # nothing counting it -- so we could not say how often it happened, which
+    # means we could not say whether it mattered.
+    missing_event_ts: int = 0
+    missing_event_ts_by_type: dict[str, int] = field(default_factory=dict)
     joined: list[str] = field(default_factory=list)
     join_rejected: dict[str, str] = field(default_factory=dict)
     gaps_opened: int = 0
@@ -145,6 +156,12 @@ class StreamStats:
             "unknown_events": dict(self.unknown_events),
             "last_event_ts": self.last_event_ts,
             "max_event_ts": self.max_event_ts,
+            "missing_event_ts": self.missing_event_ts,
+            "missing_event_ts_by_type": dict(self.missing_event_ts_by_type),
+            "missing_event_ts_pct": (
+                round(100.0 * self.missing_event_ts / self.events, 2)
+                if self.events else 0.0
+            ),
             "joined": list(self.joined),
             "join_rejected": dict(self.join_rejected),
             "gaps_opened": self.gaps_opened,
@@ -386,6 +403,26 @@ class StreamConsumer:
                         return ts
         return None
 
+    def _land(self, raw: str, **kw: Any) -> None:
+        """Write to the landing zone, distinguishing LOCAL failure from remote.
+
+        BUG-20260909-018. A disk-full OSError raised here used to be caught by
+        the run loop's `except Exception`, recorded as an ingestion gap, and
+        retried forever -- so the gap register blamed OpenSea for a local
+        failure, and the retry could not succeed because the thing that failed
+        was writing. Reconnecting is the right response to a remote failure and
+        exactly the wrong one to a local failure.
+        """
+        try:
+            self.writer.write(raw, **kw)
+        except OSError as exc:
+            raise LandingZoneWriteError(
+                f"could not write to the landing zone: {exc}",
+                expected="a writable landing zone",
+                received=f"{type(exc).__name__}: {exc}",
+                ingestion_run_id=self.run_id,
+            ) from exc
+
     def handle_frame(self, raw: str) -> dict[str, Any] | None:
         """Land the frame, then parse. Landing never depends on parsing.
 
@@ -400,14 +437,14 @@ class StreamConsumer:
         except json.JSONDecodeError:
             # Land it anyway. Losing an unparseable frame loses the evidence
             # needed to find out why it was unparseable.
-            self.writer.write(raw, topic=None, event_timestamp=None)
+            self._land(raw, topic=None, event_timestamp=None)
             log.warning("unparseable frame landed verbatim (%d bytes)", len(raw))
             return None
 
         # BUG-20260909-002: OpenSea speaks Phoenix v2, which sends ARRAYS.
         msg = normalize_frame(parsed)
         if msg is None:
-            self.writer.write(raw, topic=None, event_timestamp=None)
+            self._land(raw, topic=None, event_timestamp=None)
             log.warning("unrecognised frame shape landed verbatim: %.120s", raw)
             return None
 
@@ -420,7 +457,7 @@ class StreamConsumer:
             # actually subscribed to at a given moment -- which is precisely
             # the question that could not be answered when BUG-20260909-005
             # made a refused join invisible.
-            self.writer.write(raw, topic="__control__", event_timestamp=None, control=True)
+            self._land(raw, topic="__control__", event_timestamp=None, control=True)
             if event == "phx_reply":
                 self._handle_join_reply(msg)
             elif event in ("phx_close", "phx_error"):
@@ -431,12 +468,32 @@ class StreamConsumer:
             return msg
         if topic == "phoenix" or event == "heartbeat":
             self.stats.heartbeats += 1
-            self.writer.write(raw, topic="__control__", event_timestamp=None, control=True)
+            self._land(raw, topic="__control__", event_timestamp=None, control=True)
             return msg
 
         ets = self.extract_event_timestamp(msg)
-        self.writer.write(raw, topic=topic, event_timestamp=ets)
+        self._land(raw, topic=topic, event_timestamp=ets)
         self.stats.events += 1
+        if not ets:
+            # Landed regardless -- the bytes are the record, and a reprocessor
+            # may be able to find the timestamp we could not. But it is COUNTED,
+            # because an unknown rate of unorderable events is an unknown-size
+            # hole in every event-time query (BUG-20260909-017).
+            self.stats.missing_event_ts += 1
+            key = event if isinstance(event, str) else "?"
+            self.stats.missing_event_ts_by_type[key] = (
+                self.stats.missing_event_ts_by_type.get(key, 0) + 1)
+            if self.stats.missing_event_ts in (1, 10, 100) or (
+                    self.stats.missing_event_ts % 1000 == 0):
+                log.warning(
+                    "%d event(s) landed with NO parseable event_timestamp "
+                    "(%.1f%% of %d). REQ-D-07 orders on that field, so these "
+                    "are unorderable and drop out of manifest range queries. "
+                    "By type: %s",
+                    self.stats.missing_event_ts,
+                    100.0 * self.stats.missing_event_ts / max(1, self.stats.events),
+                    self.stats.events, dict(self.stats.missing_event_ts_by_type),
+                )
         self._since_checkpoint += 1
         if self._since_checkpoint >= self.checkpoint_every:
             self._checkpoint()
@@ -459,11 +516,26 @@ class StreamConsumer:
         return msg
 
     # -- gap tracking ------------------------------------------------------
+    def _gap_classes(self) -> tuple[list[str], list[str], bool]:
+        """Split this subscription's event classes into recoverable and not.
+
+        REQ-D-09a. Returns (recoverable, irrecoverable, fully_backfillable).
+        `fully_backfillable` is True only when NOTHING in the subscription is
+        permanently lost -- which, for the default ALL_EVENTS subscription, is
+        never. Saying so on every gap is the point: an honest "no" is worth
+        more than a hopeful "yes" that no backfill can ever satisfy.
+        """
+        subscribed = set(self.events)
+        recoverable = sorted(subscribed & BACKFILLABLE)
+        lost = sorted(subscribed & IRRECOVERABLE)
+        return recoverable, lost, not lost
+
     def _open_gap(self, reason: str) -> None:
         if self._open_gap_id is not None:
             return
+        recoverable, lost, full = self._gap_classes()
         self._open_gap_id = self.opstore.open_gap(
-            self.run_id, reason, topics=self._topics(), backfillable=True
+            self.run_id, reason, topics=self._topics(), backfillable=full
         )
         self._open_gap_record = GapRecord(
             started_at=_iso(_now()),
@@ -472,19 +544,23 @@ class StreamConsumer:
             run_id=self.run_id,
             topics=self._topics(),
             gap_id=self._open_gap_id,
-            # The window is partially backfillable: sales/listings/offers can
-            # be recovered, cancellations and order invalidations cannot.
-            # BUG-20260909-013 tracks wiring IRRECOVERABLE to this flag.
-            backfillable=True,
+            backfillable=full,
+            backfillable_classes=recoverable,
+            irrecoverable_classes=lost,
         )
         self.stats.gaps_opened += 1
         self.writer.record_gap(self._open_gap_record)
-        log.warning("ingestion gap opened: %s", reason)
+        log.warning(
+            "ingestion gap opened: %s -- %d event classes recoverable, "
+            "%d PERMANENTLY LOST for this window (%s)",
+            reason, len(recoverable), len(lost), ", ".join(lost) or "none",
+        )
 
     def _close_gap(self) -> None:
         if self._open_gap_id is None:
             return
         self.opstore.close_gap(self._open_gap_id)
+        _rec, _lost, _full = self._gap_classes()
         # BUG-20260909-023. This used to update ONLY the SQLite gap register,
         # which docs/07 §1 classifies as disposable, reconstructible
         # bookkeeping -- and a gap is reconstructible from nothing. The durable
@@ -495,10 +571,14 @@ class StreamConsumer:
         if self._open_gap_record is not None:
             self.writer.close_gap_record(self._open_gap_record, _iso(_now()))
             self._open_gap_record = None
+        # BUG-20260909-013: this used to say backfill "enqueued". Nothing was
+        # enqueued -- there is no backfill queue yet -- and a log line claiming
+        # a recovery that never happens is how a hole comes to look filled.
         log.info(
-            "ingestion gap closed; backfill enqueued for recoverable classes only "
-            "(cancellations and order invalidate/revalidate in this window are "
-            "permanently lost -- REQ-D-09a)"
+            "ingestion gap closed. Recoverable when a backfiller exists: %s. "
+            "PERMANENTLY LOST for this window (REQ-D-09a): %s. "
+            "NOTE: no backfill queue exists yet; nothing has been enqueued.",
+            ", ".join(_rec) or "none", ", ".join(_lost) or "none",
         )
         self._open_gap_id = None
 
@@ -532,7 +612,7 @@ class StreamConsumer:
             f"{since}; it may have been alive up to one heartbeat interval longer, "
             f"so this gap is over-recorded rather than under-recorded)",
             topics=self._topics(),
-            backfillable=True,
+            backfillable=self._gap_classes()[2],
             started_at=since,
         )
         self.opstore.close_gap(gid)
@@ -541,7 +621,10 @@ class StreamConsumer:
             GapRecord(
                 started_at=since, ended_at=_iso(_now()),
                 reason=f"process not running since {since} (run {ck.get('run_id')})",
-                run_id=self.run_id, topics=self._topics(), backfillable=True,
+                run_id=self.run_id, topics=self._topics(),
+                backfillable=self._gap_classes()[2],
+                backfillable_classes=self._gap_classes()[0],
+                irrecoverable_classes=self._gap_classes()[1],
             )
         )
         log.warning(
@@ -575,6 +658,17 @@ class StreamConsumer:
                 self.stats.reconnects += 1
                 log.warning("stream closed cleanly but we did not ask it to")
             except asyncio.CancelledError:
+                raise
+            except LandingZoneWriteError:
+                # BUG-20260909-018: local, not remote. Reconnecting cannot help
+                # and the retry loop would spin forever recording gaps it also
+                # cannot write. Stop, and let the operator see why.
+                self.writer.flush()
+                log.error(
+                    "HALTING: the landing zone is not writable. This is a LOCAL "
+                    "failure (disk, permissions, or an unmounted volume) -- not "
+                    "an OpenSea outage, and not something reconnecting fixes."
+                )
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect on anything
                 self._open_gap(f"{type(exc).__name__}: {exc}")

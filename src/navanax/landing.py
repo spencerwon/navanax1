@@ -148,7 +148,21 @@ class GapRecord:
     reason: str
     run_id: str
     topics: list[str] = field(default_factory=list)
-    backfillable: bool = True
+    # BUG-20260909-013. A single boolean cannot describe this window honestly.
+    # Any gap wide enough to matter spans BOTH recoverable and unrecoverable
+    # event classes: sales, listings and offers can be re-fetched from the
+    # events endpoint; cancellations and order invalidate/revalidate cannot
+    # (REQ-D-09a) and are gone for good. Every gap used to be written
+    # `backfillable: True`, which contradicted this record's own docstring and
+    # told a downstream reader that a hole it can never fill was fillable.
+    #
+    # `backfillable` now means "can this gap be fully repaired" -- which for a
+    # subscription covering any IRRECOVERABLE class is False. The two lists say
+    # exactly what is and is not recoverable, so nothing has to be inferred
+    # from a flag that cannot carry the distinction.
+    backfillable: bool = False
+    backfillable_classes: list[str] = field(default_factory=list)
+    irrecoverable_classes: list[str] = field(default_factory=list)
     backfilled_at: str | None = None
     # BUG-20260909-023. A gap opened live was written with ended_at=None and
     # NOTHING ever wrote its end into the manifest -- _close_gap only touched

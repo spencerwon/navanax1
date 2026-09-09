@@ -280,20 +280,33 @@ every operator-facing file… so this class cannot recur silently."* It scanned 
 hardcoded list of seven. **The false claim of coverage is what did the damage** —
 it turned an unexamined gap into a settled question. The scan is repo-wide now.
 
-### Still open
+### Round 4 — the full hardening pass
+
+Spencer chose to close every remaining open bug before starting the ingestion
+clock, rather than record with known-wrong flags in an append-only store. All
+five are closed, each with a regression test **demonstrated to fail against the
+unfixed code** (10 assertions failed on the reverted tree).
 
 | ID | Sev | Pri | Status | Summary |
 |---|---|---|---|---|
-| BUG-20260909-012 | S1 | P1 | open | One 429 permanently bricks the REST governor; server_reset_at is parsed and never read |
-| BUG-20260909-013 | S1 | P1 | open | Every gap is recorded backfillable=True even for event classes REQ-D-09a says are permanently unrecoverable |
-| BUG-20260909-016 | S3 | P3 | open | Governor priority queue is dead code; ordering is emergent from reserve floors |
-| BUG-20260909-017 | S1 | P1 | open | An event with no parseable event_timestamp lands silently and drops out of manifest-driven range queries |
-| BUG-20260909-018 | S3 | P2 | open | A landing-zone write failure (disk full) is misrecorded as a stream gap and retried forever |
+| BUG-20260909-012 | S1 | P1 | fixed | One 429 permanently bricks the REST governor; server_reset_at is parsed and never read |
+| BUG-20260909-013 | S1 | P1 | fixed | Every gap is recorded backfillable=True even for event classes REQ-D-09a says are permanently unrecoverable |
+| BUG-20260909-016 | S3 | P3 | fixed | Governor priority queue is dead code; ordering is emergent from reserve floors |
+| BUG-20260909-017 | S1 | P1 | fixed | An event with no parseable event_timestamp lands silently and drops out of manifest-driven range queries |
+| BUG-20260909-018 | S3 | P2 | fixed | A landing-zone write failure (disk full) is misrecorded as a stream gap and retried forever |
 
-All six remaining open items are **inactive**: nothing in Phase 0 makes a REST
-call, so BUG-012 and BUG-016 cannot bite yet. BUG-013 is the least comfortable
-— the landing zone is append-only, so every gap written before it is fixed
-carries a known-wrong `backfillable` flag permanently.
+**BUG-013 was the one that justified the decision.** The landing zone is
+append-only, so every gap written before the fix would have permanently claimed
+it was backfillable — including windows where cancellations and order
+invalidations are gone for good. Not editable later, only annotated.
+
+**BUG-012 had a second half nobody had read.** `observe_success` cleared the
+new expiry but left `server_remaining = 0`, so the block expired and the ceiling
+did not. The regression test found it; reading the code had not.
+
+### Still open
+
+**None.** All 28 logged bugs are fixed.
 
 ### The lesson
 

@@ -397,7 +397,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: RTL
-  status: open
+  status: fixed
+  resolved_at: "2026-09-09T11:20:00-05:00"
   logged_at: "2026-09-09T07:40:00-05:00"
   detected_by: "validator agent (opus), first review; re-confirmed and escalated in the second"
   detection_channel: validator
@@ -414,8 +415,9 @@ bugs:
     BUG-009 fixes, which now generate far more unbackfilled gaps that can never
     be serviced.
   root_cause: "The recovery path requires the very resource the failure removes. server_reset_at is parsed at governor.py:150 and read nowhere."
-  resolution: ""
-  regression_test: ""
+  resolution: >-
+    The server's "no" now EXPIRES. `server_reset_at` -- already parsed and read nowhere -- is believed when present; absent it, an exponential block capped at 15 minutes, so an unattended process heals itself overnight. `observe_success` also clears `server_remaining`, which was the other half: the block expired and the ceiling did not, so REST stayed disabled anyway. That half was found by the regression test, not by reading the code.
+  regression_test: tests/selftest.py::test_governor_recovers_from_a_429
   monitor_gap: "No test ever sent a 429 followed by a recovery attempt."
   pr: 1
 
@@ -424,7 +426,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: ING
-  status: open
+  status: fixed
+  resolved_at: "2026-09-09T11:20:00-05:00"
   logged_at: "2026-09-09T07:40:00-05:00"
   detected_by: "validator agent (opus), first review; escalated in the second"
   detection_channel: validator
@@ -440,8 +443,9 @@ bugs:
     gaps are now mislabelled recoverable. A gap believed backfillable and never
     backfilled reads downstream as a gap that WAS filled.
   root_cause: "The classification exists as data and was never wired to the code that records gaps. No backfill queue exists yet at all."
-  resolution: ""
-  regression_test: ""
+  resolution: >-
+    `_gap_classes()` splits the subscription against BACKFILLABLE and IRRECOVERABLE. `backfillable` now means "can this gap be FULLY repaired", which for any subscription containing a REQ-D-09a class is False -- and the two class lists say exactly what is and is not recoverable, so nothing has to be inferred from a flag that cannot carry the distinction. `_close_gap` no longer logs that backfill was "enqueued"; it says plainly that no backfill queue exists yet.
+  regression_test: tests/selftest.py::test_gaps_are_labelled_by_what_can_actually_be_recovered
   monitor_gap: "Nothing asserts that a recorded gap's backfillable flag matches the event classes it actually spans."
   pr: 1
 
@@ -511,7 +515,8 @@ bugs:
   severity: S3
   priority: P3
   error_class: RTL
-  status: open
+  status: fixed
+  resolved_at: "2026-09-09T11:20:00-05:00"
   logged_at: "2026-09-09T07:40:00-05:00"
   detected_by: "validator agent (opus), first review"
   detection_channel: validator
@@ -521,8 +526,9 @@ bugs:
   requirement: REQ-D-02
   data_impact: "MAINTENANCE can beat an earlier INTERACTIVE request. _Waiter/_waiters/_seq are never appended to, so they read as an implemented feature that does not exist."
   root_cause: "Dead code that implies capability."
-  resolution: ""
-  regression_test: ""
+  resolution: >-
+    `_Waiter`, `_waiters` and `_seq` removed rather than implemented: the reserve floors already produce the ordering that matters, and a real queue is not needed until there are concurrent REST callers, which Phase 0 has none of. The consequence is now stated in the module rather than implied by dead code: ordering between classes is emergent, not guaranteed.
+  regression_test: tests/selftest.py::test_dead_priority_queue_is_gone
   monitor_gap: "No test asserts ordering between priorities under contention."
   pr: 1
 
@@ -531,7 +537,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: TMP
-  status: open
+  status: fixed
+  resolved_at: "2026-09-09T11:20:00-05:00"
   logged_at: "2026-09-09T07:40:00-05:00"
   detected_by: "validator agent (opus), first review; manifestation changed by the V2 fix"
   detection_channel: validator
@@ -547,8 +554,9 @@ bugs:
     longer over-selected -- but a MARKET event with an unparseable timestamp is
     still landed silently.
   root_cause: "extract_event_timestamp returns None and the caller treats that as ordinary."
-  resolution: ""
-  regression_test: ""
+  resolution: >-
+    `stats.missing_event_ts` and a per-event-type breakdown, with a WARNING at 1/10/100 and every 1,000 thereafter, and the rate exposed as a percentage WITH its count in `stats.as_dict()`. The event is still landed -- the bytes are the record and a reprocessor may find what we could not -- but the rate is no longer unknown.
+  regression_test: tests/selftest.py::test_missing_event_timestamp_is_counted
   monitor_gap: "No counter, no alert, no test for the missing-timestamp rate."
   pr: 1
 
@@ -557,7 +565,8 @@ bugs:
   severity: S3
   priority: P2
   error_class: INF
-  status: open
+  status: fixed
+  resolved_at: "2026-09-09T11:20:00-05:00"
   logged_at: "2026-09-09T07:40:00-05:00"
   detected_by: "validator agent (opus), first review"
   detection_channel: validator
@@ -571,8 +580,9 @@ bugs:
     loops forever recording gaps it cannot write, and the gap register blames
     OpenSea for a local failure.
   root_cause: "One handler for two unrelated failure domains: the remote connection and the local filesystem."
-  resolution: ""
-  regression_test: ""
+  resolution: >-
+    A new `LandingZoneWriteError` (S2, halts_ingestion=True) separates the two failure domains. Every landing write goes through `_land()`, which converts an OSError into that error; the run loop halts on it instead of opening a gap and reconnecting. Reconnecting is the right response to a remote failure and exactly the wrong one to a local one -- retrying cannot make the disk bigger.
+  regression_test: tests/selftest.py::test_disk_failure_is_not_blamed_on_the_stream
   monitor_gap: "No test injects a writer failure."
   pr: 1
 

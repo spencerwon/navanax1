@@ -17,6 +17,7 @@ import json
 import shutil
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1151,6 +1152,181 @@ def test_single_instance_degrades_on_unsupported_filesystem(tmp: Path) -> None:
         _fcntl.flock = real
 
 
+def test_governor_recovers_from_a_429() -> None:
+    """BUG-012. One 429 used to disable REST for the life of the process.
+
+    `observe_429` set `server_remaining = 0`; `try_consume` takes
+    `min(tokens, server_remaining)`; and only a header from a SUCCESSFUL
+    response could raise it again -- which required a token. The recovery path
+    required the very resource the failure removed, and the outage presented as
+    something unrelated.
+    """
+    t = [0.0]
+    b = TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t[0])
+    check("BUG-012: a healthy bucket grants", b.try_consume(1))
+
+    b.observe_429()
+    check("BUG-012: a 429 stops REST immediately", not b.try_consume(1))
+    check("BUG-012: and the wait is REPORTED, not silent",
+          b.seconds_until(1) > 0, f"got {b.seconds_until(1)}")
+
+    t[0] += 31
+    check("BUG-012: the block EXPIRES and the governor heals itself",
+          b.try_consume(1),
+          "before the fix nothing could ever raise server_remaining again")
+
+    # Repeated 429s must back off further, not reset to the same short wait.
+    b.observe_429()
+    first = b.seconds_until(1)
+    b.observe_429()
+    check("BUG-012: repeated 429s back off further", b.seconds_until(1) > first,
+          f"{first} -> {b.seconds_until(1)}")
+
+    # A server-supplied reset time is believed over our guess.
+    # A server-supplied reset time is believed over our own guess. Advance the
+    # clock enough for the LOCAL bucket to refill too, so this asserts the
+    # server block lifting rather than accidentally asserting token refill.
+    t2 = [0.0]
+    b2 = TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t2[0])
+    b2.observe_headers({"x-ratelimit-reset": str(time.time() - 1)})
+    b2.observe_429()
+    t2[0] += 60                     # 2 tokens at 120/hr
+    check("BUG-012: an ALREADY-PASSED server reset lifts the block",
+          b2.try_consume(1),
+          "x-ratelimit-reset was parsed at governor.py:150 and read nowhere")
+
+    t3 = [0.0]
+    b3 = TokenBucket(capacity=120, per_seconds=3600, clock=lambda: t3[0])
+    b3.observe_429()
+    check("BUG-012: blocked while the 429 stands", b3.state.server_remaining == 0)
+    b3.observe_success()
+    check("BUG-012: a success clears the block outright",
+          b3.state.server_block_until is None,
+          "the block must not outlive the evidence for it")
+    t3[0] += 60
+    check("BUG-012: and REST works again once tokens refill", b3.try_consume(1))
+
+
+def test_gaps_are_labelled_by_what_can_actually_be_recovered(tmp: Path) -> None:
+    """BUG-013. Every gap claimed backfillable=True, contradicting REQ-D-09a.
+
+    A single boolean cannot describe the window honestly: sales, listings and
+    offers can be re-fetched; cancellations and order invalidate/revalidate
+    cannot, ever. Writing True told a downstream reader that a hole it can
+    never fill was fillable -- and the landing zone is append-only, so every
+    gap written with the wrong flag stayed wrong permanently.
+    """
+    from navanax.stream import BACKFILLABLE, IRRECOVERABLE
+
+    store = OperationalStore(tmp / "classes.db")
+    w = FakeWriter()
+    c = StreamConsumer("k", ["argonauts"], w, store, run_id="run-cls")
+    c._open_gap("peer closed")
+
+    g = w.gaps[-1]
+    check("BUG-013: a gap over ALL_EVENTS is NOT fully backfillable",
+          g.backfillable is False,
+          "it spans item_cancelled and order_invalidate, which REST cannot return")
+    check("BUG-013: the irrecoverable classes are named, not implied",
+          set(g.irrecoverable_classes) == set(IRRECOVERABLE) & set(c.events),
+          f"got {g.irrecoverable_classes}")
+    check("BUG-013: the recoverable classes are named too",
+          set(g.backfillable_classes) == set(BACKFILLABLE) & set(c.events),
+          f"got {g.backfillable_classes}")
+    check("BUG-013: the register agrees with the manifest",
+          store.open_gaps()[0]["backfillable"] == 0)
+
+    # A subscription with nothing unrecoverable in it IS fully backfillable --
+    # the flag has to be able to say yes, or it carries no information.
+    c2 = StreamConsumer("k", ["argonauts"], FakeWriter(), store, run_id="run-cls2",
+                        events=["item_listed", "item_sold"])
+    rec, lost, full = c2._gap_classes()
+    check("BUG-013: a recoverable-only subscription is marked backfillable",
+          full is True and lost == [], f"lost={lost}")
+
+
+def test_missing_event_timestamp_is_counted(tmp: Path) -> None:
+    """BUG-017. An unorderable event landed silently and nothing counted it.
+
+    REQ-D-07 orders on event_timestamp and never on arrival, so an event
+    without one drops out of every manifest-driven range query. We could not
+    say how often it happened, which means we could not say whether it
+    mattered.
+    """
+    store = OperationalStore(tmp / "noets.db")
+    w = FakeWriter()
+    c = StreamConsumer("k", ["argonauts"], w, store, run_id="run-ets")
+
+    c.handle_frame(json.dumps(["1", None, "collection:argonauts", "item_listed",
+                               {"event_type": "item_listed", "payload": {}}]))
+    check("BUG-017: an event with no timestamp is still LANDED",
+          len(w.landed) == 1, "the bytes are the record; never drop them")
+    check("BUG-017: ...and is COUNTED", c.stats.missing_event_ts == 1)
+    check("BUG-017: broken down by event type, so the cause is findable",
+          c.stats.missing_event_ts_by_type == {"item_listed": 1},
+          f"got {c.stats.missing_event_ts_by_type}")
+
+    c.handle_frame(frame("argonauts", "2026-09-09T15:00:00Z"))
+    d = c.stats.as_dict()
+    check("BUG-017: the rate is reported as a percentage, with its count",
+          d["missing_event_ts_pct"] == 50.0 and d["missing_event_ts"] == 1,
+          f"got {d['missing_event_ts_pct']}% of {d['events']}")
+
+
+def test_disk_failure_is_not_blamed_on_the_stream(tmp: Path) -> None:
+    """BUG-018. A full disk was recorded as an ingestion gap and retried forever.
+
+    The run loop's `except Exception` caught the writer's OSError, opened a gap
+    blaming OpenSea for a local failure, reconnected, and failed again --
+    recording gaps it could not write either.
+    """
+    from navanax.errors import LandingZoneWriteError
+
+    store = OperationalStore(tmp / "disk.db")
+
+    class FullDisk(FakeWriter):
+        def write(self, *a, **k):
+            raise OSError(28, "No space left on device")
+
+    c = StreamConsumer("k", ["argonauts"], FullDisk(), store, run_id="run-disk")
+    try:
+        c.handle_frame(frame("argonauts", "2026-09-09T16:00:00Z"))
+        raised = None
+    except LandingZoneWriteError as exc:
+        raised = exc
+    except OSError:
+        raised = "bare OSError"
+
+    check("BUG-018: a write failure raises a LOCAL error, not a stream error",
+          isinstance(raised, LandingZoneWriteError), f"got {raised!r}")
+    check("BUG-018: it halts ingestion rather than reconnecting",
+          raised is not None and raised.halts_ingestion is True,
+          "there is nothing to reconnect to; retrying cannot make the disk bigger")
+    check("BUG-018: no gap is opened blaming the stream",
+          store.open_gaps() == [], f"got {store.open_gaps()}")
+    check("BUG-018: the message names the real cause",
+          "landing zone" in str(raised).lower())
+
+
+def test_dead_priority_queue_is_gone() -> None:
+    """BUG-016. `_Waiter` and `_waiters` read as a priority queue that was not one.
+
+    Nothing appended to them and nothing read them. Dead code that implies
+    capability is worse than absent code: it answers the question "is ordering
+    handled?" with a yes that is not true.
+    """
+    import navanax.governor as G
+
+    check("BUG-016: the dead _Waiter class is removed",
+          not hasattr(G, "_Waiter"))
+    g = RestGovernor()
+    check("BUG-016: and the unused queue is gone from the governor",
+          not hasattr(g, "_waiters") and not hasattr(g, "_seq"))
+    check("BUG-016: the real ordering mechanism -- reserve floors -- is intact",
+          g.reserve[Priority.INTERACTIVE] < g.reserve[Priority.MAINTENANCE],
+          "INTERACTIVE must be able to draw when MAINTENANCE cannot")
+
+
 def test_error_hierarchy() -> None:
     from navanax.errors import (
         BacktestIntegrityError,
@@ -1203,12 +1379,17 @@ def main() -> int:
             test_rest_budget_config_is_actually_read,
             test_no_superseded_rate_limit_in_operator_text,
             test_single_instance_degrades_on_unsupported_filesystem,
+            # --- the full hardening pass: the five remaining open bugs ---
+            test_gaps_are_labelled_by_what_can_actually_be_recovered,
+            test_missing_event_timestamp_is_counted,
+            test_disk_failure_is_not_blamed_on_the_stream,
         ):
             print(f"\n--- {fn.__name__} ---")
             fn(tmp)
         for fn0 in (test_governor_budget, test_governor_priority, test_stream_parsing,
                     test_irrecoverable_classification, test_phoenix_v2_arrays,
-                    test_codec_multiframe_contract, test_error_hierarchy):
+                    test_codec_multiframe_contract, test_governor_recovers_from_a_429,
+                    test_dead_priority_queue_is_gone, test_error_hierarchy):
             print(f"\n--- {fn0.__name__} ---")
             fn0()
         print("\n" + "=" * 72)
