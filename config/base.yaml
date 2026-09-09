@@ -1,0 +1,62 @@
+# Base configuration. Per-environment files override these.
+# REQ-N-09: no threshold, weight, interval or assumption lives in code.
+# REQ-N-10: every change here is logged with timestamp and rationale.
+
+version: 1
+environment: local
+
+opensea:
+  stream_url: "wss://stream.openseabeta.com/socket/websocket"
+  rest_base: "https://api.opensea.io/api/v2"
+  heartbeat_seconds: 30
+  max_backoff_seconds: 60
+
+rest_budget:
+  # MEASURED 2026-09-09 from live response headers (BUG-20260909-003):
+  #   x-ratelimit-limit: 120     <-- not the 600 previously documented
+  # The 600 figure was an assumption that survived into every document
+  # unchallenged. One real request falsified it.
+  #
+  # Caveat: that response was a Cloudflare cache HIT, so the headers may be a
+  # cached reading rather than live. 120 is used as the conservative default.
+  # The governor reads x-ratelimit-limit on every response and adapts
+  # (TokenBucket.observe_headers, governor.py -- BUG-20260909-029: this line
+  # claimed that for a day before any code did it; a test now holds the code
+  # to it), so a wrong default self-corrects on the first uncached reply, and
+  # BudgetState.capacity_source records whether config or the server is in
+  # force.
+  capacity: 120
+  per_seconds: 3600
+  # Floors keep low-priority work from consuming the last of the budget, so an
+  # INTERACTIVE request arriving later still finds something left.
+  # Floors rescaled to the measured 120/hr budget (were 0/20/60/120 at 600).
+  reserve:
+    INTERACTIVE: 0
+    SIGNAL: 4
+    BACKFILL: 12
+    MAINTENANCE: 24
+
+landing:
+  root: "data/landing"
+  codec: zstd            # gzip is a deliberate fallback, never a silent one
+  codec_level: 9
+  roll_bytes: 67108864   # 64 MiB uncompressed
+  # REQ-D-26a: frame flush cadence. This is what makes the crash-safety
+  # property real rather than decorative -- it bounds loss to seconds.
+  flush_seconds: 5
+  flush_events: 1000
+
+opstore:
+  path: "data/ops.db"
+
+analytical:
+  path: "data/navanax.duckdb"
+
+reconciliation:
+  # REQ-D-10 + 07 §3.3: rotate, do not sweep. Checking every collection hourly
+  # would cost a third of the budget permanently; daily rotation costs ~1.4%.
+  rotation_hours: 24
+  drift_alert_threshold_pct: 2.0
+
+display:
+  timezone: "America/Chicago"   # storage is always UTC; this is display only

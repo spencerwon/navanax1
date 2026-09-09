@@ -1,0 +1,43 @@
+# Watchlist -- REQ-D-29: subscribe per collection, NEVER the wildcard firehose.
+# The firehose is ~373 GB/year and carries events about collections we are not
+# analysing. A 200-collection watchlist is ~15 GB/year.
+#
+# Onboarding a collection costs 60-100 REST reads (07 §3.1), so adding one is a
+# scheduled background operation, not an instant action.
+
+version: 1
+
+collections:
+  - slug: argonauts
+    chain: ethereum
+    role: primary_fixture
+    note: >
+      Spencer owns one and knows the collection well enough to spot a wrong
+      number, which is the most valuable property a test fixture can have.
+    onboard_priority: 1
+
+# Staged for after Argonauts proves the pipeline (Spencer, 2026-09-09).
+# Do NOT enable these until Phase 0 exit criteria are met for argonauts.
+staged:
+  - slug: chromie-squiggle
+    chain: ethereum
+    role: comparison
+    onboard_priority: 2
+  # Five trending collections, chosen at onboarding time rather than pinned
+  # here -- "trending" is a moving target and a stale hardcoded list would be
+  # worse than an empty one.
+  - slug: TBD_TRENDING_1
+    role: comparison
+    onboard_priority: 3
+  - slug: TBD_TRENDING_2
+    role: comparison
+    onboard_priority: 3
+  - slug: TBD_TRENDING_3
+    role: comparison
+    onboard_priority: 3
+  - slug: TBD_TRENDING_4
+    role: comparison
+    onboard_priority: 3
+  - slug: TBD_TRENDING_5
+    role: comparison
+    onboard_priority: 3

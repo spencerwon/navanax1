@@ -1,0 +1,84 @@
+name: CI
+on:
+  push: {branches: [main]}
+  pull_request: {branches: [main]}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      # Runs with no third-party deps at all -- it is the floor of correctness
+      # and must pass before anything else is attempted.
+      - name: Self-test (stdlib only)
+        run: python3 tests/selftest.py
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # BUG-20260909-010: the production codec had ZERO test coverage because
+      # the sandbox the code was written in cannot install zstandard. CI can,
+      # so CI is where the multi-frame contract is actually proven.
+      # Facts first, verdict second: if the gate below goes red, this step
+      # says WHY in terms of what the binding actually does (BUG-20260909-032).
+      - name: What does this zstandard build actually do?
+        run: python3 tools/zstd_probe.py
+
+      - name: Codec multi-frame contract (real zstandard)
+        run: |
+          python3 - <<'PY'
+          import sys, zstandard
+          sys.path.insert(0, "src")
+          from navanax.codec import ZstdCodec, GzipCodec, verify_codec_roundtrip
+          for c in (ZstdCodec(level=3), GzipCodec()):
+              verify_codec_roundtrip(c, frames=5)
+              print(f"ok {c.name}")
+          print("python-zstandard", zstandard.__version__)
+          PY
+
+      # A bug marked `fixed` whose regression test does not exist is a claim,
+      # not a fix. This is the gate that makes the bug log load-bearing.
+      - name: Bug ledger consistency
+        run: python3 tools/buglog.py --check
+      - name: Lint
+        run: ruff check src tests tools   # tools/ was excluded before BUG-20260909-004
+      # BUG-20260909-019: `pytest -q` collected ZERO tests and exited 5, so the
+      # pipeline could never go green -- and every gate after it, including the
+      # bug-ledger check, never ran. tests/selftest.py is the real suite (it
+      # runs as step one, with no dependencies at all). pytest is scaffolding
+      # for later, so exit code 5 (nothing collected) is tolerated and nothing
+      # else is.
+      - name: Tests (pytest; exit 5 = nothing collected yet, tolerated)
+        run: pytest -q || test $? -eq 5
+
+      # REQ-N-11 / REQ-N-14: standing checks, not one-time reviews.
+      - name: No credentials in repo
+        run: |
+          if grep -rInE '(OPENSEA_API_KEY|PRIVATE_KEY|SEED_PHRASE|MNEMONIC)[[:space:]]*=[[:space:]]*[A-Za-z0-9]' \
+             --include='*.py' --include='*.yaml' --include='*.yml' --include='*.toml' \
+             --exclude='.env.example' . ; then
+            echo "::error::credential-shaped assignment found in tracked files (REQ-N-11)"; exit 1
+          fi
+      - name: No transaction-signing capability
+        run: |
+          if grep -rInE '\b(eth_sendRawTransaction|signTransaction|sign_transaction|from_mnemonic|Account\.from_key)\b' \
+             --include='*.py' src/ ; then
+            echo "::error::transaction-signing capability present (REQ-N-14)"; exit 1
+          fi
+      - name: DataIntegrityError is never swallowed
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          bad = []
+          for p in pathlib.Path("src").rglob("*.py"):
+              src = p.read_text()
+              for m in re.finditer(r"except\s+DataIntegrityError[^\n]*:\n((?:\s+.*\n)+?)(?=\S|\Z)", src):
+                  if "raise" not in m.group(1):
+                      bad.append(f"{p}:{src[:m.start()].count(chr(10))+1}")
+          if bad:
+              print("::error::DataIntegrityError caught without re-raise (S1):", *bad, sep="\n  "); sys.exit(1)
+          print("ok")
+          PY
