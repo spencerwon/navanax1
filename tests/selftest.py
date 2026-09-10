@@ -2924,9 +2924,20 @@ def test_trait_filtered_metrics(tmp: Path) -> None:
     f = {"Background": ["Blue"]}
     check("trait metrics: filtered to a matching trait -> item bid + collection offer, trait offer excluded = 2",
           last(eng.series(metric="bid_count", collection="argonauts", interval="1h", range_="6h", now=now, traits=f)) == 2.0)
+    # BUG-20260910-060. This check used to read "filtered to a trait no token has
+    # -> only the collection offer = 1 (F2)" and it PASSED, because it was the
+    # defect written down as intended behaviour: a collection offer bids on every
+    # token, but a bid on every token is not a bid on any token of an EMPTY set.
+    # The check now asserts the rule instead of the implementation, and the
+    # dedicated property test is
+    # test_filtered_counts_are_null_when_the_filter_selects_no_token.
     none = {"Background": ["Red"]}
-    check("trait metrics: filtered to a trait no token has -> only the collection offer = 1 (F2)",
-          last(eng.series(metric="bid_count", collection="argonauts", interval="1h", range_="6h", now=now, traits=none)) == 1.0)
+    s_none = eng.series(metric="bid_count", collection="argonauts", interval="1h",
+                        range_="6h", now=now, traits=none)
+    check("trait metrics: filtered to a trait NO token has -> undefined on every bucket, not "
+          "the collection-offer count and not 0 (BUG-20260910-060; this check used to assert 1.0)",
+          all(v is None for v in s_none["raw"]) and s_none["basis"]["empty_token_set"] is True,
+          str(s_none["raw"]))
     s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h", range_="6h", now=now, traits=f)
     check("trait metrics: the derived spread under a filter declares its legs (F3)",
           "legs" in s["basis"] and "trait-filtered" in s["basis"]["legs"]["floor_ask"]
@@ -3266,6 +3277,9 @@ def test_ui_contract() -> None:
           "book: ${b.book}" in html and "coverage: median" in html and "CROSSED standing book" in html)
     check("ui/basis: a withheld percentile band is printed, never silently dropped",
           "p10–p90 withheld (n<${minN})" in html)
+    check("ui/basis: a filter that selects NO token says so under EVERY chart, not only the "
+          "trait panel — the Activity bars go null under it too (BUG-20260910-060)",
+          "b.empty_token_set?" in html and "b.empty_token_set_note" in html)
 
 
 def test_ui_range_chips_name_an_anchored_range() -> None:
@@ -3348,6 +3362,23 @@ def test_ui_palette_delta_e_figures_match_the_measurements() -> None:
     wrong = {k: (stated.get(k), v) for k, v in measured.items() if stated.get(k) != v}
     check("ui/palette: every stated ΔE is the tech-lead's measured figure (2026-09-10)",
           not wrong, "; ".join(f"{k}: comment says {a}, measured {b}" for k, (a, b) in wrong.items()))
+
+    # PR-6 re-picks --trait-offer. Same discipline, same reason: these are the figures
+    # the dataviz validator actually printed (worst of protan/deutan, OKLab dE x100,
+    # measured on --surface #141B17), and the comment is the only place a future reader
+    # is told how far apart these hues are.
+    to_measured = {"--bid": "15.8", "--cancel": "15.4", "--ask": "27.7", "--coll": "25.7"}
+    to_line = next((ln for ln in html.splitlines() if "--trait-offer vs --" in ln), "")
+    to_stated = dict(re.findall(r"vs (--[a-z0-9-]+) (\d+\.\d)", to_line))
+    check("ui/palette: the comment reports --trait-offer against every hue it shares a panel with",
+          set(to_stated) == set(to_measured), f"stated {to_stated} on line: {to_line.strip()[:120]}")
+    to_wrong = {k: (to_stated.get(k), v) for k, v in to_measured.items() if to_stated.get(k) != v}
+    check("ui/palette: every stated --trait-offer ΔE is the validator's measured figure (PR-6)",
+          not to_wrong, "; ".join(f"{k}: comment says {a}, measured {b}" for k, (a, b) in to_wrong.items()))
+    tok_hex = re.search(r"--trait-offer\s*:\s*(#[0-9A-Fa-f]{6})", html).group(1).upper()
+    check("ui/palette: --trait-offer is no longer #C792EA -- it was ΔE 5.0 from --bid under "
+          "deuteranopia and 14.6 under NORMAL vision, and PR-6 is the panel that finally draws it",
+          tok_hex != "#C792EA" and tok_hex == "#B266FF", tok_hex)
 
 
 # ===========================================================================
@@ -4131,11 +4162,19 @@ def test_trait_offer_matching_rule(tmp: Path) -> None:
 
     every_filter = ({}, {"Print": ["Unclaimed"]}, {"Print": ["Claimed"]}, {"Palette": ["Seafoam"]},
                     {"Print": ["Unclaimed"], "Palette": ["Seafoam"]}, {"Nothing": ["At all"]})
+    # BUG-20260910-060: the second half of this check used to read
+    # `counted({"Nothing": ["At all"]}) == 1.0` -- a filter on a trait type no token
+    # has, expected to return the collection-offer count. That was the defect
+    # written down as intended behaviour; a bid on every token is not a bid on any
+    # token of an empty set. It is now the rule: undefined on every bucket.
+    nothing_at_all = eng.series(metric="bid_count", collection="argonauts", interval="1h",
+                                range_="6h", now=now, traits={"Nothing": ["At all"]})
     check("trait matching: the PROPERTY TEST -- a trait offer with criteria_n = 0 matches NOTHING, "
           "under every filter (dataeng §4.3: with no criteria rows the NOT EXISTS is vacuously "
           "true and it would otherwise match every filter and every token)",
           all("0xbad" not in covered(f) for f in every_filter)
-          and counted({"Print": ["Unclaimed"]}) == 2.0 and counted({"Nothing": ["At all"]}) == 1.0,
+          and counted({"Print": ["Unclaimed"]}) == 2.0
+          and all(v is None for v in nothing_at_all["raw"]),
           str([sorted(covered(f)) for f in every_filter]))
     got = covered({"Print": ["Unclaimed"]})
     check("trait matching: COVERS is exactly the offers whose every criterion the filter guarantees",
@@ -4641,6 +4680,1021 @@ def test_sync_counts_unreadable_files_instead_of_reporting_zero_rows(tmp: Path) 
     check("bug-058: an unreadable file is COUNTED (failed or short), never reported as read-with-zero-rows",
           (stats["files_failed"] + stats["files_short"]) == 1 and stats["rows_added"] == 0
           and stats["last_error"] and "jsonl.gz" in stats["last_error"], str(stats))
+    n.close()
+
+
+# ===========================================================================
+# PR-5: the trait chart's metric layer (`MetricEngine.trait_set_series`).
+#
+# Every check in this section fails against the pre-PR-5 code, and fails for a
+# reason rather than by accident: `trait_set_series` did not exist, there was no
+# union bid leg (the standing legs were reachable only one at a time and
+# `STANDING_NOT_OFFERED` said in as many words that the union "is PR-5"), no
+# single-clause floors, no `winning_leg`, and no PARTIAL/UNKNOWN counts on a
+# price response.
+#
+# The fixture is one collection of four tokens with two trait types, so that
+# S(F_combined) is a strict subset of each single-clause set -- which is what
+# makes the ordering property below have any content.
+# ===========================================================================
+def test_ui_trait_chart_is_the_shape_the_operator_decided() -> None:
+    """PR-6. The Prices card BECOMES the trait chart under a filter, and it draws
+    exactly what the Operator decided on 2026-09-10 -- no more lines, no fewer.
+
+    Fails today: `traitChart`, `/api/trait_series`, the custom legend and the
+    categorical ramp do not exist, and `prices()` drew the same three
+    collection-wide series whether a trait filter was on or not -- so a trait
+    floor and the collection floor were the same pixels with a different filter
+    silently applied to only some of them.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    script = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+
+    def _obj(src: str, opener: str) -> str:
+        i = src.index(opener) + len(opener)
+        depth, j = 1, i
+        while depth and j < len(src):
+            depth += (src[j] == "{") - (src[j] == "}")
+            j += 1
+        return src[i:j - 1]
+
+    check("ui/trait chart: the Prices card switches to the trait chart when traitSpec() is "
+          "non-empty -- one panel, never two price panels showing different token sets",
+          "if(traitSpec()){await traitChart();return}" in script
+          and 'id="h-prices"' in html and 'id="tlegend"' in html)
+    check("ui/trait chart: it calls the PR-5 endpoint and passes the filter, interval, range "
+          "and denomination -- and nothing else, because the engine owns every rule",
+          "J('/api/trait_series?'+qs({collection:p.collection,traits:p.traits,"
+          "interval:p.interval,range:p.range,denom:S.denom})" in script.replace("\n", ""))
+    body = _obj(script, "async function traitChart(){")
+    # Line-by-line, read off the real trace literals rather than the doc comment.
+    traces = re.findall(r"line:\{color:(C\.[a-z]+|CAT\[i\]),width:([0-9.]+)(,dash:'([a-z]+)')?\}", body)
+    check("ui/trait chart: the baseline collection floor is --faint, DOTTED, 1.4 -- and it is "
+          "the FIRST trace pushed, so it sits UNDER everything (z-order is trace order)",
+          traces and traces[0] == ("C.faint", "1.4", ",dash:'dot'", "dot")
+          and body.index("name:'collection floor'") < body.index("if(!multi)"), str(traces[:1]))
+    single = body.split("if(!multi){", 1)[1].split("}else{", 1)[0]
+    check("ui/trait chart: single clause draws EXACTLY the trait lowest ask (--ask, solid, 2.4) "
+          "and the trait highest bid (--bid, solid, 2.4) over that baseline -- three lines total",
+          single.count("tr.push({") == 2
+          and "line:{color:C.ask,width:2.4}" in single and "line:{color:C.bid,width:2.4}" in single
+          and "dash" not in single, single[:200])
+    multi = body.split("}else{", 1)[1]
+    check("ui/trait chart: multi-clause draws the combined (AND) floor at --ask weight 3.0 "
+          "-- weight encodes ROLE (3.0 the set you asked for, 2.0 a component, 1.4 a reference)",
+          "line:{color:C.ask,width:3.0}" in multi and "line:{color:CAT[i],width:2.0}" in multi)
+    check("ui/trait chart: the categorical ramp is FIXED ORDER and never cycled -- a 5th clause "
+          "gets no generated hue, it gets a printed notice naming how many are drawn",
+          "const CAT=[C.bid,C.coll,C.trait,C.cancel], CAT_MAX=4" in script
+          and "slice(0,CAT_MAX)" in multi
+          and "clauses drawn individually" in multi and "CAT[i%" not in script)
+    check("ui/trait chart: every series keeps its holes -- connectgaps:false on all of them, "
+          "and markers stay on below ~120 observed points so 8 listings draw 8 marks",
+          body.count("connectgaps:false") == body.count("tr.push({")
+          and body.count("mode:mode(") >= 4, f"{body.count('connectgaps:false')} vs {body.count('tr.push({')}")
+    check("ui/trait chart: the hover carries value+unit, coverage, per-leg n AND which leg set "
+          "the number -- a line whose population changes and does not say so is leg-mixing",
+          "cov ${(100*cov[i]).toFixed(0)}%" in script and "leg: ${b.winning_leg[i]}" in script
+          and "n item ${fmt(b.n_item[i],0)}" in script)
+    check("ui/trait chart: the legend is OURS (Plotly's is off) and each row carries n tokens, "
+          "observed/total buckets and the last value; the bid row also carries per-leg n",
+          "showlegend:false" in body and "$('#tlegend').innerHTML=lg.join('')" in body
+          and "n=${fmt(n,0)} token" in script and "${obsN(a)}/${a.length} buckets" in script
+          and "trait offers that COVER this filter n=${medOf(b.n_trait_offer_cover)}" in script)
+    check("ui/trait chart: the trait-offer legend swatch wears the RE-PICKED --trait-offer token, "
+          "read out of :root like every other mark -- no literal",
+          "color:${C.trait}" in script and "trait:tok('--trait-offer')" in script)
+    check("ui/trait chart: the basis prints PARTIAL / UNKNOWN / UNPARSED counts and says PARTIAL "
+          "is never summed -- the panel that most needs the verdicts is the one that shows them",
+          "PARTIAL · ${fmt(b.unknown_offers,0)} UNKNOWN" in script
+          and "b.partial_note" in script and "d.overlap_tokens" in script)
+    check("ui/trait chart: the global transform control is refused here rather than misapplied "
+          "-- the endpoint returns levels, and a % change off a hole has no basis",
+          "S.transform!=='ABS'" in script and "does not apply to this panel" in script
+          and "const thov=()" in script)
+    check("ui/trait chart: still no spline and still no smoothing anywhere on the page",
+          "shape:'spline'" not in html and "connectgaps:true" not in html)
+
+
+def _trait_chart_store(tmp: Path, name: str):
+    """Four tokens, two clauses, one standing book. Returns (normalizer, engine).
+
+        token  Print       Palette    standing ask   standing item bid
+          1    Unclaimed   Seafoam        1.20             -
+          2    Unclaimed   Ivory          0.90            0.30
+          3    Claimed     Seafoam        -               0.95   <- outside S(F)
+          4    Claimed     Ivory          0.70             -
+
+    plus one collection offer at 0.348 and four trait offers: one COVERing
+    `Print: Unclaimed` at 0.41, one on `Palette: Seafoam` (PARTIAL under a
+    Print filter) at 0.42, one with NO criteria at 9.99 (the loud-failure
+    marker -- if the guard ever fails, this is the number that appears), and one
+    with numeric criteria at 8.88 (UNKNOWN).
+    """
+    import copy
+
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    rows = {"1": ("Unclaimed", "Seafoam"), "2": ("Unclaimed", "Ivory"),
+            "3": ("Claimed", "Seafoam"), "4": ("Claimed", "Ivory")}
+    for tid, (pr, pa) in rows.items():
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Print", pr), ("argonauts", tid, "Palette", pa)])
+    seq = 0
+
+    def at(raw, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, "2026-09-09T10:00:00Z", seq, **over, **NO_EXP)
+
+    for tid, px in (("1", 1.20), ("2", 0.90), ("4", 0.70)):
+        at(DOC_LISTING, order_hash=f"0xask{tid}", token_id=tid, price_eth=px)
+    at(REAL_BID, order_hash="0xbid2", token_id="2", price_eth=0.30)
+    at(REAL_BID, order_hash="0xbid3", token_id="3", price_eth=0.95)
+    at(REAL_COLL_OFFER, order_hash="0xcoll", price_eth=0.348)
+
+    def offer(hash_, mutate, px):
+        raw = copy.deepcopy(REAL_TRAIT_OFFER)
+        mutate(raw[4]["payload"])
+        at(raw, order_hash=hash_, price_eth=px)
+
+    def one(tt, tn):
+        def m(p):
+            p["trait_criteria"] = {"trait_type": tt, "trait_name": tn}
+            p["trait_criteria_list"] = None
+        return m
+
+    def nothing(p):
+        p["trait_criteria"] = None
+        p["trait_criteria_list"] = None
+
+    def numeric(p):
+        p["numeric_trait_criteria_list"] = [{"trait_type": "Level", "min": 1, "max": 5}]
+
+    offer("0xtcov", one("Print", "Unclaimed"), 0.41)
+    offer("0xtpar", one("Palette", "Seafoam"), 0.42)
+    offer("0xtbad", nothing, 9.99)
+    offer("0xtnum", numeric, 8.88)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def _win(tmp_engine, traits, tmp=None):
+    """The 09:00-11:00 window at 1 h: bucket 0 is empty, bucket 1 holds the book."""
+    from navanax.normalize import iso_to_ts
+    return tmp_engine.trait_set_series(
+        "argonauts", traits, iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"),
+        "1h", "ETH", H11)
+
+
+def test_trait_set_series_bid_leg_is_a_union_that_names_its_winner(tmp: Path) -> None:
+    """The Operator's single-clause chart: one bid line, three legs, each with its own n.
+
+    Fails today: `MetricEngine.trait_set_series` does not exist. The three
+    standing legs existed separately and `STANDING_NOT_OFFERED` said the union
+    "is PR-5" in as many words -- there was no way to ask for the trait group's
+    highest bid at all, and `top_item_bid` deliberately refused to stand in for it.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart1.sqlite")
+    r = _win(eng, {"Print": ["Unclaimed"]})
+    b = r["trait_bid"]
+    check("trait chart: the bid is the MAX over the union of the three legs -- the COVERing "
+          "trait offer at 0.41 beats the item bid at 0.30 and the collection offer at 0.348",
+          b["median"][1] == 0.41, str(b["median"]))
+    check("trait chart: `winning_leg` NAMES the leg that set the number on screen, per bucket "
+          "-- a line that silently swaps population is the leg-mixing quant §1 metric 1 forbids",
+          b["winning_leg"][1] == "trait_offer" and b["winning_leg"][0] is None, str(b["winning_leg"]))
+    check("trait chart: each leg carries its OWN n and kind; the three are never summed",
+          (b["n_item"][1], b["n_trait_offer_cover"][1], b["n_collection"][1]) == (1, 1, 1),
+          f"item={b['n_item']} cover={b['n_trait_offer_cover']} coll={b['n_collection']}")
+    check("trait chart: the item-bid leg is TOKEN-SCOPED -- the 0.95 bid on token 3, which the "
+          "filter excludes, never reaches the line (it would have won by a wide margin)",
+          b["median"][1] == 0.41 and b["n_item"][1] == 1, str(b))
+    check("trait chart (BUG-051 guard, on a PRICE this time): the criteria-less trait offer at "
+          "9.99 matches nothing, so the number it would have produced never appears",
+          9.99 not in [v for v in b["median"] if v is not None] and r["unparsed_offers"] == 1,
+          str(b["median"]))
+    check("trait chart: numeric-criteria offers are UNKNOWN -- excluded AND counted, never TRUE; "
+          "8.88 is not on the chart and the count is on the response",
+          8.88 not in [v for v in b["median"] if v is not None] and r["unknown_offers"] == 1,
+          f"unknown={r['unknown_offers']} median={b['median']}")
+    check("trait chart: the ask line is the trait group's LOWEST STANDING ask over S(F)",
+          r["trait_ask"]["median"][1] == 0.90 and r["trait_ask"]["median"][0] is None,
+          str(r["trait_ask"]["median"]))
+    check("trait chart: every series is on the FULL bucket grid with the hole preserved",
+          len(r["keys"]) == 2 and len(b["median"]) == 2
+          and len(r["baseline_ask"]["median"]) == 2 and r["basis"]["undefined_buckets"] == 1,
+          str(r["basis"]))
+    check("trait chart: the basis says which book, which legs, and how many tokens the filter picks",
+          r["basis"]["book"] == "standing" and r["matching_tokens"] == 2
+          and set(r["basis"]["legs"]) == {"item", "trait_offer", "collection"}, str(r["basis"]))
+    n.close()
+
+
+def test_trait_set_series_collection_offer_covers_every_filter(tmp: Path) -> None:
+    """`C = {}` is a subset of every token's traits, so a collection offer is bid
+    depth for EVERY filter -- not by a special branch, but because that is what an
+    empty criteria set means (dataeng §4.3, E-V9).
+
+    Fails today: there is no union bid leg to carry it. `collection_bid` alone was
+    reachable, but nothing combined it with the other two, so "the trait group's
+    highest bid" could not be asked for.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart2.sqlite")
+    filters = [{"Print": ["Unclaimed"]}, {"Print": ["Claimed"]}, {"Palette": ["Seafoam"]},
+               {"Palette": ["Ivory"]}, {"Print": ["Claimed"], "Palette": ["Ivory"]},
+               {"Print": ["Unclaimed"], "Palette": ["Seafoam"]}]
+    ns = [_win(eng, f)["trait_bid"]["n_collection"][1] for f in filters]
+    check("trait chart: the collection offer stands in the bid leg under EVERY filter, "
+          "including one whose AND-set is a single token", all(x == 1 for x in ns), str(ns))
+    r = _win(eng, {"Print": ["Claimed"], "Palette": ["Ivory"]})
+    b = r["trait_bid"]
+    check("trait chart: where it is the only leg standing, it sets the line and is named as such",
+          b["median"][1] == 0.348 and b["winning_leg"][1] == "collection"
+          and (b["n_item"][1], b["n_trait_offer_cover"][1]) == (0, 0), str(b))
+    n.close()
+
+
+def test_trait_set_series_partial_offers_are_counted_never_summed(tmp: Path) -> None:
+    """PARTIAL is a verdict, not a fraction of depth (dataeng §4.3, project rule 4).
+
+    Fails today: no price response carried a verdict count at all. The counts
+    existed only on `trait_offer_verdicts`, which the chart never called, so a
+    PARTIAL offer was invisible on the panel that most needs to know about it.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart3.sqlite")
+    r = _win(eng, {"Print": ["Unclaimed"]})
+    check("trait chart: the 0.42 offer on Palette:Seafoam is PARTIAL under a Print filter and is "
+          "NOT in the bid line -- it does not bid on token 2, which the filter selects",
+          r["trait_bid"]["median"][1] == 0.41 and r["partial_offers"] == 1,
+          f"median={r['trait_bid']['median']} partial={r['partial_offers']}")
+    d = r["partial_detail"][0]
+    check("trait chart: ...and it is reported with |S(F) n S(C)| AND |S(F)|, never a bare count",
+          d["overlap_tokens"] == 1 and d["filter_tokens"] == 2 and d["order_hash"] == "0xtpar",
+          str(d))
+    check("trait chart: the basis says out loud that allocating a PARTIAL offer's quantity as "
+          "depth is a JUDGEMENT and belongs in ANALYSIS, not here",
+          "never summed" in r["basis"]["partial_note"].lower()
+          and "judgement" in r["basis"]["partial_note"].lower(), r["basis"]["partial_note"])
+    check("trait chart: UNPARSED and UNKNOWN are counted SEPARATELY -- summing a parser gap into "
+          "a schema limit would retire the question of which one is growing",
+          (r["unknown_offers"], r["unparsed_offers"]) == (1, 1), str(r))
+    n.close()
+
+
+def test_trait_set_series_empty_and_set_is_null_never_zero(tmp: Path) -> None:
+    """A bucket where the AND-set has no standing ask is a HOLE.
+
+    Two different emptinesses, and both must be null: the filter selects tokens
+    but none of them is listed, and the filter selects no tokens at all. Zero is a
+    price. "No standing ask" is not the price zero, and on a book with eight
+    listings in forty minutes the difference is most of the chart.
+
+    Fails today: `trait_set_series` does not exist, and the metric that stood in
+    for a trait floor -- `floor_ask` with `book='observed'` -- returned the lowest
+    price SEEN in the interval, so a bucket with no standing ask showed whatever
+    had been briefly quoted and cancelled inside it.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart4.sqlite")
+    r = _win(eng, {"Print": ["Claimed"], "Palette": ["Seafoam"]})     # token 3: real, unlisted
+    check("trait chart: the AND-set is a real, non-empty token set with NO standing ask -- "
+          "the bucket is null, not 0",
+          r["matching_tokens"] == 1 and all(v is None for v in r["trait_ask"]["median"]),
+          f"n={r['matching_tokens']} ask={r['trait_ask']['median']}")
+    r2 = _win(eng, {"Print": ["Unclaimed"], "Palette": ["Nonesuch"]})  # no token at all
+    check("trait chart: an AND-set that is EMPTY is also null, and says so with its count",
+          r2["matching_tokens"] == 0 and all(v is None for v in r2["trait_ask"]["median"])
+          and r2["basis"]["empty_token_set"] is True,
+          f"n={r2['matching_tokens']} ask={r2['trait_ask']['median']}")
+    check("trait chart: ...and the BID is null too. A collection offer is not token-scoped and "
+          "covers the empty set vacuously, so without the guard the panel drew a confident bid "
+          "line (0.348) for a trait group with ZERO members -- a bid on tokens this filter does "
+          "not select. That is the flattering-direction failure docs/05 rule 5 is about.",
+          all(v is None for v in r2["trait_bid"]["median"])
+          and all(v is None for v in r2["trait_bid"]["winning_leg"]),
+          str(r2["trait_bid"]["median"]))
+    check("trait chart: ...and the per-leg counts still report what WAS standing, so the "
+          "withheld line is visible as a withholding rather than as an empty book",
+          r2["trait_bid"]["n_collection"][1] == 1, str(r2["trait_bid"]["n_collection"]))
+    check("trait chart: the note names the universe the guard actually counts -- TOKENS, not "
+          "traits, because a populated traits table with an empty token list lands here too (F7)",
+          "TOKENS table" in r2["basis"]["empty_token_set_note"]
+          and "empty `tokens` table" in r2["basis"]["empty_token_set_note"]
+          and r2["basis"]["token_set_universe"] == "tokens",
+          r2["basis"]["empty_token_set_note"][:160])
+    check("trait chart: a filter that DOES select tokens is not caught by the guard",
+          r["basis"]["empty_token_set"] is False and r["trait_bid"]["median"][1] is not None,
+          str(r["basis"]["empty_token_set"]))
+    check("trait chart: 0.0 appears nowhere in any price series -- not once, under either filter",
+          not any(v == 0.0 for r_ in (r, r2)
+                  for arr in (r_["trait_ask"]["median"], r_["trait_bid"]["median"],
+                              r_["baseline_ask"]["median"])
+                  for v in arr if v is not None),
+          str([r["trait_ask"]["median"], r2["trait_bid"]["median"]]))
+    n.close()
+
+
+def test_filtered_counts_are_null_when_the_filter_selects_no_token(tmp: Path) -> None:
+    """BUG-20260910-060: a bid on every token is not a bid on any token of an empty set.
+
+    `_bucketed`'s filter clause is three disjuncts -- collection offers (no
+    token, so they pass), trait offers whose criteria COVER F, and token-level
+    events matching every clause. Each is right on its own. The SET of them is
+    wrong when `S(F) = {}`, because `S(F) ⊆ S(C)` is vacuously true for the empty
+    set, so the two token-less branches kept matching a filter that selects
+    nothing. `bid_count` and `event_count` under an impossible filter counted
+    bids on tokens the filter does not select.
+
+    **This is not an edge case here, it is the default.** `traits` and `tokens`
+    have 0 rows until the Explorer import lands, so EVERY filter is impossible
+    and this was 100% of the filtered bid count -- the Activity chart's `bids`
+    bars under any trait filter.
+
+    Fails today by returning a number: `bid_count` = 1.0 (the collection offer)
+    and `event_count` = 1.0 where both must be None, and `sales_count` = 0.0
+    where None is meant -- a 0 says the trait group was quiet, and the truth is
+    that there is no trait group.
+    """
+    n, eng = _trait_chart_store(tmp, "emptyfilter.sqlite")
+    nope = {"Print": ["Nonesuch"]}
+
+    def ser(metric, traits, **kw):
+        return eng.series(metric=metric, collection="argonauts", interval="1h",
+                          range_="2h", now=H11, traits=traits, **kw)
+
+    # The COUNT/SUM metrics are the ones that leaked, and this fixture is where the
+    # leak was: the collection offer and any COVERing trait offer matched a filter
+    # selecting nothing. Every one of them must be null, not 0.
+    for m in ("bid_count", "event_count", "sales_count", "cancel_count",
+              "listing_count", "volume"):
+        s = ser(m, nope)
+        check(f"empty filter: {m} is null on EVERY bucket -- never 0, never a count of "
+              "token-less events",
+              all(v is None for v in s["raw"]) and s["basis"]["empty_token_set"] is True,
+              f"{m} raw={s['raw']}")
+    # F4 (tech-lead): the PRICE metrics are null on THIS fixture whether or not the
+    # guard exists -- no token has `Nonesuch`, so there are no listings and no item
+    # bids to find. Asserting the guard here would be an over-claim, so this fixture
+    # asserts only that they are null and SAYS why, and the load-bearing case (a
+    # populated `traits` with an empty token list, where the book does match the
+    # filter) lives in test_empty_token_set_guard_holds_on_the_standing_branches_too.
+    for m in ("floor_ask", "top_item_bid"):
+        s = ser(m, nope)
+        check(f"empty filter: {m} is null too -- though on THIS fixture it would be null "
+              "without the guard as well (no token has the value, so there is nothing to "
+              "find); the case where the guard is what makes it null is the disagreeing store",
+              all(v is None for v in s["raw"]) and s["basis"]["empty_token_set"] is True,
+              f"{m} raw={s['raw']}")
+    s = ser("bid_count", nope)
+    check("empty filter: the basis says WHY, and names the first thing to check -- the TOKENS "
+          "table, which is what the guard counts (F7)",
+          "there is no trait group" in s["basis"]["empty_token_set_note"]
+          and "TOKENS table" in s["basis"]["empty_token_set_note"]
+          and "empty `tokens` table" in s["basis"]["empty_token_set_note"]
+          and s["basis"]["token_set_universe"] == "tokens",
+          s["basis"]["empty_token_set_note"][:160])
+    imm = ser("immediacy_cost", nope)
+    check("empty filter: the derived spread is null too -- its ask leg is narrowed, so there "
+          "is no ask, and a spread with one leg is not a spread",
+          all(v is None for v in imm["raw"]) and imm["basis"]["empty_token_set"] is True,
+          str(imm["raw"]))
+
+    # The deliberate carve-out, unchanged: `collection_bid` is NOT narrowed by a
+    # trait filter (leg discipline, quant §1 metric 1), so it still reports the
+    # collection-wide offer -- and now says, in the same basis, that the filter
+    # selects no token and this number is not about it.
+    # BUG-060's own guard, exercised DIRECTLY (tech-lead R2): series()'s
+    # blanket pass (BUG-061) is a superset, so without this call reverting the
+    # _bucketed guard leaves every suite green while the fix is gone.
+    from navanax.metrics import load_intervals as _li
+    _iv = _li(ROOT / "config" / "intervals.yaml")["intervals"]["1h"]
+    _s, _e = ser("bid_count", nope)["basis"]["range"]["start"], ser("bid_count", nope)["basis"]["range"]["end"]
+    from navanax.normalize import iso_to_ts as _its
+    direct = eng._bucketed("bid_count", "argonauts", "ETH", _its(_s), _its(_e), _iv, nope)
+    check("empty filter: _bucketed ITSELF returns no bucket for a filter selecting no token (BUG-060 guard, "
+          "independent of series()' blanket pass)", direct == {}, str(direct))
+    cb = ser("collection_bid", nope, book="observed")
+    check("empty filter: collection_bid is deliberately NOT narrowed and still reports the "
+          "collection-wide offer, with the basis saying the number is not about the filter",
+          cb["raw"][1] == 0.348 and cb["basis"]["empty_token_set"] is True
+          and "deliberately NOT narrowed" in cb["basis"]["empty_token_set_note"], str(cb["raw"]))
+
+    # ...and a filter that DOES select tokens counts exactly what it did before.
+    good = {"Print": ["Unclaimed"]}
+    b = ser("bid_count", good)
+    check("empty filter: with a filter that selects tokens the counts are unchanged -- one item "
+          "bid on a token in S(F), the collection offer, and the one COVERing trait offer = 3",
+          b["raw"][1] == 3.0 and b["basis"]["empty_token_set"] is False, str(b["raw"]))
+    check("empty filter: with NO filter at all the guard never fires -- 2 item bids, "
+          "1 collection offer and 4 trait offers = 7",
+          ser("bid_count", None)["raw"][1] == 7.0
+          and ser("bid_count", None)["basis"]["empty_token_set"] is False,
+          str(ser("bid_count", None)["raw"]))
+    check("empty filter: a real filter still gets a real ZERO where a bucket was quiet -- the "
+          "guard must not turn 'we watched and nothing happened' into a hole",
+          ser("sales_count", good)["raw"] == [0.0, 0.0],
+          str(ser("sales_count", good)["raw"]))
+    n.close()
+
+
+def test_trait_offer_verdicts_query_count_is_o_distinct_pairs(tmp: Path) -> None:
+    """B1 (tech-lead, S1): the reach of a criterion is a property of the TRAIT TABLE,
+    not of the offer that names it, so it must be looked up once per distinct
+    `(trait_type, value)` pair -- not once per (offer, criterion).
+
+    Measured by the tech-lead on the real shape: 27,694 traits queries for 48
+    distinct pairs, 8.6 s at 200k lives with a filter selecting 500 of 9,000
+    tokens at 1h/24h. This fixture is a modest synthetic -- 2,000 trait offers,
+    2 criteria each, over 2,000 tokens -- and it fails today by issuing ~4,000
+    traits lookups plus ~2,000 criteria queries where 40-odd of each is the work
+    that actually exists.
+
+    The query count is asserted with `sqlite3.Connection.set_trace_callback`, not
+    with a stopwatch: a timing threshold on shared CI hardware is a flaky test,
+    and the thing that is actually wrong is the COUNT. The wall time is printed
+    beside it as evidence, with a generous ceiling that only catches a
+    catastrophic regression.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.traits import ensure_schema
+
+    N_TOKENS, N_OFFERS, N_TYPES, N_VALUES = 2000, 2000, 4, 12
+    n = Normalizer(tmp / "empty-lz", tmp / "verdictperf.sqlite")
+    ensure_schema(n.conn)
+    types = [f"T{i}" for i in range(N_TYPES)]
+    values = [f"V{i}" for i in range(N_VALUES)]
+    n.conn.executemany("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       [("argonauts", str(t), f"#{t}", "2026-09-09T00:00:00Z") for t in range(N_TOKENS)])
+    n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                       [("argonauts", str(t), ty, values[(t + i) % N_VALUES])
+                        for t in range(N_TOKENS) for i, ty in enumerate(types)])
+    rr0 = parse_event(_env(0, REAL_TRAIT_OFFER, "2026-09-09T10:00:00Z"))
+    rows, crits = [], []
+    for k in range(N_OFFERS):
+        rr = dict(rr0)
+        rr.update(file="f", run="run-ui", seq=k, order_hash=f"0x{k:040x}",
+                  valid_at="2026-09-09T10:00:00Z", valid_ts=iso_to_ts("2026-09-09T10:00:00Z"),
+                  criteria_n=2, criteria_numeric_n=0, price_eth=0.4)
+        rows.append(tuple(rr.get(c) for c in COLS))
+        # Two criteria per offer, drawn from the same small pool of pairs, so the
+        # DISTINCT pair count is tiny while the (offer x criterion) count is not.
+        for i in (0, 1):
+            crits.append(("run-ui", k, i, "string", types[(k + i) % N_TYPES],
+                          values[(k * 7 + i) % N_VALUES], None, None))
+    n.conn.executemany(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})", rows)
+    n.conn.executemany("INSERT INTO order_criteria VALUES (?,?,?,?,?,?,?,?)", crits)
+    n.conn.commit()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+    seen: list[str] = []
+    n.conn.set_trace_callback(seen.append)
+    t0 = time.monotonic()
+    v = eng.trait_offer_verdicts("argonauts", {"T0": [values[0]]},
+                                 iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
+    took = time.monotonic() - t0
+    n.conn.set_trace_callback(None)
+    traits_q = sum(1 for q in seen if "FROM traits" in q)
+    crit_q = sum(1 for q in seen if "order_criteria" in q)
+    pairs = v["distinct_criteria_pairs"]
+    check("verdict perf: the traits table is queried once per DISTINCT (trait_type, value) pair, "
+          "not once per (offer, criterion) -- the reach of a criterion is a property of the "
+          "trait table, not of the offer that names it",
+          traits_q <= pairs + 2 and pairs <= N_TYPES * N_VALUES,
+          f"{traits_q} traits queries for {pairs} distinct pairs over {N_OFFERS} offers")
+    check("verdict perf: the criteria rows are fetched in ONE grouped query, not one per offer",
+          crit_q <= 2, f"{crit_q} order_criteria queries for {N_OFFERS} offers")
+    check("verdict perf: total queries are O(distinct pairs), not O(offers x criteria) -- "
+          f"under {N_OFFERS // 10} for {N_OFFERS} offers x 2 criteria",
+          len(seen) < N_OFFERS // 10, f"{len(seen)} queries total, {took:.2f}s")
+    check(f"verdict perf: and it runs well inside the budget ({took:.2f}s, ceiling 3.0s)",
+          took < 3.0, f"{took:.2f}s")
+    # The verdicts themselves must be identical to the one-query-per-lookup version.
+    check("verdict perf: memoising changes the COST and not one verdict -- every offer lands in "
+          "exactly one bucket and the five still sum to the offer count",
+          v["covers"] + v["partial_n"] + v["disjoint"] + v["unknown_numeric"] + v["unparsed"]
+          == N_OFFERS, str({k: v[k] for k in ("covers", "partial_n", "disjoint",
+                                              "unknown_numeric", "unparsed")}))
+    n.close()
+
+
+def test_partial_detail_is_capped_but_the_count_never_is(tmp: Path) -> None:
+    """F3 (tech-lead, S2): an uncapped `partial` list reached 4.1 MB on the fixture.
+
+    The detail is a SAMPLE and the count is the answer. Capping the count instead
+    of the list would make the cap silently become the answer -- the exact shape
+    of BUG-047 (`requests_spent` counting the wrong thing) one module over.
+
+    Fails today: `partial_n` was `len(partial)`, so the two could not disagree
+    and there was nothing to cap.
+    """
+    from navanax.metrics import PARTIAL_DETAIL_CAP, MetricEngine, load_intervals
+    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.traits import ensure_schema
+
+    N_OFFERS = PARTIAL_DETAIL_CAP * 3 + 7
+    n = Normalizer(tmp / "empty-lz", tmp / "partialcap.sqlite")
+    ensure_schema(n.conn)
+    # Two tokens, two trait types. The filter is on Print; every offer is on
+    # Palette, so every one of them OVERLAPS without COVERING -> all PARTIAL.
+    for tid in ("1", "2"):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"#{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Print", "Unclaimed"),
+                            ("argonauts", tid, "Palette", "Seafoam" if tid == "1" else "Ivory")])
+    rr0 = parse_event(_env(0, REAL_TRAIT_OFFER, "2026-09-09T10:00:00Z"))
+    rows, crits = [], []
+    for k in range(N_OFFERS):
+        rr = dict(rr0)
+        rr.update(file="f", run="run-ui", seq=k, order_hash=f"0x{k:040x}",
+                  valid_at="2026-09-09T10:00:00Z", valid_ts=iso_to_ts("2026-09-09T10:00:00Z"),
+                  criteria_n=1, criteria_numeric_n=0, price_eth=0.4)
+        rows.append(tuple(rr.get(c) for c in COLS))
+        crits.append(("run-ui", k, 0, "string", "Palette", "Seafoam", None, None))
+    n.conn.executemany(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})", rows)
+    n.conn.executemany("INSERT INTO order_criteria VALUES (?,?,?,?,?,?,?,?)", crits)
+    n.conn.commit()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    v = eng.trait_offer_verdicts("argonauts", {"Print": ["Unclaimed"]},
+                                 iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
+    check("partial cap: the DETAIL is capped so the response cannot reach megabytes",
+          len(v["partial"]) == PARTIAL_DETAIL_CAP and PARTIAL_DETAIL_CAP == 50,
+          f"{len(v['partial'])} entries, cap {PARTIAL_DETAIL_CAP}")
+    check("partial cap: the COUNT is the true count and is computed separately -- a cap that "
+          "silently becomes the answer is worse than no detail at all",
+          v["partial_n"] == N_OFFERS, f"partial_n={v['partial_n']} of {N_OFFERS}")
+    check("partial cap: the response SAYS it was truncated and what the cap was, so nobody "
+          "reads the sample as the population",
+          v["partial_truncated"] is True and v["partial_detail_cap"] == PARTIAL_DETAIL_CAP
+          and "SAMPLE" in v["note"], str({k: v[k] for k in ("partial_truncated", "partial_detail_cap")}))
+    check("partial cap: every capped entry still carries |S(F) n S(C)| AND |S(F)| -- the cap "
+          "changes how many are shown, never what each one says (project rule 4)",
+          all(d["overlap_tokens"] == 1 and d["filter_tokens"] == 2 for d in v["partial"]),
+          str(v["partial"][0]))
+    small = eng.trait_offer_verdicts("argonauts", {"Palette": ["Seafoam"]},
+                                     iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
+    check("partial cap: under the cap nothing is truncated and the flag says so",
+          small["partial_truncated"] is False and small["partial_n"] == len(small["partial"]),
+          str(small["partial_n"]))
+    n.close()
+
+
+def _disagreeing_store(tmp: Path, name: str):
+    """A store where `traits` is populated and `tokens` is EMPTY.
+
+    A real intermediate state of the trait onboarding, and the one that makes the
+    empty-token-set guard load-bearing rather than redundant: `token_filter_sql`
+    (and so `_standing_live`, and so every standing series) resolves membership
+    against `traits`, while |S(F)| is counted over `tokens`. With the two
+    disagreeing, the book has listings the filter matches and |S(F)| is still 0.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                       [("argonauts", "1", "Print", "Unclaimed"),
+                        ("argonauts", "1", "Palette", "Seafoam")])
+    # NOTE: no INSERT INTO tokens. That is the whole fixture.
+    put(DOC_LISTING, "2026-09-09T10:00:00Z", 1, order_hash="0xask1", token_id="1",
+        price_eth=1.20, **NO_EXP)
+    put(REAL_BID, "2026-09-09T10:00:00Z", 2, order_hash="0xbid1", token_id="1",
+        price_eth=0.30, **NO_EXP)
+    put(REAL_COLL_OFFER, "2026-09-09T10:00:00Z", 3, order_hash="0xcoll", price_eth=0.348, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def test_empty_token_set_guard_holds_on_the_standing_branches_too(tmp: Path) -> None:
+    """B2/F4 (tech-lead, S1): the guard was only on the `_bucketed` branch.
+
+    `series()` has four branches — standing spread, standing series, derived, and
+    `_bucketed` — and BUG-20260910-060's guard was applied to one of them. The
+    other three walked straight past it while `basis.empty_token_set_note`
+    asserted, in the same response, that *"every bucket of this metric is
+    undefined"*. A basis that contradicts its own arrays is worse than no basis.
+
+    It is not a theoretical gap, and this is the fixture that shows why F4's
+    earlier version over-claimed: with `Print: Nonesuch` the standing ask is null
+    because no token has that trait, so the guard is never what makes it null and
+    the test proved nothing about the guard. Here `traits` is populated and
+    `tokens` is empty — a real intermediate state of trait onboarding — so
+    `_standing_live` (which resolves membership against `traits`) DOES match the
+    listing while |S(F)| (counted over `tokens`) is 0. Only the guard can null it.
+
+    Fails today: `floor_ask` returns 1.20, `immediacy_cost` returns 0.852, and
+    `trait_set_series`' ask line draws, all with `empty_token_set: true` beside
+    them.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n, eng = _disagreeing_store(tmp, "disagree.sqlite")
+    f = {"Print": ["Unclaimed"]}
+
+    def ser(metric, **kw):
+        return eng.series(metric=metric, collection="argonauts", interval="1h",
+                          range_="2h", now=H11, traits=f, **kw)
+
+    check("guard/standing: the fixture really does disagree -- the traits table matches the "
+          "filter and the token list is empty, so a standing series CAN find the listing",
+          eng._token_set_size("argonauts", f) == 0
+          and len(eng._standing_live("ask", "argonauts", "ETH",
+                                     iso_to_ts("2026-09-09T09:00:00Z"),
+                                     iso_to_ts("2026-09-09T11:00:00Z"), f)) == 1,
+          "if either half of this fails the rest of the test proves nothing")
+
+    for metric in ("floor_ask", "immediacy_cost"):
+        s = ser(metric)                                  # standing is the default for both
+        check(f"guard/standing: {metric} on the STANDING book is null on every bucket -- the "
+              "guard, not the absence of data, is what makes it null",
+              s["basis"]["book"] == "standing" and all(v is None for v in s["raw"])
+              and s["basis"]["empty_token_set"] is True, f"{metric} raw={s['raw']}")
+    imm = ser("immediacy_cost")
+    check("guard/standing: the spread's LEG arrays are blanked with it -- leaving the "
+          "collection-wide bid leg populated invites subtracting two legs of a metric that "
+          "has just been declared meaningless",
+          all(v is None for leg in imm["parts"].values() for v in leg)
+          and all(v is None for v in imm["pct_of_ask"]), str(imm["parts"]))
+    check("guard/standing: and so are the band, the coverage and the counts -- every one of "
+          "them is a claim about a group that does not exist",
+          all(v is None for k in ("p10", "p90", "coverage") for v in imm.get(k, []))
+          and all(v == 0 for k in ("n_ask", "n_bid") for v in imm.get(k, [])),
+          str({k: imm.get(k) for k in ("p10", "coverage", "n_ask")}))
+    fa = ser("floor_ask")
+    check("guard/standing: floor_ask's own band and n go with it",
+          all(v is None for k in ("p10", "p90", "coverage") for v in fa.get(k, []))
+          and all(v == 0 for v in fa.get("n", [])), str(fa.get("coverage")))
+    check("guard/standing: the note now says the universe is TOKENS, because that is what the "
+          "guard counts -- telling the Operator to check `traits` when `traits` is the "
+          "populated half is the wrong instruction (F7)",
+          "TOKENS table" in fa["basis"]["empty_token_set_note"]
+          and fa["basis"]["token_set_universe"] == "tokens"
+          and "empty `tokens` table" in fa["basis"]["empty_token_set_note"],
+          fa["basis"]["empty_token_set_note"][:160])
+    obs = ser("floor_ask", book="observed")
+    check("guard/standing: the observed book is guarded too, on the same fixture",
+          all(v is None for v in obs["raw"]) and obs["basis"]["empty_token_set"] is True,
+          str(obs["raw"]))
+    cb = ser("collection_bid")
+    check("guard/standing: collection_bid stays the metric-level carve-out and still reports "
+          "the collection-wide offer -- the guard blanks metrics the filter NARROWS",
+          any(v is not None for v in cb["raw"]) and cb["basis"]["empty_token_set"] is True
+          and "deliberately NOT narrowed" in cb["basis"]["empty_token_set_note"], str(cb["raw"]))
+
+    r = eng.trait_set_series("argonauts", f, iso_to_ts("2026-09-09T09:00:00Z"),
+                             iso_to_ts("2026-09-09T11:00:00Z"), "1h", "ETH", H11)
+    check("guard/standing: trait_set_series nulls its ASK line too -- the comment that 'no "
+          "tokens means no listings' was an assumption that tokens and traits agree, and "
+          "nothing enforces that",
+          r["matching_tokens"] == 0 and r["basis"]["empty_token_set"] is True
+          and all(v is None for v in r["trait_ask"]["median"])
+          and all(v is None for v in r["trait_ask"]["coverage"])
+          and all(v == 0 for v in r["trait_ask"]["n"]), str(r["trait_ask"]["median"]))
+    check("guard/standing: ...and its bid line, and the baseline is UNTOUCHED because it is "
+          "not filtered at all",
+          all(v is None for v in r["trait_bid"]["median"])
+          and any(v is not None for v in r["baseline_ask"]["median"]),
+          str(r["baseline_ask"]["median"]))
+    m = eng.trait_set_series("argonauts", {"Print": ["Unclaimed"], "Palette": ["Seafoam"]},
+                             iso_to_ts("2026-09-09T09:00:00Z"),
+                             iso_to_ts("2026-09-09T11:00:00Z"), "1h", "ETH", H11)
+    check("guard/standing: every single-clause floor is nulled too, each on ITS OWN token set",
+          len(m["single_floors"]) == 2
+          and all(v is None for fl in m["single_floors"] for v in fl["median"])
+          and all(fl["matching_tokens"] == 0 for fl in m["single_floors"]),
+          str([fl["median"] for fl in m["single_floors"]]))
+    n.close()
+
+
+def test_trait_series_endpoint_refuses_an_unknown_interval(tmp: Path) -> None:
+    """F6 (tech-lead, S3): an unknown interval reached the page as a bare 500.
+
+    REQ-N-09: an interval not in `config/intervals.yaml` is refused, not
+    improvised. `series()` has always refused with a ValueError naming the valid
+    ids, which the handler turns into a 400; `trait_set_series` indexed the dict
+    directly, so a typo in a URL produced `KeyError: '5min'` and an HTTP 500 with
+    a body nobody can act on.
+
+    Fails today with KeyError, not ValueError.
+    """
+    import threading
+
+    from navanax.dashboard import Dashboard
+
+    n, eng = _trait_chart_store(tmp, "badinterval.sqlite")
+    d = Dashboard.__new__(Dashboard)
+    d.engine, d.slugs, d.lock = eng, ["argonauts"], threading.Lock()
+    d.intervals, d.tz = eng.intervals, "America/Chicago"
+    try:
+        d.api_trait_series({"collection": "argonauts", "interval": "5min", "range": "24h"})
+        check("trait endpoint: an unknown interval is refused", False, "no exception raised")
+    except ValueError as exc:
+        check("trait endpoint: an unknown interval raises ValueError -- which the handler maps "
+              "to 400, not the KeyError that reached the page as a bare 500",
+              "5min" in str(exc) and "1h" in str(exc), str(exc)[:140])
+    except KeyError as exc:
+        check("trait endpoint: an unknown interval raises ValueError, not KeyError", False,
+              f"KeyError({exc}) -- this is the 500")
+    # The route table maps ValueError to 400 and everything else to 500; that
+    # mapping is the reason the exception TYPE is the fix.
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    check("trait endpoint: the handler still maps ValueError to 400 with the message as the body",
+          "except ValueError as exc:" in src and 'self._send(400, json.dumps({"error": str(exc)})' in src)
+    ok = d.api_trait_series({"collection": "argonauts", "interval": "1h", "range": "24h"})
+    check("trait endpoint: a known interval is unaffected", ok["basis"]["interval_id"] == "1h")
+    n.close()
+
+
+def test_trait_set_series_combined_floor_bounds_every_single_clause_floor(tmp: Path) -> None:
+    """THE PROPERTY, and note its DIRECTION -- the intuitive one is backwards.
+
+    `S(F_combined) = S(clause_1) n S(clause_2) n ...` is a SUBSET of each
+    single-clause set. The minimum over a subset is >= the minimum over the
+    superset, so at every bucket where both are defined:
+
+        combined floor  >=  each single-clause floor  >=  ...  and the
+        unfiltered baseline is <= all of them.
+
+    A run where a single-clause floor came out ABOVE the combined floor would
+    mean the AND-set is not a subset of that clause's set -- a broken token
+    filter, or a trait table where one token carries two values of one type and
+    the join is duplicating rather than intersecting. It would look like a
+    trait premium and it would be a bug (project rule 5).
+
+    Fails today: `single_floors` does not exist -- the multi-clause mode of the
+    chart had no metric behind it at all.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart5.sqlite")
+    r = _win(eng, {"Print": ["Unclaimed"], "Palette": ["Seafoam"]})
+    combined, base = r["trait_ask"]["median"], r["baseline_ask"]["median"]
+    check("trait chart: multi-clause mode returns the combined floor plus one floor per clause",
+          r["basis"]["mode"] == "multi" and len(r["single_floors"]) == 2
+          and {f["clause"] for f in r["single_floors"]} == {"Print", "Palette"},
+          str([f["clause"] for f in r["single_floors"]]))
+    check("trait chart: the fixture actually exercises the property -- the AND-set is ONE token "
+          "and each clause alone selects two, so the floors are genuinely different numbers",
+          r["matching_tokens"] == 1
+          and [f["matching_tokens"] for f in r["single_floors"]] == [2, 2],
+          str([(f["clause"], f["matching_tokens"]) for f in r["single_floors"]]))
+    viol = [(f["clause"], i, f["median"][i], combined[i])
+            for f in r["single_floors"] for i in range(len(combined))
+            if f["median"][i] is not None and combined[i] is not None
+            and f["median"][i] > combined[i] + 1e-12]
+    check("trait chart: PROPERTY -- at every bucket where both are defined, the combined (AND) "
+          "floor is >= every single-clause floor, because the AND-set is a subset of each",
+          not viol and combined[1] == 1.20, f"violations {viol}; combined {combined}")
+    low = [(i, base[i], combined[i]) for i in range(len(base))
+           if base[i] is not None and combined[i] is not None and base[i] > combined[i] + 1e-12]
+    check("trait chart: ...and the unfiltered baseline is at or below all of them",
+          not low and base[1] == 0.70, f"violations {low}; baseline {base}")
+    n.close()
+
+
+def test_trait_set_series_baseline_is_present_and_unfiltered(tmp: Path) -> None:
+    """The pale dotted line underneath is the COLLECTION floor, not a filtered one.
+
+    Fails today: no response carried a filtered series and its unfiltered
+    baseline together, so the page had to fire a second, differently-parameterised
+    request to draw the comparison -- two windows, two `now`s, and no guarantee
+    they were the same grid.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart6.sqlite")
+    for f in ({"Print": ["Unclaimed"]}, {"Print": ["Claimed"], "Palette": ["Ivory"]}):
+        r = _win(eng, f)
+        b = r["baseline_ask"]
+        check(f"trait chart: the baseline under {sorted(f)} is the UNFILTERED collection floor "
+              "(0.70, token 4 -- which the filter may exclude entirely)",
+              b["median"][1] == 0.70 and b["basis"]["kind"] == "ask", str(b["median"]))
+        check("trait chart: ...on the SAME grid as the filtered series, so the two can never "
+              "be drawn against different windows",
+              b["keys"] == r["keys"] and r["trait_ask"]["keys"] == r["keys"],
+              f"{b['keys']} vs {r['keys']}")
+    n.close()
+
+
+def test_trait_series_endpoint_passes_the_filter_through(tmp: Path) -> None:
+    """PR-6's endpoint: `/api/trait_series`, minimal, engine-owned.
+
+    Fails today: the route does not exist and `Dashboard.api_trait_series` is
+    not defined, so the page had nothing to call.
+    """
+    import threading
+
+    from navanax.dashboard import Dashboard
+
+    n, eng = _trait_chart_store(tmp, "traitchart7.sqlite")
+    d = Dashboard.__new__(Dashboard)
+    d.engine, d.slugs, d.lock = eng, ["argonauts"], threading.Lock()
+    d.intervals = eng.intervals
+    d.tz = "America/Chicago"
+    out = d.api_trait_series({"collection": "argonauts", "traits": "Print:Unclaimed",
+                              "interval": "1h", "range": "24h", "denom": "ETH"})
+    check("trait endpoint: it passes traits, interval, range and denomination through to the engine "
+          "and adds no calculation of its own",
+          out["basis"]["trait_filter"] == {"Print": ["Unclaimed"]}
+          and out["basis"]["interval_id"] == "1h" and out["basis"]["denomination"] == "ETH"
+          and out["matching_tokens"] == 2, str(out["basis"])[:200])
+    check("trait endpoint: the response is JSON-serialisable exactly as the handler sends it",
+          isinstance(json.dumps(out, default=str), str))
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    check("trait endpoint: the route table names it, so the page can actually reach it",
+          '"/api/trait_series": dash.api_trait_series' in src)
+
+    # The contract between the page and the API, written down. `traitChart()` reads
+    # exactly these; a rename on either side that this list does not catch shows up in
+    # the browser as `undefined` in a legend or a silently missing line, which on a
+    # panel full of legitimate holes is indistinguishable from a quiet market.
+    multi = d.api_trait_series({"collection": "argonauts", "range": "24h", "interval": "1h",
+                                "traits": "Print:Unclaimed;Palette:Seafoam"})
+    missing = [k for k in ("t", "trait_ask", "trait_bid", "baseline_ask", "single_floors",
+                           "matching_tokens", "partial_offers", "partial_detail",
+                           "unknown_offers", "unparsed_offers", "basis") if k not in multi]
+    missing += [f"trait_bid.{k}" for k in ("median", "coverage", "winning_leg", "n_item",
+                                           "n_trait_offer_cover", "n_collection")
+                if k not in multi["trait_bid"]]
+    missing += [f"basis.{k}" for k in ("book", "mode", "clauses", "denomination", "interval_id",
+                                       "buckets", "undefined_buckets", "matching_tokens",
+                                       "wash_filter", "timezone", "ask_rule", "bid_rule", "legs",
+                                       "partial_offers", "unknown_offers", "unparsed_offers",
+                                       "partial_note", "unknown_note", "left_truncation_note",
+                                       "gap_note") if k not in multi["basis"]]
+    missing += [f"single_floors[].{k}" for k in ("clause", "values", "median", "coverage", "n",
+                                                 "matching_tokens")
+                if multi["single_floors"] and k not in multi["single_floors"][0]]
+    missing += [f"{s}.{k}" for s in ("trait_ask", "baseline_ask") for k in ("median", "coverage", "n", "keys")
+                if k not in multi[s]]
+    check("trait endpoint: every field `traitChart()` reads is present in the response",
+          not missing, ", ".join(missing))
+    check("trait endpoint: a two-clause filter returns multi mode with one floor per clause",
+          multi["basis"]["mode"] == "multi" and multi["basis"]["clauses"] == 2
+          and len(multi["single_floors"]) == 2, str(multi["basis"]["mode"]))
+    n.close()
+
+
+def test_trait_set_series_ordering_survives_a_duplicated_traits_row(tmp: Path) -> None:
+    """The ordering property, on the shape that would break it (tech-lead gate, PR-5).
+
+    `test_..._combined_floor_bounds_every_single_clause_floor` names the failure
+    mode -- "a `traits` table where one token carries two values of one type and
+    the join is duplicating rather than intersecting" -- and then does not build
+    it: every token in that fixture has exactly one value per type, so the
+    duplicating join is never exercised. A property test that cannot see its own
+    counterexample is a test of the happy path with a warning attached.
+
+    A token with two values of one trait type is not a corruption. It is what a
+    multi-value attribute looks like in OpenSea metadata, and it arrives the
+    first time the Explorer cache is imported for a collection that has one.
+    Here token 1 carries `Palette: Seafoam` AND `Palette: Ivory`, and token 2
+    carries `Print: Unclaimed` AND `Print: Claimed`.
+
+    What must hold: `S(F_combined)` is still a SUBSET of every single-clause set,
+    so the combined floor stays at or ABOVE each of them and the unfiltered
+    baseline stays at or below all of them. A duplicating join would inflate
+    `|S(F)|`, pull a token into the AND-set that satisfies only one clause, and
+    render as a trait premium (docs/05 rule 5).
+
+    It holds because the filter is an `IN (SELECT ...)` per clause, ANDed --
+    `token_filter_sql`, metrics.py:380 -- not a JOIN per clause. `IN` is a
+    membership test and cannot multiply rows; `|S(F)|` is `COUNT(*)` over
+    `tokens`, one row per token, so it cannot double-count either. This test
+    pins that, so a future rewrite to a JOIN fails here rather than on screen.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "traitdup.sqlite")
+    rows = {"1": ("Unclaimed", "Seafoam"), "2": ("Unclaimed", "Ivory"),
+            "3": ("Claimed", "Seafoam"), "4": ("Claimed", "Ivory")}
+    for tid, (pr, pa) in rows.items():
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Print", pr), ("argonauts", tid, "Palette", pa)])
+    # THE FIXTURE: two tokens each carrying a SECOND value of a type they already have.
+    n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                       [("argonauts", "1", "Palette", "Ivory"),
+                        ("argonauts", "2", "Print", "Claimed")])
+    seq = 0
+
+    def at(raw, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, "2026-09-09T10:00:00Z", seq, **over, **NO_EXP)
+
+    for tid, px in (("1", 1.20), ("2", 0.90), ("4", 0.70)):
+        at(DOC_LISTING, order_hash=f"0xask{tid}", token_id=tid, price_eth=px)
+    at(REAL_COLL_OFFER, order_hash="0xcoll", price_eth=0.348)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+    dup = n.conn.execute("SELECT COUNT(*) FROM traits WHERE collection='argonauts' "
+                         "AND token_id='1' AND trait_type='Palette'").fetchone()[0]
+    check("trait chart (dup traits): the fixture really does hold two values of one type for one "
+          "token -- without this the property test never sees its own counterexample", dup == 2, str(dup))
+
+    viol, low, sizes = [], [], []
+    for f in ({"Print": ["Unclaimed"], "Palette": ["Seafoam"]},
+              {"Print": ["Unclaimed"], "Palette": ["Ivory"]},
+              {"Print": ["Claimed"], "Palette": ["Ivory"]},
+              {"Print": ["Claimed"], "Palette": ["Seafoam"]}):
+        r = _win(eng, f)
+        comb, base = r["trait_ask"]["median"], r["baseline_ask"]["median"]
+        sizes.append((r["matching_tokens"], [s["matching_tokens"] for s in r["single_floors"]]))
+        viol += [(f, s["clause"], i, s["median"][i], comb[i])
+                 for s in r["single_floors"] for i in range(len(comb))
+                 if s["median"][i] is not None and comb[i] is not None
+                 and s["median"][i] > comb[i] + 1e-12]
+        low += [(f, i, base[i], comb[i]) for i in range(len(base))
+                if base[i] is not None and comb[i] is not None and base[i] > comb[i] + 1e-12]
+    check("trait chart (dup traits): PROPERTY -- the combined (AND) floor is still >= every "
+          "single-clause floor. A duplicating join would pull a token satisfying only ONE clause "
+          "into the AND-set and render it as a trait premium (docs/05 rule 5)",
+          not viol, f"violations {viol}")
+    check("trait chart (dup traits): ...and the unfiltered baseline is still at or below all of them",
+          not low, f"violations {low}")
+    check("trait chart (dup traits): |S(F)| is never inflated by the duplicate -- the AND-set is "
+          "at most as large as either clause alone, on every filter",
+          all(c <= min(s) for c, s in sizes), str(sizes))
+    check("trait chart (dup traits): the duplicate WIDENS the single-clause sets it belongs to "
+          "(Palette:Ivory now reaches 3 tokens, Print:Claimed 3) -- the fixture is live, not inert",
+          sizes[1][1] == [2, 3] and sizes[2][1] == [3, 3], str(sizes))
+    n.close()
+
+
+def test_merge_leg_maxima_reports_a_tie_as_every_leg_that_holds_it(tmp: Path) -> None:
+    """A tie names BOTH legs. Nothing tested this (tech-lead gate, PR-5).
+
+    `merge_leg_maxima` documents ties as its central design choice -- "two legs
+    quoting the same best price is a fact about the book, and naming one of them
+    would be an invention" -- and docs/08 §4a.1 promises the Operator the string
+    `"item+collection"` by name. Every fixture in the suite had three legs at
+    three different prices, so replacing the tie branch with `pass` (first leg
+    wins by iteration order) passed the entire suite. That is a documented
+    behaviour with no coverage: the leg-mixing guard would have gone silently
+    one-sided, and on a book this thin two makers quoting the same round number
+    is common, not exotic.
+
+    Here the item bid and the collection offer are BOTH 0.50 and both beat the
+    COVERing trait offer at 0.41.
+    """
+    import copy
+
+    from navanax.metrics import MetricEngine, load_intervals, merge_leg_maxima
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    # -- the primitive, directly: ties, and no invented precedence -------------
+    legs = {"collection": [(0.0, 10.0, 0.5)], "item": [(0.0, 10.0, 0.5)],
+            "trait_offer": [(0.0, 4.0, 0.9)]}
+    got = merge_leg_maxima(legs)
+    check("merge_leg_maxima: while a third leg is strictly highest it alone is named",
+          got[0][2] == (0.9, ("trait_offer",)), str(got))
+    check("merge_leg_maxima: when it drops out, the two legs tied at the max are BOTH named, "
+          "in a tuple -- not one of them picked by dict order",
+          got[-1][2][0] == 0.5 and sorted(got[-1][2][1]) == ["collection", "item"], str(got))
+    rev = merge_leg_maxima({k: legs[k] for k in reversed(list(legs))})
+    check("merge_leg_maxima: reversing the leg order names the SAME set of legs -- a result that "
+          "depends on dict iteration order is a precedence rule nobody decided",
+          len(rev[-1][2][1]) == 2 and sorted(rev[-1][2][1]) == sorted(got[-1][2][1]),
+          f"{rev[-1]} vs {got[-1]}")
+
+    # -- and end to end, as `winning_leg` on the chart -------------------------
+    n, put = _lives_store(tmp, "traittie.sqlite")
+    for tid, pr in (("1", "Unclaimed"), ("2", "Unclaimed"), ("3", "Claimed")):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", tid, "Print", pr))
+    seq = 0
+
+    def at(raw, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, "2026-09-09T10:00:00Z", seq, **over, **NO_EXP)
+
+    at(DOC_LISTING, order_hash="0xask1", token_id="1", price_eth=1.20)
+    at(REAL_BID, order_hash="0xbid1", token_id="1", price_eth=0.50)    # item leg
+    at(REAL_COLL_OFFER, order_hash="0xcoll", price_eth=0.50)           # collection leg, SAME price
+    raw = copy.deepcopy(REAL_TRAIT_OFFER)
+    raw[4]["payload"]["trait_criteria"] = {"trait_type": "Print", "trait_name": "Unclaimed"}
+    raw[4]["payload"]["trait_criteria_list"] = None
+    at(raw, order_hash="0xtcov", price_eth=0.41)                       # COVERing, but lower
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    b = _win(eng, {"Print": ["Unclaimed"]})["trait_bid"]
+    check("trait chart: two legs tied at the best bid put BOTH names on screen, joined and sorted "
+          "-- docs/08 §4a.1 promises the Operator this exact string",
+          b["median"][1] == 0.50 and b["winning_leg"][1] == "collection+item", str(b["winning_leg"]))
+    check("trait chart: ...and each tied leg still carries its OWN n; the tie is not a merge",
+          (b["n_item"][1], b["n_collection"][1], b["n_trait_offer_cover"][1]) == (1, 1, 1), str(b))
     n.close()
 
 

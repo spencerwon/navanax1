@@ -567,9 +567,121 @@ Found by the orchestrator running the new `tools/gates.py --corpus` in the
 device VM. Fix: failures and short files are counted in the sync stats and fail
 the gate; `gates.command` runs the fold on the Mac where the codec lives.
 
+### Round 17 — a bid line for a trait group with no members (PR-5)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-059 | S1 | P1 | fixed | the trait chart's union bid leg drew the collection offer for a filter selecting **zero** tokens — a confident bid line for a trait group with no members |
+| BUG-20260910-060 | S1 | P1 | fixed | the same shape in `_bucketed`: under a trait filter that selects zero tokens, `bid_count` / `event_count` still counted collection offers and COVERing trait offers |
+
+Found by the data engineer smoke-testing PR-6's page against real PR-5 payloads
+before opening the PR, on the filter case nobody draws on purpose: `Print: Nope`,
+a clause with no matching token.
+
+The ask lines went null on their own — no tokens, so no listings. The **bid** did
+not. A collection offer is not token-scoped and `S(F) ⊆ S(C)` is vacuously true
+when `S(F) = ∅`, so the panel drew **0.348 Ξ** as "the highest standing bid for
+this trait" for a trait group with **zero** members. Every leg count was correct;
+only the line was a lie, and it was a lie in the flattering direction — a bid
+with no ask above it reads as a trait nobody has listed and somebody wants.
+
+**It is reachable today on every filter.** `traits` has 0 rows in this working
+copy and on the Operator's machine until the Explorer import lands, so *every*
+filter has `S(F) = ∅`. The first thing the trait chart would have drawn, on its
+first run, is this number.
+
+Fixed in `trait_set_series`: when the filter is non-empty and `|S(F)| = 0`, the
+bid series and `winning_leg` are null in every bucket, `basis.empty_token_set` is
+true, and both the panel and the basis print *"this filter selects no token, so
+there is no trait group … if that is unexpected, check whether the `traits` table
+is populated at all."* The per-leg counts still report what **was** standing, so
+the withholding is visible as a withholding rather than as an empty book.
+
+**BUG-060 was the same defect one function away, and is fixed in the same pass.**
+`_bucketed`'s filter clause is `((token_id IS NULL AND event_type='collection_offer')
+OR (event_type='trait_offer' AND <COVERS>) OR (<token matches every clause>))`. Each
+disjunct is right on its own; the *set* of them had no `|S(F)| > 0` condition, so
+under a filter that selects no token the two token-less branches kept matching.
+Measured on the fixture, before the fix, in the bucket holding the book:
+
+| metric, filter selects 0 tokens | before | after |
+|---|---|---|
+| `bid_count` | **1.0** — the collection offer | `None` |
+| `event_count` | **1.0** | `None` |
+| `sales_count` · `cancel_count` · `listing_count` · `volume` | **0.0** | `None` |
+| `top_item_bid` · `floor_ask` · `immediacy_cost` | `None` (already) | `None`, now with a reason |
+| `basis.empty_token_set` | **absent** — nothing on the page could say why | `true` + a printed note |
+
+The `0.0` cases matter as much as the `1.0` ones: a zero says *"nothing happened
+to this trait group in this hour"*, and the truth is that there is no trait group.
+And while `traits` is empty **every** filter selects zero tokens, so the `1.0` was
+100 % of the filtered bid count — the Activity chart's *bids* bars under any trait
+filter were counting bids on tokens the filter does not select.
+
+The fix is one predicate, `filter_narrows(spec)`, used in the two places that were
+about to disagree: `_bucketed` returns nothing, and `series()` fills the grid with
+`None` rather than the usual `0.0` for COUNT/SUM. `collection_bid` is the
+deliberate carve-out and is unchanged — it is not narrowed by a trait filter (leg
+discipline, quant §1 metric 1) — but its basis now says the number is
+collection-wide and is not a statement about the filter. The note prints under
+**every** chart, not only the trait panel.
+
+### Round 18 — the tech-lead blocks PR-5/PR-6
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-061 | S1 | P0 | fixed | the empty-token-set guard was on **one** of `series()`' four branches; the standing-book branches drew a line while the basis in the same response said every bucket was undefined |
+| BUG-20260910-062 | S1 | P1 | fixed | `trait_offer_verdicts` re-queried `traits` once per (offer, criterion) — 27,694 queries for 48 distinct pairs, 8.6 s at 200k lives |
+| BUG-20260910-063 | S2 | P2 | fixed | every PARTIAL offer travelled as full detail — 4.1 MB of JSON |
+
+**061 is an incomplete fix to 060, and that is the interesting part.** The guard
+was written where the defect was *found* — the `_bucketed` branch — rather than
+around the value the guard is *about*. `series()` has four branches; three
+ignored it, so `floor_ask` and `immediacy_cost` on the standing book drew a line
+while `basis.empty_token_set_note`, in the same response, asserted that every
+bucket was undefined. **A basis that contradicts its own arrays is worse than no
+basis**, because the basis is the thing a reader falls back on.
+
+It is reachable only when `tokens` and `traits` disagree, which is why it was not
+obvious — and why the BUG-060 regression test could not see it. That test filtered
+on a trait value **no token has**, so the standing series was null for lack of
+data and the guard was never what made it null. The new fixture populates `traits`
+and leaves `tokens` empty — a real intermediate state of trait onboarding — so the
+book matches the filter while `|S(F)| = 0`. Before the fix, on that fixture:
+`floor_ask` **1.20 Ξ**, `immediacy_cost` **0.852 Ξ**, and the trait chart's ask
+line drawn, all with `empty_token_set: true` printed beside them.
+
+> **A guard needs a fixture in which the thing it guards against is actually
+> present.** When two tables can disagree, the test for a rule that spans them
+> must make them disagree.
+
+The same review corrected the note's wording (**F7**): it told the Operator to
+check the `traits` table, and the guard counts `tokens`. On the very fixture that
+exposed 061, `traits` was the populated half — so the note named the one table
+that was fine. It now says the universe is `tokens` and that both are filled by
+the same onboarding run.
+
+**062** is cost, not correctness: the reach of a criterion `(trait_type, value)`
+is a property of the trait table, not of the offer that names it. Memoised per
+call, plus one grouped query for the criteria rows: fewer than 200 queries and
+0.03 s on a 2,000-offer synthetic, against ~6,000 queries before. The regression
+test asserts the **query count** with `sqlite3`'s trace callback rather than a
+wall clock — the count is what was wrong, and a stopwatch on shared CI hardware is
+a flaky test.
+
+**063**: `partial_n` is now counted separately from the detail list and is never
+capped; `partial` is a sample of at most 50, flagged with `partial_truncated`. A
+cap that silently becomes the answer is BUG-047's shape one module over.
+
+Also in this round, no ledger id: `/api/trait_series` indexed the intervals dict
+directly, so an unknown interval reached the page as a bare **500**
+(`KeyError: '5min'`). It now refuses with a `ValueError` naming the valid ids,
+which the handler maps to **400** — REQ-N-09, an interval not in
+`intervals.yaml` is refused, not improvised.
+
 ### Still open
 
-**None.** All 58 logged bugs are fixed.
+**None.** All 63 logged bugs are fixed.
 
 ### The lesson
 

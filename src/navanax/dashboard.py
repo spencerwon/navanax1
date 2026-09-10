@@ -159,6 +159,20 @@ class Dashboard:
         s, e = parse_range(q.get("range", "6h"), self.intervals, now, self.tz)
         return s.timestamp(), e.timestamp()
 
+    def api_trait_series(self, q: dict[str, str]) -> dict[str, Any]:
+        """PR-6's hero panel: everything the trait chart draws, on one grid.
+
+        Minimal on purpose -- traits, interval, range, denomination. There is no
+        `transform` and no `book`: the Operator's decision fixes the book to
+        STANDING, and a % -change view of a floor whose baseline is a hole is a
+        number with no basis. The engine owns every rule; this passes through.
+        """
+        s, e = self._window(q)
+        with self.lock:
+            return self.engine.trait_set_series(
+                self._slug(q), parse_trait_filter(q.get("traits")), s, e,
+                q.get("interval", "5m"), q.get("denom", "ETH"))
+
     def api_book(self, q: dict[str, str]) -> dict[str, Any]:
         with self.lock:
             return self.engine.live_book(self._slug(q), limit=int(q.get("limit", "25")),
@@ -322,6 +336,7 @@ def make_handler(dash: Dashboard):
         "/api/meta": lambda q: dash.api_meta(),
         "/api/series": dash.api_series,
         "/api/multi": dash.api_multi,
+        "/api/trait_series": dash.api_trait_series,
         "/api/book": dash.api_book,
         "/api/tape": dash.api_tape,
         "/api/makers": dash.api_makers,

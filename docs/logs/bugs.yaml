@@ -1976,3 +1976,216 @@ bugs:
   regression_test: tests/selftest.py::test_sync_counts_unreadable_files_instead_of_reporting_zero_rows
   monitor_gap: "A log WARNING is not a signal a caller sees. The fifth rule applied to a gate: '0 rows, green' is a surprisingly clean result and should have been read as a bug by whoever ran it -- and it was, on the second look."
   pr: 6
+
+- id: BUG-20260910-059
+  summary: "the trait chart's union bid leg drew the collection offer for a filter selecting ZERO tokens -- a confident bid line for a trait group with no members"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T09:20:00-05:00"
+  occurred_at: "2026-09-10T08:55:00-05:00"
+  resolved_at: "2026-09-10T09:30:00-05:00"
+  detected_by: "data-engineer, smoke-testing the PR-6 page against real PR-5 payloads on the filter case nobody draws on purpose: a clause with no matching token"
+  detection_channel: agent
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1142}
+  requirement: REQ-F-19
+  data_impact: "None to stored data. Presentation and metric output only: the panel reported a price as the trait group's highest standing bid when the group had no members."
+  root_cause: >-
+    The union bid leg maxes over three legs and only one of them is token-scoped.
+    A collection offer carries no token and S(F) is a subset of S(C) vacuously
+    when S(F) is empty, so with a filter matching no token the collection-offer
+    leg still stood and set the line. The ask legs went null on their own
+    because no tokens means no listings, which is exactly why the defect was
+    asymmetric and easy to miss: half the chart was already behaving.
+    It is reachable on EVERY filter today -- `traits` has 0 rows until the
+    Explorer import lands, so every filter has S(F) = {} -- which means this is
+    the first number the trait chart would have drawn on its first run.
+  resolution: >-
+    When the filter is non-empty and |S(F)| = 0 the bid series and `winning_leg`
+    are null in every bucket, `basis.empty_token_set` is true, and both the panel
+    notice and the basis line say so and name the likely cause (an unpopulated
+    `traits` table). The per-leg counts still report what WAS standing, so the
+    withholding is visible as a withholding rather than as an empty book.
+  regression_test: tests/selftest.py::test_trait_set_series_empty_and_set_is_null_never_zero
+  monitor_gap: >-
+    Every metric test asserted a filter that MATCHED something. No fixture ever
+    asked what a trait metric does when the trait set is empty -- which is the
+    state the store is actually in right now. The narrow fix is the property test
+    above; the general one is that a filtered metric needs a case where the
+    filter selects nothing, because that is not an edge case here, it is the
+    default until the traits table is filled.
+  pr: null
+
+- id: BUG-20260910-060
+  summary: "under a trait filter that selects zero tokens, `_bucketed` still counts collection offers and COVERing trait offers, so `bid_count` / `event_count` report bids on tokens the filter does not select"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T09:30:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  resolved_at: "2026-09-10T10:05:00-05:00"
+  detected_by: "data-engineer, while fixing BUG-20260910-059 -- the same shape one function away"
+  detection_channel: agent
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 728}
+  requirement: REQ-F-19
+  data_impact: "None to stored data. The Activity chart's `bids` bars, and any `bid_count` / `event_count` under a trait filter, include collection offers and COVERing trait offers even when the filter matches no token."
+  root_cause: >-
+    The filter clause in `_bucketed` is `((token_id IS NULL AND
+    event_type='collection_offer') OR (event_type='trait_offer' AND <COVERS>) OR
+    (<token matches every clause>))`. Each disjunct is right on its own, but
+    there is no `|S(F)| > 0` condition, and a bid on every token is not a bid on
+    any token of an empty set. While `traits` is empty this is 100% of the
+    filtered bid count.
+  resolution: >-
+    One predicate, `filter_narrows(spec)`, answers "does a trait filter actually
+    narrow this metric" in the two places that were about to disagree.
+    `_bucketed` returns {} when the filter narrows this metric AND |S(F)| = 0, so
+    no direct caller can get the leaked count. `series()` computes |S(F)| once and,
+    when it is 0 and the filter narrows, fills the grid with None instead of the
+    usual 0.0 for COUNT/SUM -- a 0 says "nothing happened to this trait group",
+    and the truth is that there is no trait group. Every response now carries
+    `basis.empty_token_set` and a note saying which case it is and to check
+    whether `traits` is populated; the page prints it under EVERY chart, not just
+    the trait panel. `collection_bid` is the deliberate carve-out and is
+    unchanged -- it is not narrowed by a trait filter (leg discipline, quant §1
+    metric 1) -- but its basis now says the number is collection-wide and is not
+    a statement about the filter. |S(F)| is counted over `tokens`, the same
+    universe `screener` and `trait_offer_verdicts` use, so an unpopulated token
+    list trips the guard too: if we know of no tokens we can say nothing about a
+    subset of them.
+  regression_test: tests/selftest.py::test_filtered_counts_are_null_when_the_filter_selects_no_token
+  monitor_gap: >-
+    Same gap as BUG-20260910-059: no test asked what a filtered COUNT does when
+    the filter selects nothing, and every filtered-metric fixture used a filter
+    that matched something. The general lesson is that a filtered metric needs a
+    case where the filter selects NOTHING -- which on this project is not an edge
+    case but the default until the traits table is filled. What still settles the
+    size of the error already shipped, on the Operator's store: SELECT
+    event_type, COUNT(*) FROM events WHERE collection='argonauts' AND event_type
+    IN ('collection_offer','trait_offer');
+  pr: null
+
+- id: BUG-20260910-061
+  summary: "the empty-token-set guard was applied to ONE of series()' four branches: the standing-book branches drew a line while the basis in the same response said every bucket was undefined"
+  severity: S1
+  priority: P0
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T10:05:00-05:00"
+  resolved_at: "2026-09-10T11:40:00-05:00"
+  detected_by: "tech-lead, reviewing PR-5/PR-6 (item B2) -- an incomplete fix to BUG-20260910-060, caught by reading the other three branches"
+  detection_channel: tech-lead
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1382}
+  - {file: src/navanax/metrics.py, line: 1178}
+  requirement: REQ-F-19
+  data_impact: "None to stored data. `floor_ask` and `immediacy_cost` on the STANDING book, and `trait_set_series`' ask line and single-clause floors, drew values under a filter whose response simultaneously declared every bucket undefined."
+  root_cause: >-
+    BUG-060's guard was written on the `_bucketed` branch, where the defect had
+    been found, rather than on the value the guard is about. `series()` has four
+    branches (standing spread, standing series, derived, _bucketed) and three
+    ignored it. The gap is only reachable when `tokens` and `traits` disagree,
+    which is why it was not obvious: `token_filter_sql` -- and so
+    `_standing_live`, and so every standing series -- resolves membership against
+    the `traits` table, while |S(F)| is counted over `tokens`. A populated
+    `traits` table with an empty token list is a real intermediate state of trait
+    onboarding, and in it the book matches the filter while |S(F)| = 0. The
+    comment in `trait_set_series` said "the ask legs go null on their own",
+    which was an unstated assumption that the two tables agree.
+  resolution: >-
+    One blanking pass in `series()` after every branch -- raw, parts, pct, and
+    the p10/p90/coverage/n arrays -- so a branch added later cannot miss it.
+    `parts` is blanked with the rest: `immediacy_cost` as a whole is undefined
+    there, and leaving its collection-wide bid leg populated invites subtracting
+    two legs of a metric just declared meaningless. `trait_set_series` blanks its
+    ask line via `_blank_standing`, and each single-clause floor on ITS OWN token
+    set rather than on the combined one -- a clause that does select tokens is a
+    real number and is exactly what the multi-clause panel exists to show when
+    the AND-set is empty. The metric-level carve-out is unchanged:
+    `collection_bid` has `narrows = False` and is never blanked. The note, the UI
+    notice and docs/08 §4a.1/§4a.2 now all say the universe is `tokens`.
+  regression_test: tests/selftest.py::test_empty_token_set_guard_holds_on_the_standing_branches_too
+  monitor_gap: >-
+    The BUG-060 regression test used a filter naming a trait value no token has,
+    so the standing series was null because there was no data -- the guard was
+    never what made it null and the test could not see the missing branches.
+    A guard needs a fixture in which the thing it guards against is actually
+    present. The lesson generalises past this bug: when two tables can disagree,
+    the test for a rule that spans them must make them disagree.
+  pr: null
+
+- id: BUG-20260910-062
+  summary: "trait_offer_verdicts re-queried the traits table once per (offer, criterion): 27,694 queries for 48 distinct pairs, 8.6 s at 200k lives"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T08:40:00-05:00"
+  resolved_at: "2026-09-10T11:20:00-05:00"
+  detected_by: "tech-lead, reviewing PR-5/PR-6 (item B1), profiling the trait panel at 200k lives with a filter selecting 500 of 9,000 tokens at 1h/24h"
+  detection_channel: tech-lead
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1668}
+  requirement: REQ-N-11
+  data_impact: "None. Cost only -- but the trait panel is the hero panel and it re-renders every 10 s, so an 8.6 s call is a dashboard that is always behind and a store that is always locked."
+  root_cause: >-
+    The reach of a criterion `(trait_type, value)` is a property of the trait
+    table, not of the offer that names it, and it was being looked up per offer.
+    The criteria rows were also fetched one query per offer. Both scale with
+    offers x criteria where the real work is the number of DISTINCT pairs.
+  resolution: >-
+    A per-call memo, `(trait_type, value) -> set(token_id)`, local to the call
+    so nothing is cached across a fold; and one grouped query for all criteria
+    rows in the window. The verdicts are unchanged, which the property tests
+    assert. On the 2,000-offer synthetic the call now issues fewer than 200
+    queries in total and runs in 0.03 s.
+  regression_test: tests/selftest.py::test_trait_offer_verdicts_query_count_is_o_distinct_pairs
+  monitor_gap: >-
+    Every existing fixture had a handful of offers, so the shape was invisible:
+    a query count that is quadratic in the fixture and linear in reality looks
+    identical at n = 5. The regression test asserts the QUERY COUNT with
+    sqlite3's trace callback rather than a wall-clock threshold -- the count is
+    the thing that was wrong, and a stopwatch on shared CI hardware is a flaky
+    test. Wall time is printed beside it with a generous ceiling.
+  pr: null
+
+- id: BUG-20260910-063
+  summary: "trait_offer_verdicts returned every PARTIAL offer as full detail -- 4.1 MB of JSON on the tech-lead's fixture"
+  severity: S2
+  priority: P2
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T08:40:00-05:00"
+  resolved_at: "2026-09-10T11:25:00-05:00"
+  detected_by: "tech-lead, reviewing PR-5/PR-6 (item F3)"
+  detection_channel: tech-lead
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1700}
+  requirement: REQ-F-19
+  data_impact: "None. Response size only: the page prints the first five and carried the rest for nobody."
+  root_cause: "The detail list was the count: `partial_n` was `len(partial)`, so there was nothing to cap without capping the answer."
+  resolution: >-
+    `partial_n` is counted separately from the detail list and is never capped;
+    `partial` is a SAMPLE of at most PARTIAL_DETAIL_CAP = 50, and the response
+    carries `partial_detail_cap` and `partial_truncated` so nobody reads the
+    sample as the population. Every entry still carries |S(F) n S(C)| and |S(F)|
+    -- the cap changes how many are shown, never what each one says.
+  regression_test: tests/selftest.py::test_partial_detail_is_capped_but_the_count_never_is
+  monitor_gap: >-
+    A cap that silently becomes the answer is the exact shape of BUG-047
+    (`requests_spent` counting the wrong thing) one module over, so the test
+    asserts the count and the detail length are DIFFERENT numbers on a fixture
+    that exceeds the cap -- which is the only way to tell the two apart.
+  pr: null

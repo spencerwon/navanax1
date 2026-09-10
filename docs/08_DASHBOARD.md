@@ -107,6 +107,7 @@ Metrics available now (all *observed* quantities — no fair value, no smoothing
 | `collection_bid` | highest **standing** collection offer over the bucket, time-weighted | `standing` (default) |
 | `top_item_bid` | highest `item_received_bid` seen in the interval | `observed` only — see §4c |
 | `immediacy_cost` | standing lowest ask − standing highest collection offer, both legs on the same τ (REQ-F-13a, docs/01 §3.2), also as % of ask. **Undefined when either leg is absent** — drawn as a hole, never filled | `standing` (default) |
+| `trait_set_series` | not a `series()` metric but its own call (§4a.1): the trait group's lowest standing ask, its highest standing bid over three named legs, the unfiltered baseline, and per-clause floors | `standing` only |
 | `sale_price`, `volume`, `sales_count` | median / sum / count of `item_sold` | n/a — flow, not a book |
 | `listing_count`, `bid_count`, `cancel_count`, `event_count` | counts | n/a |
 
@@ -202,11 +203,81 @@ Five verdicts, **never summed into one number**:
 
 The structural rule is deliberately **conservative**: it decides COVERS from F and C alone, without consulting `traits`. An offer whose reach happens to contain `S(F)` for reasons the filter does not state is reported PARTIAL rather than COVERS. That errs toward under-counting depth, which is the safe direction.
 
-**A filtered spread has two different legs.** `immediacy_cost` under a trait filter is a *trait-filtered* lowest ask minus the *collection-wide* highest collection offer. Trait offers do **not** enter that leg even now that their criteria are stored: `collection_bid` is collection offers by definition, and a bid leg that maxes over item bids, COVERing trait offers and collection offers is a **different metric** and a later PR. The COVER rule changes the metrics whose event set already includes `trait_offer` — `bid_count` and `event_count`. The response carries a `legs` field naming all of this and the page prints it as a warning line under the chart. Whether that leg should instead refuse to compute is an open product decision for the Operator (see §5).
+**A filtered spread has two different legs.** `immediacy_cost` under a trait filter is a *trait-filtered* lowest ask minus the *collection-wide* highest collection offer. Trait offers do **not** enter that leg even now that their criteria are stored: `collection_bid` is collection offers by definition, and a bid leg that maxes over item bids, COVERing trait offers and collection offers is a **different metric** — `trait_set_series`, below. The COVER rule changes the metrics whose event set already includes `trait_offer` — `bid_count` and `event_count`. The response carries a `legs` field naming all of this and the page prints it as a warning line under the chart. Whether that leg should instead refuse to compute is an open product decision for the Operator (see §5).
+
+### 4a.1 `trait_set_series` — the trait chart's metric layer (PR-5)
+
+`MetricEngine.trait_set_series(collection, traits, start, end, interval, denom, now)` returns, on **one** bucket grid, everything the trait chart draws. It is the Operator's decision of 2026-09-10 expressed as a function, and its shape is not a menu.
+
+| output | definition |
+|---|---|
+| `trait_ask` | the **lowest STANDING ask** over `S(F)` — a full `standing_series` response (median, `[p10, p90]`, `coverage`, `n`, basis) |
+| `trait_bid` | the trait group's **highest STANDING bid**: the MAX, at each τ, over the union of three legs, with `n_item`, `n_trait_offer_cover`, `n_collection` and `winning_leg` per bucket |
+| `baseline_ask` | the **unfiltered** collection floor, on the same grid |
+| `single_floors` | multi-clause only: one `standing_series` per clause, each with its own `matching_tokens` |
+| `matching_tokens` | `\|S(F)\|` — the `n` every number on the panel carries |
+| `partial_offers` · `partial_detail` | the **true** PARTIAL count, and a **sample** of at most 50 offers each carrying `\|S(F) ∩ S(C)\|` and `\|S(F)\|`. The count is computed separately from the list and is never capped — a cap that silently becomes the answer is worse than no detail (BUG-20260910-063); `partial_truncated` says when the sample is short of the count |
+| `unknown_offers` · `unparsed_offers` | numeric-criteria UNKNOWN and `criteria_n = 0` UNPARSED, **counted separately** |
+
+**The three bid legs, and why they are one line with three counts.**
+
+1. **item bids on tokens in `S(F)`** — token-scoped, narrowed by the filter.
+2. **trait offers whose criteria COVER F** — `S(F) ⊆ S(C)` (§4a). The COVERS predicate is `criteria_cover_sql()` unchanged; `order_lives` carries no `(run, seq)`, so the criteria join reaches it through the placement row in `events`. Under an **empty** filter no trait offer covers — `S(F)` is every token and only `C = {}` reaches all of them — so this leg is legitimately empty with no filter. That is the rule, not a missing join.
+3. **collection offers** — `C = {}`, a bid on every token, so they reach `S(F)` whatever F is. Not a special branch: it falls out of the same rule.
+
+The union max is a legitimate *"best bid available to a holder of this trait"*. A **sum** of the three would not be depth, and a line that silently swaps population between buckets is exactly the leg-mixing quant §1 metric 1 forbids — so the response reports each leg's own `n` and `winning_leg` names the leg that set the number in each bucket. Where two legs quote the same best price, `winning_leg` names both (`"item+collection"`): picking one would be an invention.
+
+**Nulls, never zeros.** A bucket where the AND-set has no standing ask is `None`. Zero is a price; *"no standing ask in this hour"* is not the price zero, and on a book with eight listings in forty minutes the difference is most of the chart. Both emptinesses are null and both say which: an AND-set of real tokens none of which is listed (`matching_tokens > 0`), and an AND-set that selects no token at all (`matching_tokens = 0`).
+
+**`|S(F)| = 0` withholds every trait series, and this matters today.** The bid line was the obvious one (BUG-20260910-059): a collection offer is not token-scoped and `S(F) ⊆ S(C)` is vacuously true when `S(F) = ∅`, so without a guard the panel draws a confident *"highest standing bid"* for a trait group with **zero members**.
+
+The **ask** lines were left unguarded on the reasoning *"no tokens, so no listings"* — and that is an unstated assumption that `tokens` and `traits` agree (BUG-20260910-061). Nothing enforces it: `token_filter_sql`, and so `_standing_live`, and so every standing series, resolves membership against **`traits`**, while `|S(F)|` is counted over **`tokens`**. A populated `traits` table with an empty token list is a real intermediate state of trait onboarding, and in it the book matches the filter while `|S(F)| = 0`.
+
+So every series is blanked explicitly:
+
+| series | guarded on | when `|S(F)| = 0` |
+|---|---|---|
+| `trait_bid` + `winning_leg` | the combined set | null on every bucket |
+| `trait_ask` (median, `p10`, `p90`, `coverage`; `n` → 0) | the combined set | null on every bucket |
+| each `single_floors[i]` | **its own** clause's token set | null on every bucket |
+| `baseline_ask` | — | **untouched**; it is not filtered at all |
+
+Each single-clause floor is guarded on **its own** token set, not on the combined one: a clause that does select tokens is a real number, and it is exactly what the multi-clause panel exists to show when the AND-set is empty. Blanking it because the *intersection* is empty would delete the answer to the question the panel is asking.
+
+`basis.empty_token_set` is `true`, `basis.token_set_universe` is `"tokens"`, and the panel and the basis both say so. The per-leg counts still report what **was** standing, so the withholding reads as a withholding rather than as an empty book. **Until the token list is loaded, every filter has `S(F) = ∅`**, so this is the first thing the panel would otherwise have drawn.
+
+**The ordering property, and its direction.** `S(F_combined)` is a **subset** of every single-clause set, so the minimum over it is **≥** the minimum over each of them:
+
+> at every bucket where both are defined, **combined floor ≥ each single-clause floor ≥ … and the unfiltered baseline is ≤ all of them.**
+
+The intuitive direction is backwards, and it matters: a single-clause floor coming out *above* the combined floor would mean the AND-set is not a subset of that clause's set — a broken token filter, or a `traits` table where one token carries two values of one type and the join is duplicating rather than intersecting. It would render as a trait premium and it would be a bug (docs/05 rule 5). There is a property test on it.
+
+**No REST, and two things it does not do.** Every number comes off the stream-derived store. Ingestion-gap masking is applied by `series()` and is **not** applied here (the page shades gap spans on the plot instead); the basis says so rather than leaving it to be discovered. And the response carries no `transform`: `/api/trait_series` returns levels, because a % change of a floor whose baseline bucket is a hole is a number with no basis. The panel prints a line saying the global transform control does not apply to it.
+
+**`GET /api/trait_series`** — `collection`, `traits`, `interval`, `range`, `denom`. Minimal on purpose: no `transform`, no `book` (the Operator's decision fixes the book to STANDING). The handler adds no calculation.
 
 **Holes, zeros and gaps.** Every series is returned on the **full bucket grid** of its range (BUG-044). A price bucket with no observation is `null` — a hole on the chart, never bridged. A count or volume bucket with no event while the recorder was listening is `0`: zero sales in an hour we watched is a fact. Any bucket overlapping an **ingestion gap** from the landing-zone manifest is `null` for every metric, counts included — we were not listening, so we do not know (REQ-F-15); the basis reports `gap_masked_buckets`. Grids over 20,000 buckets are refused with a message rather than thinned.
 
 **Screener.** Every token matching the filter with its traits, the **lowest standing ask**, the **highest standing item bid** (`standing_sql` over `order_lives` — the same one predicate as the live book, §3.3) and its **last sale**. Sortable on every column — token, name, every trait type, and the three prices — with "no value" always at the bottom in either direction. Paged at 50. An unknown sort column falls back to `token_id`; sort is applied in Python, never interpolated into SQL.
+
+### 4a.2 A filter that selects no token makes every metric under it undefined
+
+`|S(F)| = 0` is not an edge case on this project — it is the **default** until the `traits` table is filled, and it was producing numbers.
+
+Three of a filter's disjuncts are right on their own and wrong as a set. `_bucketed` matches `((token_id IS NULL AND event_type='collection_offer') OR (event_type='trait_offer' AND COVERS) OR (token matches every clause))`. A collection offer bids on every token, and `S(F) ⊆ S(C)` is **vacuously true** when `S(F) = ∅` — so with a filter that selects nothing, the two token-less branches kept matching. `bid_count` and `event_count` returned the collection-offer count; `sales_count`, `listing_count`, `cancel_count` and `volume` returned **0.0**, which reads as *"nothing happened to this trait group"* when the truth is that there is no trait group (BUG-20260910-060).
+
+The rule now, in one place:
+
+> When a trait filter is applied to a metric **and** `|S(F)| = 0`, that metric is **`null` on every bucket** — not 0, not a count of token-less events — and `basis.empty_token_set` is `true` with a note saying which case it is and that the first thing to check is whether `traits` is populated.
+
+- `filter_narrows(spec)` is the single predicate for *"does a trait filter actually narrow this metric"*. It is **false** only for a metric whose events are all collection offers.
+- `_bucketed` returns nothing under the guard, so no direct caller can get the leaked count; `series()` fills the grid with `None` instead of the usual `0.0` for COUNT/SUM.
+- `trait_set_series` applies the same rule to its bid leg (§4a.1), which is where the defect was first seen.
+- **`collection_bid` is the deliberate carve-out and is unchanged.** It is not narrowed by a trait filter — that is the leg discipline quant §1 metric 1 requires, and the `legs` line has always said so — but its basis now adds that the number is collection-wide and is **not** a statement about the filter.
+- **The universe is `tokens`, and the note says so.** `|S(F)|` is counted over the `tokens` table — the same universe `screener` and `trait_offer_verdicts` use — so an unpopulated *token list* trips the guard even when `traits` is full. That is the conservative direction (knowing of no tokens, we can say nothing about a subset of them), and it is why the note names `tokens` rather than `traits`: on the fixture that exposed BUG-20260910-061, `traits` was the *populated* half, and a note telling the Operator to check `traits` would have named the one table that was fine. Both are filled by the same onboarding run (`traits.command` / `import-traits.command`). `basis.token_set_universe` carries the answer as data.
+- **Every branch of `series()`, not just `_bucketed`** (BUG-20260910-061). The guard runs once after all four branches — standing spread, standing series, derived, `_bucketed` — and blanks `raw`, `parts`, `pct_of_ask`, `p10`/`p90`/`coverage` and the `n` arrays together. `parts` goes with the rest: `immediacy_cost` as a whole is undefined here, and leaving its collection-wide bid leg populated invites subtracting two legs of a metric that has just been declared meaningless.
+
+The page prints the note under **every** chart's basis line, not only the trait panel.
 
 ## 4b. The page — the design rules
 
@@ -235,7 +306,11 @@ Two hexes were chosen by measurement rather than by eye, using the OKLab ΔE (×
 - **`--coll` `#33E7C6`.** Worst-case ΔE across normal/protan/deutan vision is 11.4 against `--bid` and 11.4 against `--ask`; 15.1 against `--bid` under normal vision; 12.3 from `--verde-2`, which is what actually severs the brand/data collision. Contrast 11.2 : 1. *DESIGN §5.4's suggested `#2ED573` was measured and rejected: it is ΔE 4.0 from `--verde-2` (so it does not fix D-V3 at all) and ΔE 2.5 from `--ask` under deuteranopia.*
 - **`--cancel` `#E24E9B`.** DESIGN §5.4 assigns cancel to `--bad` `#FF6B6B`, but the cancels and listings bars sit adjacent in one stack on the Activity chart at ΔE 4.6 (deutan) / 6.9 (normal) — below the readability floor. `#E24E9B` sits at 16.1 / 17.9 from `--ask`, contrast 4.8 : 1, and keeps `--bad` reserved for status. **This is a deliberate deviation from §5.4 and is the design-lead's to confirm.**
 
-Two measured problems are recorded rather than silently fixed: `--trait-offer` `#C792EA` is ΔE 5.0 from `--bid` under deuteranopia (it is not drawn by any chart until PR-6, which is where it should be re-picked), and every mark on the page sits above the validator's dark-mode lightness band because the Operator chose bright marks on a near-black ground.
+- **`--trait-offer` `#B266FF` (re-picked in PR-6).** The old `#C792EA` was ΔE **5.0** from `--bid` under deuteranopia *and* **14.6** under normal vision — below the validator's 15.0 hard floor, so it was a pair a full-colour reader could not reliably separate either. It was recorded rather than fixed because no chart drew it; PR-6 is the chart that draws it, twice (the bid leg's legend swatch, and slot 3 of the §3.2 ramp), so it is re-picked. Worst of protan/deutan: **15.8** from `--bid`, **15.4** from `--cancel`, **27.7** from `--ask`, **25.7** from `--coll`; contrast **5.20 : 1**. At OKLCH L 0.665 / C 0.221 it is the first mark on the page **inside** the validator's dark-mode lightness band.
+
+One measured problem is still recorded rather than fixed: every other mark on the page sits **above** that lightness band, because the Operator chose bright marks on a near-black ground. Two checks in `validate_palette.js` therefore still FAIL on the full data palette by design — the lightness band, and the chroma floor, which `--sale` `#FFFFFF` fails because pure white has zero chroma and is deliberately the loudest mark on the page. What PR-6 *did* fix is the two checks that were failing for a real reason: CVD separation and the normal-vision floor both passed after the re-pick and failed before it.
+
+**The multi-trait categorical ramp (§4b.5) adds no new tokens.** Colour on that one panel encodes trait identity rather than event role — the single documented exception to §5.4 — and it reuses four hues the palette already carries: `--bid` · `--coll` · `--trait-offer` · `--cancel`, in that fixed order, never cycled. No event-role series but the combined ask is on the panel, the sub-title says *"colour = trait; asks only"*, and each swatch sits beside its trait's own name. Measured: all **ten** pairs on that panel (the combined `--ask` against each of the four, and the four against each other) are ≥ **11.4** worst-case ΔE across protan/deutan, against a target of 8; the tightest is `--bid` / `--coll` at 11.4, and the normal-vision worst is 15.1. *DESIGN §3.2's suggested ramp — violet `#C792EA` · cyan `#4DD0E1` · pink `#FF8FB1` · tan `#D6BA73` — was measured and rejected: `--ask` / tan is ΔE **3.8**, violet / cyan **6.1** and cyan / pink **7.6**, all below the floor, and it would have added four more hues to an eight-slot palette to get there.*
 
 **No panel may reference a colour literal.** `test_ui_contract` asserts that the `<script>` block contains **no** six-digit hex at all: the chart code reads each token back out of `:root` with `getComputedStyle`, so the CSS and Plotly can never drift apart.
 
@@ -263,10 +338,38 @@ Four cards: **lowest ask now · collection offer now · volume 24 h · sales 24 
 
 Under the Prices and Immediacy-cost charts the basis line now also renders, from the PR-3 `series()` response: which `book` produced the number (`standing` or `observed`), the **median coverage** — share of observable bucket seconds both legs actually stood — with its bucket count and denominator, the median number of orders in the book per bucket (both legs, for the spread), `p10–p90 withheld (n<30) in N of M buckets` wherever the band arrays are null, a **crossed-book alarm** when `basis.negative_buckets > 0` (a crossed book is a reconstruction defect, never an arbitrage — BUG-20260910-057), the left-truncation warning, and the `observed_book_warning` when the interval-extremum variant is in use.
 
+### 4b.5 The trait chart (PR-6) — what the Prices card becomes under a filter
+
+Whenever a trait filter is on, the **Prices card becomes the trait chart**. It does not appear beside the collection prices panel: two price panels on one screen showing different token sets is how a trait floor gets read as the collection floor.
+
+**Single clause — exactly three lines.**
+
+| series | token | weight | dash | markers |
+|---|---|---|---|---|
+| trait group's **highest standing bid** | `--bid` | 2.4 | solid | below ~120 points |
+| trait group's **lowest standing ask** | `--ask` | 2.4 | solid | below ~120 points |
+| collection floor (baseline) | `--faint` | 1.4 | **dotted** | no |
+
+The baseline is pushed **first**, so it sits under everything — z-order in Plotly is trace order, and the Operator asked for the collection floor pale and dotted *below*.
+
+**Two or more clauses — asks only.** The combined (AND) floor in `--ask` at full strength, weight **3.0**, drawn on a 6 px `--bg` halo so it stays readable where a clause line crosses it; each single-clause floor on the categorical ramp at weight **2.0**; the unfiltered baseline dotted at **1.4**. The panel title says *"Trait floors — asks"* and the sub-title says *"colour = trait; asks only"*.
+
+**Five or more clauses.** The ramp has four slots and a fifth clause does **not** get a generated hue — it gets a printed line: *"4 of 6 clauses drawn individually — the ramp has 4 slots and a 5th clause gets no generated colour, it gets this line. Deselect to see the others; the combined floor still counts every clause."*
+
+**The legend is ours, not Plotly's** (`showlegend:false`), and sits under the plot. One row per series: a 24 px swatch drawn at the series' **actual** weight and dash, the series name with its clause, `n=NNN tokens`, `observed/total buckets`, and the last value. **The hole count is a first-class number on screen**, not something to be found in the basis. The bid row carries a second line naming its three legs with each leg's own median `n` per bucket, and says *"never summed"* on the same line.
+
+**Hover** carries the value with its unit, `cov NN%` (share of observable bucket seconds the leg stood), the per-leg `n`, and **`leg:`** — which of the three legs set that bucket's bid. *Known limit, inherited from §4b.2: in `x unified` mode Plotly omits a null series from the card rather than printing `— no observation`; that row needs the hand-built hover card in DESIGN §5.2.*
+
+**Holes, times, transforms.** `connectgaps:false` on every trace; no spline, no smoothing, ever; the x-axis is in `display.timezone` (Central) like every other chart. The global **transform** control does not apply to this panel and it says so in its basis instead of pretending: `/api/trait_series` returns levels, and a % change of a floor whose baseline bucket is a hole is a number with no basis.
+
+**The basis under the chart** prints the book, the mode, the bucket and hole counts, `|S(F)|`, the ask and bid rules verbatim from the engine, all three leg definitions, the PARTIAL / UNKNOWN / UNPARSED counts with each PARTIAL offer's `|S(F) ∩ S(C)|` of `|S(F)|`, the left-truncation warning, and the note that ingestion-gap masking is not applied here.
+
 ## 5. What it does not do yet — read this before trusting a number
 
 - **SQLite, not DuckDB.** docs/07 specifies DuckDB + Parquet for the analytical store. The environment this was built in cannot install DuckDB, and shipping an untested store for irreplaceable data is how BUG-010 happened. Every query is plain SQL DuckDB accepts; the swap is the `analytical.path` line. Revisit when the store passes ~50 M rows or a query is slow.
 - **No wash filter, no `qa_index`, no trait model.** Prices are raw observations. Methodology §4.4 and REQ-F-13 are Phase 1.
+- **The trait chart cannot draw a line until `traits` has rows, and it will say so rather than draw something else.** `traits` has 0 rows in this working copy. Every trait filter therefore selects no token, so `trait_ask`, `trait_bid` and every single-clause floor are null, `basis.empty_token_set` is `true`, and the panel prints the reason. Only the baseline collection floor draws. Nothing here is verifiable against real trait data until the Explorer cache is imported (§4a) or `traits.command` is run.
+- **Every metric under a filter that selects no token is `null`, and says so** (BUG-20260910-059/060 — both fixed). See §4a.2. Because `traits` is empty today, that is *every* filter: the page will draw the unfiltered baselines and print the reason, rather than draw the collection offer under a trait's name.
 - **The standing book only contains orders whose placement we witnessed.** `immediacy_cost`, `floor_ask` and `collection_bid` are now resting-book quantities (§4c), but the resting book is reconstructed from the stream and is left-truncated: ~801 Argonauts listings were already resting when recording started and none of them are in it. The reconstructed floor is an **upper bound**. Until the ask side is seeded from a REST listings snapshot, read every standing spread as an upper bound on the true spread, which is what `basis.left_truncated` says.
 - **No cross-sectional views, no heatmap, no rarity or trait pricing model** (REQ-F-05..11) — one collection so far. The screener shows observed prices per token; it does not yet estimate what a trait is worth.
 - **No moving average yet** — waiting for 24 h of data so the window is a choice, not a guess.
@@ -277,4 +380,4 @@ Under the Prices and Immediacy-cost charts the basis line now also renders, from
 
 ## 6. Files
 
-`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/rest.py` · `src/navanax/traits.py` · `src/navanax/ui/index.html` · `dashboard.command` · `traits.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`, `test_traits_pipeline`, `test_screener_sort_and_filter`, `test_trait_filtered_metrics`, `test_series_gap_masking`, `test_rest_client_accounting`, `test_ui_contract`, `test_order_lives_primitive`, `test_bid_lifetimes_censoring_and_orphans`, `test_order_criteria_parsing_and_migration`, `test_trait_offer_matching_rule`, `test_standing_series_is_time_weighted_over_the_bucket`, `test_immediacy_cost_is_a_standing_book_spread`, `test_percentiles_are_withheld_below_min_n`) — fixtures are **real frames** from the 2026-09-09 capture.
+`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/rest.py` · `src/navanax/traits.py` · `src/navanax/ui/index.html` · `dashboard.command` · `traits.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`, `test_traits_pipeline`, `test_screener_sort_and_filter`, `test_trait_filtered_metrics`, `test_series_gap_masking`, `test_rest_client_accounting`, `test_ui_contract`, `test_order_lives_primitive`, `test_bid_lifetimes_censoring_and_orphans`, `test_order_criteria_parsing_and_migration`, `test_trait_offer_matching_rule`, `test_standing_series_is_time_weighted_over_the_bucket`, `test_immediacy_cost_is_a_standing_book_spread`, `test_percentiles_are_withheld_below_min_n`, `test_ui_trait_chart_is_the_shape_the_operator_decided`, `test_trait_set_series_bid_leg_is_a_union_that_names_its_winner`, `test_trait_set_series_collection_offer_covers_every_filter`, `test_trait_set_series_partial_offers_are_counted_never_summed`, `test_trait_set_series_empty_and_set_is_null_never_zero`, `test_trait_set_series_combined_floor_bounds_every_single_clause_floor`, `test_trait_set_series_baseline_is_present_and_unfiltered`, `test_trait_series_endpoint_passes_the_filter_through`) — fixtures are **real frames** from the 2026-09-09 capture.

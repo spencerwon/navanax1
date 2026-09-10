@@ -24,8 +24,18 @@
    validator (OKLab dE x100, Machado CVD sim, worst of normal/protan/deutan):
      --coll  vs --ask 12.3 · vs --bid 11.4 · vs --verde-2 13.6 · contrast 11.2:1
      --cancel vs --ask 16.1 (the old #FF6B6B cancel bar sat at 4.6 beside --ask)
-   --sale is pure white and is the ONLY white on the page: not --text #F1F5F2 (D-W3). */
-  --ask:#FF8A65; --bid:#7CC4FF; --coll:#33E7C6; --trait-offer:#C792EA; --sale:#FFFFFF;
+   --sale is pure white and is the ONLY white on the page: not --text #F1F5F2 (D-W3).
+   PR-6 re-picks the trait-offer hue. #C792EA was dE 5.0 from --bid under deuteranopia AND
+   14.6 under NORMAL vision -- below the validator's 15.0 hard floor, i.e. two lines a
+   full-colour reader cannot reliably tell apart either. docs/08 recorded it rather than
+   fixing it because nothing drew it until this panel; this panel draws it twice (the bid
+   leg's legend swatch, and slot 3 of the §3.2 categorical ramp). Re-picked #C792EA ->
+   #B266FF with the same validator, worst of protan/deutan:
+     --trait-offer vs --bid 15.8 · vs --cancel 15.4 · vs --ask 27.7 · vs --coll 25.7 · contrast 5.20:1
+   and at OKLCH L 0.665 / C 0.221 it is the first mark on the page INSIDE the validator's
+   dark-mode lightness band. Every OTHER pair on the multi-trait panel -- the combined ask
+   against each of the four ramp slots, and the four against each other -- is >= 11.4. */
+  --ask:#FF8A65; --bid:#7CC4FF; --coll:#33E7C6; --trait-offer:#B266FF; --sale:#FFFFFF;
   --spread:#FFD166; --cancel:#E24E9B; --gap-fill:rgba(255,107,107,.10);
 /* @end-tokens — non-colour design tokens below this line. */
   --r:14px; --r-s:9px;
@@ -115,6 +125,16 @@ aside h3{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spaci
 .tval input{accent-color:var(--verde);width:14px;height:14px;margin:0}.tval .n{margin-left:auto;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
 .tsearch{padding:6px 6px 4px}
 .thumb{width:26px;height:26px;border-radius:6px;object-fit:cover;background:var(--surface-2);vertical-align:middle;margin-right:8px}
+/* ---- trait-chart legend: ours, not Plotly's (DESIGN §3.2). Every row carries the
+   swatch at its ACTUAL weight and dash, the matching-token count, and observed/total
+   buckets -- the hole count is a first-class number on screen, not buried in the basis. */
+.tlg{margin-top:10px;display:grid;gap:5px;font-size:12px}
+.tlg .row{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;line-height:1.5}
+.tlg .sw{flex:none;width:24px;border-radius:2px;align-self:center}
+.tlg .nm{color:var(--text);font-weight:600}
+.tlg .meta{color:var(--muted);font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px}
+.tlg .legs{color:var(--text-2);font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px;padding-left:33px;margin-top:-2px}
+.tlg .notice{color:var(--warn);font-size:11.5px}
 .pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;color:var(--muted);font-size:12px}
 footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px solid var(--border)}
 </style></head><body>
@@ -149,7 +169,7 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
 </aside>
 <main>
  <div class="kpis c12" id="kpis"></div>
- <div class="card c8"><h2>Prices<em>lowest ask · highest collection offer · highest item bid, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="basis" id="b-prices"></div></div>
+ <div class="card c8"><h2><span id="h-prices">Prices</span><em id="h-prices-sub">lowest ask · highest collection offer · highest item bid, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="tlg" id="tlegend"></div><div class="basis" id="b-prices"></div></div>
  <div class="card c4"><h2>Live book<em>standing orders</em></h2><div id="book"></div></div>
  <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer · holes = no bid or no ask</em><span class="chips" data-plot="p-imm"></span></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
  <div class="card c4"><h2>How long a bid stands<em>placed → cancelled</em></h2><div id="life"></div><h2 style="margin-top:16px">Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
@@ -170,6 +190,7 @@ const tok=n=>CSS.getPropertyValue(n).trim();
 const C={ask:tok('--ask'),bid:tok('--bid'),coll:tok('--coll'),trait:tok('--trait-offer'),sale:tok('--sale'),
  spread:tok('--spread'),cancel:tok('--cancel'),gap:tok('--gap-fill'),
  grid:tok('--grid'),axis:tok('--border'),spike:tok('--border-2'),tick:tok('--muted'),muted:tok('--muted'),
+ faint:tok('--faint'),warn:tok('--warn'),bg:tok('--bg'),
  ink:tok('--text'),ink2:tok('--text-2'),hoverBg:tok('--hover-bg'),hoverBd:tok('--hover-border')};
 const $=s=>document.querySelector(s);
 const esc=v=>v==null?'':String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -220,7 +241,7 @@ const L=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{c
 const CFG={displayModeBar:false,displaylogo:false,responsive:true,scrollZoom:false,doubleClick:false};
 let gaps=[];
 const gapShapes=()=>gaps.filter(g=>g.started_at).map(g=>({type:'rect',xref:'x',yref:'paper',x0:plotT(g.started_at),x1:plotT(g.ended_at||new Date().toISOString()),y0:0,y1:1,fillcolor:C.gap,line:{width:0}}));
-const basis=b=>`${b.label}\n${b.denomination} · ${b.transform}${b.baseline_value!=null&&b.transform!=='ABS'?` · baseline ${fmt(b.baseline_value)} at ${clock(b.baseline_at)}`:''} · ${b.interval} bars aligned ${b.bucket_alignment||'UTC'} · ${b.range.spec} (${clock(b.range.start)} → ${clock(b.range.end)} ${S.tz}) · ${b.buckets} buckets, ${b.undefined_buckets} with no observation (holes)${Object.keys(b.trait_filter||{}).length?` · traits: ${esc(traitSpec())}`:''} · wash filter ${b.wash_filter}${b.legs?`\n⚠ under a trait filter the two legs differ — ask: ${b.legs.floor_ask}; bid: ${b.legs.collection_bid}`:''}`;
+const basis=b=>`${b.label}\n${b.denomination} · ${b.transform}${b.baseline_value!=null&&b.transform!=='ABS'?` · baseline ${fmt(b.baseline_value)} at ${clock(b.baseline_at)}`:''} · ${b.interval} bars aligned ${b.bucket_alignment||'UTC'} · ${b.range.spec} (${clock(b.range.start)} → ${clock(b.range.end)} ${S.tz}) · ${b.buckets} buckets, ${b.undefined_buckets} with no observation (holes)${Object.keys(b.trait_filter||{}).length?` · traits: ${esc(traitSpec())}`:''} · wash filter ${b.wash_filter}${b.legs?`\n⚠ under a trait filter the two legs differ — ask: ${b.legs.floor_ask}; bid: ${b.legs.collection_bid}`:''}${b.empty_token_set?`\n⚠ ${b.empty_token_set_note}`:''}`;
 
 /* ---------- the standing-book basis: which book, how much of the bucket the legs
    actually stood, whether the book ever crossed, and where the band was withheld.
@@ -333,7 +354,142 @@ async function status(){const s=await J('/api/status');S.tz=s.display_timezone||
 // Markers on below ~120 observed points, off above (DESIGN §5.4) — non-negotiable in
 // a book this thin: 8 listings in a window must draw 8 visible marks, not an empty pane.
 const mode=v=>v.filter(x=>x!=null).length<120?'lines+markers':'lines';
-async function prices(){if(!window.Plotly)return;const m=await J('/api/multi?'+qs({...base(),metrics:'floor_ask,collection_bid,top_item_bid'}));
+/* ---------- PR-6: the trait chart. The Prices card BECOMES this panel whenever a
+   trait filter is on, because two price panels on one screen showing different token
+   sets is how a trait floor gets read as the collection floor.
+
+   Single clause, exactly three lines (Operator, 2026-09-10):
+     · the trait group's HIGHEST standing bid  — --bid, solid, 2.4
+     · the trait group's LOWEST standing ask   — --ask, solid, 2.4
+     · the collection floor                    — --faint, DOTTED, 1.4, drawn FIRST so it sits under
+   Multi-clause, asks only:
+     · the combined (AND) floor                — --ask at full strength, 3.0, on a --bg halo
+     · each single-clause floor                — the categorical ramp, 2.0
+     · the unfiltered baseline                 — --faint, dotted, 1.4, drawn first
+
+   Dash carries exactly one meaning globally: dotted = reference/baseline, never an
+   observation. Weight encodes ROLE, not identity: 3.0 the set you asked for, 2.4/2.0 a
+   component, 1.4 a reference. Holes stay holes (`connectgaps:false`); no spline, no
+   smoothing, ever; times in the display timezone.
+
+   The global `transform` control does NOT apply here and this panel says so in its
+   basis rather than pretending: /api/trait_series returns levels, and a % change of a
+   floor whose baseline bucket is a hole is a number with no basis. ---------- */
+// The one place on the page where hue encodes TRAIT IDENTITY instead of event role
+// (DESIGN §3.2, the single documented exception to §5.4). It reuses four tokens the
+// palette already carries rather than inventing four more hues -- no event-role series
+// but the combined ask is on this panel, the sub-title says "colour = trait", and the
+// swatch sits beside the trait's own name. Measured on --surface with the dataviz
+// validator: all ten pairs on this panel (combined + the four) are >= 11.4 worst-case
+// OKLab dE x100 across protan/deutan, against a target of 8. Assigned in FIXED ORDER
+// and NEVER cycled: a 5th clause does not get a generated hue, it gets a printed notice.
+const CAT=[C.bid,C.coll,C.trait,C.cancel], CAT_MAX=4;
+const obsN=a=>a.filter(v=>v!=null).length;
+// A single order's price is 4 dp in ETH (DESIGN §5.1), which is what the hover prints;
+// the legend prints the same number, so the two can never disagree about precision.
+const money4=v=>v==null?'—':S.denom==='USD'?money2(v,'USD'):(+v).toLocaleString(undefined,{minimumFractionDigits:4,maximumFractionDigits:4})+' Ξ';
+const lastV=a=>{const i=idxLast(a);return i<0?'—':money4(a[i])};
+// Levels only, so the axis and the hover ignore S.transform (see the note above).
+const tyfmt=()=>S.denom==='USD'?{tickprefix:'$',tickformat:',.2f'}:{ticksuffix:' Ξ',tickformat:',.3f'};
+const thov=()=>S.denom==='USD'?'$%{y:,.2f}':'%{y:,.4f} Ξ';
+// Hover rows: value with its unit, then coverage, n and (on the bid line) which leg the
+// number came from. A line whose population changes between buckets and does not say so
+// is the leg-mixing quant §1 metric 1 forbids.
+function hoverBits(len,parts){const out=[];for(let i=0;i<len;i++){const b=parts.map(f=>f(i)).filter(Boolean);out.push(b.length?'  ('+b.join(' · ')+')':'')}return out}
+const covBit=cov=>i=>(cov&&cov[i]!=null)?`cov ${(100*cov[i]).toFixed(0)}%`:null;
+const nBit=n=>i=>(n&&n[i]!=null)?`n=${fmt(n[i],0)}`:null;
+function swatch(color,width,dash){const h=Math.max(2,Math.round(width));
+ return dash==='dot'
+  ?`<span class="sw" style="height:${h}px;background:repeating-linear-gradient(90deg,${color} 0 3px,transparent 3px 6px)"></span>`
+  :`<span class="sw" style="height:${h}px;background:${color}"></span>`}
+function lgRow(color,width,dash,name,meta,legs){
+ return `<div class="row">${swatch(color,width,dash)}<span class="nm">${name}</span><span class="meta">${meta}</span></div>`
+  +(legs?`<div class="legs">${legs}</div>`:'')}
+// n tokens, observed/total buckets, last value — the hole count is a first-class number
+// on screen (DESIGN §3.2), not something the reader has to find in the basis.
+const bucketMeta=(a,n)=>`${n==null?'':`n=${fmt(n,0)} token${n===1?'':'s'} · `}${obsN(a)}/${a.length} buckets · last ${lastV(a)}`;
+const medOf=a=>{const v=a.filter(z=>z!=null).sort((m,n)=>m-n);return v.length?fmt(v[v.length>>1],0):'0'};
+async function traitChart(){
+ const p=base();
+ const r=await J('/api/trait_series?'+qs({collection:p.collection,traits:p.traits,interval:p.interval,range:p.range,denom:S.denom}));
+ const x=r.t.map(plotT), b=r.trait_bid, multi=r.basis.clauses>=2;
+ const clause=Object.entries(S.traits).filter(([,v])=>v.length).map(([t,v])=>`${esc(t)}: ${esc(v.join(' | '))}`).join('  +  ');
+ const tr=[], lg=[];
+ // The baseline is added FIRST so it sits UNDER everything: the Operator asked for the
+ // collection floor pale and dotted below, and z-order in Plotly is trace order.
+ const bl=r.baseline_ask.median;
+ tr.push({x,y:bl,name:'collection floor',mode:'lines',line:{color:C.faint,width:1.4,dash:'dot'},
+  connectgaps:false,customdata:hoverBits(x.length,[covBit(r.baseline_ask.coverage),nBit(r.baseline_ask.n)]),
+  hovertemplate:thov()+'%{customdata}<extra>collection floor</extra>'});
+ lg.push(lgRow(C.faint,1.4,'dot','collection floor',`unfiltered · ${bucketMeta(bl,null)}`,
+  'reference, not an observation of this trait set — dotted means baseline everywhere on this page'));
+ if(!multi){
+  const ask=r.trait_ask.median;
+  tr.push({x,y:ask,name:'trait lowest ask',mode:mode(ask),line:{color:C.ask,width:2.4},marker:{size:5},
+   connectgaps:false,customdata:hoverBits(x.length,[covBit(r.trait_ask.coverage),nBit(r.trait_ask.n)]),
+   hovertemplate:thov()+'%{customdata}<extra>trait lowest ask</extra>'});
+  tr.push({x,y:b.median,name:'trait highest bid',mode:mode(b.median),line:{color:C.bid,width:2.4},marker:{size:5},
+   connectgaps:false,customdata:hoverBits(x.length,[covBit(b.coverage),
+    i=>`n item ${fmt(b.n_item[i],0)} · trait-offer ${fmt(b.n_trait_offer_cover[i],0)} · coll ${fmt(b.n_collection[i],0)}`,
+    i=>b.winning_leg[i]?`leg: ${b.winning_leg[i]}`:null]),
+   hovertemplate:thov()+'%{customdata}<extra>trait highest bid</extra>'});
+  lg.push(lgRow(C.ask,2.4,'solid',`lowest standing ask — ${clause}`,bucketMeta(ask,r.matching_tokens)));
+  lg.push(lgRow(C.bid,2.4,'solid',`highest standing bid — ${clause}`,bucketMeta(b.median,r.matching_tokens),
+   `legs, each with its own n, never summed (median per bucket): item bids n=${medOf(b.n_item)} · `
+   +`<span style="color:${C.trait}">▬</span>&nbsp;trait offers that COVER this filter n=${medOf(b.n_trait_offer_cover)} · `
+   +`collection offers n=${medOf(b.n_collection)}`));
+ }else{
+  const comb=r.trait_ask.median;
+  const shown=r.single_floors.slice(0,CAT_MAX);
+  shown.forEach((f,i)=>{
+   const nm=`${esc(f.clause)}: ${esc(f.values.join(' | '))}`;
+   tr.push({x,y:f.median,name:nm,mode:mode(f.median),line:{color:CAT[i],width:2.0},marker:{size:4},
+    connectgaps:false,customdata:hoverBits(x.length,[covBit(f.coverage),nBit(f.n)]),
+    hovertemplate:thov()+`%{customdata}<extra>${nm}</extra>`});
+   lg.push(lgRow(CAT[i],2.0,'solid',nm,bucketMeta(f.median,f.matching_tokens)));});
+  // The halo: the same trace drawn once more in --bg underneath, so the combined line
+  // stays readable where a single-clause line crosses it (DESIGN §3.2).
+  tr.push({x,y:comb,mode:'lines',line:{color:C.bg,width:6},connectgaps:false,
+   hoverinfo:'skip',showlegend:false});
+  tr.push({x,y:comb,name:'combined (AND)',mode:mode(comb),line:{color:C.ask,width:3.0},marker:{size:6},
+   connectgaps:false,customdata:hoverBits(x.length,[covBit(r.trait_ask.coverage),nBit(r.trait_ask.n)]),
+   hovertemplate:thov()+'%{customdata}<extra>combined (AND) floor</extra>'});
+  lg.push(lgRow(C.ask,3.0,'solid',`combined (AND) floor — ${clause}`,bucketMeta(comb,r.matching_tokens),
+   'the AND-set is a subset of every clause above, so wherever both are defined this line sits at or ABOVE each of them — a clause line above it is a bug, not a premium'));
+  if(r.single_floors.length>CAT_MAX)
+   lg.push(`<div class="notice">${CAT_MAX} of ${r.single_floors.length} clauses drawn individually — the ramp has ${CAT_MAX} slots and a 5th clause gets no generated colour, it gets this line. Deselect to see the others; the combined floor still counts every clause.</div>`);
+ }
+ draw('p-prices',tr,{...L(),showlegend:false,shapes:gapShapes(),
+  yaxis:{...L().yaxis,...tyfmt(),title:{text:S.denom==='USD'?'USD':'ETH',font:{color:C.muted}}}});
+ $('#h-prices').textContent=multi?'Trait floors — asks':'Trait prices';
+ $('#h-prices-sub').textContent=multi
+  ?'colour = trait; asks only · combined (AND) floor at full weight · baseline dotted'
+  :'highest standing bid · lowest standing ask · collection floor dotted underneath';
+ if(r.basis.empty_token_set)
+  lg.push(`<div class="notice">This filter selects no token in combination, so there is no trait group: the combined floor and the trait bid are withheld, not empty (a single clause that does select tokens keeps its own floor line). The collection offer still stands (n=${fmt(b.n_collection[b.n_collection.length-1],0)}) but it is a bid on tokens this filter does not select. |S(F)| is counted over the <b>tokens</b> table, so the first thing to check is whether the token list is loaded — a populated traits table with an empty tokens table gives the same result. Both are filled by traits.command / import-traits.command.</div>`);
+ $('#tlegend').innerHTML=lg.join('');
+ $('#b-prices').textContent=traitBasis(r)}
+function traitBasis(r){const b=r.basis,out=[];
+ out.push(`book: ${b.book} · ${b.mode}-clause · ${b.denomination} levels · ${b.interval_id} bars · ${b.buckets} buckets, ${b.undefined_buckets} with no observation (holes) · ${fmt(b.matching_tokens,0)} token${b.matching_tokens===1?'':'s'} match · wash filter ${b.wash_filter} · times ${b.timezone}`);
+ if(S.transform!=='ABS')out.push(`⚠ the ${S.transform} transform does not apply to this panel: it is drawn as levels. A % change of a floor whose baseline bucket is a hole has no basis.`);
+ if(b.empty_token_set)out.push(`⚠ ${b.empty_token_set_note}`);
+ out.push(`ask: ${b.ask_rule}`);
+ out.push(`bid: ${b.bid_rule}`);
+ Object.entries(b.legs).forEach(([k,v])=>out.push(`  · ${k} — ${v}`));
+ out.push(`trait offers under this filter: ${fmt(b.partial_offers,0)} PARTIAL · ${fmt(b.unknown_offers,0)} UNKNOWN (numeric criteria) · ${fmt(b.unparsed_offers,0)} UNPARSED (criteria_n = 0)`);
+ if(b.partial_offers)out.push(`  ⚠ ${b.partial_note}`);
+ (r.partial_detail||[]).slice(0,5).forEach(d=>out.push(`  · PARTIAL ${short(d.order_hash)} at ${money2(d.price_eth,'ETH')}: reaches ${fmt(d.overlap_tokens,0)} of the ${fmt(d.filter_tokens,0)} tokens this filter selects`));
+ if(r.basis.partial_offers>(r.partial_detail||[]).length)out.push(`  · the lines above are a SAMPLE of ${fmt((r.partial_detail||[]).length,0)} carried with the response; ${fmt(r.basis.partial_offers,0)} is the true count`);
+ if(b.unknown_offers||b.unparsed_offers)out.push(`  ⚠ ${b.unknown_note}`);
+ out.push(`⚠ ${b.left_truncation_note}`);
+ out.push(`⚠ ${b.gap_note}`);
+ return out.join('\n')}
+async function prices(){if(!window.Plotly)return;
+ if(traitSpec()){await traitChart();return}
+ $('#h-prices').textContent='Prices';
+ $('#h-prices-sub').textContent='lowest ask · highest collection offer · highest item bid, per interval';
+ $('#tlegend').innerHTML='';
+ const m=await J('/api/multi?'+qs({...base(),metrics:'floor_ask,collection_bid,top_item_bid'}));
  const tr=[['floor_ask','lowest ask',C.ask],['collection_bid','collection offer',C.coll],['top_item_bid','top item bid',C.bid]]
   .map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:mode(m[k].v),line:{color:c,width:2.2},marker:{size:5},
    connectgaps:false,customdata:meta(m[k]),hovertemplate:hov()+'%{customdata}<extra></extra>'}));

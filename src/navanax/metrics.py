@@ -90,6 +90,14 @@ BOOKS = ("standing", "observed")
 # told not to make in dashboard.py. Raised for the tech-lead.
 MIN_N_FOR_PERCENTILES = 30
 
+# How many PARTIAL offers travel with a verdict report as full detail. The
+# report is JSON on a localhost response and the page prints the first few; an
+# uncapped list reached 4.1 MB on the tech-lead's fixture, which is a page that
+# stalls rather than a page that tells the truth harder. The COUNT is never
+# capped -- `partial_n` is computed separately from the detail list, because a
+# cap that silently becomes the answer is worse than no detail at all.
+PARTIAL_DETAIL_CAP = 50
+
 # metric id -> (event_type filter, aggregate, price column?, description)
 #
 # `book`      : the standing-book kind this metric has, if any (STANDING_KINDS).
@@ -162,6 +170,29 @@ STANDING_KINDS: dict[str, dict[str, Any]] = {
                        "label": "highest standing collection offer"},
     "item_bid":       {"event_type": "item_received_bid", "want": "max", "token_scoped": True,
                        "label": "highest standing item bid"},
+    # PR-5. The third bid leg of the trait chart. It is NOT token-scoped -- a
+    # trait offer carries no token_id -- and it is not narrowed by the token
+    # filter either: it is narrowed by the COVERS rule (dataeng §4.3), which
+    # asks whether the offer will buy ANY token the filter selects. Under an
+    # EMPTY filter no trait offer covers (S(F) is every token, and only C = {}
+    # reaches all of them), so this leg is legitimately empty with no filter --
+    # that is the rule, not a missing join.
+    "trait_offer_cover": {"event_type": "trait_offer", "want": "max", "token_scoped": False,
+                          "cover_scoped": True,
+                          "label": "highest standing trait offer whose criteria COVER the filter"},
+}
+
+# The three legs of the trait group's highest standing bid (PR-5, Operator's
+# decision of 2026-09-10). Reported with its own n and kind, never summed:
+# they are three populations, and the number on the chart is the MAX over their
+# union at each tau, not a total.
+TRAIT_BID_LEGS: dict[str, str] = {
+    "item": "item bids on tokens in S(F) -- token-scoped, narrowed by the filter",
+    "trait_offer": "trait offers whose stored criteria COVER F, i.e. S(F) subset of S(C) "
+                   "(dataeng §4.3); unparsed (criteria_n = 0) and numeric-criteria offers "
+                   "are excluded AND counted, never assumed to match",
+    "collection": "collection offers -- C = {}, a bid on every token, so they reach S(F) "
+                  "whatever F is",
 }
 
 # Metrics that HAVE a standing-book kind but whose STANDING variant `series()`
@@ -405,6 +436,27 @@ def criteria_cover_sql(alias: str, traits: dict[str, list[str]]) -> tuple[str, l
     return sql, args
 
 
+def filter_narrows(spec: dict[str, Any]) -> bool:
+    """Does a trait filter actually narrow this metric's event set?
+
+    **No** for a metric whose events are all collection offers. A collection
+    offer carries no token and bids on every one of them, so `collection_bid` is
+    deliberately collection-wide even under a filter -- that is the leg
+    discipline quant §1 metric 1 requires, and the `legs` line on every filtered
+    spread says so out loud.
+
+    **Yes** for everything else, including a metric with no `types` at all
+    (`event_count`) and a derived metric whose legs include a token-scoped one
+    (`immediacy_cost`).
+
+    One predicate, because two places need the same answer and they were about
+    to disagree: `_bucketed` decides whether to append the filter clause, and
+    `series()` decides whether an empty token set makes the metric undefined.
+    """
+    types = spec.get("types")
+    return not (types and set(types) <= {"collection_offer"})
+
+
 def criteria_covers(criteria: list[tuple[str, str]], traits: dict[str, list[str]]) -> bool:
     """The same rule in Python, for the verdict report. `criteria` is [(type, value)]."""
     if not criteria:
@@ -602,6 +654,68 @@ def _distinct_per_bucket(live: list[tuple[float, float, float]], grid: list[floa
     return out
 
 
+def merge_leg_maxima(legs: dict[str, list[tuple[float, float, float]]],
+                     ) -> list[tuple[float, float, tuple[float, tuple[str, ...]]]]:
+    """The running MAX across several legs, carrying WHICH leg(s) set it.
+
+    Each value in `legs` is that leg's own extremum step function from
+    `_extremum_segments` -- sorted, non-overlapping, with no entry for time when
+    that leg had nothing standing. The result is
+    `[(t0, t1, (value, legs_at_that_value))]` over the time ANY leg stood.
+
+    Why not one sweep over the concatenation: the value would be identical, but
+    the answer to "which leg is this number?" would be lost, and that answer is
+    the point. The Operator's trait chart reports the group's highest standing
+    bid as ONE line whose three legs are three different populations (item bids,
+    COVERing trait offers, collection offers). A line that is sometimes one
+    population and sometimes another, with nothing on screen saying which, is a
+    chart that invites exactly the population-mixing quant §1 metric 1 forbids.
+
+    Ties are reported as a tuple of every leg holding the maximum, not as a
+    winner picked by precedence: two legs quoting the same best price is a fact
+    about the book, and naming one of them would be an invention.
+    """
+    bounds = sorted({t for segs in legs.values() for s in segs for t in (s[0], s[1])})
+    ptr = dict.fromkeys(legs, 0)
+    out: list[tuple[float, float, tuple[float, tuple[str, ...]]]] = []
+    for a, b in zip(bounds, bounds[1:], strict=False):   # pairwise over the boundary list
+        best: float | None = None
+        who: list[str] = []
+        for k, segs in legs.items():
+            p = ptr[k]
+            while p < len(segs) and segs[p][1] <= a:
+                p += 1
+            ptr[k] = p
+            if p < len(segs) and segs[p][0] <= a < segs[p][1]:
+                v = segs[p][2]
+                if best is None or v > best:
+                    best, who = v, [k]
+                elif v == best:
+                    who.append(k)
+        if best is not None and b > a:
+            out.append((a, b, (best, tuple(who))))
+    return out
+
+
+def _blank_standing(s: dict[str, Any]) -> None:
+    """Blank every value array of a `standing_series` response in place.
+
+    Used where a series is DECLARED undefined -- the filter selects no token, so
+    there is no group for the number to be about -- and the arrays the sweep
+    produced must not survive the declaration. `n` goes to 0 rather than None:
+    "zero orders were in a book about nothing" is true and countable, where a
+    null n would read as "we did not look".
+    """
+    n = len(s.get("keys", []))
+    for key in ("median", "p10", "p90", "coverage"):
+        if key in s:
+            s[key] = [None] * n
+    if "n" in s:
+        s["n"] = [0] * n
+    if "standing_seconds" in s:
+        s["standing_seconds"] = [0.0] * n
+
+
 def time_weighted_quantile(pairs: list[tuple[float, float]], p: float) -> float | None:
     """The p-quantile of a step function, weighted by how long each value held.
 
@@ -659,7 +773,21 @@ class MetricEngine:
         #     (BUG-045); that blanket rule is now an evidence-based verdict, and
         #     the offers it still excludes -- unparsed (criteria_n = 0) and
         #     numeric-criteria -- are counted by trait_offer_verdicts (BUG-051).
-        if tf and not (spec["types"] and set(spec["types"]) <= {"collection_offer"}):
+        if tf and filter_narrows(spec):
+            # BUG-20260910-060. Each disjunct below is right on its own and the
+            # SET of them is wrong when the filter selects NO token: a bid on
+            # every token is not a bid on any token of an empty set, but
+            # `S(F) subset of S(C)` is vacuously true for `S(F) = {}`, so the
+            # collection-offer and COVERing-trait-offer branches kept matching.
+            # `bid_count` and `event_count` under an impossible filter therefore
+            # counted bids on tokens the filter does not select -- and while the
+            # `traits` table is empty EVERY filter is impossible, so that was
+            # 100% of the filtered bid count. Return nothing; `series()` turns
+            # that into a null on every bucket rather than a zero (a zero would
+            # say "nothing happened to this trait group", and the truth is that
+            # there is no trait group).
+            if self._token_set_size(collection, traits or {}) == 0:
+                return {}
             clauses = tf[len(" AND "):]                     # "A AND B AND C"
             cover, cargs = criteria_cover_sql("e", traits or {})
             where.append(f"((e.token_id IS NULL AND e.event_type = 'collection_offer')"
@@ -724,6 +852,16 @@ class MetricEngine:
             tf, targs = token_filter_sql(collection, traits, alias="ol")
             where.append(tf[len(" AND "):])
             args.extend(targs)
+        if spec.get("cover_scoped"):
+            # `order_lives` is keyed on order_hash and carries no (run, seq), so the
+            # criteria join goes through the placement row in `events`. The predicate
+            # itself is `criteria_cover_sql` unchanged -- one rule, one guard, one
+            # place it is written (BUG-051). Applied UNCONDITIONALLY, including under
+            # an empty filter, where it correctly matches nothing.
+            cover, cargs = criteria_cover_sql("e", traits or {})
+            where.append(f"EXISTS (SELECT 1 FROM events e WHERE e.order_hash = ol.order_hash"
+                         f" AND e.event_type = 'trait_offer' AND {cover})")
+            args.extend(cargs)
         rows = self.conn.execute(
             f"SELECT ol.t_place, ol.t_term, ol.expiration_ts, ol.{col} FROM order_lives ol "
             f"WHERE {' AND '.join(where)}", args)
@@ -949,6 +1087,230 @@ class MetricEngine:
             },
         }
 
+    # -- PR-5: the trait chart's metric layer --------------------------------
+    def trait_set_series(self, collection: str, traits: dict[str, list[str]] | None,
+                         start: float, end: float, interval: str | dict[str, Any],
+                         denom: str = "ETH", now: datetime | None = None) -> dict[str, Any]:
+        """Everything the Operator's trait chart draws, on one bucket grid.
+
+        The Operator decided this shape on 2026-09-10 and it is not a menu:
+
+        **Under a SINGLE-clause filter** the chart shows exactly three things --
+        the trait group's HIGHEST standing bid, the trait group's LOWEST standing
+        ask, and the collection floor pale and dotted underneath. The highest
+        standing bid is the max, at each tau, over the union of three legs:
+
+          * item bids on tokens in `S(F)`,
+          * trait offers whose stored criteria **COVER** F (dataeng §4.3),
+          * collection offers (`C = {}` reaches every token, so they reach `S(F)`).
+
+        Each leg is reported with its own `n` and its own kind, and `winning_leg`
+        names the leg that actually set the number in each bucket. They are three
+        different populations; the union max is a legitimate "best bid available
+        to a holder of this trait", but a *sum* of them would not be depth and a
+        line that silently swaps population would be the leg-mixing quant §1
+        metric 1 forbids. Hence: one line, three counts, and a name.
+
+        **Under a MULTI-clause filter** it shows the combined (AND) trait floor,
+        each single-clause floor, and the unfiltered baseline floor.
+
+        Everything is a STANDING quantity (`order_lives`), because a floor you
+        cannot hit is not a floor (tech-lead C5, Operator's decision). Every
+        series is on the FULL bucket grid and a bucket where nothing stood is
+        `None`. **Never `0`.** Zero is a price; "the AND-set had no standing ask
+        in this hour" is not the price zero, and the difference is the whole
+        reason the chart is worth drawing on a book this thin.
+
+        No REST. Every number here comes off the stream-derived store.
+        """
+        if denom not in DENOMS:
+            raise ValueError(f"unknown denomination {denom!r}; one of {DENOMS}")
+        # Refuse an unknown interval the same way `series()` does, and name the
+        # valid ids. A bare KeyError here reached the page as a 500 with no body
+        # worth reading; the handler turns a ValueError into a 400 that says what
+        # to ask for instead (REQ-N-09: an interval not in intervals.yaml is
+        # refused, not improvised).
+        if isinstance(interval, str) and interval not in self.intervals["intervals"]:
+            raise ValueError(f"unknown interval {interval!r}; "
+                             f"one of {sorted(self.intervals['intervals'])}")
+        traits = traits or {}
+        ispec = self.intervals["intervals"][interval] if isinstance(interval, str) else interval
+        iv_id = interval if isinstance(interval, str) else str(ispec.get("id", "?"))
+        now_dt = now or datetime.now(timezone.utc)
+        now_ts = now_dt.timestamp()
+        horizon = min(end, now_ts)
+        grid = bucket_grid(start, end, ispec, self.tz)
+        windows = _bucket_windows(grid, start, horizon, ispec, self.tz)
+
+        # The three ask lines are `standing_series` verbatim with a different token
+        # set: the AND-set, each single clause, and no filter at all. Nothing about
+        # a "trait floor" differs from a floor except which tokens are in scope, so
+        # nothing about it should differ in the code either.
+        trait_ask = self.standing_series("ask", collection, start, end, ispec, denom,
+                                         traits or None, now_dt)
+        baseline_ask = self.standing_series("ask", collection, start, end, ispec, denom,
+                                            None, now_dt)
+        single_floors: list[dict[str, Any]] = []
+        if len(traits) >= 2:
+            for t, vals in traits.items():
+                s = self.standing_series("ask", collection, start, end, ispec, denom,
+                                         {t: vals}, now_dt)
+                single_floors.append({"clause": t, "values": list(vals),
+                                      "matching_tokens": self._token_set_size(collection, {t: vals}),
+                                      **s})
+
+        # -- the union bid leg ------------------------------------------------
+        live = {
+            "item": self._standing_live("item_bid", collection, denom, start, horizon, traits or None),
+            "trait_offer": self._standing_live("trait_offer_cover", collection, denom, start,
+                                               horizon, traits or None),
+            "collection": self._standing_live("collection_bid", collection, denom, start,
+                                              horizon, None),
+        }
+        per_leg = {k: _extremum_segments(v, False) for k, v in live.items()}
+        union = merge_leg_maxima(per_leg)
+        acc = _accumulate(union, grid, windows)
+        n_leg = {k: _distinct_per_bucket(v, grid) for k, v in live.items()}
+
+        bid: list[float | None] = []
+        bid_cov: list[float | None] = []
+        winning: list[str | None] = []
+        for i in range(len(grid)):
+            pairs = acc.get(i, [])
+            width = max(0.0, windows[i][1] - windows[i][0])
+            secs = sum(w for w, _ in pairs)
+            bid_cov.append((secs / width) if width > 0 else None)
+            v = time_weighted_quantile([(w, pv) for w, (pv, _who) in pairs], 0.5)
+            bid.append(v)
+            if v is None:
+                winning.append(None)
+                continue
+            # Which leg is the number ON SCREEN? Not "which leg was highest most
+            # often" -- the leg that held the reported level, for the longest.
+            held: dict[str, float] = {}
+            for w, (pv, who) in pairs:
+                if pv == v:
+                    for k in who:
+                        held[k] = held.get(k, 0.0) + w
+            top = max(held.values()) if held else 0.0
+            winning.append("+".join(sorted(k for k, s in held.items() if s == top)) or None)
+
+        verdicts = self.trait_offer_verdicts(collection, traits or None, start, end)
+        matching = self._token_set_size(collection, traits)
+        # S(F) = {} -- the filter selects no token at all. There is no trait group, so
+        # there is no "highest bid available to a holder of this trait", and every
+        # series about the group is undefined.
+        #
+        # The BID leg was the obvious one: a collection offer is not token-scoped and
+        # covers the empty set vacuously, so without a guard the panel drew a
+        # confident bid line for a trait group with zero members (BUG-20260910-059).
+        #
+        # The ASK legs are the subtle one and were left unguarded on the assumption
+        # that "no tokens means no listings" (BUG-20260910-061). That assumption is
+        # a claim that `tokens` and `traits` agree, and nothing enforces it:
+        # `_standing_live`'s token filter reads `traits`, while |S(F)| is counted over
+        # `tokens`. A populated `traits` table with an empty token list -- which is a
+        # real intermediate state of the trait onboarding -- gave |S(F)| = 0 and a
+        # drawn ask line at the same time. Every series is blanked explicitly now.
+        #
+        # Each series is guarded on ITS OWN token set, not on the combined one: a
+        # single-clause floor whose own clause selects tokens is a real number and is
+        # exactly what the multi-clause panel exists to show when the AND-set is
+        # empty. Blanking it because the INTERSECTION is empty would delete the
+        # answer to the question the panel is asking.
+        empty_set = bool(traits) and matching == 0
+        if empty_set:
+            bid = [None] * len(grid)
+            winning = [None] * len(grid)
+            _blank_standing(trait_ask)
+        for f in single_floors:
+            if f["matching_tokens"] == 0:
+                _blank_standing(f)
+        observed = sum(1 for v in trait_ask["median"] if v is not None)
+        legs_note = {k: TRAIT_BID_LEGS[k] for k in ("item", "trait_offer", "collection")}
+        return {
+            "keys": grid,
+            "t": [datetime.fromtimestamp(k, tz=timezone.utc).isoformat() for k in grid],
+            "trait_ask": trait_ask,
+            "trait_bid": {
+                "median": bid, "coverage": bid_cov, "winning_leg": winning,
+                "n_item": n_leg["item"],
+                "n_trait_offer_cover": n_leg["trait_offer"],
+                "n_collection": n_leg["collection"],
+                "legs": legs_note,
+            },
+            "baseline_ask": baseline_ask,
+            "single_floors": single_floors,
+            "matching_tokens": matching,
+            "partial_offers": verdicts["partial_n"],
+            "partial_detail": verdicts["partial"],
+            "partial_detail_cap": verdicts.get("partial_detail_cap"),
+            "partial_truncated": verdicts.get("partial_truncated"),
+            "unknown_offers": verdicts["unknown_numeric"],
+            "unparsed_offers": verdicts["unparsed"],
+            "basis": {
+                "book": "standing",
+                "kind": "trait_set",
+                "interval_id": iv_id,
+                "denomination": denom,
+                "trait_filter": traits,
+                "clauses": len(traits),
+                "mode": "multi" if len(traits) >= 2 else "single",
+                "matching_tokens": matching,
+                "empty_token_set": empty_set,
+                "empty_token_set_note": (
+                    "this filter selects NO token, so there is no trait group and every series "
+                    "about it is undefined -- the ask, the bid, and every single-clause floor "
+                    "whose own clause selects nothing. The bid would otherwise show the "
+                    "collection offer, a bid on tokens this filter does not select. The per-leg "
+                    "counts still report what was standing. |S(F)| is counted over the TOKENS "
+                    "table, so the first thing to check is whether the token list is loaded at "
+                    "all -- a populated `traits` table with an empty `tokens` table gives "
+                    "|S(F)| = 0 too, and both are filled by the same onboarding run "
+                    "(traits.command / import-traits.command)."
+                    if empty_set else ""),
+                "token_set_universe": "tokens",
+                "buckets": len(grid),
+                "observed_buckets": observed,
+                "undefined_buckets": len(grid) - observed,
+                "legs": legs_note,
+                "bid_rule": ("highest standing bid = MAX at each tau over the union of the three "
+                             "legs above. The three are never summed: they are three populations, "
+                             "and a sum of them is not depth (dataeng §4.3, quant §1 metric 1)."),
+                "ask_rule": ("lowest STANDING ask over S(F). A bucket with no standing ask is null, "
+                             "never 0 and never the last price seen (Operator, 2026-09-10)."),
+                "partial_offers": verdicts["partial_n"],
+                "partial_note": ("PARTIAL offers overlap S(F) without covering it. They are counted "
+                                 "and reported with |S(F) n S(C)| and |S(F)|, and are NEVER summed "
+                                 "into the bid leg -- allocating a fraction of their quantity as "
+                                 "depth is a judgement and belongs in ANALYSIS (docs/06 §4)."),
+                "unknown_offers": verdicts["unknown_numeric"],
+                "unparsed_offers": verdicts["unparsed"],
+                "unknown_note": ("numeric criteria cannot be evaluated against the string `traits` "
+                                 "table, so their verdict is UNKNOWN -- excluded AND counted, never "
+                                 "TRUE. `unparsed` (criteria_n = 0) is the loud-failure marker and "
+                                 "is counted separately: summing the two would blur a parser gap "
+                                 "into a schema limit."),
+                "gap_masked": False,
+                "gap_note": ("ingestion-gap masking is applied by series() and is NOT applied here; "
+                             "the page shades gap spans on the plot. A bucket inside a gap shows "
+                             "what the reconstructed book held, which during a gap is stale."),
+                "percentiles_min_n": MIN_N_FOR_PERCENTILES,
+                "left_truncated": True,
+                "left_truncation_note": trait_ask["basis"]["left_truncation_note"],
+                "wash_filter": "raw",
+                "timezone": self.tz,
+                "as_of": datetime.fromtimestamp(horizon, tz=timezone.utc).isoformat(),
+            },
+        }
+
+    def _token_set_size(self, collection: str, traits: dict[str, list[str]] | None) -> int:
+        """|S(F)| -- how many tokens the filter selects. The `n` every trait number carries."""
+        tf, targs = token_filter_sql(collection, traits or {}, alias="t")
+        return self.conn.execute(
+            f"SELECT COUNT(*) FROM tokens t WHERE t.collection = ?{tf}",
+            (collection, *targs)).fetchone()[0]
+
     def series(self, *, metric: str, collection: str, denomination: str = "ETH",
                transform: str = "ABS", interval: str = "1h", range_: str = "24h",
                now: datetime | None = None, traits: dict[str, list[str]] | None = None,
@@ -1017,6 +1379,14 @@ class MetricEngine:
                     f"{metric!r} has a standing book but series() does not offer the standing "
                     f"variant: {STANDING_NOT_OFFERED[metric]}")
         keys = bucket_grid(start, end, ispec, self.tz)
+        # |S(F)| = 0 -- the filter selects no token, so there is no trait group and
+        # nothing this metric reports is a statement about one (BUG-20260910-060).
+        # Counted over `tokens`, the same universe `screener` and
+        # `trait_offer_verdicts` use, so an unpopulated token list trips the guard
+        # too -- which is the conservative direction: if we know of no tokens we can
+        # say nothing about a subset of them.
+        no_tokens = bool(traits) and self._token_set_size(collection, traits) == 0
+        narrows = filter_narrows(spec)
         legs: dict[str, str] = {}
         extra: dict[str, Any] = {}
         book_basis: dict[str, Any] = {}
@@ -1047,9 +1417,43 @@ class MetricEngine:
             legs = self._spread_legs(traits, standing=False)
         else:
             g = self._bucketed(metric, collection, denomination, start, end, ispec, traits)
-            empty = 0.0 if spec["agg"] in ("COUNT", "SUM") else None
+            # A COUNT/SUM bucket with no event is normally 0.0 -- zero sales in an
+            # hour we were listening is a fact. It is NOT a fact when the filter
+            # selects no token: "0 bids on this trait" says the trait group was
+            # quiet, and the truth is that there is no trait group. Undefined
+            # (BUG-20260910-060).
+            empty = None if (no_tokens and narrows) else (
+                0.0 if spec["agg"] in ("COUNT", "SUM") else None)
             raw = [g.get(k, empty) for k in keys]
             parts, pct = {}, None
+        # |S(F)| = 0 blanks EVERY array this metric returns, on every branch
+        # (BUG-20260910-061). The first version of this guard lived only on the
+        # `_bucketed` branch, so `floor_ask` and `immediacy_cost` on the STANDING
+        # book walked straight past it -- and those two are the ones that can
+        # disagree with it, because `_standing_live`'s token filter reads the
+        # `traits` table while the guard counts `tokens`. With traits populated
+        # and the token list not, the basis said "every bucket of this metric is
+        # undefined" while the chart drew a line. One place, after every branch,
+        # so a branch added later cannot miss it.
+        #
+        # `parts` is blanked with the rest: `immediacy_cost` as a WHOLE is
+        # undefined here, and leaving its collection-wide bid leg populated
+        # invites someone to subtract two legs of a metric that has just been
+        # declared meaningless. The metric-level carve-out is unaffected --
+        # `collection_bid` asked for on its own has `narrows = False` and is
+        # never blanked.
+        if no_tokens and narrows:
+            raw = [None] * len(keys)
+            for leg in parts.values():
+                leg[:] = [None] * len(keys)
+            if pct is not None:
+                pct = [None] * len(keys)
+            for key in ("p10", "p90", "coverage"):
+                if key in extra:
+                    extra[key] = [None] * len(keys)
+            for key in ("n", "n_ask", "n_bid"):
+                if key in extra:
+                    extra[key] = [0] * len(keys)
         gap_masked = 0
         if gaps and keys:
             widths = [keys[i + 1] - keys[i] for i in range(len(keys) - 1)] + [end - keys[-1]]
@@ -1093,6 +1497,24 @@ class MetricEngine:
             "bucket_alignment": ("UTC" if "duration" in ispec and int(ispec["duration"]) < 86400
                                  else f"local midnight ({self.tz})"),
         })
+        basis["empty_token_set"] = no_tokens
+        basis["token_set_universe"] = "tokens"
+        basis["empty_token_set_note"] = ((
+            "this trait filter selects NO token, so every array this metric returns is "
+            "undefined -- null, not 0, on every book and every leg. A 0 would say 'nothing "
+            "happened to this trait group in this hour'; the truth is that there is no trait "
+            "group. Before BUG-20260910-060 the collection-offer and COVERing-trait-offer "
+            "branches of the filter still matched here, and before BUG-20260910-061 the "
+            "standing-book branches ignored this guard entirely."
+            if narrows else
+            "this trait filter selects NO token, so nothing on this panel is about a trait group. "
+            "This metric is deliberately NOT narrowed by a trait filter (see `legs`): its events "
+            "are collection offers, which carry no token and bid on every one of them, so the "
+            "number below is collection-wide and is not a statement about the filter."
+        ) + " |S(F)| is counted over the TOKENS table, so the first thing to check is whether "
+            "the token list is loaded at all -- a populated `traits` table with an empty "
+            "`tokens` table gives |S(F)| = 0 too, and both are filled by the same onboarding "
+            "run (traits.command / import-traits.command).") if no_tokens else ""
         if legs:
             basis["legs"] = legs
         if book_used == "observed" and "book" in spec:
@@ -1298,6 +1720,19 @@ class MetricEngine:
         of a PARTIAL offer's quantity as depth models the offerer as
         indifferent among the tokens in reach -- a judgement, and so it belongs
         in ANALYSIS with its assumption declared, never here (docs/06 §4).
+
+        **Two shapes here are load-bearing for cost, not for correctness
+        (BUG-20260910-062).** The reach of a criterion `(trait_type, value)` is a
+        property of the TRAIT TABLE, not of the offer that names it, so it is
+        looked up once per distinct pair and memoised for the call -- 48 distinct
+        pairs, not 27,694 lookups, on the fixture the tech-lead measured. And the
+        criteria rows are fetched in ONE grouped query rather than one per offer.
+        Both are O(distinct work) instead of O(offers x criteria); the verdicts
+        they produce are identical, which is what the property tests assert.
+
+        `partial` is capped at `PARTIAL_DETAIL_CAP` entries. `partial_n` is the
+        TRUE count and is computed separately -- capping the detail must never
+        cap the number, or the cap silently becomes the answer (BUG-20260910-063).
         """
         traits = traits or {}
         tf, targs = token_filter_sql(collection, traits, alias="t")
@@ -1305,6 +1740,28 @@ class MetricEngine:
             f"SELECT t.token_id FROM tokens t WHERE t.collection = ?{tf}", (collection, *targs))}
         covers = disjoint = unknown = unparsed = 0
         partial: list[dict[str, Any]] = []
+        partial_n = 0
+
+        reach: dict[tuple[str, str], set[str]] = {}
+
+        def tokens_with(t: str, v: str) -> set[str]:
+            """S({(t, v)}) -- memoised per call. One query per DISTINCT pair."""
+            key = (t, v)
+            if key not in reach:
+                reach[key] = {r[0] for r in self.conn.execute(
+                    "SELECT token_id FROM traits WHERE collection=? AND trait_type=? AND value=?",
+                    (collection, t, v))}
+            return reach[key]
+
+        crit_by_order: dict[tuple[str, int], list[tuple[str, str]]] = {}
+        for run, seq, t, v in self.conn.execute(
+                """SELECT c.run, c.seq, c.trait_type, c.value
+                   FROM order_criteria c JOIN events e ON e.run = c.run AND e.seq = c.seq
+                   WHERE e.collection = ? AND e.event_type = 'trait_offer'
+                     AND e.valid_ts >= ? AND e.valid_ts < ? AND c.kind = 'string'
+                   ORDER BY c.run, c.seq, c.idx""", (collection, start, end)):
+            crit_by_order.setdefault((run, seq), []).append((t, v))
+
         for run, seq, oh, price, qty, cn, cnn in self.conn.execute(
                 """SELECT run, seq, order_hash, price_eth, quantity, criteria_n, criteria_numeric_n
                    FROM events WHERE collection = ? AND event_type = 'trait_offer'
@@ -1315,30 +1772,32 @@ class MetricEngine:
             if (cnn or 0) > 0:
                 unknown += 1                        # numeric criteria: UNKNOWN is not TRUE
                 continue
-            crit = self.conn.execute(
-                "SELECT trait_type, value FROM order_criteria WHERE run=? AND seq=? AND kind='string'",
-                (run, seq)).fetchall()
+            crit = crit_by_order.get((run, seq), [])
             if criteria_covers(list(crit), traits):
                 covers += 1
                 continue
             s_c: set[str] | None = None
             for t, v in crit:
-                got = {r[0] for r in self.conn.execute(
-                    "SELECT token_id FROM traits WHERE collection=? AND trait_type=? AND value=?",
-                    (collection, t, v))}
-                s_c = got if s_c is None else (s_c & got)
+                got = tokens_with(t, v)
+                s_c = set(got) if s_c is None else (s_c & got)
             overlap = len(s_f & (s_c or set()))
             if overlap:
-                partial.append({"order_hash": oh, "price_eth": price, "quantity": qty,
-                                "criteria": [{"trait_type": t, "value": v} for t, v in crit],
-                                "overlap_tokens": overlap, "filter_tokens": len(s_f)})
+                partial_n += 1
+                if len(partial) < PARTIAL_DETAIL_CAP:
+                    partial.append({"order_hash": oh, "price_eth": price, "quantity": qty,
+                                    "criteria": [{"trait_type": t, "value": v} for t, v in crit],
+                                    "overlap_tokens": overlap, "filter_tokens": len(s_f)})
             else:
                 disjoint += 1
         return {"collection": collection, "trait_filter": traits, "filter_tokens": len(s_f),
-                "covers": covers, "partial_n": len(partial), "partial": partial,
+                "covers": covers, "partial_n": partial_n, "partial": partial,
+                "partial_detail_cap": PARTIAL_DETAIL_CAP,
+                "partial_truncated": partial_n > len(partial),
                 "disjoint": disjoint, "unknown_numeric": unknown, "unparsed": unparsed,
+                "distinct_criteria_pairs": len(reach),
                 "note": "COVERS is the only verdict counted as bid depth; the four others are "
-                        "reported separately and are never summed into it"}
+                        "reported separately and are never summed into it. `partial` is a SAMPLE "
+                        f"of at most {PARTIAL_DETAIL_CAP}; `partial_n` is the true count."}
 
     def screener(self, collection: str, *, traits: dict[str, list[str]] | None = None,
                  sort: str = "token_id", direction: str = "asc", page: int = 0, page_size: int = 50,
