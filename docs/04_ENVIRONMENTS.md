@@ -149,7 +149,7 @@ The last step is split across two machines, because it has to be.
 1. HEAD is on a pushable branch — never `main`, never detached, `tester` only with `--allow-tester`.
 2. The working tree is clean. What is not committed does not get pushed, so a dirty tree means the sign-offs describe something other than what would land.
 3. Nothing forbidden is tracked: anything under `data/`, any `*.tgz` or `*.zip`, any `*.patch`, anything under `.sync/`. Commit `9932f9f` put eight archives and a 2,125-line patch into history because nothing was looking; this is what looks.
-4. `docs/gates/<branch, slashes as dashes>.yaml` records `APPROVE` from every role in `config/base.yaml` → `gates.required_roles`, **bound to the current HEAD sha**. A new commit invalidates every sign-off on the branch, by design. `APPROVE-WITH-FIXES` is not approval.
+4. `docs/gates/<branch, slashes as dashes>.yaml` records `APPROVE` from every role in `config/base.yaml` → `gates.required_roles`, **bound to the current HEAD sha**. A new commit invalidates every sign-off on the branch, by design. `APPROVE-WITH-FIXES` is not approval. The record is gitignored: it names the sha it applies to, and committing it would itself move HEAD, so a tracked record could never satisfy its own binding. The durable copy of who approved what is the PR description.
 5. `tools/secrets_check.py` clean (REQ-N-11).
 6. `tools/buglog.py --check` clean.
 7. `ruff check src tests tools` — skipped with a warning if ruff is not installed locally, because the Mac may not have it. CI runs it as a hard failure, so a skip here means the PR may go red after the push.

@@ -51,7 +51,10 @@ is proposing to remove reason 2 as well as route around reason 1.
 - Run `python3 tools/pushgate.py` (and `--json`) as often as you like. It is
   read-only and costs no REST budget.
 - Write `docs/gates/<branch>.yaml` — **only** to transcribe a verdict a role
-  actually gave, quoting or citing where it gave it.
+  actually gave, quoting or citing where it gave it. That file is gitignored
+  and stays that way: it names the HEAD sha it applies to, and committing it
+  would itself move HEAD, so a tracked record could never satisfy its own
+  binding. Never `git add -f` one.
 - Run `pull.command`'s fast-forward, or the equivalent
   `git fetch` + `git merge --ff-only @{u}`. Pulling is safe: it changes no
   history and needs no sign-off. Say so when asked; do not invent a gate that

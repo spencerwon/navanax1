@@ -31,3 +31,17 @@ tools/sample_frames.jsonl
 # market-analyst output: local only, never published
 docs/market/
 data/market/
+
+# Push-gate sign-off records. Deliberately NOT committed: each one names the
+# exact HEAD sha it applies to, and committing the record would itself move
+# HEAD, so a tracked record could never satisfy its own binding. They are
+# working-tree artifacts, read by tools/pushgate.py and thrown away with the
+# branch. docs/gates/README.md, which explains the format, IS tracked.
+docs/gates/*.yaml
+
+# Transfer scratch and build archives. 9932f9f committed eight .sync/*.tgz and
+# a 2,125-line .patch; tools/pushgate.py check 3 refuses to let that recur.
+.sync/
+*.tgz
+*.zip
+*.patch

@@ -35,7 +35,9 @@ WHAT IT CHECKS, cheapest and most structural first
   2. The working tree is clean.
   3. Nothing forbidden is tracked (data/, *.tgz, *.zip, *.patch, .sync/).
   4. docs/gates/<branch>.yaml records the required sign-offs, bound to this
-     exact commit sha.
+     exact commit sha. That file is gitignored on purpose: it names the HEAD
+     sha it applies to, and committing it would itself move HEAD, so a tracked
+     record could never satisfy its own binding.
   5. tools/secrets_check.py is clean.
   6. tools/buglog.py --check is clean.
   7. ruff check src tests tools (SKIPPED with a warning if ruff is absent --

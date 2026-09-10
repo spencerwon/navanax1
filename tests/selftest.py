@@ -4576,6 +4576,23 @@ def test_pushgate_gate_file_path_and_protected_branches() -> None:
     check("pushgate: the shared tester branch needs an explicit flag",
           "tester" in pg.SHARED_BRANCHES)
 
+    # The record must NOT be committed. It names the HEAD sha it applies to, so
+    # committing it would move HEAD and the record would be stale the instant it
+    # existed -- the binding could never be satisfied. Held here because a
+    # well-meant `git add docs/gates/` would break the gate in a way that looks
+    # like tidiness.
+    import subprocess
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "docs/gates/feat-example.yaml"],
+        cwd=str(ROOT), capture_output=True)
+    check("pushgate: a sign-off record is gitignored, so it can never move HEAD",
+          ignored.returncode == 0)
+    tracked = subprocess.run(["git", "ls-files", "docs/gates/"],
+                             cwd=str(ROOT), capture_output=True, text=True)
+    check("pushgate: docs/gates/ tracks its README and no sign-off records",
+          [ln for ln in tracked.stdout.split() if ln.endswith(".yaml")] == [],
+          tracked.stdout)
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

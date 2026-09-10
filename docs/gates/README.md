@@ -18,6 +18,16 @@ docs/gates/<branch name, slashes replaced by dashes>.yaml
 | `feat/explorer-traits` | `docs/gates/feat-explorer-traits.yaml` |
 | `fix/BUG-20260909-041` | `docs/gates/fix-BUG-20260909-041.yaml` |
 
+**These files are gitignored, on purpose.** A record names the exact HEAD sha
+it applies to. Committing the record would itself move HEAD, so a *tracked*
+record could never satisfy its own binding — it would be stale the instant it
+existed. So the record is a working-tree artifact: written on the machine the
+reviews happened on, read by the gate, and discarded with the branch. This
+`README.md` is tracked; the `.yaml` files are not.
+
+The durable copy of who approved what is the pull request description, which
+is what Spencer reads before he merges.
+
 ---
 
 ## The shape, in full
