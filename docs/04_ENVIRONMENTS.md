@@ -117,6 +117,50 @@ Types: `feat`, `fix`, `refactor`, `test`, `docs`, `config`, `data`.
 
 The `Requirement:` line is not bureaucracy — it is what lets you ask "why does this code exist?" in six months and get an answer. Code that traces to no requirement is a signal that either the code is unnecessary or a requirement is missing. Both are worth knowing.
 
+### 4.2 Getting a branch to the remote
+
+The last step is split across two machines, because it has to be.
+
+**The agents cannot push.** Git over HTTPS from the Linux VM the agents run in on the Operator's Mac is refused by the corporate proxy — `403 from proxy after CONNECT`. This is not a credentials problem and no token would fix it; the tunnel is blocked before authentication is attempted. The macOS side, where a `.command` launcher runs, already holds the Operator's GitHub credentials through GitHub Desktop and can.
+
+**And the Operator approves every pull request** (`02_AGENT_HIERARCHY.md` §2). That would be true even if the proxy were opened tomorrow. So the split is not a workaround that expires — it is the control, expressed as the only step a human performs.
+
+```
+  agent, in the Linux VM                    Spencer, on macOS
+  ──────────────────────                    ─────────────────
+  work on feat/<name>
+  pm · tech-lead · validator review
+  push-steward records each APPROVE
+    in docs/gates/<branch>.yaml,
+    bound to the exact commit sha
+  push-steward runs tools/pushgate.py
+    until every check is green
+                              ────────▶     double-click  push.command
+                                            (it re-runs the whole gate first)
+                                            read the summary
+                                            type  PUSH
+                                            git push runs with his credentials
+                                            open the PR
+                                            ⛔ HE approves and merges it
+```
+
+**The gate.** `python3 tools/pushgate.py` exits 0 only if every one of these passes, and prints a numbered report saying what to do about each failure either way:
+
+1. HEAD is on a pushable branch — never `main`, never detached, `tester` only with `--allow-tester`.
+2. The working tree is clean. What is not committed does not get pushed, so a dirty tree means the sign-offs describe something other than what would land.
+3. Nothing forbidden is tracked: anything under `data/`, any `*.tgz` or `*.zip`, any `*.patch`, anything under `.sync/`. Commit `9932f9f` put eight archives and a 2,125-line patch into history because nothing was looking; this is what looks.
+4. `docs/gates/<branch, slashes as dashes>.yaml` records `APPROVE` from every role in `config/base.yaml` → `gates.required_roles`, **bound to the current HEAD sha**. A new commit invalidates every sign-off on the branch, by design. `APPROVE-WITH-FIXES` is not approval.
+5. `tools/secrets_check.py` clean (REQ-N-11).
+6. `tools/buglog.py --check` clean.
+7. `ruff check src tests tools` — skipped with a warning if ruff is not installed locally, because the Mac may not have it. CI runs it as a hard failure, so a skip here means the PR may go red after the push.
+8. `tests/selftest.py` and `tests/validator_probe.py` green.
+
+It is stdlib-only, including its own small YAML reader — `push.command` runs it, and a launcher that dies on a missing package teaches the Operator that the gate is flaky, which is how a gate stops being run.
+
+**`pull.command`** fetches and fast-forwards only (`git merge --ff-only`). It refuses on a dirty tree, and on a divergence it prints both sides and stops. It never merges, rebases, or resolves a conflict. **Pulling needs no sign-off** — it changes no history and creates no risk. Only pushing does.
+
+**Neither launcher can merge, and nothing in this repository can.** `push.command` never uses `--force` and never targets `main`. Merging is the Operator's, on GitHub, after he has read the description.
+
 ---
 
 ## 5. Promotion gates

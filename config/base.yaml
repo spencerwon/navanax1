@@ -80,3 +80,24 @@ reconciliation:
 
 display:
   timezone: "America/Chicago"   # storage is always UTC; this is display only
+
+gates:
+  # Roles whose APPROVE must be recorded in docs/gates/<branch>.yaml before
+  # tools/pushgate.py will let a branch go to the remote. Read by
+  # tools/pushgate.py:required_roles() -- REQ-N-09, no threshold in code.
+  #
+  # These three are the checks the Operator asked for by name. Each is a
+  # DIFFERENT question, which is why three signatures and not one:
+  #   tech-lead  -- is this coherent with the architecture, and traceable?
+  #   pm         -- is this what was asked for, in scope, and complete?
+  #   validator  -- does it actually work, and were the defects fixed?
+  # Every role listed here must have a charter at .claude/agents/<role>.md;
+  # the gate refuses a sign-off from a role the repo does not define.
+  #
+  # Written as a block list on purpose: the gate parses this file with a
+  # stdlib YAML subset reader (no PyYAML on a launcher path) that does not
+  # accept flow style [a, b, c].
+  required_roles:
+    - tech-lead
+    - pm
+    - validator

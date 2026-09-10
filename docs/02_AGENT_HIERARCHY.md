@@ -419,6 +419,8 @@ self-validated.
 | UI Designer | — | R | — | — | — | R | — | — |
 | Build Reporter | R | R | — | — | — | R | R | — |
 | Research | — | R | — | — | — | R | R | — |
+| PM | R | R | — | — | — | R | R⁵ | — |
+| Push Steward | — | — | — | — | — | R | R⁶ | — |
 | Operator | R/W | R/W | R/W | R/W | R/W | R/W | R/W | **Sole** |
 
 ¹ **Training-window only.** Quant Research's landing-zone and normalized-store access is filtered at the data-access layer to records with `observed_at` inside the training partition. Unrestricted read access would silently void the partition control, since both stores contain the validation and test periods in full.
@@ -426,7 +428,45 @@ self-validated.
 ³ **`config/assumptions.yaml` only.** Quant Research owns the registry of judgments (`docs/06_TIME_UNITS_AND_LAYERING.md` §4.4) and may edit that one file in a branch. Every other config file is read-only to it, and it cannot merge its own change.
 ⁴ **Test and audit code only** — regression tests, leakage traps, reproduction scripts, audit tooling. The Validator must be able to write the test that demonstrates a defect; it may not modify the production code under review, and it may not merge.
 
-Footnotes 2–4 are the only authorities L1 agents hold beyond the §2 baseline. They are granted narrowly, named explicitly, and none of them includes merge.
+⁵ **Its own sign-off entry only.** The PM writes one entry, for the role `pm`, in `docs/gates/<branch>.yaml`. It writes no other file in the repository — no code, no config, no other role's entry.
+⁶ **`docs/gates/*.yaml` only, and only to transcribe.** The Push Steward records verdicts other roles actually gave. It never signs for a role, never signs for itself, and never writes anything else.
+
+Footnotes 2–4 are the only authorities L1 agents hold beyond the §2 baseline. They are granted narrowly, named explicitly, and none of them includes merge. Footnotes 5–6 are the same kind of grant to two L2 roles whose *only* write is a single line in a sign-off record.
+
+### 3.18 Push Steward (L2) — `push-steward`, sonnet
+
+**Purpose.** Gets a finished branch to the point where it can reach the remote, and verifies it is allowed to. Runs `tools/pushgate.py`, records the sign-offs the required roles gave, and hands the Operator `push.command` to click. **It cannot push, and that is the design.**
+
+**Exists because** the last step of getting work to GitHub is split across two machines and neither half can do the other's job:
+
+- The Linux VM the agents run in on the Operator's Mac **cannot reach GitHub at all** — the corporate proxy refuses the tunnel (`403 from proxy after CONNECT`). No credential fixes this; the connection is blocked before authentication is attempted.
+- The macOS side, where a `.command` launcher runs, holds the Operator's GitHub credentials through GitHub Desktop and can.
+
+So the agent prepares and verifies; **the Operator's click performs.** The second reason is the one that survives even if the proxy is fixed tomorrow: **Spencer approves every pull request** (§2). A step where he reads a summary and types `PUSH` is a control, not friction.
+
+**The gate** (`tools/pushgate.py`, stdlib-only because a launcher runs it) checks, cheapest first: a pushable branch (never `main`, never detached, `tester` only with an explicit flag) · a clean working tree · nothing forbidden tracked (`data/`, `*.tgz`, `*.zip`, `*.patch`, `.sync/`) · a current sign-off record · `tools/secrets_check.py` · `tools/buglog.py --check` · `ruff` (skipped with a warning if absent; hard in CI) · `tests/selftest.py` and `tests/validator_probe.py`.
+
+**The sign-off record** is `docs/gates/<branch, slashes as dashes>.yaml`, and it is **bound to one exact commit sha**. Every role in `config/base.yaml` → `gates.required_roles` — currently `tech-lead`, `pm`, `validator` — must have recorded `APPROVE` against the current HEAD. `APPROVE-WITH-FIXES` is not approval. A new commit invalidates every sign-off on the branch. Format: `docs/gates/README.md`.
+
+**May** run the gate, transcribe verdicts that were actually given, and run `pull.command`'s fast-forward (pulling changes no history and needs no sign-off). **May not** push, merge, open or approve a PR, touch `main`, force-push, rewrite history, write to `data/`, or sign any gate itself.
+
+**Never** records a sign-off that did not happen, re-uses one across commits, treats `APPROVE-WITH-FIXES` as approval, or proposes a token, a PAT, `gh`, or a CI job with write access as a way around the block. There is no token in this project and there must not be.
+
+**Reports to** the orchestrator. The push and the PR approval are the Operator's alone.
+
+### 3.19 PM (L2) — `pm`, sonnet
+
+**Purpose.** Asks the one question the other two gates do not: **is this what was asked for, all of it, and nothing else?** The `validator` asks whether the code works; the `tech-lead` asks whether it fits the architecture. Neither re-reads the sentence that started the work.
+
+**Exists because** the Operator named it. His request was that a push pass "tech lead, pm and other checks in the hierarchy" — and scope drift is a live anti-pattern here (§9), not a hypothetical.
+
+**Checks** the request quoted verbatim against what was built; completeness; scope growth; that cited requirement IDs exist in `docs/00_REQUIREMENTS.md`; the Operator-facing surface read as the Operator; and that anything deferred is stated where he will see it.
+
+**Runs first** of the three gates. It is the cheapest, and a change that solves the wrong problem should not consume an opus review.
+
+**May** read everything and run the suites. **Writes exactly one thing:** its own entry in `docs/gates/<branch>.yaml`. **May not** write code, merge, push, or sign for another role.
+
+**Reports to** the orchestrator.
 
 ---
 
@@ -709,6 +749,11 @@ Operator or engine creates a paper position
 | Reconciliation drift persistent | Operator via Validator | Medium |
 | Signal result surprisingly strong | Validator, then Operator | Medium — treat as suspicious |
 | Validator blocks a promotion | Operator | Medium |
+| Push gate fails on tests, lint or a forbidden tracked path | Tech Lead, then the change's author | Medium — it is a code problem, not an ops one |
+| A required role will not sign a branch's gate | Orchestrator | Medium — routing or scope, rarely the Operator's |
+| `pull.command` reports the local and remote histories have diverged | Tech Lead | Medium — never resolve a conflict alone, never force over it |
+| The push itself fails on the Mac (credentials, moved remote) | Orchestrator, then Operator | Medium — both causes need him |
+| Anyone proposes a token, `gh`, or auto-merge to skip the click | Operator via Orchestrator | High — it removes a control he set |
 | Requirement ambiguous | Operator | Blocking |
 | Live signal degrading | Operator | Medium |
 | Wash ratio spike | Operator | Low unless a trade is pending |

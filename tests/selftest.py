@@ -4287,6 +4287,294 @@ def test_audit_token_ids_command(tmp: Path) -> None:
         rc2 = cli_main(["--root", str(empty), "audit-token-ids"])
     check("audit: a clean record exits 0 and says so in words, not just a count",
           rc2 == 0 and "RESULT: 0" in buf2.getvalue(), f"rc={rc2}")
+# The push gate. tools/pushgate.py is what stands between a branch and the
+# remote, and it runs from `push.command` -- a double-clicked launcher on a Mac
+# that may have nothing installed but Python. So it is stdlib-only, including
+# its own small YAML reader, and these tests hold it to that.
+#
+# The failure this guards against is not "the gate crashed". It is "the gate
+# said PASS when it should have said FAIL", which is silent, and which would
+# put unreviewed code in front of the only person with merge authority.
+# ===========================================================================
+GOOD_SIGNOFF = '''\
+# a sign-off record -- comments are ignored
+branch: feat/explorer-traits
+commit: 1111111111111111111111111111111111111111
+signoffs:
+  - role: tech-lead
+    verdict: APPROVE
+    at: "2026-09-10T09:12:00-05:00"
+    note: "traces to REQ-D-31; both findings fixed with tests"
+  - role: pm
+    verdict: APPROVE
+    at: "2026-09-10T09:40:00-05:00"
+    note: "what was asked for, nothing extra"
+  - role: validator
+    verdict: APPROVE
+    at: 2026-09-10T10:05:00Z
+    note: "reverted each fix, confirmed the new test fails"
+'''
+
+HEAD_SHA = "1111111111111111111111111111111111111111"
+OTHER_SHA = "2222222222222222222222222222222222222222"
+DEFINED_ROLES = {"tech-lead", "pm", "validator", "orchestrator"}
+
+
+def _pushgate():
+    sys.path.insert(0, str(ROOT / "tools"))
+    import pushgate
+    return pushgate
+
+
+def _signoff_problems(text, sha=HEAD_SHA, branch="feat/explorer-traits", now=None):
+    pg = _pushgate()
+    doc = pg.parse_yaml(text)
+    return pg.validate_signoffs(
+        doc, branch, sha, ["tech-lead", "pm", "validator"],
+        role_defined=lambda r: r in DEFINED_ROLES,
+        now=now or datetime(2026, 9, 11, tzinfo=timezone.utc),
+    )
+
+
+def test_pushgate_yaml_subset_reads_a_well_formed_record() -> None:
+    """The gate must not depend on PyYAML -- a launcher that dies on
+    ModuleNotFoundError teaches the Operator that the gate is flaky, and a gate
+    people route around is worse than none. So it carries its own reader, and
+    the reader has to actually produce the right structure, not merely not
+    crash."""
+    pg = _pushgate()
+    doc = pg.parse_yaml(GOOD_SIGNOFF)
+    check("pushgate yaml: top-level scalars read back",
+          doc["branch"] == "feat/explorer-traits" and doc["commit"] == HEAD_SHA, repr(doc))
+    check("pushgate yaml: the signoffs list is a list of mappings",
+          isinstance(doc["signoffs"], list) and len(doc["signoffs"]) == 3
+          and all(isinstance(s, dict) for s in doc["signoffs"]), repr(doc.get("signoffs")))
+    check("pushgate yaml: each entry keeps role/verdict/at/note",
+          [s["role"] for s in doc["signoffs"]] == ["tech-lead", "pm", "validator"]
+          and doc["signoffs"][0]["verdict"] == "APPROVE"
+          and doc["signoffs"][0]["at"] == "2026-09-10T09:12:00-05:00"
+          and doc["signoffs"][1]["note"] == "what was asked for, nothing extra",
+          repr(doc["signoffs"]))
+    check("pushgate yaml: a full-line comment and a trailing one are both dropped",
+          "#" not in json.dumps(doc), repr(doc))
+    check("pushgate yaml: a well-formed record raises nothing at all",
+          _signoff_problems(GOOD_SIGNOFF) == [], repr(_signoff_problems(GOOD_SIGNOFF)))
+
+
+def test_pushgate_yaml_subset_rejects_what_it_cannot_read() -> None:
+    """Anything outside the subset is an ERROR, never a guess. A sign-off file
+    that parses to something other than what it looks like is the worst possible
+    outcome for this particular file: it would read green."""
+    pg = _pushgate()
+    bad = {
+        "a tab indent": "branch: x\ncommit: y\nsignoffs:\n\t- role: pm\n",
+        "an unterminated quote": 'branch: "feat/x\ncommit: y\n',
+        "a duplicate key": "branch: x\nbranch: y\n",
+        "a key with no colon": "branch x\n",
+        "flow-style list": "signoffs: [tech-lead, pm]\n",
+        "a list item where a mapping belongs": "branch: x\n- role: pm\n",
+        "a document that does not start at column 0": "  branch: x\n",
+        "a dash with no space": "signoffs:\n  -role: pm\n",
+    }
+    for label, text in bad.items():
+        raised = False
+        try:
+            pg.parse_yaml(text)
+        except pg.GateYamlError:
+            raised = True
+        except Exception as exc:                                  # noqa: BLE001
+            check(f"pushgate yaml: {label} raises GateYamlError, not {type(exc).__name__}", False, str(exc))
+            continue
+        check(f"pushgate yaml: {label} is refused, not guessed at", raised)
+    check("pushgate yaml: the error names the line so it can be fixed",
+          "line 4" in str(_first_yaml_error(pg, bad["a tab indent"])),
+          str(_first_yaml_error(pg, bad["a tab indent"])))
+
+
+def _first_yaml_error(pg, text):
+    try:
+        pg.parse_yaml(text)
+    except pg.GateYamlError as exc:
+        return exc
+    return None
+
+
+def test_pushgate_signoffs_are_bound_to_one_exact_commit() -> None:
+    """The sha binding IS the mechanism. Without it a sign-off says "the branch
+    was reviewed", and a branch is a moving target -- one more commit after the
+    review and the approval covers code nobody read. So a record that does not
+    name the current HEAD is not a record."""
+    problems = _signoff_problems(GOOD_SIGNOFF, sha=OTHER_SHA)
+    check("pushgate: a sign-off for a different commit is rejected",
+          any("HEAD is" in p and "different commit" in p for p in problems), repr(problems))
+    check("pushgate: the rejection says both shas so the drift is visible",
+          any(HEAD_SHA[:12] in p and OTHER_SHA[:12] in p for p in problems), repr(problems))
+
+    short = GOOD_SIGNOFF.replace(HEAD_SHA, HEAD_SHA[:7])
+    check("pushgate: an abbreviated sha is not accepted as the binding",
+          any("40-character" in p for p in _signoff_problems(short, sha=HEAD_SHA[:7])),
+          repr(_signoff_problems(short, sha=HEAD_SHA[:7])))
+
+    wrong_branch = _signoff_problems(GOOD_SIGNOFF, branch="feat/something-else")
+    check("pushgate: a record naming a different branch is rejected",
+          any("but HEAD is on" in p for p in wrong_branch), repr(wrong_branch))
+
+
+def test_pushgate_every_required_role_must_have_approved() -> None:
+    """Three signatures because they are three different questions. Two of three
+    is not two-thirds of a review -- it is a missing question."""
+    missing = GOOD_SIGNOFF.split("  - role: validator")[0]
+    problems = _signoff_problems(missing)
+    check("pushgate: a missing required role is rejected",
+          any("validator" in p and "no APPROVE" in p for p in problems), repr(problems))
+    check("pushgate: only the missing role is complained about",
+          not any("tech-lead" in p or "'pm'" in p for p in problems), repr(problems))
+
+    dup = GOOD_SIGNOFF + '''  - role: pm
+    verdict: APPROVE
+    at: "2026-09-10T11:00:00-05:00"
+    note: "signed twice"
+'''
+    problems = _signoff_problems(dup)
+    check("pushgate: the same role signing twice is rejected",
+          any("appears twice" in p for p in problems), repr(problems))
+
+    unknown = GOOD_SIGNOFF + '''  - role: chief-vibes-officer
+    verdict: APPROVE
+    at: "2026-09-10T11:00:00-05:00"
+    note: "looks great"
+'''
+    problems = _signoff_problems(unknown)
+    check("pushgate: a sign-off from a role the repo does not define is not a sign-off",
+          any("chief-vibes-officer" in p and "does not define" in p for p in problems), repr(problems))
+
+
+def test_pushgate_approve_with_fixes_is_not_approval() -> None:
+    """It means the fixes have NOT been applied. This project already has a bug
+    class made entirely of things everyone agreed would be fixed later, so the
+    gate refuses to treat the promise as the fix."""
+    awf = GOOD_SIGNOFF.replace(
+        "  - role: pm\n    verdict: APPROVE",
+        "  - role: pm\n    verdict: APPROVE-WITH-FIXES")
+    problems = _signoff_problems(awf)
+    check("pushgate: APPROVE-WITH-FIXES does not satisfy a required role",
+          any("APPROVE-WITH-FIXES" in p and "not approval" in p for p in problems), repr(problems))
+    check("pushgate: and the role still counts as un-approved",
+          any("required role 'pm'" in p for p in problems), repr(problems))
+
+    rej = GOOD_SIGNOFF.replace(
+        "  - role: validator\n    verdict: APPROVE",
+        "  - role: validator\n    verdict: REJECT")
+    check("pushgate: a REJECT blocks",
+          any("is REJECT" in p for p in _signoff_problems(rej)), repr(_signoff_problems(rej)))
+
+    bogus = GOOD_SIGNOFF.replace("verdict: APPROVE\n    at: \"2026-09-10T09:12", "verdict: LGTM\n    at: \"2026-09-10T09:12")
+    check("pushgate: an invented verdict word is not quietly treated as approval",
+          any("is not one of" in p for p in _signoff_problems(bogus)), repr(_signoff_problems(bogus)))
+
+
+def test_pushgate_timestamps_must_be_real_and_past() -> None:
+    """A sign-off dated in the future was either written before the review
+    happened or written on a machine whose clock is wrong. Both are worth
+    stopping for, and only one of them is innocent."""
+    future = GOOD_SIGNOFF.replace('"2026-09-10T09:40:00-05:00"', '"2027-01-01T00:00:00-06:00"')
+    problems = _signoff_problems(future)
+    check("pushgate: a sign-off dated in the future is rejected",
+          any("in the future" in p for p in problems), repr(problems))
+
+    naive = GOOD_SIGNOFF.replace('"2026-09-10T09:40:00-05:00"', '"2026-09-10T09:40:00"')
+    check("pushgate: a timestamp with no offset is rejected -- 09:40 where?",
+          any("no timezone offset" in p for p in _signoff_problems(naive)),
+          repr(_signoff_problems(naive)))
+
+    junk = GOOD_SIGNOFF.replace('"2026-09-10T09:40:00-05:00"', '"yesterday afternoon"')
+    check("pushgate: an unparseable timestamp is rejected",
+          any("not an ISO-8601" in p for p in _signoff_problems(junk)),
+          repr(_signoff_problems(junk)))
+
+    check("pushgate: a Z-suffixed timestamp IS accepted (the validator entry uses one)",
+          _signoff_problems(GOOD_SIGNOFF) == [])
+
+
+def test_pushgate_refuses_to_push_forbidden_paths() -> None:
+    """Commit 9932f9f put eight .sync/*.tgz archives and a 2,125-line .patch
+    into history. Nothing stopped it, because nothing was looking. The landing
+    zone under data/ is the same shape of mistake with a much worse blast
+    radius: it is irreplaceable, it is enormous, and once it is in history it is
+    in history."""
+    pg = _pushgate()
+    tracked = [
+        "src/navanax/stream.py", "docs/00_REQUIREMENTS.md", "config/base.yaml",
+        "data/x", "a.tgz", "b.patch", ".sync/c",
+        "data/landing/2026-09-09/frames.jsonl.zst", "release.ZIP",
+        "docs/notes/datacenter.md", "tools/patchwork.py",
+    ]
+    hits = dict(pg.forbidden_tracked(tracked))
+    for path in ("data/x", "a.tgz", "b.patch", ".sync/c"):
+        check(f"pushgate: tracking {path!r} is caught", path in hits, repr(sorted(hits)))
+    check("pushgate: a real landing-zone file is caught too",
+          "data/landing/2026-09-09/frames.jsonl.zst" in hits, repr(sorted(hits)))
+    check("pushgate: the extension test is case-insensitive",
+          "release.ZIP" in hits, repr(sorted(hits)))
+    check("pushgate: source, docs and config are NOT flagged",
+          not any(p.startswith(("src/", "config/")) for p in hits), repr(sorted(hits)))
+    check("pushgate: 'data' as a substring of a legitimate path is not flagged",
+          "docs/notes/datacenter.md" not in hits and "tools/patchwork.py" not in hits,
+          repr(sorted(hits)))
+    check("pushgate: every hit carries the reason, so the report can explain itself",
+          all(isinstance(v, str) and v for v in hits.values()), repr(hits))
+
+
+def test_pushgate_required_roles_come_from_config_not_code() -> None:
+    """REQ-N-09: no threshold in code. Which roles must sign is a decision, and
+    decisions live in config/base.yaml. The gate slices out only the `gates:`
+    block, so an unrelated addition elsewhere in that file cannot break the
+    launcher path."""
+    pg = _pushgate()
+    roles = pg.required_roles()
+    check("pushgate: the shipped config requires tech-lead, pm and validator",
+          roles == ["tech-lead", "pm", "validator"], repr(roles))
+    for role in roles:
+        check(f"pushgate: required role {role!r} has a charter the gate can find",
+              (ROOT / ".claude" / "agents" / f"{role}.md").exists())
+
+    custom = Path(tempfile.mkdtemp(prefix="navanax-gatecfg-")) / "base.yaml"
+    custom.write_text(
+        "landing:\n  root: data/landing\n"
+        "gates:\n  # a comment inside the block\n  required_roles:\n"
+        "    - tech-lead\n    - validator\n"
+        "display:\n  timezone: \"America/Chicago\"\n", encoding="utf-8")
+    check("pushgate: an overridden role list is read back exactly",
+          pg.required_roles(custom) == ["tech-lead", "validator"],
+          repr(pg.required_roles(custom)))
+
+    empty = custom.with_name("nogates.yaml")
+    empty.write_text("landing:\n  root: data/landing\n", encoding="utf-8")
+    check("pushgate: a config with no gates block falls back to the shipped default",
+          pg.required_roles(empty) == pg.DEFAULT_REQUIRED_ROLES, repr(pg.required_roles(empty)))
+
+    broken = custom.with_name("broken.yaml")
+    broken.write_text("gates:\n  required_roles: []\n", encoding="utf-8")
+    raised = False
+    try:
+        pg.required_roles(broken)
+    except pg.GateYamlError:
+        raised = True
+    check("pushgate: an empty required_roles list is an error, not an open gate", raised)
+
+
+def test_pushgate_gate_file_path_and_protected_branches() -> None:
+    """The file name is derived, not typed, so it cannot drift from the branch."""
+    pg = _pushgate()
+    check("pushgate: slashes in a branch name become dashes in the gate file",
+          pg.gate_file_for("feat/explorer-traits").name == "feat-explorer-traits.yaml",
+          pg.gate_file_for("feat/explorer-traits").name)
+    check("pushgate: a bug-fix branch maps to its own file",
+          pg.gate_file_for("fix/BUG-20260909-041").name == "fix-BUG-20260909-041.yaml")
+    check("pushgate: main is protected and can never be a push target",
+          "main" in pg.PROTECTED_BRANCHES)
+    check("pushgate: the shared tester branch needs an explicit flag",
+          "tester" in pg.SHARED_BRANCHES)
 
 
 if __name__ == "__main__":
