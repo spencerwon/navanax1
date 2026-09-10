@@ -1739,3 +1739,31 @@ bugs:
   regression_test: tests/selftest.py::test_expiry_is_never_in_the_future
   monitor_gap: "The unit fixtures had no order whose expiration lay in the future relative to the fold. A censored count of 1 in 46,814 on the real run should have been read as a bug by whoever quoted it -- the fifth project rule, applied to a liquidity number."
   pr: 5
+
+- id: BUG-20260909-054
+  summary: "The collection list endpoint carries each token's `traits`; the list pass discarded them and left 9,161 tokens to a per-token fallback (~76 h of REST budget) where the 47 list reads already had the data"
+  severity: S3
+  priority: P1
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T15:30:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T16:00:00-05:00"
+  detected_by: "data-engineer, comparing SpencerTinker/scrape.py parse_tokens (reads nft['traits'] from GET /collection/{slug}/nfts; 8,798 tokens with traits in 44 reads) against the traits.py list pass"
+  detection_channel: operator
+  branch: feat/explorer-traits
+  locations:
+  - {file: src/navanax/traits.py, line: 9}
+  - {file: src/navanax/traits.py, line: 186}
+  requirement: REQ-D-01
+  data_impact: "No wrong record. The 2026-09-09 list pass spent 47 governed reads and stored name/image/metadata_url only; every Argonauts token has metadata_url NULL, so the only path left to traits was the budgeted OpenSea per-token fallback -- 50 tokens got traits (source opensea_nft) and 9,161 did not. Completing that way costs 9,161 reads: 76 hours of the shared 120/hr budget, during which reconciliation and any INTERACTIVE read compete with it."
+  root_cause: >-
+    The module docstring asserted the list endpoint "gives each token's name,
+    image and metadata_url. NOT its traits" and the code was written to the
+    docstring. The assertion was never checked against a response body. The
+    test fixture (FakeRest) was written from the same assumption and so could
+    not falsify it -- the BUG-002 shape again.
+  resolution: "list_tokens() parses `traits` on every list entry and stores it at once (traits_source='opensea_nft_list', traits_at set) for tokens that do not already have traits; fetch_traits() then runs only for tokens whose entry carried none. Docstring corrected to state what is verified (Argonauts, 2026-09-09, from a second tool's raw pull) and that other collections must be re-verified. Separately, `navanax import-traits` loads the friend's cache with zero reads so the already-spent 47 do not need repeating."
+  regression_test: tests/selftest.py::test_list_pass_keeps_traits_it_is_given
+  monitor_gap: "Nothing compares what an endpoint RETURNS with what the code KEEPS. The raw response bodies of the 47 list reads were not landed (REST responses go through the governor, not the landing zone), so the discarded field left no trace to audit. Worth a follow-up: land REST bodies too, or at least log the top-level keys of the first page of every new endpoint."
+  pr: null

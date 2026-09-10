@@ -7,13 +7,25 @@ Phase 1's analysis -- need a table that says "#7531: Background=Blue, ...".
 Where traits come from, and what it costs (docs/07 §3.1, measured budget 120/hr):
 
   1. `GET /collection/{slug}/nfts?limit=200`      ~47 governed reads for 9,212
-     items. Gives each token's name, image and `metadata_url`. NOT its traits.
+     items. Gives each token's name, image, `metadata_url` -- AND, for
+     Argonauts, a `traits: [{trait_type, value}]` list on every item.
+     VERIFIED 2026-09-09 from a raw pull of that endpoint by a second tool
+     (SpencerTinker/scrape.py, 44 reads, 8,798 tokens all with traits). An
+     earlier version of this docstring asserted the opposite and the list
+     pass threw the field away (BUG-20260909-054); it is now stored at once
+     as `traits_source='opensea_nft_list'`. Other collections must be
+     RE-VERIFIED -- the field may be absent or empty where OpenSea has not
+     indexed metadata, and the paths below remain for those tokens.
   2. Each token's `metadata_url`, fetched DIRECTLY from wherever it is hosted
      (IPFS gateway, the project's own server). Not OpenSea, not metered by the
-     governor. This is where the traits are (`attributes: [{trait_type, value}]`).
+     governor. Carries `attributes: [{trait_type, value}]`. For Argonauts
+     `metadata_url` is NULL on every token, so this path never applies there.
   3. Fallback, budget-limited: OpenSea's per-token endpoint, for tokens whose
      metadata cannot be fetched. Never used for the whole collection -- that
      would be 9,212 reads, 77 hours of budget.
+  4. Offline: `navanax import-traits <tokens.json>` loads a cache another
+     tool already pulled (`traits_source='explorer_cache'`, `traits_at` = the
+     cache's own generated time). Zero REST reads. See `import_explorer_cache`.
 
 Progress is written to the operational store's `onboarding` row for the
 collection as it goes (state, items_done, requests_spent, last_cursor), so a
@@ -67,7 +79,7 @@ CREATE TABLE IF NOT EXISTS tokens (
     metadata_url  TEXT,
     listed_at     TEXT NOT NULL,          -- when the token list pass saw it
     traits_at     TEXT,                   -- when traits were fetched; NULL = not yet
-    traits_source TEXT,                   -- metadata_url | opensea_nft | none
+    traits_source TEXT,                   -- metadata_url | opensea_nft | opensea_nft_list | explorer_cache | none
     traits_error  TEXT,
     PRIMARY KEY (collection, token_id)
 );
@@ -139,7 +151,7 @@ class TraitsJob:
         spent0 = int(row["requests_spent"]) if row else 0
         made0 = self.rest.requests_made
         spent = spent0
-        pages = tokens = 0
+        pages = tokens = traits_from_list = 0
         seen_cursors: set[str] = set()
         while True:
             params: dict[str, Any] = {"limit": 200}
@@ -161,6 +173,17 @@ class TraitsJob:
                     [(self.slug, str(n.get("identifier")), n.get("contract"), n.get("name"),
                       n.get("display_image_url") or n.get("image_url"), n.get("metadata_url"), _now())
                      for n in batch if n.get("identifier") is not None])
+            # BUG-20260909-054: the list response carries `traits` (verified for
+            # Argonauts). Store them now, with the observation time, so the
+            # per-token paths below only run for items whose entry had none.
+            # A token that already has traits from another source is left alone.
+            for n in batch:
+                if n.get("identifier") is None:
+                    continue
+                pairs = parse_attributes({"traits": n.get("traits")}) if isinstance(n.get("traits"), list) else []
+                if pairs:
+                    self._store(str(n["identifier"]), pairs, "opensea_nft_list", None, only_if_missing=True)
+                    traits_from_list += 1
             pages += 1
             tokens += len(batch)
             cursor = body.get("next")
@@ -178,7 +201,7 @@ class TraitsJob:
                 raise RuntimeError(f"token list stopped after {pages} pages: repeated cursor or page cap")
             seen_cursors.add(cursor)
         self.opstore.upsert_onboarding(self.slug, state="traits", last_cursor=None, items_total=total)
-        return {"pages": pages, "tokens": tokens, "requests_spent": spent}
+        return {"pages": pages, "tokens": tokens, "requests_spent": spent, "traits_from_list": traits_from_list}
 
     # -- 2. metadata, direct -----------------------------------------------------
     def _resolve_url(self, url: str) -> str:
@@ -200,8 +223,17 @@ class TraitsJob:
             raise ValueError(f"metadata larger than {MAX_METADATA_BYTES} bytes")
         return json.loads(data)
 
-    def _store(self, token_id: str, pairs: list[tuple[str, str]], source: str, error: str | None) -> None:
+    def _store(self, token_id: str, pairs: list[tuple[str, str]], source: str, error: str | None,
+               *, only_if_missing: bool = False, observed_at: str | None = None) -> None:
+        """Write one token's traits. `only_if_missing` leaves a token that already
+        has traits untouched (two sources never silently overwrite each other);
+        `observed_at` is the time the traits were OBSERVED by the source, which
+        defaults to now for a live fetch."""
         with self.conn:
+            if only_if_missing and self.conn.execute(
+                    "SELECT 1 FROM tokens WHERE collection=? AND token_id=? AND traits_at IS NOT NULL",
+                    (self.slug, token_id)).fetchone():
+                return
             if pairs:
                 self.conn.execute("DELETE FROM traits WHERE collection=? AND token_id=?", (self.slug, token_id))
                 self.conn.executemany("INSERT OR REPLACE INTO traits (collection, token_id, trait_type, value) VALUES (?,?,?,?)",
@@ -209,7 +241,7 @@ class TraitsJob:
             # traits_at is set only on success: a token that failed keeps
             # traits_at NULL and is retried on the next run (tech-lead F12).
             self.conn.execute("UPDATE tokens SET traits_at=?, traits_source=?, traits_error=? WHERE collection=? AND token_id=?",
-                              (_now() if pairs else None, source, error, self.slug, token_id))
+                              ((observed_at or _now()) if pairs else None, source, error, self.slug, token_id))
 
     async def fetch_traits(self, *, limit: int | None = None) -> dict[str, int]:
         rows = self.conn.execute(
@@ -300,6 +332,105 @@ def trait_values(conn: sqlite3.Connection, slug: str) -> dict[str, list[dict[str
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# Offline import of a trait cache pulled by another tool (zero REST reads)
+# ---------------------------------------------------------------------------
+# Contracts we know without a REST read. The watchlist carries no contract
+# field; when it grows one, prefer it over this table.
+KNOWN_CONTRACTS = {"argonauts": "0x387c41b0b2f1128de44db1bcf8baad085f26392c"}
+
+
+def cache_traits(entry: dict[str, Any]) -> list[tuple[str, str]]:
+    """One Explorer cache entry -> [(trait_type, value)]. Only `traits` is read;
+    rank, rarity_*, price, listing, deal... are that tool's ASSUMPTIONS and
+    market snapshots, not structure, and never enter this store."""
+    t = entry.get("traits")
+    return parse_attributes({"traits": t}) if isinstance(t, (dict, list)) else []
+
+
+def import_explorer_cache(conn: sqlite3.Connection, cache: dict[str, Any], *, slug: str,
+                          generated_at: str, contract: str | None = None) -> dict[str, Any]:
+    """Load `tokens.json` from the Explorer tool into `tokens` / `traits`. Idempotent.
+
+    `cache` is {token_id: {id, name, image, traits: {trait_type: value}, ...}};
+    `generated_at` is the ISO-UTC time the cache was generated -- that is when
+    the traits were OBSERVED, and it is what `traits_at` records. Claiming
+    "now" would be a bitemporal lie (docs/05 TMP).
+
+      * a token absent from `tokens` is inserted (listed_at = now: that is when
+        THIS table first saw it; image from `image`; metadata_url NULL);
+      * a token with no traits yet gets the cache's, source `explorer_cache`;
+      * a token that ALREADY has traits from any source is NOT overwritten. It
+        is diffed against the cache per trait_type, and every disagreement is
+        returned -- it is evidence about one of the two sources, and the
+        Operator decides which. The caller exits non-zero on any disagreement.
+
+    Every count in the result is exact; nothing is sampled.
+    """
+    ensure_schema(conn)
+    contract = contract or KNOWN_CONTRACTS.get(slug)
+    now = _now()
+    table_ids = {r[0] for r in conn.execute("SELECT token_id FROM tokens WHERE collection=?", (slug,))}
+    traited = {r[0] for r in conn.execute(
+        "SELECT token_id FROM tokens WHERE collection=? AND traits_at IS NOT NULL", (slug,))}
+    stored: dict[str, dict[str, set[str]]] = {}
+    for tid, tt, v in conn.execute("SELECT token_id, trait_type, value FROM traits WHERE collection=?", (slug,)):
+        if tid in traited:
+            stored.setdefault(tid, {}).setdefault(tt, set()).add(v)
+    cache_ids = {str(k) for k in cache}
+    out: dict[str, Any] = {
+        "collection": slug, "generated_at": generated_at, "source": "explorer_cache",
+        "tokens_inserted": 0, "imported": 0, "skipped_already_had": 0,
+        "diffed_agree": 0, "diffed_disagree": 0, "disagreements": [],
+        "in_cache_not_in_table": len(cache_ids - table_ids),
+        "in_table_not_in_cache": len(table_ids - cache_ids),
+        "cache_tokens_without_traits": 0,
+    }
+    with conn:
+        for key, entry in cache.items():
+            tid = str(entry.get("id") or key)
+            pairs = cache_traits(entry)
+            if tid not in table_ids:
+                conn.execute(
+                    """INSERT INTO tokens (collection, token_id, contract, name, image_url, metadata_url, listed_at)
+                       VALUES (?,?,?,?,?,NULL,?)""",
+                    (slug, tid, contract, entry.get("name"), entry.get("image"), now))
+                table_ids.add(tid)
+                out["tokens_inserted"] += 1
+            else:
+                # Fill blanks only. A value another source recorded is never replaced.
+                conn.execute(
+                    """UPDATE tokens SET contract=COALESCE(contract, ?), name=COALESCE(name, ?),
+                                         image_url=COALESCE(image_url, ?)
+                       WHERE collection=? AND token_id=?""",
+                    (contract, entry.get("name"), entry.get("image"), slug, tid))
+            if not pairs:
+                out["cache_tokens_without_traits"] += 1
+                continue
+            if tid in traited:
+                out["skipped_already_had"] += 1
+                mine = stored.get(tid, {})
+                theirs: dict[str, set[str]] = {}
+                for t, v in pairs:
+                    theirs.setdefault(t, set()).add(v)
+                for t in sorted(set(mine) | set(theirs)):
+                    if mine.get(t) == theirs.get(t):
+                        out["diffed_agree"] += 1
+                    else:
+                        out["diffed_disagree"] += 1
+                        out["disagreements"].append({
+                            "token_id": tid, "trait_type": t,
+                            "stored": sorted(mine.get(t, ())), "cache": sorted(theirs.get(t, ()))})
+                continue
+            conn.execute("DELETE FROM traits WHERE collection=? AND token_id=?", (slug, tid))
+            conn.executemany("INSERT OR REPLACE INTO traits (collection, token_id, trait_type, value) VALUES (?,?,?,?)",
+                             [(slug, tid, t, v) for t, v in pairs])
+            conn.execute("UPDATE tokens SET traits_at=?, traits_source='explorer_cache', traits_error=NULL "
+                         "WHERE collection=? AND token_id=?", (generated_at, slug, tid))
+            out["imported"] += 1
+    return out
 
 
 def open_store(path: str | Path) -> sqlite3.Connection:

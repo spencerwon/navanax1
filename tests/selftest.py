@@ -2199,6 +2199,131 @@ def test_traits_pipeline(tmp: Path) -> None:
     conn.close()
 
 
+def test_list_pass_keeps_traits_it_is_given(tmp: Path) -> None:
+    """BUG-20260909-054: the collection list endpoint carries `traits` (verified for
+    Argonauts from a raw pull). The list pass used to discard them and plan
+    9,161 per-token reads. Now a list entry with traits is stored at once; one
+    without still goes through metadata_url / the budgeted fallback."""
+    import asyncio
+
+    from navanax.opstore import OperationalStore
+    from navanax.traits import TraitsJob, open_store
+
+    class Rest:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.requests_made = 0
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.calls.append(path)
+            self.requests_made += 1
+            if path.endswith("/nfts") and "collection/" in path:
+                return 200, {"nfts": [
+                    {"identifier": "1", "contract": "0xc", "name": "A", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Death"}, {"trait_type": "Bones", "value": "Bone"}]},
+                    {"identifier": "2", "contract": "0xc", "name": "B", "metadata_url": None, "traits": []},
+                    {"identifier": "3", "contract": "0xc", "name": "C", "metadata_url": None}], "next": None}
+            if "/contract/0xc/nfts/" in path:
+                return 200, {"nft": {"traits": [{"trait_type": "Cloak", "value": "Clergy"}]}}
+            return 404, {}
+
+    conn = open_store(tmp / "lp.sqlite")
+    ops = OperationalStore(tmp / "lp-ops.db")
+    rest = Rest()
+    job = TraitsJob(conn, rest, ops, slug="argonauts", opensea_fallback_budget=5)
+    r1 = asyncio.run(job.list_tokens())
+    check("list pass: traits on the list response are stored during the list pass, source opensea_nft_list",
+          r1["traits_from_list"] == 1
+          and conn.execute("SELECT traits_source, traits_at IS NOT NULL FROM tokens WHERE token_id='1'").fetchone() == ("opensea_nft_list", 1)
+          and sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='1'")) == [("Bones", "Bone"), ("Cloak", "Death")],
+          str(r1))
+    check("list pass: an empty or absent traits list leaves traits_at NULL (nothing invented)",
+          [r[0] for r in conn.execute("SELECT traits_at FROM tokens WHERE token_id IN ('2','3') ORDER BY token_id")] == [None, None])
+    r2 = asyncio.run(job.fetch_traits())
+    check("list pass: the per-token fallback runs ONLY for tokens the list gave no traits for -- 2 reads, not 3",
+          sorted(c for c in rest.calls if "/contract/" in c) == ["/chain/ethereum/contract/0xc/nfts/2", "/chain/ethereum/contract/0xc/nfts/3"]
+          and r2["attempted"] == 2 and r2["ok"] == 2, str(rest.calls))
+    check("list pass: the list-sourced token keeps its list traits (fallback never overwrote it)",
+          conn.execute("SELECT value FROM traits WHERE token_id='1' AND trait_type='Cloak'").fetchone()[0] == "Death")
+    conn.close()
+
+
+def test_import_explorer_cache(tmp: Path) -> None:
+    """`navanax import-traits`: zero REST, observation time = the cache's generated
+    time, never overwrites, diffs what it cannot write, exact counts, idempotent."""
+    from navanax.cli import main as cli_main
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "1": {"id": "1", "name": "Argonaut #1", "image": "https://x/1.svg", "rank": 3, "price": 0.5,
+              "traits": {"Cloak": "Death", "Bones": "Bone"}},
+        "2": {"id": "2", "name": "Argonaut #2", "image": "https://x/2.svg", "traits": {"Cloak": "Clergy"}},
+        "3": {"id": "3", "name": "Argonaut #3", "image": "https://x/3.svg", "traits": {"Cloak": "Clergy", "Relic": "Gold"}},
+        "4": {"id": "4", "name": "Argonaut #4", "image": None, "traits": {}},
+    }
+    conn = open_store(tmp / "imp.sqlite")
+    # token 2 already has traits from OpenSea and AGREES; token 3 has traits and DISAGREES on Cloak;
+    # token 9 is in the table and not in the cache; token 1 is in the table with no traits yet.
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at) VALUES ('argonauts','1','2026-09-09T00:00:00Z')")
+    for tid in ("2", "3"):
+        conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                     "VALUES ('argonauts',?,'2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','opensea_nft')", (tid,))
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at) VALUES ('argonauts','9','2026-09-09T00:00:00Z')")
+    conn.executemany("INSERT INTO traits VALUES ('argonauts',?,?,?)",
+                     [("2", "Cloak", "Clergy"), ("3", "Cloak", "Death"), ("3", "Relic", "Gold")])
+    conn.commit()
+
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    check("import: exact counts -- 1 imported (token 1, present without traits), 2 skipped, 1 inserted (4), 1 without traits",
+          (r["imported"], r["skipped_already_had"], r["tokens_inserted"], r["cache_tokens_without_traits"]) == (1, 2, 1, 1), str(r))
+    check("import: set arithmetic -- 1 cache id not in the table (4), 1 table id not in the cache (9)",
+          r["in_cache_not_in_table"] == 1 and r["in_table_not_in_cache"] == 1, str(r))
+    check("import: diff per trait_type -- token 2 Cloak agrees, token 3 Relic agrees, token 3 Cloak disagrees",
+          r["diffed_agree"] == 2 and r["diffed_disagree"] == 1
+          and r["disagreements"] == [{"token_id": "3", "trait_type": "Cloak", "stored": ["Death"], "cache": ["Clergy"]}], str(r))
+    check("import: the disagreeing token was NOT overwritten (the store keeps its own observation)",
+          conn.execute("SELECT value FROM traits WHERE token_id='3' AND trait_type='Cloak'").fetchone()[0] == "Death"
+          and conn.execute("SELECT traits_source FROM tokens WHERE token_id='3'").fetchone()[0] == "opensea_nft")
+    row = conn.execute("SELECT traits_at, traits_source, contract, image_url, metadata_url FROM tokens WHERE token_id='1'").fetchone()
+    check("import: traits_at is the cache's generated time, not now; source explorer_cache; known contract filled in",
+          row == (gen, "explorer_cache", "0x387c41b0b2f1128de44db1bcf8baad085f26392c", "https://x/1.svg", None), str(row))
+    check("import: traits written verbatim from `traits` only -- rank/price never enter the store",
+          sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='1'")) == [("Bones", "Bone"), ("Cloak", "Death")]
+          and "rank" not in {c[1] for c in conn.execute("PRAGMA table_info(tokens)")})
+    check("import: a cache token with no traits is inserted but keeps traits_at NULL",
+          conn.execute("SELECT traits_at FROM tokens WHERE token_id='4'").fetchone() == (None,))
+    before = sorted(conn.execute("SELECT * FROM tokens")) + sorted(conn.execute("SELECT * FROM traits"))
+    r2 = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    after = sorted(conn.execute("SELECT * FROM tokens")) + sorted(conn.execute("SELECT * FROM traits"))
+    check("import: idempotent -- a second run inserts and imports nothing and the tables are byte-identical",
+          before == after and r2["imported"] == 0 and r2["tokens_inserted"] == 0 and r2["diffed_disagree"] == 1, str(r2))
+    conn.close()
+
+    # -- the CLI: reads summary.json for the timestamp, exits 1 on a disagreement, 0 when clean
+    root = tmp / "imp-root"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "base.yaml").write_text("environment: local\nanalytical:\n  path: data/an.sqlite\n"
+                                               "opstore:\n  path: data/ops.db\nlanding:\n  root: data/landing\n")
+    (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    d = tmp / "explorer"
+    d.mkdir()
+    (d / "tokens.json").write_text(json.dumps(cache))
+    (d / "summary.json").write_text(json.dumps({"generated": 1788808192}))
+    rc = cli_main(["--root", str(root), "import-traits", str(d / "tokens.json"), "--collection", "argonauts"])
+    conn = open_store(root / "data" / "an.sqlite")
+    check("import CLI: clean import exits 0 and stamps traits_at from summary.json `generated`",
+          rc == 0 and conn.execute("SELECT traits_at FROM tokens WHERE token_id='1'").fetchone()[0]
+          == datetime.fromtimestamp(1788808192, tz=timezone.utc).isoformat().replace("+00:00", "Z"))
+    conn.execute("UPDATE traits SET value='Death' WHERE token_id='2' AND trait_type='Cloak'")
+    conn.commit()
+    conn.close()
+    rc = cli_main(["--root", str(root), "import-traits", str(d / "tokens.json"), "--collection", "argonauts"])
+    check("import CLI: a disagreement exits non-zero so the Operator sees it", rc == 1)
+    (d / "summary.json").unlink()
+    rc = cli_main(["--root", str(root), "import-traits", str(d / "tokens.json")])
+    check("import CLI: with no timestamp source it refuses rather than stamping `now`", rc == 2)
+
+
 def test_trait_filtered_metrics(tmp: Path) -> None:
     """Under a trait filter: item bids on matching tokens count, collection offers
     count (they bid on every token), trait offers do NOT (criteria unknown), and
