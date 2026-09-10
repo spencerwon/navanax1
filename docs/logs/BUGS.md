@@ -733,13 +733,178 @@ traces, so switching the visible curve to a straight interpolation left it green
 both are now scoped to the exact trace and the exact header template, and each was
 proven by mutation.
 
+### Round 20 — PR-9 (view split): one defect found while moving the survival panel
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-066 | S4 | P3 | fixed | The survival panel escaped three server strings with `esc()` and then assigned them to `.textContent`, so the Operator was shown the literal characters `&lt;` where the withheld-percentiles reason says `n_eff = 0 ... < 30` |
+
+**Found by looking at the page, not at the code.** The PR-9 screenshot of the Flow
+view rendered *"percentiles WITHHELD — n_eff = 0 maker-episode cluster(s) `&lt;` 30
+(REQ-F-19)"*. `esc()` is the page's HTML escaper and every other call site sends its
+result to `innerHTML`, where escaping is the whole point. `#s-head` and `#b-surv` are
+set with **`.textContent`**, which never interprets markup — so escaping there was
+not a safety measure at all, it was a double encoding, and the one string on the
+page that contains a `<` is the one that explains why a number is missing. The
+sentence a reader most needs to trust was the sentence that looked broken.
+
+Nothing is unescaped as a result: the fix removes `esc()` **only** on the three
+`textContent` targets, and `test_ui_contract`'s escaping property test — which
+covers every `${…}` reaching `innerHTML` — is unchanged and still green. The code
+now carries a comment saying not to "restore" it.
+
+### Round 21 — PR-10: the production incident. Two writers on one derived store
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-067 | S3 | P0 | fixed | `serve()` opened the analytical store and started the folding writer **before** binding 127.0.0.1:8765, so with a second dashboard already listening every launchd retry folded into `data/analytics.sqlite` and then died on "Address already in use" — 177 times in half an hour, until the 2.8 GB store became `database disk image is malformed` |
+
+**What happened, in order.** A second dashboard was running on port 8765. The
+launchd job kept trying to start its own. Each retry did this:
+
+```
+Dashboard(...)          → opens data/analytics.sqlite read-write
+     └─ start()         → the normalizer thread folds new frames INTO it
+ThreadingHTTPServer(..) → OSError: [Errno 48] Address already in use
+     └─ process exits mid-fold; launchd waits ThrottleInterval (10 s); repeat
+```
+
+177 times. Two writers alternating on one SQLite file, one of them killed while
+writing, and the store ended unopenable.
+
+**Severity is S3; the root cause is S1-class, and the distinction is the point.**
+The consequence was availability — the dashboard was down and the Health page with
+it — because the analytical store is *derived*. The corrupt file was **renamed
+aside, never deleted and never edited**, and the store was rebuilt from the landing
+zone; every event came back, because the raw frames are the record and the store is
+a fold of them. **No landing-zone byte was touched in any code path.** What makes
+this worth a P0 is that it was *silent*: no error, no warning, and no number
+anywhere on the page said a second process was folding. The first symptom was a
+store that would not open. Point the same two writers at the landing zone instead
+of at a derived file and this entry is an S0a with permanent loss.
+
+**The fix is three layers, and the first one is just ordering.**
+
+1. **Bind first.** `serve()` binds the listening socket *before* it constructs
+   `Dashboard`. A process that cannot get its port now exits without having opened
+   the store at all — the doomed retry costs nothing, whatever else is in place.
+   `navanax dashboard` exits **2** on a bind failure and says the store was not
+   opened.
+2. **A writer lock.** `Normalizer(..., writer=True)` takes an exclusive `flock` on
+   `<store>.lock` for its lifetime; a second folding writer is refused with
+   `StoreWriterBusyError` naming the holder's pid and the two ways out, and
+   `close()` releases it. Readers pass `writer=False` — `mode=ro`, enforced by
+   SQLite rather than by intention, no lock, and `sync()` / `reset_for_refold()` /
+   `refold_criteria()` refuse. docs/07 §1's "one writer, readers attach read-only"
+   was a documented pattern with nothing behind it; it is now enforced. The
+   flock errno rules are **one** set shared with `cli._single_instance`, so a share
+   that cannot lock warns and proceeds instead of stopping the fold. The traits job
+   is deliberately *outside* the lock — it writes `tokens`/`traits` and folds no
+   events — and opens with an explicit `busy_timeout` so a concurrent fold makes it
+   wait rather than fail spuriously.
+3. **`ThrottleInterval: 30`** on the dashboard plist, so a port conflict cannot
+   retry every 10 s.
+
+**Second round — the tech-lead blocked the first fix, correctly.** Everything above
+prevents the store *becoming* corrupt. None of it addressed the incident's **end
+state**: with `analytics.sqlite` already malformed, `sqlite3.connect()` succeeds
+(it is lazy) and the first `PRAGMA journal_mode=WAL` raises
+`DatabaseError: database disk image is malformed` straight out of
+`Dashboard.__init__` — caught by nothing in `cmd_dashboard`, so: a raw traceback,
+an **undocumented exit 1**, and `KeepAlive` repeating that every 30 s. The page
+that explains the fault was the one thing the fault took away.
+
+So the dashboard now **degrades instead of dying**:
+
+| | while degraded |
+|---|---|
+| `/api/health` | **200**, with a `degraded` block (fault, store, recipe) and `quick_check.ok` false |
+| `/api/meta`, `/api/gaps` | **200** — neither reads the analytical store |
+| every other API route | **503** `{"error": "analytical store is malformed", "rebuild": …}` |
+| `/` | **200** — there has to be somewhere to read all of the above |
+| store-derived counts | `null`, never `0`. `0` is a claim about a store nobody could read |
+| the recorder | untouched, still landing frames |
+
+`_loop` retries the open every 60 s, so recovery is **one step**:
+`rebuild-store.command` renames the store to `analytics.sqlite.corrupt-<date>` —
+a move, never a delete — and the running dashboard folds a fresh one within a
+minute. It asks the **lock**, not the lock file, before moving anything, and names
+the holding pid if it is held: "is that pid still alive?" gives false refusals in
+both directions, and a false refusal here means the Operator cannot recover at all.
+Verified end to end against a deliberately malformed store: 503 → rename → 200 with
+`events` back, in 35 s, no restart. `cmd_dashboard` catches
+`sqlite3.DatabaseError` anyway and maps it to a documented
+`DASH_EXIT_STORE_MALFORMED = 5` with the recipe rather than a stack trace. And
+`serve()`'s `except BaseException` path now closes `norm` as well as the socket
+(**B2**) — a failure *after* the store opened left the writer lock held by an
+object nobody would ever close, so a retry in the same process was refused by its
+own stale lock.
+
+**Why nothing caught it.** Nothing looked at the analytical store's integrity, and
+nothing named the process folding into it. `/api/health` reported the store's *size*
+and the last fold time but never asked whether the file was still readable — so
+corruption was found by a crash loop instead of by a check. Both new Health fields
+(`store_writer`, and a `PRAGMA quick_check` cached for ten minutes because it reads
+every page of a 2.8 GB file) exist because of that. And the suite had no test that
+started **two** of anything: every dashboard test built one `Dashboard`, and one
+writer never contends with itself.
+
+The second round's version of the same gap: **no test had ever pointed the
+dashboard at a store that was already broken.** Every fixture built its store by
+folding a fresh landing zone, so `Dashboard.__init__` was only ever exercised on a
+healthy file, and the exit code the real incident produced was one no test had ever
+seen. The new fixture corrupts **page 1 of a real SQLite file**, because the three
+ways to break a store fail differently and only one of them is this bug: junk
+behind a valid magic gives *"file is not a database"*; scribbled interior pages
+open fine and are caught by `quick_check`; a corrupted page 1 gives *"database disk
+image is malformed"* on the first PRAGMA. Only the third reproduces the incident.
+
+### Round 21 — the tech-lead blocks PR-9 (view split, ledger, wallets, health)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-068 | S1 | P1 | fixed | `/api/ledger` never used the index its own basis named — with an unconditional time window the planner skip-scanned and then sorted the whole window into a TEMP B-TREE, 864 ms per page at 200,000 rows |
+| BUG-20260910-069 | S1 | P1 | fixed | The "chart this selection" caption stated a **capped** count as exact, and counted rows without the price predicate the chart draws from |
+| BUG-20260910-070 | S3 | P2 | fixed | `tools/buglog.py --check` collected bug ids into a **set**, so a duplicate id collapsed into one and the gate stayed green |
+| BUG-20260910-071 | S2 | P2 | fixed | The degraded-store reopen probe ran on the **fold** tick, so `refresh_seconds: 3600` meant a rebuilt store went unnoticed for up to an hour |
+
+**068 is BUG-040's shape with one extra turn, and the extra turn is the lesson.**
+The obvious fix — `INDEXED BY` — is not sufficient. SQLite then *skip-scans* the
+named index (`ANY(collection) AND ANY(maker) AND valid_ts>?`) in order to use the
+range term, and a skip-scan does not deliver rows in the index's order, so the
+TEMP B-TREE survives. The index was named, the plan read plausibly, and the sort
+was still there. Three things together fix it: the named index, an `ORDER BY` that
+is the index's own column order `(key, valid_ts, rowid)` with the cursor carrying
+that same tuple, and `+e.valid_ts` on the five sorts whose index does not lead
+with a timestamp — SQLite's documented way to keep a term out of the index
+constraint. The trade is deliberate and scoped: on those five the window becomes a
+per-row filter (right for a LIMITed page, wrong for a `COUNT`, so the count query
+is built from the indexable form), and on the **default** sort `valid_ts` the range
+stays an index range, because there the window *is* the order. 864 ms → 0.2 ms for
+page 1, 7–9 ms for a page 12,000 rows deep.
+
+**The lasting change is that this repo now reads `EXPLAIN QUERY PLAN` in a test.**
+BUG-040 was caught by a human noticing a 29-second wall clock on real data; the
+same defect one module over was invisible on a twelve-row fixture, which is every
+fixture the ledger tests had. `MetricEngine.ledger_query_plan()` exists so the
+claim in `basis.index` is checkable, and the test asserts both halves — the plan
+*and* the consequence at 200,000 rows — so neither can stand in for the other.
+
+**070 has a live cause, not a hypothetical one.** IDs **059–061 are allocated on
+two branches at once** — this one and `feat/push-steward`. Whichever merges second
+must renumber its three entries and update every reference to them (source
+comments, test docstrings, `BUGS.md`); the gate will now name the collision
+instead of silently keeping one of the two meanings. **068–071 carry the same
+risk** and the same rule: they were allocated on this branch while another was
+open, so if that branch reached 068+ too, whichever merges second renumbers.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-64 of 65 logged bugs are fixed.
+66 of 67 logged bugs are fixed.
 
 ### The lesson
 

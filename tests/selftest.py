@@ -6445,5 +6445,2108 @@ def test_survival_response_stays_small_at_forty_thousand_lives(tmp: Path) -> Non
     n.close()
 
 
+
+# ===========================================================================
+# PR-9 -- the view split: the Event Ledger, the Wallets view, Health, and the
+# hash router. Every test below fails on the page and the endpoints as they
+# stood before PR-9.
+# ===========================================================================
+def _ledger_store(tmp: Path, name: str = "ledger.sqlite"):
+    """Twelve events on one collection: tokens 1..12 so #10 vs #9 is decidable,
+    three makers, two sales between a pair of wallets, one un-numbered token."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    seq = 0
+
+    def at(raw, minute, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, f"2026-09-09T10:{minute:02d}:00Z", seq, **over, **NO_EXP)
+
+    # bids on tokens 1..12, alternating makers, one per minute
+    for i in range(1, 13):
+        at(REAL_BID, i, order_hash=f"0xbid{i:02d}", token_id=str(i),
+           maker=f"0xmk{i % 3}", price_eth=0.1 * i)
+    # a token whose id is not a number at all -- token_num must be NULL, not 0
+    at(REAL_BID, 20, order_hash="0xbidX", token_id="argo-x", maker="0xmk0", price_eth=9.0)
+    # two sales, 0xseller -> 0xbuyer, so the wallet card has counterparties
+    at(DOC_LISTING, 30, order_hash="0xsold1", token_id="3", maker="0xseller",
+       taker="0xbuyer", price_eth=1.5, event_type="item_sold")
+    at(DOC_LISTING, 31, order_hash="0xsold2", token_id="4", maker="0xseller",
+       taker="0xbuyer", price_eth=1.6, event_type="item_sold")
+    # and one cancel, so 0xmk1 has an ended bid life
+    at(DOC_LISTING, 35, order_hash="0xbid01", token_id="1", maker="0xmk1",
+       price_eth=None, event_type="item_cancelled")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    return n, eng, put
+
+
+_LEDGER_WINDOW = ("2026-09-09T09:00:00Z", "2026-09-09T12:00:00Z")
+
+
+def _lwin():
+    from navanax.normalize import iso_to_ts
+    return {"start": iso_to_ts(_LEDGER_WINDOW[0]), "end": iso_to_ts(_LEDGER_WINDOW[1])}
+
+
+def test_ledger_keyset_pages_are_stable_under_inserts(tmp: Path) -> None:
+    """design §8.1.2. Offset pagination over a table an append-only writer is
+    adding 48 rows/s to skips and repeats rows: everything shifts down by however
+    many arrived between page 1 and page 2. A keyset cursor is anchored to a ROW,
+    so rows inserted afterwards cannot move the rows already returned.
+
+    Fails before PR-9: `MetricEngine.ledger` does not exist.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+    n, eng, put = _ledger_store(tmp, "ledger-keyset.sqlite")
+    w = _lwin()
+    p1 = eng.ledger("argonauts", sort="valid_ts", direction="desc", limit=5, **w)
+    check("ledger: a page is keyset-paginated and hands back a cursor, never an offset",
+          len(p1["rows"]) == 5 and p1["next_cursor"] and p1["basis"]["pagination"].startswith("keyset"),
+          str({k: p1[k] for k in ("has_more", "total_estimate", "exact")}))
+
+    # the stream keeps writing between the two requests -- five NEWER events
+    for i in range(5):
+        put(REAL_BID, f"2026-09-09T11:{i:02d}:00Z", 900 + i,
+            order_hash=f"0xnew{i}", token_id=str(50 + i), maker="0xmk9", price_eth=5.0, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+
+    p2 = eng.ledger("argonauts", sort="valid_ts", direction="desc", limit=5,
+                    cursor=p1["next_cursor"], **w)
+    k = lambda r: (r["valid_at"], r["order_hash"], r["event_type"])   # noqa: E731
+    first, second = [k(r) for r in p1["rows"]], [k(r) for r in p2["rows"]]
+    check("ledger: page 2 repeats NOTHING from page 1 even though five newer rows landed "
+          "between the two requests -- the cursor is anchored to a row, not to an offset",
+          not (set(first) & set(second)), f"overlap {sorted(set(first) & set(second))}")
+    check("ledger: ...and page 2 continues strictly below page 1's last key, so nothing "
+          "between them was skipped either",
+          all(r["valid_at"] <= p1["rows"][-1]["valid_at"] for r in p2["rows"]),
+          f"{p1['rows'][-1]['valid_at']} then {[r['valid_at'] for r in p2['rows']]}")
+    check("ledger: the inserted rows are NOT in page 2 -- they sort above page 1's window "
+          "and a keyset page cannot reach back up",
+          not any(r["order_hash"].startswith("0xnew") for r in p2["rows"]),
+          str([r["order_hash"] for r in p2["rows"]]))
+
+    # a cursor issued for one query must not be usable on another
+    bad = False
+    try:
+        eng.ledger("argonauts", sort="token_num", direction="desc", limit=5,
+                   cursor=p1["next_cursor"], **w)
+    except ValueError as exc:
+        bad = "different query" in str(exc)
+    check("ledger: a cursor from a DIFFERENT sort or filter is refused, not silently reused "
+          "-- continuing would interleave two result sets", bad)
+
+    # walking every page visits every row exactly once
+    seen, cur, guard = [], None, 0
+    while guard < 50:
+        guard += 1
+        pg = eng.ledger("argonauts", sort="valid_ts", direction="desc", limit=4, cursor=cur, **w)
+        seen += [k(r) for r in pg["rows"]]
+        cur = pg["next_cursor"]
+        if not cur:
+            break
+    check("ledger: walking the cursor to the end visits every matching row exactly once",
+          len(seen) == len(set(seen)) == pg["total_estimate"],
+          f"{len(seen)} rows, {len(set(seen))} distinct, total_estimate {pg['total_estimate']}")
+    n.close()
+
+
+def test_ledger_refuses_a_sort_it_has_no_index_for(tmp: Path) -> None:
+    """design §8.1.2: "a sort on a non-indexed column is refused with a message
+    naming the indexed ones -- not silently slow". A four-million-row full scan
+    that eventually answers teaches the Operator the ledger is broken; a refusal
+    that names five working columns teaches him what the store can do.
+
+    Fails before PR-9: there is no ledger and no sort whitelist.
+    """
+    from navanax.metrics import LEDGER_SORTS, LEDGER_UNSORTABLE
+    n, eng, _ = _ledger_store(tmp, "ledger-sort.sqlite")
+    w = _lwin()
+    msg = ""
+    try:
+        eng.ledger("argonauts", sort="price_usd", **w)
+    except ValueError as exc:
+        msg = str(exc)
+    check("ledger: an unindexed sort is REFUSED, and the refusal names every column that works",
+          "price_usd" in msg and all(c in msg for c in LEDGER_SORTS), msg[:200])
+    check("ledger: ...and it says WHY this one cannot be served, rather than 'unsupported'",
+          "rate moves" in msg, msg[:200])
+    injected = ""
+    try:
+        eng.ledger("argonauts", sort="valid_ts; DROP TABLE events--", **w)
+    except ValueError as exc:
+        injected = str(exc)
+    check("ledger: an arbitrary string never reaches SQL -- the whitelist refuses it first",
+          "cannot sort by" in injected
+          and n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] > 0, injected[:120])
+    check("ledger: every sortable column names the index that makes it a range scan, and "
+          "that index really exists in the store (the whitelist cannot drift from the schema)",
+          all(n.conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+                             (idx,)).fetchone()[0] == 1 for _, idx, _ in LEDGER_SORTS.values()),
+          str([idx for _, idx, _ in LEDGER_SORTS.values()]))
+    check("ledger: the columns the page shows but cannot sort are listed WITH their reason, "
+          "so the UI can grey the header instead of offering a sort that 400s",
+          set(LEDGER_UNSORTABLE) >= {"price_usd", "token_id", "taker", "lag"}
+          and all(LEDGER_UNSORTABLE.values()), str(sorted(LEDGER_UNSORTABLE)))
+    n.close()
+
+
+def test_ledger_token_number_sorts_numerically(tmp: Path) -> None:
+    """The Operator asked for this by name: `#10` sorts AFTER `#9`, not before it.
+    `token_id` is TEXT in the store, so a lexical sort is the wrong answer that
+    looks like an answer.
+
+    Fails before PR-9: there is no `token_num` column, no index on it, and no
+    ledger to sort by it.
+    """
+    n, eng, _ = _ledger_store(tmp, "ledger-token.sqlite")
+    w = _lwin()
+    r = eng.ledger("argonauts", sort="token_num", direction="asc", limit=50,
+                   event_types=["item_received_bid"], **w)
+    nums = [x["token_num"] for x in r["rows"] if x["token_num"] is not None]
+    check("ledger: token_num ascending is 1,2,...,10,11,12 -- #10 after #9, not after #1",
+          nums == sorted(nums) and nums[:12] == list(range(1, 13)), str(nums))
+    ids = [x["token_id"] for x in r["rows"] if x["token_num"] is not None]
+    check("ledger: ...and it is the LEXICAL order that would have been wrong, so this is a "
+          "real distinction on this fixture rather than a coincidence of the ids",
+          ids != sorted(ids), str(ids))
+    check("ledger: a token_id that is not a plain number has token_num NULL -- never 0, which "
+          "would sort it in front of token #1 as though it were one",
+          any(x["token_id"] == "argo-x" and x["token_num"] is None for x in r["rows"]),
+          str([(x["token_id"], x["token_num"]) for x in r["rows"]][-3:]))
+    stored = n.conn.execute(
+        "SELECT token_id, token_num FROM events WHERE token_id IN ('9','10','argo-x') "
+        "GROUP BY token_id ORDER BY token_num").fetchall()
+    check("ledger: token_num is DERIVED from token_id by the store, so the two can never "
+          "disagree (it is a generated column, not a copy)",
+          dict(stored) == {"9": 9, "10": 10, "argo-x": None}, str(stored))
+    rng = eng.ledger("argonauts", sort="token_num", direction="asc", limit=50, token="4-6", **w)
+    check("ledger: the token filter takes a range as well as an exact id",
+          sorted({x["token_num"] for x in rng["rows"]}) == [4, 5, 6],
+          str(sorted({x["token_num"] for x in rng["rows"]})))
+    n.close()
+
+    # -- the additive migration, on a store an earlier version built ---------
+    # The precedent is `expiration_ts` (normalize._migrate): add the column, derive it
+    # from one already present, never touch the landing zone. token_num is GENERATED,
+    # so the migration writes no data at all -- which is why it cannot half-succeed.
+    import sqlite3 as _sq
+    legacy = tmp / "legacy-tokennum.sqlite"
+    lc = _sq.connect(str(legacy))
+    lc.executescript(
+        """CREATE TABLE events (run TEXT NOT NULL, seq INTEGER NOT NULL, file TEXT,
+             observed_at TEXT, valid_at TEXT, observed_ts REAL, valid_ts REAL, event_type TEXT,
+             collection TEXT, token_id TEXT, order_hash TEXT, maker TEXT, taker TEXT,
+             price_eth REAL, price_usd REAL, expiration_at TEXT, expiration_ts REAL,
+             PRIMARY KEY (run, seq));
+           INSERT INTO events (run,seq,event_type,collection,token_id,valid_ts,observed_ts)
+             VALUES ('r',1,'item_listed','argonauts','9',1,1),('r',2,'item_listed','argonauts','10',2,2),
+                    ('r',3,'item_listed','argonauts','argo-x',3,3);""")
+    lc.commit()
+    lc.close()
+    from navanax.normalize import LEDGER_INDEXES, Normalizer
+    ln = Normalizer(tmp / "empty-lz", legacy)
+    xcols = {r[1] for r in ln.conn.execute("PRAGMA table_xinfo(events)")}
+    got = dict(ln.conn.execute("SELECT token_id, token_num FROM events ORDER BY seq"))
+    check("ledger/migration: _migrate adds token_num to a store an earlier version built, "
+          "additively, and it is populated from token_id with no re-fold and no write",
+          "token_num" in xcols and got == {"9": 9, "10": 10, "argo-x": None}, str(got))
+    have = {r[0] for r in ln.conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    check("ledger/migration: ...and every ledger index is built on the migrated store, so the "
+          "sorts the whitelist offers are the sorts the store can actually serve",
+          all(name in have for name, _, _ in LEDGER_INDEXES),
+          str([nm for nm, _, _ in LEDGER_INDEXES if nm not in have]))
+    ln.close()
+
+
+def test_ledger_chart_states_its_cap_and_never_samples_silently(tmp: Path) -> None:
+    """design §8.1.3. "Chart this selection" caps at 5,000 rows and prints
+    `charting the 5,000 most recent of 41,208`. A silent sample is a chart whose
+    shape is an artefact of the cap.
+    """
+    from navanax.metrics import LEDGER_CHART_CAP
+    n, eng, _ = _ledger_store(tmp, "ledger-chart.sqlite")
+    w = _lwin()
+    c = eng.ledger_chart("argonauts", cap=4, **w)
+    check("ledger/chart: one series per event type, never one line across types -- a listing "
+          "and a bid are not two readings of one quantity",
+          set(c["series"]) <= {"item_received_bid", "item_sold", "item_listed", "item_cancelled",
+                               "collection_offer", "trait_offer"} and len(c["series"]) >= 1,
+          str(list(c["series"])))
+    check("ledger/chart: above the cap it says so, with BOTH numbers",
+          c["capped"] and c["charted"] == 4 and c["matched"] > 4
+          and "most recent" in (c["basis"]["cap_note"] or ""), str(c["basis"]["cap_note"]))
+    full = eng.ledger_chart("argonauts", **w)
+    check("ledger/chart: under the cap nothing is trimmed and cap_note is absent",
+          not full["capped"] and full["basis"]["cap_note"] is None
+          and full["cap"] == LEDGER_CHART_CAP, str(full["cap"]))
+    check("ledger/chart: points carry their own timestamps and nothing is interpolated "
+          "between two observations -- the basis says so where the reader is",
+          "interpolated" in full["basis"]["hole_note"]
+          and all(len(s["t"]) == len(s["price_eth"]) for s in full["series"].values()))
+    n.close()
+
+
+def test_wallet_card_percentages_carry_their_counts(tmp: Path) -> None:
+    """Project rule 4, and design §8.2.1: "every percentage carries its count, in
+    the card, not in a tooltip". `61.4%` is not a number anyone can check;
+    `61.4% of 62,218` is.
+
+    Fails before PR-9: there is no wallet endpoint, and `makers()` computed its
+    share in the PAGE (`100*r.events/T`), where nothing could assert on it.
+    """
+    from navanax.metrics import share
+    n, eng, _ = _ledger_store(tmp, "wallet-pct.sqlite")
+    w = _lwin()
+    lst = eng.wallets("argonauts", w["start"], w["end"], limit=20)
+    bad = [r["address"] for r in lst["rows"]
+           if not isinstance(r.get("events_share"), dict)
+           or set(r["events_share"]) != {"pct", "n", "of"}]
+    check("wallets: every share in the ranked list is {pct, n, of}, never a bare percentage",
+          lst["rows"] and not bad, str(bad))
+    check("wallets: the denominator is stated and is the real one",
+          all(r["events_share"]["of"] == lst["total_events_with_maker"] for r in lst["rows"])
+          and lst["total_events_with_maker"] > 0, str(lst["total_events_with_maker"]))
+
+    p = eng.wallet("argonauts", "0xmk1", w["start"], w["end"])
+    b = p["behaviour"]
+    pcts = [(k, v) for k, v in b.items() if isinstance(v, dict) and "pct" in v]
+    check("wallets/card: every percentage on the address card carries its count and its "
+          "denominator -- events share, cancel ratio, fill ratio",
+          len(pcts) >= 3 and all(set(v) == {"pct", "n", "of"} for _, v in pcts),
+          str([k for k, _ in pcts]))
+    check("wallets/card: 0 of 0 is UNDEFINED, not 0% -- a wallet that placed no bids has no "
+          "fill ratio, and printing 0.0% would be a claim about a sample that does not exist",
+          share(0, 0)["pct"] is None and share(3, 0)["pct"] is None
+          and abs(share(3, 12)["pct"] - 25.0) < 1e-9)
+    life = b["bid_life"]
+    check("wallets/card: the median bid life carries BOTH n and n_eff -- one wallet's quotes "
+          "are not independent observations and the uncertainty belongs to the clusters",
+          "n" in life and "n_eff" in life and life["n_eff"] <= life["n"] + 1
+          and "n_eff" in life["n_eff_rule"], str({k: life[k] for k in ("n", "n_eff", "median_s")}))
+    check("wallets/card: percentiles are WITHHELD below the minimum n rather than printed "
+          "with a warning beside them, and the response says which happened",
+          (life["median_s"] is None) == life["percentiles_withheld"],
+          str({k: life[k] for k in ("n", "median_s", "percentiles_withheld")}))
+    seller = eng.wallet("argonauts", "0xseller", w["start"], w["end"])
+    cp = seller["counterparties"]
+    check("wallets/card: counterparties come from item_sold maker/taker pairs, with each "
+          "counterparty's share of this address's trades and its count",
+          cp["trades"] == 2 and cp["rows"] and cp["rows"][0]["address"] == "0xbuyer"
+          and cp["rows"][0]["trades"] == 2
+          and set(cp["rows"][0]["share_of_trades"]) == {"pct", "n", "of"}, str(cp))
+    adj = eng.counterparty_adjacency("argonauts", w["start"], w["end"])
+    i, j = adj["addresses"].index("0xseller"), adj["addresses"].index("0xbuyer")
+    check("wallets: the counterparty graph is an ADJACENCY MATRIX whose cell states the trade "
+          "count exactly -- deterministic, no physics library, no seeded layout",
+          adj["matrix"][i][j] == 2 and adj["matrix"][j][i] == 0 and adj["trades"] == 2,
+          str(adj["matrix"]))
+    n.close()
+
+
+def test_wallet_profile_has_no_field_for_an_off_chain_identity(tmp: Path) -> None:
+    """The charter boundary, enforced by the SCHEMA rather than by discipline
+    (.claude/agents/market-analyst.md; design §8.2.1): the wallet profile object
+    has no field for a legal name, employer, company or location, so there is
+    nowhere in the record for one to leak from. A reviewer checks the schema, not
+    the rendering code.
+
+    This is a PROPERTY over the whole object at any depth, not a list of the keys
+    that exist today -- a future `notes` or `who_is_this` field fails here.
+    """
+    from navanax.metrics import WALLET_PROFILE_KEYS, _assert_address_only
+    n, eng, _ = _ledger_store(tmp, "wallet-schema.sqlite")
+    w = _lwin()
+    p = eng.wallet("argonauts", "0xmk1", w["start"], w["end"])
+
+    def keys(o, out=None):
+        out = [] if out is None else out
+        if isinstance(o, dict):
+            for k, v in o.items():
+                out.append(str(k))
+                keys(v, out)
+        elif isinstance(o, list):
+            for v in o:
+                keys(v, out)
+        return out
+
+    all_keys = keys(p)
+    # Through the REAL matcher, not a naive substring loop: the matcher is segment
+    # based on purpose (`tokens` contains `ens`), and a test that re-implements it
+    # badly tests the re-implementation. `_assert_address_only` raises on the first
+    # offending key and names it.
+    leak = ""
+    try:
+        _assert_address_only(p)
+    except ValueError as exc:
+        leak = str(exc)
+    check("wallets/schema: NO key anywhere in the profile -- at any depth -- could hold a "
+          "name, company, employer, location, city, a handle or any free text that could "
+          "become one",
+          not leak, leak[:200])
+    check("wallets/schema: ...and the walk really did look at every key, not just the top level",
+          len(all_keys) > 30 and "n_eff" in all_keys, f"{len(all_keys)} keys")
+    check("wallets/schema: the top-level key set is FIXED and declared, so a new field is a "
+          "deliberate change to a constant rather than something that appeared",
+          set(p) == set(WALLET_PROFILE_KEYS), str(sorted(set(p) ^ set(WALLET_PROFILE_KEYS))))
+    refused = False
+    try:
+        _assert_address_only({"address": "0x1", "cluster": {"members": [{"real_name": "x"}]}})
+    except ValueError as exc:
+        refused = "address-level only" in str(exc) and "real" in str(exc)
+    check("wallets/schema: the guard is what refuses it -- adding an identity field raises in "
+          "the layer that BUILDS the profile, not in the layer that draws it", refused)
+    check("wallets/schema: chain-sourced facts are marked NOT COLLECTED rather than "
+          "fabricated -- null, never 0, because 0 reads as 'this address holds nothing'",
+          p["chain"]["collected"] is False and p["chain"]["holdings"] is None
+          and p["chain"]["first_funded_by"] is None
+          and "not collected yet" in p["chain"]["why_not_collected"],
+          str(p["chain"]))
+    check("wallets/schema: a cluster is a hypothesis with evidence attached, so with no "
+          "evidence there is no cluster -- the word never appears without its count",
+          p["cluster"]["id"] is None and p["cluster"]["evidence_count"] == 0
+          and "evidence" in p["cluster"]["evidence_rule"])
+    check("wallets/schema: a flag renders only if its rows can be listed, and none can yet",
+          p["flags"] == [] and "rows can be listed" in p["basis"]["flags_rule"])
+    n.close()
+
+
+def test_health_surfaces_the_alarms_nothing_else_does(tmp: Path) -> None:
+    """The Health view answers "can I trust the other tabs?" -- so the three
+    numbers that mean the answer is NO must be on it, in one response:
+
+      * the crossed-book alarm count (docs/05 rule 5: a crossed standing book is
+        a reconstruction defect, never an arbitrage);
+      * criteria coverage (a trait-offer criterion matching no trait value reads
+        as "no trait-offer depth", i.e. a quiet market, unless it is surfaced);
+      * files_failed / files_short (BUG-058: "115 files read, 0 rows added" with
+        no error anywhere an operator looks).
+
+    Fails before PR-9: there is no /api/health, and the crossed-book count lived
+    only in the basis of whichever collection happened to be selected.
+    """
+    import http.client
+    import shutil as _sh
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import Dashboard, make_handler
+
+    root = tmp / "healthroot"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    import yaml
+    cfg = yaml.safe_load((root / "config" / "base.yaml").read_text())
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / cfg["landing"]["root"], "run-h", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    for raw in (REAL_BID, REAL_COLL_OFFER, DOC_LISTING):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+    w.close()
+    dash = Dashboard(root, cfg, ["argonauts"])
+    dash._sync_once()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(dash))
+    port = httpd.server_address[1]
+    t = _th.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        def get(path):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+            return r.status, body
+
+        st, body = get("/api/health")
+        h = json.loads(body) if st == 200 else {}
+        check("health: /api/health answers 200 with one object, not four requests the view "
+              "could render three of", st == 200 and isinstance(h, dict), f"{st} {body[:120]}")
+        check("health: the crossed-book alarm is a COUNT on this page, for every watched "
+              "collection -- not a field in the basis of whichever chart is on screen",
+              "crossed_book" in h and "alarms" in h["crossed_book"]
+              and set(h["crossed_book"]["by_collection"]) == {"argonauts"}
+              and "never an arbitrage" in h["crossed_book"]["note"],
+              str(h.get("crossed_book"))[:200])
+        check("health: criteria coverage is here, because a criterion that matches no trait "
+              "value reads as a quiet market rather than as a broken join",
+              "criteria_coverage" in h and "argonauts" in h["criteria_coverage"],
+              str(list(h.get("criteria_coverage", {}))))
+        nz = h.get("normalizer", {})
+        check("health: files_failed AND files_short are on the TOP level of the normalizer "
+              "block, not three keys deep in a status blob (BUG-058)",
+              "files_failed" in nz and "files_short" in nz and nz["files_failed"] == 0
+              and nz["files_short"] == 0 and "BUG-058" in nz["files_note"], str(nz)[:220])
+        check("health: recorder state, gaps open and awaiting backfill",
+              "running" in h["recorder"] and "open" in h["gaps"]
+              and "awaiting_backfill" in h["gaps"], str(h.get("gaps")))
+        check("health: the integrity audit travels with it -- failures AND notes",
+              "failures" in h["integrity"] and "notes" in h["integrity"])
+        check("health: store size on disk and the row counts behind every other tab",
+              h["store"]["bytes"] > 0 and h["store"]["events"] == 3
+              and "order_lives" in h["store"] and "landing_bytes" in h["store"], str(h["store"])[:200])
+        check("health: the last fold time, so a page that has stopped updating says so",
+              nz.get("last_fold_at") and "refresh_seconds" in nz, str(nz.get("last_fold_at")))
+
+        # the ledger and wallet routes answer over real HTTP too, and refuse properly
+        for path in ("/api/ledger?collection=argonauts&range=YTD",
+                     "/api/ledger?collection=argonauts&range=YTD&mode=chart",
+                     "/api/wallets?collection=argonauts&range=YTD",
+                     "/api/wallet/0x0d9ec524ed52f109c530a28c91fe190c44c0babd?collection=argonauts&range=YTD"):
+            st, body = get(path)
+            check(f"health/routes: {path.split('?')[0]} -> 200 JSON",
+                  st == 200 and body[:1] == b"{", f"{st} {body[:120]}")
+        st, body = get("/api/ledger?collection=argonauts&range=YTD&sort=price_usd")
+        check("health/routes: /api/ledger refuses an unindexed sort with a 400 naming the "
+              "columns that work, rather than a full scan that eventually answers",
+              st == 400 and b"price_usd" in body and b"valid_ts" in body, f"{st} {body[:200]}")
+        st, body = get("/api/ledger?collection=argonauts&range=YTD&token=nope")
+        check("health/routes: a token filter it cannot read is a 400, never a dropped filter "
+              "-- a dropped filter returns more rows than were asked for",
+              st == 400 and b"token" in body, f"{st} {body[:160]}")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.norm.close()
+
+
+def test_ui_router_keeps_every_panel_and_adds_the_views(tmp: Path) -> None:
+    """PR-9's whole risk in one test. Splitting one page into views is a MOVE, and
+    a move loses things: the failure mode is a panel that is still in the code, no
+    longer in any view, and therefore never drawn again while every one of its own
+    tests stays green because they read the file rather than the layout.
+
+    So: every view id exists, and every panel that existed before PR-9 still
+    exists EXACTLY ONCE and is inside exactly one view.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+
+    views = ["market", "traits", "flow", "wallets", "health"]
+    missing = [v for v in views if f'id="v-{v}"' not in html]
+    check("ui/router: every view has a section with its own id",
+          not missing, f"missing {missing}")
+    # A5 / BUG-20260910-068's sibling finding: every behavioural substring below is
+    # asserted against the script with COMMENTS REMOVED. Three of these used to be
+    # satisfied by the block comment that EXPLAINS the router, so a page whose router
+    # body had been deleted -- comment intact -- passed. See
+    # `test_ui_router_assertions_read_code_not_comments` for the mutation proofs.
+    code = _script_code(html)
+    check("ui/router: routes are HASH routes so a view is linkable and a deep link restores it",
+          "location.hash='#/'+" in code.replace(" ", "")
+          and "window.addEventListener('hashchange',route)" in code.replace(" ", "")
+          and "#/market" in html)
+    check("ui/router: global state -- collection, interval, range, denomination, transform and "
+          "the trait filter -- lives in the hash and survives a reload",
+          all(k in code for k in ("GLOBAL_KEYS", "writeHash", "readHash",
+                                  "localStorage.setItem", "history.replaceState")))
+    check("ui/router: a per-view DEFAULT range/interval applies on first visit only; after the "
+          "Operator changes it, his choice sticks",
+          "VIEW_DEFAULTS" in code and "S.touched.range" in code and "S.touched.interval" in code)
+
+    # Every panel that existed before the split, by the id the old page drew into.
+    panels = ["kpis", "p-prices", "tlegend", "b-prices", "h-prices", "h-prices-sub",
+              "book", "p-imm", "b-imm", "p-mix", "p-act", "b-act", "makers", "tape",
+              "screener", "gaps", "audit", "s-bar", "s-head", "s-curve", "s-hist",
+              "s-mini", "s-drill", "b-surv", "s-sub"]
+    sidebar = ["traits", "chips", "tsum", "onboard"]        # global chrome, not a view panel
+    counts = {p: len(re.findall(rf'id="{re.escape(p)}"', html)) for p in panels + sidebar}
+    wrong = {p: c for p, c in counts.items() if c != 1}
+    check("ui/router: EVERY panel the page had before the split still exists, exactly once -- "
+          "nothing was dropped on the floor and nothing was duplicated into two views",
+          not wrong, str(wrong))
+
+    # and each one is inside a view, not orphaned between them
+    bodies = {}
+    for v in views:
+        seg = html.split(f'id="v-{v}"', 1)
+        bodies[v] = seg[1].split('<section class="view"', 1)[0] if len(seg) > 1 else ""
+    homeless = [p for p in panels if not any(f'id="{p}"' in b for b in bodies.values())]
+    check("ui/router: ...and every one of them is inside a view, so switching tabs cannot "
+          "leave a panel rendered under the wrong one", not homeless, str(homeless))
+    aside = html.split("<aside>", 1)[1].split("</aside>", 1)[0] if "<aside>" in html else ""
+    check("ui/router: the trait sidebar stays OUTSIDE the views, because the filter is global "
+          "-- one filter, applied on every tab, not four copies that can disagree",
+          all(f'id="{p}"' in aside for p in sidebar),
+          str([p for p in sidebar if f'id="{p}"' not in aside]))
+    check("ui/router: the Prices card is ONE card the router MOVES between the Market and "
+          "Traits grids -- two copies would be two price panels on different token sets",
+          'id="card-prices"' in html and html.count('id="card-prices"') == 1
+          and "anchor-market-hero" in code and "anchor-traits-hero" in code
+          and "function hostHero()" in code and ".after(" in code)
+
+    check("ui/router: the trait sidebar is GLOBAL -- the filter applies on every view and is "
+          "shown as a read-only chip row where the 272 px of checkboxes do not earn their place",
+          "SIDEBAR_VIEWS.includes(S.view)" in code and 'id="roChips"' in html)
+    check("ui/router: only the active view's panels are fetched, so switching tabs is not four "
+          "views' worth of queries",
+          "VIEW_LOADERS" in code and "await Promise.all(VIEW_LOADERS[S.view].map" in code)
+
+
+def test_ui_ledger_and_wallets_panels_are_the_shape_the_design_specifies() -> None:
+    """design §8.1 and §8.2, and the two rules that make them honest:
+    every percentage with its count, and a cap that is stated rather than sampled.
+    """
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    script = _script_code(html)          # A5: comments never satisfy an assertion about behaviour
+    check("ui/ledger: the Flow view carries the event ledger and it reads /api/ledger",
+          'id="ledger"' in html and "/api/ledger?" in script)
+    check("ui/ledger: it pages by CURSOR, never by offset -- the page cannot ask for a page "
+          "number the API refuses to serve",
+          "LG.cursor=r.next_cursor" in script.replace(" ", "")
+          and "cursor:LG.cursor" in script.replace(" ", ""))
+    check("ui/ledger: sorting is server-side against the whitelist, and a column the API "
+          "cannot sort is shown as unsortable instead of offering a click that 400s",
+          "r.sortable" in script and "unsortable" in script)
+    check("ui/ledger: every column the design names is rendered -- time, type, token #, price "
+          "in ETH and USD, maker, taker, order hash and the exit reason",
+          all(k in script for k in ("token_num", "price_eth", "price_usd", "exit_reason",
+                                    "order_hash", "price_basis", "lag_s")))
+    check("ui/ledger: USD is to the cent on every row, through the same formatter as the rest "
+          "of the page", "money2(x.price_usd,'USD')" in script)
+    check("ui/ledger: 'chart this selection' asks for mode=chart, draws MARKERS always, keeps "
+          "holes, and prints the cap rather than sampling silently",
+          "mode:'chart'" in script and "c.basis.cap_note" in script
+          and "connectgaps:false" in script and "lines+markers" in script)
+    check("ui/wallets: the address card reads /api/wallets and /api/wallet/",
+          "/api/wallets?" in script and "/api/wallet/" in script)
+    check("ui/wallets: every percentage is printed FROM the {pct,n,of} object, so the page "
+          "cannot show a percentage the API did not send a count with",
+          "const pctOf=" in script and "s.of" in script and "s.n" in script)
+    check("ui/wallets: chain-sourced facts render as 'not collected yet', never as a zero and "
+          "never invented", "not collected yet" in html and "w.chain.collected" in script)
+    check("ui/wallets: the counterparty graph is a HEAT-MAP (a Plotly heatmap trace), not a "
+          "force graph -- deterministic, no second library, and a cell states the count",
+          "type:'heatmap'" in script and "%{z:,d} trade" in script
+          and not any(k in html for k in ("d3-force", "forceSimulation", "d3.forceLink")))
+    check("ui/wallets: the heat-map scale is SEQUENTIAL and built from a palette token -- "
+          "counts have no meaningful midpoint, so a diverging scale would invent one",
+          "colorscale:[[0,rgba(C.coll" in script and "single hue" in script.lower())
+    check("ui/wallets: a cluster prints its evidence count, and a flag renders only when its "
+          "rows can be listed", "evidence_count" in script and "flags_rule" in script)
+    check("ui/health: the Health view surfaces the recorder, gaps, the audit, the crossed-book "
+          "alarm count, criteria coverage, files_failed/files_short, store size and last fold",
+          all(k in script for k in ("/api/health", "crossed_book", "criteria_coverage",
+                                    "files_failed", "files_short", "last_fold_at")))
+
+
+def test_ui_escaping_matches_its_sink() -> None:
+    """BUG-20260910-066. `esc()` is the page's HTML escaper, and escaping is
+    correct at exactly one boundary: a string being interpolated into `innerHTML`.
+    A string assigned to `.textContent` is never parsed as markup, so escaping it
+    is a DOUBLE encoding -- and the one string on this page that contains a `<` is
+    the sentence explaining why a percentile is missing (`n_eff = 0 ... < 30`).
+    The Operator was shown `&lt;` in the one place REQ-F-19 most needs him to read
+    a plain sentence.
+
+    `test_ui_contract` asserts the dangerous direction (an unescaped third-party
+    field reaching innerHTML) and by design says nothing about this one. This test
+    is the other half: every esc() call site is checked against the sink it feeds.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    script = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+
+    # The two textContent sinks that carry server prose. For each, take the whole
+    # assignment -- the template plus every local it interpolates -- and assert no
+    # esc() survives anywhere in it.
+    def region(start: str, end: str) -> str:
+        return script.split(start, 1)[1].split(end, 1)[0] if start in script else ""
+
+    head = region("function survHead(r){", "function survBasis(r){")
+    basis = region("function survBasis(r){", "async function surv(){")
+    check("ui/escaping: the survival HEADER builds plain text for .textContent -- no esc(), so "
+          "`n_eff < 30` reads as `<` and not as `&lt;` (BUG-20260910-066)",
+          "$('#s-head').textContent=" in head and "esc(" not in head,
+          "; ".join(re.findall(r"esc\([^)]*\)", head)))
+    check("ui/escaping: ...and so does the survival BASIS line",
+          "$('#b-surv').textContent=" in basis and "esc(" not in basis,
+          "; ".join(re.findall(r"esc\([^)]*\)", basis)))
+    check("ui/escaping: the fix is annotated with the bug id, because the obvious move on "
+          "re-reading this code is to add esc() back",
+          "BUG-20260910-066" in script and "textContent" in script.split("BUG-20260910-066", 1)[1][:400])
+
+    # The property, over the whole page: an esc() call may only appear inside a
+    # template that is heading for innerHTML / an attribute -- never inside one of
+    # the plain-text sinks. Checked structurally: every `X.textContent=` assignment
+    # in the file, through to the end of its statement, must be esc()-free.
+    leaks = []
+    for m in re.finditer(r"\$\('#[\w-]+'\)\.textContent\s*=", script):
+        seg, depth, i = "", 0, m.end()
+        while i < len(script):                      # to the end of the assignment
+            ch = script[i]
+            depth += (ch in "([{") - (ch in ")]}")
+            if ch in ";\n" and depth <= 0 and not script[i:i + 2] == "\n +":
+                break
+            seg += ch
+            i += 1
+        if "esc(" in seg:
+            leaks.append(seg[:80])
+    check("ui/escaping: NO .textContent assignment anywhere on the page escapes its value -- "
+          "the property, not the two call sites the bug was found in",
+          not leaks, " | ".join(leaks[:3]))
+    # ...and the dangerous direction is still covered, by the test that owns it.
+    check("ui/escaping: the innerHTML boundary still escapes -- esc() is alive and used",
+          script.count("esc(") > 40 and "const esc=" in script, f"{script.count('esc(')} call sites")
+
+
+# ===========================================================================
+# BUG-20260910-067 -- TWO WRITERS ON ONE DERIVED STORE.
+#
+# On 2026-09-10 `data/analytics.sqlite` (2.8 GB) became "database disk image is
+# malformed" and the launchd dashboard crash-looped 177 times. The mechanism:
+# `serve()` constructed `Dashboard(...)` -- which opens the store and starts the
+# thread that WRITES to it -- BEFORE binding 127.0.0.1:8765. With a second
+# dashboard already listening, every launchd retry opened the store, folded new
+# frames into it, and then died on "Address already in use". Two writers
+# alternating on one SQLite store, ten seconds apart, with processes killed
+# mid-write.
+#
+# Every check below was written against the OLD code first and fails there
+# (docs/03 §9). The store is derived and was rebuilt from the landing zone; the
+# landing zone was not touched.
+# ===========================================================================
+def _dash_root(tmp: Path, name: str):
+    """A project root with config, a landing zone, and three real frames in it."""
+    import shutil as _sh
+
+    import yaml
+    root = tmp / name
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = yaml.safe_load((root / "config" / "base.yaml").read_text())
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / cfg["landing"]["root"], f"run-{name}", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    for raw in (REAL_BID, REAL_COLL_OFFER, DOC_LISTING):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+    w.close()
+    return root, cfg
+
+
+def test_dashboard_binds_before_it_opens_the_store(tmp: Path) -> None:
+    """The ordering fix. A dashboard that cannot bind must never touch the store.
+
+    The test holds the port with a plain listening socket -- the second dashboard,
+    from this process's point of view -- and spies on `Normalizer` construction,
+    because constructing one is exactly the moment the store is opened and the
+    fold thread becomes possible. Against the old `serve()` the spy fires and the
+    sqlite file appears on disk before the OSError is raised; that is the bug,
+    177 times over.
+    """
+    import argparse
+    import contextlib
+    import io
+    import socket
+
+    from navanax import cli as cli_mod
+    from navanax import dashboard as dash_mod
+
+    root, cfg = _dash_root(tmp, "bindfirst")
+    db = root / cfg["analytical"]["path"]
+    lock = db.with_name(db.name + ".lock")
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+
+    built: list[Any] = []
+    real = dash_mod.Normalizer
+
+    class SpyNormalizer(real):                      # type: ignore[misc, valid-type]
+        def __init__(self, *a: Any, **k: Any) -> None:
+            built.append((a, k))
+            super().__init__(*a, **k)
+
+    dash_mod.Normalizer = SpyNormalizer
+    raised: BaseException | None = None
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                dash_mod.serve(root, cfg, ["argonauts"], host="127.0.0.1", port=port,
+                               open_browser=False)
+            except OSError as exc:
+                raised = exc
+    finally:
+        dash_mod.Normalizer = real
+
+    check("bind-first: serve() fails on the BIND when the port is already held",
+          isinstance(raised, OSError), repr(raised))
+    check("bind-first: the Normalizer -- which opens the store and starts the thread that "
+          "WRITES to it -- was never constructed, so a doomed retry folds nothing "
+          "(BUG-20260910-067)",
+          built == [], f"constructed {len(built)} time(s)")
+    check("bind-first: ...and neither the store nor its writer lock was created at all",
+          not db.exists() and not lock.exists(), f"db={db.exists()} lock={lock.exists()}")
+
+    args = argparse.Namespace(root=str(root), port=port, no_browser=True)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = cli_mod.cmd_dashboard(args)
+    msg = err.getvalue()
+    check("bind-first: `navanax dashboard` exits 2 on a port conflict -- the supervisor "
+          "contract, so launchd's restart is throttled and the reason is in the log",
+          rc == 2 and rc == cli_mod.DASH_EXIT_REFUSED, f"exit {rc}")
+    check("bind-first: ...and the message still says another dashboard is probably running, "
+          "and now also says the store was not opened",
+          "another dashboard already running" in msg and "NOT opened" in msg, msg[:220])
+    check("bind-first: the refused CLI run left no store behind either",
+          not db.exists(), str(db))
+    holder.close()
+
+
+def test_normalizer_writer_lock_is_one_writer_per_store(tmp: Path) -> None:
+    """docs/07 §1: one writer owns the read-write connection, readers attach read-only.
+
+    That was a documented pattern with nothing enforcing it. Now the folding
+    writer holds an exclusive `flock` on `<store>.lock` for its lifetime, a second
+    one is refused by name and pid, and a reader opens `mode=ro` and cannot write
+    even if it tries.
+    """
+    import errno as _errno
+    import os as _os
+    import sqlite3 as _sq
+
+    from navanax.normalize import (
+        LOCK_UNSUPPORTED_ERRNOS,
+        Normalizer,
+        StoreWriterBusyError,
+        writer_lock_path,
+    )
+
+    (tmp / "empty-lz").mkdir(exist_ok=True)
+    db = tmp / "onewriter.sqlite"
+    w1 = Normalizer(tmp / "empty-lz", db)
+    lock = writer_lock_path(db)
+    check("writer lock: the lock file sits next to the sqlite file -- one lock per STORE, "
+          "not per project root",
+          lock == db.with_name("onewriter.sqlite.lock") and lock.exists(), str(lock))
+    info = w1.writer_info()
+    check("writer lock: it records the holding pid and when it was taken",
+          info["pid"] == _os.getpid() and info["this_process"] is True
+          and bool(info["since"]) and info["alive"] is True, str(info))
+
+    busy: StoreWriterBusyError | None = None
+    try:
+        Normalizer(tmp / "empty-lz", db)
+    except StoreWriterBusyError as exc:
+        busy = exc
+    check("writer lock: a SECOND folding writer on the same store is REFUSED, not admitted "
+          "-- this is the whole of BUG-20260910-067",
+          busy is not None, "a second Normalizer(writer=True) was allowed to open the store")
+    check("writer lock: the refusal names the pid that holds it and the two ways out "
+          "(stop that process, or open read-only)",
+          busy is not None and busy.pid == _os.getpid()
+          and f"kill {_os.getpid()}" in str(busy) and "writer=False" in str(busy)
+          and "BUG-20260910-067" in str(busy), str(busy)[:260])
+
+    rd = Normalizer(tmp / "empty-lz", db, writer=False)
+    check("writer lock: a READER opens the same store while the writer holds the lock -- "
+          "the lock is on FOLDING, never on querying",
+          rd.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0)
+    ro_enforced = False
+    try:
+        rd.conn.execute("INSERT INTO unparsed (run, seq, file, reason) VALUES ('r',1,'f','x')")
+    except _sq.OperationalError as exc:
+        ro_enforced = "readonly" in str(exc).lower()
+    check("writer lock: the reader is read-only because SQLITE says so (mode=ro), not "
+          "because the code politely does not write", ro_enforced)
+    for fn in ("sync", "reset_for_refold", "refold_criteria"):
+        refused = False
+        try:
+            getattr(rd, fn)()
+        except RuntimeError as exc:
+            refused = "writer=False" in str(exc)
+        check(f"writer lock: a reader's {fn}() refuses rather than becoming the second writer",
+              refused)
+    rd.close()
+
+    missing = False
+    try:
+        Normalizer(tmp / "empty-lz", tmp / "never-folded.sqlite", writer=False)
+    except FileNotFoundError:
+        missing = True
+    check("writer lock: opening a store that does not exist read-only REFUSES rather than "
+          "creating an empty one, which a reader would then report as 'no events'", missing)
+
+    w1.close()
+    released = True
+    try:
+        w2 = Normalizer(tmp / "empty-lz", db)
+        w2.close()
+    except StoreWriterBusyError:
+        released = False
+    check("writer lock: close() releases it, so the next start is clean and a crash-looping "
+          "supervisor is not locked out forever", released)
+
+    cli_src = (ROOT / "src" / "navanax" / "cli.py").read_text()
+    check("writer lock: the store lock and the ingest lock share ONE list of 'this filesystem "
+          "cannot flock' errnos, so the two cannot drift apart (tech-lead finding #4)",
+          "LOCK_UNSUPPORTED_ERRNOS" in cli_src
+          and _errno.EOPNOTSUPP in LOCK_UNSUPPORTED_ERRNOS
+          and _errno.EWOULDBLOCK not in LOCK_UNSUPPORTED_ERRNOS,
+          sorted(LOCK_UNSUPPORTED_ERRNOS))
+
+
+def test_traits_writer_waits_and_takes_no_fold_lock(tmp: Path) -> None:
+    """The traits job writes `tokens`/`traits` and folds nothing -- so it must NOT
+    take the fold lock (that would make the daily traits job and the dashboard
+    mutually exclusive), but it MUST have a busy timeout, or a fold's batch insert
+    turns into a spurious "database is locked" that reads like a real failure.
+    """
+    from navanax.normalize import (
+        BUSY_TIMEOUT_MS,
+        Normalizer,
+        StoreWriterBusyError,
+        writer_lock_path,
+    )
+    from navanax.traits import open_store
+
+    (tmp / "empty-lz").mkdir(exist_ok=True)
+    db = tmp / "traitslock.sqlite"
+    folder = Normalizer(tmp / "empty-lz", db)          # the fold writer, holding the lock
+    conn = None
+    try:
+        conn = open_store(db)
+    except StoreWriterBusyError:
+        pass
+    check("traits: the traits job opens the store WHILE the fold holds the writer lock -- it "
+          "writes tokens/traits, folds no events, and is not a second folding writer",
+          conn is not None)
+    if conn is not None:
+        bt = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        check("traits: ...and it opens with a busy_timeout of at least 5 s, so a fold's batch "
+              "insert makes it WAIT rather than fail with 'database is locked'",
+              bt >= 5000, f"busy_timeout={bt} ms")
+        conn.execute("INSERT OR REPLACE INTO tokens (collection, token_id, listed_at) "
+                     "VALUES ('argonauts','1','2026-09-10T00:00:00Z')")
+        conn.commit()
+        check("traits: ...and it can still actually write its own two tables",
+              conn.execute("SELECT COUNT(*) FROM tokens").fetchone()[0] == 1)
+        conn.close()
+    folder.close()
+
+    fresh = tmp / "traits-first.sqlite"
+    c2 = open_store(fresh)
+    check("traits: open_store takes no fold-writer lock of its own ...",
+          not writer_lock_path(fresh).exists(), str(writer_lock_path(fresh)))
+    admitted = True
+    try:
+        n2 = Normalizer(tmp / "empty-lz", fresh)
+        n2.close()
+    except StoreWriterBusyError:
+        admitted = False
+    check("traits: ...so a store the traits job touched first still admits a folding writer",
+          admitted)
+    c2.close()
+
+    src = (ROOT / "src" / "navanax" / "traits.py").read_text()
+    check("traits: traits.py takes no lock at all -- the fold lock is the fold's, and only "
+          "the fold's (the word appears here once, in the docstring saying why)",
+          "fcntl" not in src and "LOCK_EX" not in src, src.count("flock"))
+    check("traits: the busy timeout is STATED -- an explicit PRAGMA, and the store's one "
+          "constant rather than a second number. `sqlite3.connect(timeout=...)` sets the same "
+          "thing invisibly, and an invisible guarantee is one refactor from being lost",
+          "PRAGMA busy_timeout" in src and "BUSY_TIMEOUT_MS" in src and BUSY_TIMEOUT_MS >= 5000,
+          f"{BUSY_TIMEOUT_MS} ms")
+
+
+def test_launchd_dashboard_cannot_retry_every_ten_seconds(tmp: Path) -> None:
+    """The second layer. Binding first makes a doomed retry harmless; throttling
+    makes the loop legible. 177 restarts in half an hour is a wall of banners
+    nobody reads; at 30 s the same conflict is 120 an hour and says so in the log.
+    """
+    import plistlib
+    ld = _launchd()
+    dash = plistlib.loads(ld.render(ld.DASHBOARD, tmp))
+    rec = plistlib.loads(ld.render(ld.TRAITS, tmp))
+    recorder = plistlib.loads(ld.render(ld.RECORDER, tmp))
+    check("launchd: the DASHBOARD throttles restarts to at least 30 s, so a port conflict "
+          "cannot retry every 10 s (BUG-20260910-067)",
+          dash.get("ThrottleInterval", 0) >= 30, repr(dash.get("ThrottleInterval")))
+    check("launchd: the RECORDER's 10 s is unchanged -- a recorder that is down is losing "
+          "history that cannot be bought back, and its restart writes a gap record",
+          recorder.get("ThrottleInterval") == 10 and rec.get("ThrottleInterval") == 10,
+          f"recorder={recorder.get('ThrottleInterval')} traits={rec.get('ThrottleInterval')}")
+    check("launchd: the dashboard still restarts at all -- the page is how the Operator sees "
+          "the record, so KeepAlive stays on",
+          dash.get("KeepAlive") is True and dash.get("RunAtLoad") is True)
+    ld_src = (ROOT / "tools" / "launchd.py").read_text()
+    check("launchd: the interval names the incident, because 30 looks arbitrary on re-reading "
+          "and the obvious tidy-up is to fold it back into THROTTLE_SECONDS",
+          "DASHBOARD_THROTTLE_SECONDS" in ld_src and "BUG-20260910-067" in ld_src)
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    cmd = (ROOT / "autostart-install.command").read_text()
+    check("launchd: docs/04 and the installer text state the dashboard's interval, so the "
+          "three artefacts cannot disagree about what the machine will do",
+          "ThrottleInterval: 30" in doc and "30 seconds" in cmd,
+          f"doc={'ThrottleInterval: 30' in doc} cmd={'30 seconds' in cmd}")
+
+
+def test_health_names_the_store_writer_and_caches_quick_check(tmp: Path) -> None:
+    """Health has to say the store is still READABLE, and who owns its write side.
+
+    Before this, corruption in the analytical store was discovered by a crash
+    loop, not by a check: nothing on any page looked at the store's integrity, and
+    nothing named the process that was folding into it. `quick_check` is cached
+    for ten minutes because it reads every page -- on the Operator's 2.8 GB store
+    that is seconds, and per-request it would hold the writer lock each time.
+    """
+    import http.client
+    import os as _os
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import QUICK_CHECK_TTL_SECONDS, Dashboard, make_handler
+
+    root, cfg = _dash_root(tmp, "writerhealth")
+    dash = Dashboard(root, cfg, ["argonauts"])
+    dash._sync_once()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(dash))
+    port = httpd.server_address[1]
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        def get(path: str):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+            return r.status, body
+
+        st, body = get("/api/health")
+        h = json.loads(body) if st == 200 else {}
+        sw = h.get("store_writer") or {}
+        check("health: /api/health names the process that owns the store's WRITE side -- pid "
+              "and since -- so 'is a second dashboard folding into this?' is answerable from "
+              "the page (BUG-20260910-067)",
+              sw.get("pid") == _os.getpid() and bool(sw.get("since"))
+              and sw.get("this_process") is True, str(sw)[:200])
+        qc = h.get("quick_check") or {}
+        check("health: ...and reports PRAGMA quick_check, so corruption is visible on Health "
+              "before it is fatal rather than being found by a crash loop",
+              qc.get("ok") is True and qc.get("result") == ["ok"], str(qc)[:200])
+        check("health: the first call actually ran it, and the response says how old the "
+              "answer is and how often it can be re-run",
+              qc.get("cached") is False and qc.get("ttl_seconds") == QUICK_CHECK_TTL_SECONDS
+              and QUICK_CHECK_TTL_SECONDS == 600, str(qc)[:200])
+
+        st2, body2 = get("/api/health")
+        qc2 = (json.loads(body2) or {}).get("quick_check") or {}
+        check("health: the SECOND request is served from the cache -- a full-page read per "
+              "request would make Health the slowest tab and hold the writer lock each time",
+              qc2.get("cached") is True and qc2.get("at") == qc.get("at")
+              and qc2.get("age_seconds") >= 0, str(qc2)[:200])
+
+        dash._quick_check_mono -= (QUICK_CHECK_TTL_SECONDS + 1)   # age the cache past its TTL
+        qc3 = dash.store_quick_check()
+        check("health: ...and once the TTL has passed it runs again, so a store that goes bad "
+              "in the next ten minutes is still reported",
+              qc3.get("cached") is False and qc3.get("at") != qc.get("at"), str(qc3)[:200])
+
+        html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+        check("health/ui: the Health view renders both new fields -- the integrity check and "
+              "the fold writer's pid -- and nothing else on the page changed",
+              "h.quick_check" in html and "h.store_writer" in html
+              and "quick_check ok" in html and "fold writer" in html)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.stop()
+        dash.norm.close()
+
+
+
+# ===========================================================================
+# PR-9, round 2 -- the tech-lead's blocking findings A1-A7 and C1.
+# ===========================================================================
+def _ledger_plan_store(tmp: Path, name: str, n_rows: int = 0):
+    """A store for the plan / walk tests. `n_rows` bulk rows for the timing case.
+
+    Rows are inserted straight into `events` rather than through `parse_event`:
+    what is under test is the QUERY PLAN and the keyset, not the parser, and 200k
+    frames through the parser would make the suite about the parser's speed.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+    from navanax.traits import ensure_schema
+    n = Normalizer(tmp / "empty-lz", tmp / name)
+    ensure_schema(n.conn)
+    if n_rows:
+        base = 1_757_000_000.0
+        rows = [("r", i, "f", "2026-09-09T10:00:00Z", "2026-09-09T10:00:00Z",
+                 base + i, base + i, ("item_listed", "item_received_bid", "item_sold")[i % 3],
+                 "argonauts", str(i % 977), f"0xh{i}", f"0xmk{i % 53}", None, 0.001 * (i % 991))
+                for i in range(n_rows)]
+        n.conn.executemany(
+            "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,"
+            "event_type,collection,token_id,order_hash,maker,taker,price_eth) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        n.conn.commit()
+        n.conn.execute("ANALYZE")
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    return n, eng
+
+
+def test_ledger_page_uses_its_index_under_a_time_window(tmp: Path) -> None:
+    """A1 (S1). `dashboard._window` is UNCONDITIONAL -- every ledger request the page
+    makes carries `valid_ts >= ? AND valid_ts < ?`. Given that range predicate,
+    SQLite prefers `ix_events_coll_valid` and then sorts the whole window into a
+    TEMP B-TREE, so five of the six sorts paid for an in-memory sort of every
+    matching row **on every page**. The keyset was constant-time and the sort was
+    not, which is the same defect as BUG-040 one query over.
+
+    The fix is three things, and this test is about the two that are load-bearing:
+    an ORDER BY that is the index's own column order `(key, valid_ts, rowid)`, and
+    `+e.valid_ts` on the sorts whose index does not lead with a timestamp -- the
+    unary plus being SQLite's documented way to keep a term out of the index
+    constraint. The third, `INDEXED BY`, is **deliberately un-exercised insurance**:
+    with the other two in place the planner already chooses the right index, so no
+    assertion here can fail on its absence; it is there so that a future schema or
+    statistics change cannot silently move the query onto a different index, and it
+    would fail loudly rather than degrade.
+
+    THE PLANS ARE READ AGAINST THE 200,000-ROW STORE, not an empty one. On an empty
+    table SQLite has no reason to skip-scan and every plan looks fine, so a test run
+    against a fixture would have passed before the fix as well as after it -- which
+    is the whole failure mode being guarded here.
+
+    There is deliberately NO wall-clock assertion. The measured numbers (864 ms ->
+    0.2 ms for page 1, 7-9 ms at 12,000 rows deep) belong in the bug ledger, where
+    they are evidence; as a threshold in CI they would be a flaky test that fails
+    under load and teaches everyone to re-run the suite. The PLAN is the property,
+    and the plan is deterministic.
+    """
+    import navanax.metrics as _M
+    from navanax.metrics import LEDGER_SORTS
+    n, eng = _ledger_plan_store(tmp, "plan.sqlite", n_rows=200_000)
+    w = {"start": 1_757_000_000.0 - 10, "end": 1_757_000_000.0 + 300_000}
+
+    def survey():
+        """(bad plans, plans that missed their index) over every sort x direction."""
+        bad, missing = [], []
+        for sort in LEDGER_SORTS:
+            for direction in ("asc", "desc"):
+                q = eng.ledger_query_plan("argonauts", sort=sort, direction=direction,
+                                          limit=200, **w)
+                text = " | ".join(q["plan"])
+                if "TEMP B-TREE" in text.upper():
+                    bad.append(f"{sort}/{direction}")
+                if q["index"] not in text:
+                    missing.append(f"{sort}/{direction}: wanted {q['index']}, got {text}")
+        return bad, missing
+
+    bad_plan, missing_idx = survey()
+    check("ledger/plan: over 200,000 rows, with a time window present -- which every request "
+          "from the page has -- NO sort falls back to a TEMP B-TREE (A1)",
+          not bad_plan, "; ".join(bad_plan))
+    check("ledger/plan: ...and every one of them scans the index the basis NAMES, so "
+          "`basis.index` is a fact about the query rather than a hope",
+          not missing_idx, "; ".join(missing_idx))
+
+    p1 = eng.ledger("argonauts", sort="maker", direction="desc", limit=5, **w)
+    q = eng.ledger_query_plan("argonauts", sort="maker", direction="desc", limit=5,
+                              cursor=p1["next_cursor"], **w)
+    check("ledger/plan: a cursor page keeps the index too -- the deep page is the one that "
+          "could not afford a sort",
+          "TEMP B-TREE" not in " ".join(q["plan"]).upper() and q["index"] in " ".join(q["plan"]),
+          str(q["plan"]))
+    check("ledger/plan: the basis says the index is FORCED and names the keyset tuple, so a "
+          "reader is not left to assume the planner cooperated",
+          p1["basis"]["index_forced"] is True
+          and "valid_ts" in p1["basis"]["pagination"] and "rowid" in p1["basis"]["pagination"],
+          str({k: p1["basis"][k] for k in ("index", "index_forced", "pagination")}))
+
+    # The `+valid_ts` de-optimisation is SCOPED: on the default sort the window is
+    # both the filter and the order, and there it must stay an index RANGE. Widening
+    # it to every sort would turn the page the Operator actually looks at into a scan.
+    vplan = " ".join(eng.ledger_query_plan("argonauts", sort="valid_ts", limit=100, **w)["plan"])
+    mplan = " ".join(eng.ledger_query_plan("argonauts", sort="maker", limit=100, **w)["plan"])
+    check("ledger/plan: on the DEFAULT sort the time window is still an index RANGE "
+          "(`valid_ts>? AND valid_ts<?`), not a per-row filter",
+          "valid_ts>?" in vplan.replace(" ", "") and "valid_ts<?" in vplan.replace(" ", ""), vplan)
+    check("ledger/plan: on the other sorts it is deliberately NOT an index constraint -- that "
+          "is what stops the planner skip-scanning and then sorting (A1)",
+          "valid_ts>?" not in mplan.replace(" ", ""), mplan)
+
+    # -- the mutation: remove ONLY the unary plus and re-read the planner ----
+    # 8 of the 12 plans must regress. Exactly 8, and which 8 is the point:
+    #   * valid_ts (2)    -- never used the plus; its index leads with valid_ts.
+    #   * observed_ts (2) -- its index is (collection, observed_ts), only two columns,
+    #                        so there is no third slot for the range term to skip-scan
+    #                        into and the plan was never at risk.
+    #   * the other four sorts x two directions = 8 -- these are the ones whose index
+    #                        has valid_ts as its trailing column, which is exactly the
+    #                        shape SQLite will skip-scan to reach.
+    real_where = _M.MetricEngine._ledger_where
+
+    def no_plus(self, collection, **kw):
+        kw["window_plus"] = False
+        return real_where(self, collection, **kw)
+
+    try:
+        _M.MetricEngine._ledger_where = no_plus
+        bad2, _ = survey()
+        check("ledger/plan (mutation): removing ONLY the unary plus puts a TEMP B-TREE back "
+              "into exactly 8 of the 12 plans -- so the plus is what the assertions above are "
+              "proving, and it is not incidental",
+              len(bad2) == 8, f"{len(bad2)} regressed: {sorted(bad2)}")
+        check("ledger/plan (mutation): ...and it is the four sorts whose index has valid_ts as "
+              "its TRAILING column -- valid_ts and observed_ts are untouched, because neither "
+              "has a slot for the range term to skip-scan into",
+              {b.split("/")[0] for b in bad2} == {"token_num", "maker", "event_type", "price_eth"},
+              f"regressed on {sorted({b.split('/')[0] for b in bad2})}")
+    finally:
+        _M.MetricEngine._ledger_where = real_where
+    after, _ = survey()
+    check("ledger/plan (mutation): the plus was restored and every plan is clean again",
+          not after, "; ".join(after))
+    n.close()
+
+
+def test_ledger_keyset_walks_nulls_and_ties_on_every_sort(tmp: Path) -> None:
+    """A3 / A4 (S2). Two branches of the keyset carried the whole correctness of
+    pagination and neither had a test:
+
+      * the NULL branch -- SQLite orders NULLs first ASC and last DESC, and
+        `key < NULL` is NULL rather than true, so a naive keyset stops dead at the
+        first null-keyed row and silently truncates the result;
+      * the rowid tiebreak -- at 48 events/s many rows share a timestamp, and
+        without a total order a page boundary that lands inside a tie either
+        repeats rows or skips them.
+
+    The property is the only thing worth asserting: walking the cursor to the end
+    must visit EVERY row exactly once, on every sort, in both directions, over a
+    fixture that is deliberately full of nulls and ties. Both branches are then
+    removed, one at a time, to prove the walk catches each.
+    """
+    import navanax.metrics as _M
+    n, eng = _ledger_plan_store(tmp, "walk.sqlite")
+    base = 1_757_000_000.0
+    rows = []
+    for i in range(60):
+        rows.append(("r", i, "f", "2026-09-09T10:00:00Z", "2026-09-09T10:00:00Z",
+                     base + (i % 5),                 # observed_ts: heavy ties
+                     (base + (i % 5)) if i % 7 else None,          # valid_ts: NULLs
+                     ("item_listed", "item_sold")[i % 2], "argonauts",
+                     (str(i % 4) if i % 3 else None),               # token_id -> token_num NULLs + ties
+                     f"0xh{i}",
+                     (f"0xmk{i % 3}" if i % 4 else None),           # maker NULLs + ties
+                     None,
+                     ((i % 3) * 0.5 if i % 5 else None)))           # price_eth NULLs + ties
+    n.conn.executemany(
+        "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,"
+        "event_type,collection,token_id,order_hash,maker,taker,price_eth) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.commit()
+    everything = {r[0] for r in n.conn.execute("SELECT order_hash FROM events")}
+    check("ledger/walk: the fixture really does contain nulls and ties on every sortable "
+          "column, or this test proves nothing",
+          len(everything) == 60
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE valid_ts IS NULL").fetchone()[0] > 0
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE maker IS NULL").fetchone()[0] > 0
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE token_num IS NULL").fetchone()[0] > 0
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE price_eth IS NULL").fetchone()[0] > 0
+          and n.conn.execute(
+              "SELECT MAX(c) FROM (SELECT COUNT(*) c FROM events GROUP BY observed_ts)").fetchone()[0] > 5)
+
+    def walk(sort, direction):
+        seen, cur, guard = [], None, 0
+        while guard < 200:
+            guard += 1
+            pg = eng.ledger("argonauts", sort=sort, direction=direction, limit=7, cursor=cur)
+            seen += [r["order_hash"] for r in pg["rows"]]
+            cur = pg["next_cursor"]
+            if not cur:
+                break
+        return seen
+
+    lost, dupes = [], []
+    for sort in _M.LEDGER_SORTS:
+        for direction in ("asc", "desc"):
+            seen = walk(sort, direction)
+            if set(seen) != everything:
+                lost.append(f"{sort}/{direction}: missed {len(everything - set(seen))}")
+            if len(seen) != len(set(seen)):
+                dupes.append(f"{sort}/{direction}: {len(seen) - len(set(seen))} repeated")
+    check("ledger/walk: every sort, both directions, visits EVERY row -- nulls included",
+          not lost, "; ".join(lost))
+    check("ledger/walk: ...and repeats none of them -- the rowid tiebreak makes the order total",
+          not dupes, "; ".join(dupes))
+
+    # -- prove the two branches by removing them, one at a time --------------
+    real = _M._keyset_clause
+
+    def no_nulls(cols, vals, direction):
+        """The naive version: `key < ?` with no null handling at all."""
+        op = "<" if direction == "desc" else ">"
+        sql = "0"
+        args: list = []
+        for col, v in zip(reversed(cols), reversed(vals), strict=True):
+            sql = f"({col} {op} ? OR ({col} = ? AND {sql}))"
+            args = [v, v] + args
+        return sql, args
+
+    def no_tiebreak(cols, vals, direction):
+        """Everything but the rowid: the order is no longer total."""
+        return real(cols[:-1], vals[:-1], direction)
+
+    try:
+        _M._keyset_clause = no_nulls
+        broke = [s for s in _M.LEDGER_SORTS if set(walk(s, "desc")) != everything]
+        check("ledger/walk (mutation): removing the NULL branch loses rows on the sorts whose "
+              "column is nullable -- so the branch is what the walk above is proving",
+              {"maker", "price_eth", "token_num"} <= set(broke), f"broke on {sorted(broke)}")
+        _M._keyset_clause = no_tiebreak
+        bad = []
+        for s in _M.LEDGER_SORTS:
+            seen = walk(s, "desc")
+            if set(seen) != everything or len(seen) != len(set(seen)):
+                bad.append(s)
+        check("ledger/walk (mutation): removing the rowid tiebreak breaks the walk on a fixture "
+              "this full of ties -- rows are skipped or repeated at every page boundary",
+              bad, f"still clean on {sorted(set(_M.LEDGER_SORTS) - set(bad))}")
+    finally:
+        _M._keyset_clause = real
+    n.close()
+
+
+def test_ledger_chart_caption_counts_what_it_draws(tmp: Path) -> None:
+    """A2 (S1). The caption said `charting the 5,000 most recent of N` where N was
+    (a) counted WITHOUT the price predicate the chart itself applies, so it named
+    more rows than were ever chartable, and (b) printed as an exact figure even
+    when it was the count cap -- a floor rendered as a fact, in the one sentence
+    whose whole job is to say the picture is incomplete.
+    """
+    from navanax.metrics import LEDGER_COUNT_CAP
+    n, eng = _ledger_plan_store(tmp, "chartcap.sqlite")
+    base = 1_757_000_000.0
+    rows = []
+    for i in range(50):
+        rows.append(("r", i, "f", "2026-09-09T10:00:00Z", "2026-09-09T10:00:00Z", base + i, base + i,
+                     "item_listed", "argonauts", str(i), f"0xh{i}", "0xmk", None,
+                     (1.0 + i) if i < 20 else None))       # only 20 of the 50 carry a price
+    n.conn.executemany(
+        "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,"
+        "event_type,collection,token_id,order_hash,maker,taker,price_eth) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.commit()
+    w = {"start": base - 10, "end": base + 1000}
+    c = eng.ledger_chart("argonauts", cap=5, **w)
+    check("ledger/chart: `matched` counts the rows the chart can actually DRAW -- with the "
+          "price predicate the chart query applies, not the 50 rows the table has (A2)",
+          c["matched"] == 20 and c["charted"] == 5 and c["capped"] is True,
+          str({k: c[k] for k in ("matched", "charted", "capped")}))
+    check("ledger/chart: ...and the caption names that same number, so the sentence under the "
+          "chart is about the chart",
+          "of 20" in (c["basis"]["cap_note"] or ""), str(c["basis"]["cap_note"]))
+    check("ledger/chart: the caption says the count is exact, because at this size it is",
+          c["matched_exact"] is True and "floor" not in (c["basis"]["cap_note"] or ""),
+          str(c["basis"]["cap_note"]))
+    check("ledger/chart: the predicate is STATED, so a reader can see why the chart draws "
+          "fewer rows than the table shows",
+          "price" in (c["basis"].get("matched_predicate") or ""), str(c["basis"].get("matched_predicate")))
+
+    # above the count cap the same sentence must read as a floor, exactly as count_note does
+    import navanax.metrics as _M
+    old = _M.LEDGER_COUNT_CAP
+    try:
+        _M.LEDGER_COUNT_CAP = 4
+        c2 = eng.ledger_chart("argonauts", cap=3, **w)
+        check("ledger/chart: above the count cap the caption reads as a FLOOR and says so -- "
+              "a capped count rendered as exact is a lie in the sentence that exists to "
+              "admit the picture is incomplete (A2)",
+              c2["matched_exact"] is False and "more than" in (c2["basis"]["cap_note"] or "")
+              and ("floor" in (c2["basis"]["cap_note"] or "")),
+              str(c2["basis"]["cap_note"]))
+    finally:
+        _M.LEDGER_COUNT_CAP = old
+    check("the cap constant was restored", _M.LEDGER_COUNT_CAP == LEDGER_COUNT_CAP)
+    n.close()
+
+
+def test_wallet_identity_guard_matches_the_markers_it_claims(tmp: Path) -> None:
+    """A6 (S4). The guard's comment promised to catch a field that could hold an
+    off-chain identity; the marker list did not contain the words a leak would most
+    plausibly arrive under -- `notes`, `alias`, `handle`, `owner`, `label`,
+    `twitter` -- and nothing tested it below the top level.
+
+    The matcher is SEGMENT-based, and that is not a detail: `ens` is a substring of
+    `tokens` and `tag` of `vintage`, so a substring rule on the short markers would
+    fire on `distinct_tokens_touched` and teach everyone to delete the guard.
+    """
+    from navanax.metrics import (
+        IDENTITY_KEY_MARKERS,
+        IDENTITY_SUBSTRING_MARKERS,
+        _assert_address_only,
+    )
+    for m in ("notes", "note", "alias", "handle", "ens", "owner", "label", "tag",
+              "twitter", "discord", "telegram", "name", "company", "employer",
+              "location", "email", "phone",
+              # R2-6: `note` alone was half a rule. A field called `comment`,
+              # `memo`, `remark`, `description`, `about` or `free_text` is the same
+              # field under a different name, and `contact` is the one that would
+              # arrive already holding an email address.
+              "comment", "memo", "remark", "description", "about", "free_text", "contact"):
+        check(f"wallets/guard: {m!r} is a marker the guard actually carries",
+              m in IDENTITY_KEY_MARKERS, str(sorted(IDENTITY_KEY_MARKERS)))
+    probes = ({"cluster": {"members": [{"address": "0x1", "notes": "he told me his name"}]}},
+              {"chain": {"self_attached_handle": "x"}},
+              {"behaviour": {"owner_label": "x"}},
+              {"a": {"b": {"c": [{"twitter": "@x"}]}}},
+              {"alias": None},
+              {"ens_name": None},
+              # R2-6: every ordinary name for free text, at depth
+              {"cluster": {"members": [{"comment": "spoke to him at a conference"}]}},
+              {"memo": None}, {"remark": None}, {"description": None},
+              {"about": None}, {"free_text": None}, {"contact": None},
+              {"behaviour": {"analyst_comments": []}})
+    caught = []
+    for probe in probes:
+        try:
+            _assert_address_only(probe)
+        except ValueError as exc:
+            caught.append(str(exc))
+    check("wallets/guard: a nested `cluster.members[].notes` -- the most plausible shape a leak "
+          "would actually take -- is refused, and so is every other probe at every depth, "
+          "including every ordinary name for a free-text field (R2-6)",
+          len(caught) == len(probes), f"only {len(caught)} of {len(probes)} refused")
+    check("wallets/guard: the refusal names the path and the marker, so it can be acted on",
+          caught and "members" in caught[0] and "notes" in caught[0], caught[0][:160] if caught else "")
+    ok = []
+    for benign in ({"distinct_tokens_touched": 1}, {"events": 1}, {"collection_offers": 1},
+                   {"counterparties": {"trades": 1}}, {"first_funded_by": None},
+                   {"cancel_ratio": {"pct": None, "n": 0, "of": 0}},
+                   {"count_cap": 1}, {"sales_as_seller": 0}, {"episode_gap_s": 60.0}):
+        try:
+            _assert_address_only(benign)
+            ok.append(True)
+        except ValueError as exc:
+            ok.append(str(exc))
+    check("wallets/guard: it does NOT fire on `distinct_tokens_touched` (which contains `ens`) "
+          "or on any other real field -- a guard that cries wolf gets deleted",
+          all(x is True for x in ok), str([x for x in ok if x is not True]))
+    check("wallets/guard: the short, ambiguous markers are segment-only and the long ones are "
+          "also checked as substrings, and the code says which is which",
+          set(IDENTITY_SUBSTRING_MARKERS) < set(IDENTITY_KEY_MARKERS)
+          and "ens" not in IDENTITY_SUBSTRING_MARKERS and "tag" not in IDENTITY_SUBSTRING_MARKERS
+          and "name" in IDENTITY_SUBSTRING_MARKERS, str(sorted(IDENTITY_SUBSTRING_MARKERS)))
+
+    # and the live profile still passes its own guard, with the markers widened
+    n, eng, _ = _ledger_store(tmp, "guard-live.sqlite")
+    w = _lwin()
+    p = eng.wallet("argonauts", "0xmk1", w["start"], w["end"])
+    check("wallets/guard: the profile this build returns passes the WIDENED guard -- so the "
+          "prose fields were renamed rather than the guard being narrowed to fit them",
+          isinstance(p, dict) and "chain" in p)
+    check("wallets/guard: and there is no field for a self-attached handle at all now. The "
+          "charter permits one; the SCHEMA is the enforcement, so a field that is null today "
+          "and populated later is exactly the hole the guard exists to close",
+          "self_attached_handle" not in json.dumps(p), "")
+    n.close()
+
+
+def test_writer_info_enforced_is_not_a_lie_on_a_reader(tmp: Path) -> None:
+    """A7 (S4). `enforced: False` on a READER is indistinguishable from `enforced:
+    False` on a writer whose filesystem has no flock -- and those are opposite
+    facts. The first is "this process never asked for the lock"; the second is
+    "this process asked and could not be protected, and a second writer could
+    corrupt the store". Health renders the field, so the two must not print alike.
+    """
+    from navanax.normalize import Normalizer
+    (tmp / "empty-lz").mkdir(exist_ok=True)
+    db = tmp / "enforced.sqlite"
+    w = Normalizer(tmp / "empty-lz", db)
+    wi = w.writer_info()
+    check("writer lock: on the WRITER, `enforced` is still the boolean it always was",
+          isinstance(wi["enforced"], bool), str(wi["enforced"]))
+    rd = Normalizer(tmp / "empty-lz", db, writer=False)
+    ri = rd.writer_info()
+    check("writer lock: on a READER, `enforced` is NOT False -- a reader never takes the "
+          "lock, so 'not enforced' would be read as 'unprotected writer' (A7)",
+          ri["enforced"] is not False, str(ri["enforced"]))
+    check("writer lock: ...it says it is not applicable, and says why",
+          isinstance(ri["enforced"], str) and "not applicable" in ri["enforced"]
+          and "reader" in ri["enforced"], str(ri["enforced"]))
+    check("writer lock: the reader still reports the writer's pid, so the field it CAN answer "
+          "is unchanged", ri["pid"] == wi["pid"] and ri["this_process"] is False, str(ri))
+    rd.close()
+    w.close()
+
+
+def test_buglog_check_fails_on_a_duplicate_bug_id(tmp: Path) -> None:
+    """C1 (S3). `--check` collected ids into a SET, so two entries sharing an id
+    collapsed into one and the gate stayed green. The ledger is the source of
+    truth for what a bug id MEANS; two meanings under one id is the one defect
+    that makes every other entry unciteable -- and it is exactly what happens when
+    two branches allocate the same number, which this repo is doing right now with
+    059-061.
+    """
+    import re
+    import shutil as _sh
+    import subprocess as _sp
+    import sys as _sys
+    scratch = tmp / "buglog-dupe"
+    scratch.mkdir(exist_ok=True)
+    _sh.copytree(ROOT / "docs" / "logs", scratch / "logs", dirs_exist_ok=True)
+    # a real second entry under an id that already exists
+    y = scratch / "logs" / "bugs.yaml"
+    first = re.search(r"^- id: (BUG-\d{8}-\d{3})", y.read_text(), re.M).group(1)
+    y.write_text(y.read_text().rstrip("\n") + f"""
+
+- id: {first}
+  summary: "a second entry under an id that is already taken"
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: open
+  logged_at: "2026-09-10T23:00:00-05:00"
+  occurred_at: "2026-09-10T23:00:00-05:00"
+  detected_by: "the duplicate-id test"
+  detection_channel: tech-lead
+  branch: test
+  locations: []
+  requirement: REQ-N-12
+  data_impact: "none -- this entry exists only inside a temporary copy"
+  root_cause: "test fixture"
+  monitor_gap: "test fixture"
+""")
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("buglog_probe", ROOT / "tools" / "buglog.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    import yaml as _yaml
+    data = _yaml.safe_load(y.read_text())
+    old_md, old_ledger = mod.MARKDOWN, mod.LEDGER
+    try:
+        mod.MARKDOWN = scratch / "logs" / "BUGS.md"
+        problems = mod.check(data)
+    finally:
+        mod.MARKDOWN, mod.LEDGER = old_md, old_ledger
+    dupes = [p for p in problems if "duplicate" in p.lower() or "twice" in p.lower()]
+    check("buglog: --check FAILS on a duplicate bug id, and names it (C1)",
+          dupes and first in dupes[0], f"problems: {problems[:3]}")
+    # and the real ledger has none
+    real = _sp.run([_sys.executable, "tools/buglog.py", "--check"], cwd=ROOT,
+                   capture_output=True, text=True)
+    check("buglog: the real ledger has no duplicate id today, so this gate is not already "
+          "failing when it lands", real.returncode == 0, real.stdout[-300:] + real.stderr[-300:])
+
+
+def _script_code(html: str) -> str:
+    """The page's script with COMMENTS REMOVED.
+
+    A5. Three assertions in the PR-9 UI tests were satisfied by the block comment
+    that explains the feature rather than by the feature: deleting the router's
+    body and keeping its docstring left them green. Every substring assertion
+    about behaviour must read this, never the raw file. Strings are left alone --
+    a `//` inside a URL is not a comment, and neither is one inside a template.
+    """
+    src = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    out, i, n = [], 0, len(src)
+    quote = None
+    while i < n:
+        ch = src[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\":
+                if i + 1 < n:
+                    out.append(src[i + 1])
+                    i += 2
+                    continue
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def test_ui_router_assertions_read_code_not_comments() -> None:
+    """A5 (S3). `test_ui_router_*` asserted on substrings of the whole file, and
+    several of those substrings appear in the block comments that EXPLAIN the
+    router. So a page whose router body had been deleted, keeping its comment,
+    passed -- the test asserted that the rule is documented, not that it is in
+    force. That is the same defect the tech-lead already fixed once in
+    `test_ui_contract` (the modebar/scrollZoom checks, 2026-09-10).
+
+    Each of the three structural claims below is proved by a mutation that leaves
+    the comments untouched.
+    """
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    code = _script_code(html)
+    check("ui/router (A5): the comment stripper works -- prose that only appears in a comment "
+          "is gone, and a `//` inside a string is not treated as one",
+          "the router MOVES it" not in code and "https://" in html and "esc(" in code,
+          "stripper removed too much or too little")
+
+    def p_route(c: str) -> bool:
+        """route() itself reads the hash into the global controls.
+
+        `applyGlobals(q)` is asserted BY NAME AND ARGUMENT, not as `applyGlobals(`.
+        route() has two branches -- the URL branch (`applyGlobals(q)`) and the
+        bare-URL/localStorage branch -- and a substring test for the bare call name
+        is satisfied by either one. Deleting the URL branch alone is the regression
+        that matters: it is what makes a deep link stop restoring its state, and it
+        leaves the other call site behind to vouch for it.
+        """
+        body = c.split("function route(){", 1)[1].split("\n/*", 1)[0] if "function route(){" in c else ""
+        return ("applyGlobals(q)" in body                                  # the URL branch
+                and "applyGlobals(Object.fromEntries(p.entries()))" in body  # the stored branch
+                and "readHash()" in body
+                and "classList.toggle('on'" in body and "VIEWS.forEach" in body)
+
+    def p_hero(c: str) -> bool:
+        """hostHero() performs a real DOM move, not just a class change."""
+        body = c.split("function hostHero(){", 1)[1].split("function sidebarMode()", 1)[0] \
+            if "function hostHero(){" in c else ""
+        return ".after(" in body and "anchor-traits-hero" in body and "card-prices" in body
+
+    def p_cursor(c: str) -> bool:
+        """The ledger's next page is fetched FROM next_cursor, not from a page number."""
+        return ("cursor:LG.cursor" in c.replace(" ", "")
+                and "LG.cursor=r.next_cursor" in c.replace(" ", "")
+                and "page=" not in c.split("/api/ledger?", 1)[1][:200])
+
+    check("ui/router (A5): route()'s BODY applies the hash to the global controls and toggles "
+          "exactly one view on -- asserted on code, so deleting the body fails here",
+          p_route(code))
+    check("ui/router (A5): hostHero()'s BODY performs a real DOM move (`.after(`) of the one "
+          "prices card between the two anchors", p_hero(code))
+    check("ui/router (A5): the ledger's next page URL is built from `next_cursor` -- the page "
+          "never sends an offset or a page number", p_cursor(code))
+
+    # -- the three mutations, each leaving every comment in place ------------
+    m1 = code.replace("applyGlobals(q)", "0").replace("applyGlobals(Object.fromEntries(p.entries()))", "0")
+    check("ui/router (A5, mutation): a route() that stops applying the hash FAILS the check "
+          "-- the comment above it is untouched", not p_route(m1))
+    m1b = code.replace("applyGlobals(q)", "0")     # ONLY the URL branch; the other call stays
+    check("ui/router (A5, mutation): deleting ONLY the deep-link branch fails too -- the "
+          "surviving `applyGlobals` on the localStorage path must not vouch for it (R2-3)",
+          not p_route(m1b))
+    m2 = code.replace("a.after(c)", "c.classList.add('on')")
+    check("ui/router (A5, mutation): a hostHero() that only restyles instead of MOVING the "
+          "card fails -- two price panels is the defect it prevents", not p_hero(m2))
+    m3 = code.replace("cursor:LG.cursor||''", "page:LG.page||0")
+    check("ui/router (A5, mutation): a ledger that pages by number instead of by cursor fails",
+          not p_cursor(m3))
+
+    # and the router claims that used to be satisfied by prose are re-asserted on code
+    for claim, needle in (("the hash is written back", "history.replaceState"),
+                          ("state is mirrored to localStorage", "localStorage.setItem"),
+                          ("a per-view default is skipped once he has chosen", "S.touched.range"),
+                          ("only the active view's loaders run", "VIEW_LOADERS[S.view].map")):
+        check(f"ui/router (A5): {claim} -- in the CODE, not in a comment", needle in code, needle)
+
+# ===========================================================================
+# BUG-20260910-067, second round (tech-lead B1/B2). SURVIVING a malformed store.
+#
+# The first round stopped the dashboard CREATING one. It did nothing about the
+# incident's actual END state: with `data/analytics.sqlite` already malformed,
+# `Dashboard.__init__` -> `Normalizer(writer=True)` -> `PRAGMA journal_mode=WAL`
+# raises `sqlite3.DatabaseError` -- which `cmd_dashboard` did not catch -- so the
+# dashboard died with a raw traceback and an undocumented exit 1, and KeepAlive
+# repeated that every 30 s. The page an operator needs in order to LEARN what is
+# wrong was the one thing a corrupt store took away.
+#
+# Every check below was written against the code as it stood after round 1 and
+# fails there (docs/03 §9).
+# ===========================================================================
+def _garbage_store(db: Path) -> None:
+    """A store at the store path that reproduces the incident's exact fault.
+
+    Not random bytes and not a non-database: a REAL SQLite file whose schema page
+    has been scribbled over, which is what a process killed mid-write leaves
+    behind. It matters that it is this and not `b"junk"`, because the two fail
+    differently and only one of them is BUG-20260910-067:
+
+        junk with a valid magic  -> "file is not a database"
+        interior pages corrupted -> opens fine; `quick_check` reports the fault
+        PAGE 1 corrupted         -> "database disk image is malformed" on the
+                                    first PRAGMA, out of `Normalizer.__init__`
+
+    The third is what the Operator's 2.8 GB store did, and the one the degraded
+    path exists for. `sqlite3.connect()` itself succeeds on all three -- it is
+    lazy -- so the failure always lands on the first statement, never on open.
+    """
+    db.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+    import sqlite3 as _sq
+    c = _sq.connect(str(db))
+    c.executescript("CREATE TABLE t(a, b); CREATE INDEX ix ON t(a);")
+    c.executemany("INSERT INTO t VALUES (?,?)", [(i, "x" * 200) for i in range(2000)])
+    c.commit()
+    c.close()
+    raw = bytearray(db.read_bytes())
+    for off in range(100, 4096):        # page 1 past the file header: the schema page
+        raw[off] = 0x5A
+    db.write_bytes(bytes(raw))
+    for suffix in ("-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+
+
+def _serving(dash: Any):
+    """Start a real HTTP server on a free port for `dash`; returns (port, httpd, get)."""
+    import http.client
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import make_handler
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(dash))
+    port = httpd.server_address[1]
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def get(path: str):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("GET", path)
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+        return r.status, body
+    return port, httpd, get
+
+
+def test_dashboard_serves_degraded_on_a_malformed_store(tmp: Path) -> None:
+    """A corrupt store must not take the page down: it is where the recipe lives.
+
+    Fails before this round: `Dashboard(...)` raises `sqlite3.DatabaseError` out
+    of `__init__` on the first line of this test, so there is no page to ask.
+    """
+    import sqlite3 as _sq
+
+    from navanax.dashboard import Dashboard
+
+    root, cfg = _dash_root(tmp, "degraded")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+
+    dash = None
+    try:
+        dash = Dashboard(root, cfg, ["argonauts"])
+    except _sq.DatabaseError as exc:
+        raised = f"raised {type(exc).__name__}: {exc}"
+    else:
+        raised = ""
+    check("degraded: Dashboard comes up on a MALFORMED store instead of raising out of "
+          "__init__ -- which is what became a raw traceback and an undocumented exit 1, "
+          "repeated by KeepAlive every 30 s (BUG-20260910-067)", dash is not None, raised)
+    if dash is None:
+        return
+    check("degraded: it knows it is degraded, and carries the fault and the recipe",
+          dash.degraded() and dash.norm is None and dash.store_error is not None
+          and "malformed" in (dash.store_error.get("error") or "").lower()
+          and "DERIVED" in (dash.store_error.get("rebuild") or ""),
+          str(dash.store_error)[:200])
+
+    _port, httpd, get = _serving(dash)
+    try:
+        st, body = get("/api/health")
+        h = json.loads(body) if st == 200 else {}
+        check("degraded: /api/health still answers 200 -- the one page that explains the "
+              "fault must not be the one the fault removes",
+              st == 200 and isinstance(h, dict), f"{st} {body[:160]}")
+        qc = h.get("quick_check") or {}
+        check("degraded: ...and quick_check says the store is bad rather than quietly not "
+              "running, and carries the rebuild recipe",
+              qc.get("ok") is False and "rebuild" in qc
+              and any("malformed" in r.lower() or "DatabaseError" in r
+                      for r in qc.get("result") or []), str(qc)[:220])
+        deg = h.get("degraded") or {}
+        check("degraded: ...and Health names the fault, the store, and what to do about it -- "
+              "move it aside under a dated name, never delete and never edit",
+              deg.get("error") == "analytical store is malformed"
+              and "corrupt-" in (deg.get("rebuild") or "")
+              and "landing" in (deg.get("rebuild") or "").lower(), str(deg)[:220])
+        check("degraded: every store-derived count is null, never 0 -- 0 is a claim about a "
+              "store nobody could read",
+              h["store"]["events"] is None and h["normalizer"]["files_read"] is None
+              and h["crossed_book"]["alarms"] is None, str(h["store"])[:180])
+        check("degraded: the RECORDER's state and the gap register still answer -- they come "
+              "from the landing zone, which the fault has nothing to do with",
+              "running" in h["recorder"] and "open" in h["gaps"]
+              and h["store"]["landing_bytes"] > 0, str(h["gaps"])[:160])
+
+        st, body = get("/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD")
+        j = json.loads(body)
+        check("degraded: a data endpoint answers 503 with the reason and the recipe -- not a "
+              "500 with a sqlite traceback, and not a plausible-looking empty series",
+              st == 503 and j.get("error") == "analytical store is malformed"
+              and "rebuild" in j, f"{st} {body[:200]}")
+        for path in ("/api/status", "/api/book?collection=argonauts", "/api/ledger?collection=argonauts",
+                     "/api/wallets?collection=argonauts", "/api/traits?collection=argonauts",
+                     "/api/audit"):
+            st, _ = get(path)
+            check(f"degraded: {path.split('?')[0]} -> 503", st == 503, str(st))
+        for path in ("/api/meta", "/api/gaps"):
+            st, _ = get(path)
+            check(f"degraded: {path} still answers 200 -- it reads no analytical store", st == 200,
+                  str(st))
+
+        st, body = get("/")
+        check("degraded: the page itself still loads, so there is somewhere to read all of "
+              "the above", st == 200 and b"navanax" in body.lower(), str(st))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.stop()
+
+
+def test_dashboard_picks_up_a_rebuilt_store_without_a_restart(tmp: Path) -> None:
+    """The recipe has to be ONE step. Move the corrupt file aside; the running
+    dashboard folds a fresh store on its next probe. If the Operator also had to
+    remember to restart it, half the time he would not, and the page would still
+    be empty with nothing saying why.
+    """
+    from navanax.dashboard import STORE_REOPEN_SECONDS, Dashboard
+
+    root, cfg = _dash_root(tmp, "rebuilt")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+    dash = Dashboard(root, cfg, ["argonauts"])
+    _port, httpd, get = _serving(dash)
+    try:
+        st, _ = get("/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD")
+        check("rebuild: while the store is bad, the series endpoint is 503", st == 503, str(st))
+        check("rebuild: the probe interval is a minute -- long enough not to hammer a big "
+              "store, short enough that 'it comes back on its own' is true",
+              STORE_REOPEN_SECONDS == 60, str(STORE_REOPEN_SECONDS))
+
+        # What rebuild-store.command does: move it aside. Nothing else.
+        db.rename(db.with_name(db.name + ".corrupt-test"))
+        dash._reopen_mono = 0.0          # let the next tick probe immediately
+        dash._retry_open()
+
+        check("rebuild: one probe tick later the dashboard has opened a fresh store and is "
+              "the folding writer again -- no restart, no second step",
+              not dash.degraded() and dash.norm is not None and dash.store_error is None,
+              str(dash.store_error)[:160])
+        st, body = get("/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD")
+        check("rebuild: ...and the data endpoints are 200 again", st == 200, f"{st} {body[:160]}")
+        st, body = get("/api/health")
+        h = json.loads(body)
+        check("rebuild: ...and Health drops the degraded block and reports a clean store, "
+              "re-checked rather than served from the verdict about the OLD file",
+              h.get("degraded") is None and h["quick_check"]["ok"] is True
+              and h["store"]["events"] == 3, str(h.get("quick_check"))[:180])
+        check("rebuild: the corrupt file was MOVED, never deleted -- it is evidence until "
+              "the Operator says otherwise", db.with_name(db.name + ".corrupt-test").exists())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.stop()
+        if dash.norm is not None:
+            dash.norm.close()
+
+
+def test_cmd_dashboard_maps_an_unreadable_store_to_a_documented_exit_code(tmp: Path) -> None:
+    """The belt to the degradation's braces. A `sqlite3.DatabaseError` that
+    somehow still escapes `serve()` must be a NAMED exit code and a sentence, not
+    exit 1 and a stack trace -- because under KeepAlive that is a silent loop.
+    """
+    import argparse
+    import contextlib
+    import io
+    import sqlite3 as _sq
+
+    from navanax import cli as cli_mod
+
+    root, cfg = _dash_root(tmp, "exitcode")
+    _garbage_store(root / cfg["analytical"]["path"])
+
+    import navanax.dashboard as dash_mod
+    real_dash = dash_mod.Dashboard
+
+    class Undegradable(real_dash):        # type: ignore[misc, valid-type]
+        def __init__(self, *a: Any, **k: Any) -> None:
+            raise _sq.DatabaseError("database disk image is malformed")
+
+    dash_mod.Dashboard = Undegradable
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            rc = cli_mod.cmd_dashboard(argparse.Namespace(root=str(root), port=0, no_browser=True))
+    finally:
+        dash_mod.Dashboard = real_dash
+    msg = err.getvalue()
+    check("exit code: an unreadable store the dashboard cannot degrade around exits 5, a "
+          "DOCUMENTED code -- never 1 with a traceback, which KeepAlive repeats in silence",
+          rc == 5 and rc == cli_mod.DASH_EXIT_STORE_MALFORMED, f"exit {rc}")
+    check("exit code: ...and the message is the same recipe the page would have given, not "
+          "sqlite's stack",
+          "UNREADABLE" in msg and "DERIVED" in msg and "corrupt-" in msg
+          and "Traceback" not in msg, msg[:240])
+    codes = {cli_mod.DASH_EXIT_OK, cli_mod.DASH_EXIT_REFUSED,
+             cli_mod.DASH_EXIT_STORE_BUSY, cli_mod.DASH_EXIT_STORE_MALFORMED}
+    check("exit code: the four dashboard codes are distinct, so a supervisor log says which "
+          "fault happened", len(codes) == 4, str(sorted(codes)))
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    block = doc.split("`dashboard` owes launchd", 1)[-1][:1400]
+    check("exit code: docs/04's contract table lists every one of them, so the number in the "
+          "log can be looked up",
+          all(f"| `{c}` |" in block for c in sorted(codes)),
+          [c for c in sorted(codes) if f"| `{c}` |" not in block])
+
+
+def test_serve_releases_the_writer_lock_when_startup_fails_late(tmp: Path) -> None:
+    """tech-lead B2. `serve()`'s failure path closed the socket and nothing else.
+
+    If the failure lands AFTER the Normalizer opened -- `make_handler`, `start()`,
+    a Ctrl-C during the first fold -- the store's exclusive lock is held by an
+    object nobody will ever close, and a retry inside the same process is refused
+    by our own stale lock. The OS releases it when the process ends, which is
+    exactly why this is easy to miss and worth a test.
+    """
+    from navanax import dashboard as dash_mod
+    from navanax.normalize import Normalizer, StoreWriterBusyError, writer_lock_path
+
+    root, cfg = _dash_root(tmp, "latefail")
+    db = root / cfg["analytical"]["path"]
+    real_make = dash_mod.make_handler
+
+    def boom(dash: Any):                  # fails AFTER Dashboard opened the store
+        raise RuntimeError("handler construction failed")
+
+    dash_mod.make_handler = boom
+    raised: BaseException | None = None
+    try:
+        dash_mod.serve(root, cfg, ["argonauts"], host="127.0.0.1", port=0, open_browser=False)
+    except RuntimeError as exc:
+        raised = exc
+    finally:
+        dash_mod.make_handler = real_make
+    check("late failure: the original error propagates -- the cleanup must not swallow it",
+          isinstance(raised, RuntimeError) and "handler construction" in str(raised), repr(raised))
+    check("late failure: the store's writer lock file was written, so the store really was "
+          "opened before the failure", writer_lock_path(db).exists())
+    freed = True
+    try:
+        n = Normalizer(root / cfg["landing"]["root"], db)
+        n.close()
+    except StoreWriterBusyError as exc:
+        freed = False
+        detail = str(exc)[:160]
+    check("late failure: ...and it was RELEASED on the way out, so a retry in this same "
+          "process is not refused by our own stale lock (tech-lead B2)",
+          freed, "" if freed else detail)
+
+
+def test_rebuild_store_command_moves_aside_and_refuses_a_live_writer(tmp: Path) -> None:
+    """The double-click. It must be safe in the one case that matters -- a
+    dashboard is running and has the file open -- and it must never delete."""
+    import os as _os
+    import subprocess
+
+    from navanax.normalize import Normalizer
+
+    cmd = ROOT / "rebuild-store.command"
+    check("rebuild.command: exists and is executable",
+          cmd.exists() and _os.access(cmd, _os.X_OK))
+    text = cmd.read_text()
+    check("rebuild.command: never deletes, and says so -- it renames, and the old file is "
+          "the Operator's to bin",
+          "rm " not in text and "unlink" not in text and "Trash" in text and ".rename(" in text)
+    check("rebuild.command: says the landing zone is untouched, because that is the fact "
+          "that makes a rebuild safe rather than a loss",
+          "landing" in text.lower() and "DERIVED" in text)
+
+    root, cfg = _dash_root(tmp, "rebuildcmd")
+    db = root / cfg["analytical"]["path"]
+    n = Normalizer(root / cfg["landing"]["root"], db)      # a live "dashboard" holding the lock
+    n.sync()
+    env = {**_os.environ, "PYTHONPATH": str(ROOT / "src")}
+    r = subprocess.run(["bash", str(cmd), str(root)], env=env, input="\n",
+                       capture_output=True, text=True, timeout=120)
+    check("rebuild.command: REFUSES while a live process holds the fold-writer lock -- "
+          "moving a store out from under a writer is how one corrupt store becomes two",
+          r.returncode == 3 and "REFUSING" in r.stdout and str(_os.getpid()) in r.stdout,
+          (r.stdout + r.stderr)[-300:])
+    check("rebuild.command: ...and names the pid and the command that stops it, and says "
+          "nothing was changed",
+          f"kill {_os.getpid()}" in r.stdout and "Nothing has been changed" in r.stdout
+          and db.exists(), r.stdout[-300:])
+
+    n.close()                                              # the dashboard quits
+    r2 = subprocess.run(["bash", str(cmd), str(root)], env=env, input="\n",
+                        capture_output=True, text=True, timeout=120)
+    aside = list(db.parent.glob(db.name + ".corrupt-*"))
+    check("rebuild.command: with no live writer it moves the store aside under a DATED name "
+          "and leaves the path free for a fresh fold",
+          r2.returncode == 0 and not db.exists() and len(aside) == 1,
+          f"rc={r2.returncode} aside={[p.name for p in aside]} {r2.stdout[-200:]}")
+    check("rebuild.command: ...and tells the Operator the running dashboard rebuilds by "
+          "itself, so there is no second step to forget",
+          "within a minute" in r2.stdout and "re-folds" in r2.stdout, r2.stdout[-300:])
+    check("rebuild.command: it is a rebuild, not a repair -- nothing in it tries to fix the "
+          "corrupt file in place", "recover" not in r2.stdout.lower())
+
+
+def test_quick_check_reports_a_malformed_store_instead_of_raising(tmp: Path) -> None:
+    """`store_quick_check` has to work in the degraded case, where there is no
+    connection to ask. It opens a throwaway read-only one and lets it fail, which
+    is the honest answer -- a check that quietly does not run reads as 'fine'."""
+    from navanax.dashboard import Dashboard
+
+    root, cfg = _dash_root(tmp, "qcbad")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+    dash = Dashboard(root, cfg, ["argonauts"])
+    try:
+        qc = dash.store_quick_check()
+        check("quick_check: on a store that cannot even be OPENED it returns a failed check "
+              "rather than raising -- Health renders it, so raising would take the page down "
+              "at the moment the page matters most",
+              qc.get("ok") is False and qc.get("result"), str(qc)[:200])
+        check("quick_check: ...and it names the sqlite fault, so the Health page shows what "
+              "the log shows",
+              any("malformed" in r.lower() or "not a database" in r.lower()
+                  or "DatabaseError" in r for r in qc["result"]), str(qc["result"]))
+        check("quick_check: ...and a failed check carries the rebuild recipe, because the "
+              "next question after 'it is corrupt' is always 'so what do I do'",
+              "corrupt-" in (qc.get("rebuild") or ""), str(qc.get("rebuild"))[:160])
+        cached = dash.store_quick_check()
+        check("quick_check: the failed verdict is cached like any other, so a Health tab left "
+              "open does not re-probe a broken file every refresh",
+              cached.get("cached") is True and cached.get("at") == qc.get("at"))
+    finally:
+        dash.stop()
+
+
+def test_degraded_page_and_docs_carry_the_rebuild_recipe(tmp: Path) -> None:
+    """One recipe, in one place, said the same way by the page, the CLI, the
+    docs and the double-click. A recovery procedure that four artefacts state
+    four ways is a procedure nobody follows correctly under pressure."""
+    from navanax.normalize import rebuild_recipe
+
+    recipe = rebuild_recipe(Path("/x/data/analytics.sqlite"))
+    check("recipe: it is derived from the store path, names a DATED destination, and says "
+          "the landing zone is untouched",
+          "corrupt-" in recipe and "/x/data/analytics.sqlite" in recipe
+          and "DERIVED" in recipe and "landing" in recipe.lower(), recipe[:200])
+    check("recipe: it forbids the two things that would make the loss real -- deleting it, "
+          "and editing it", "Never delete it, never edit it" in recipe, recipe[-160:])
+
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    check("recipe/ui: Health renders the degraded block with the fault AND the recipe, above "
+          "the stat row rather than below it",
+          "hz-degraded" in html and "h.degraded" in html
+          and html.index('id="hz-degraded"') < html.index('id="hz-stats"'))
+    check("recipe/ui: the degraded block escapes the server strings it interpolates -- it "
+          "goes to innerHTML, which is the boundary esc() exists for",
+          "esc(h.degraded.rebuild" in html and "esc(h.degraded.detail" in html)
+
+    cmd = (ROOT / "rebuild-store.command").read_text()
+    doc7 = (ROOT / "docs" / "07_STORAGE_AND_RECORDING.md").read_text()
+    doc8 = (ROOT / "docs" / "08_DASHBOARD.md").read_text()
+    check("recipe/docs: rebuild-store.command is named in docs/07 and docs/08, so the recipe "
+          "on the page and the recipe in the documents are the same recipe",
+          "rebuild-store.command" in doc7 and "rebuild-store.command" in doc8)
+    check("recipe/docs: ...and all four say the same dated-rename move",
+          all("corrupt-" in t for t in (recipe, cmd, doc7, doc8)))
+    check("recipe/docs: docs/08 documents DEGRADED mode -- what still answers, what 503s, "
+          "and that it retries on its own",
+          "degraded" in doc8.lower() and "503" in doc8)
+
+
+
+def test_degraded_reopen_probe_is_not_throttled_by_refresh_seconds(tmp: Path) -> None:
+    """R2-5. The reopen probe ran on the FOLD tick, so `refresh_seconds` capped it.
+
+    `_retry_open`'s own `STORE_REOPEN_SECONDS` rate limit could only make the probe
+    LESS frequent than `refresh`, never more. At the documented `refresh_seconds:
+    3600` a rebuilt store therefore sat unnoticed for up to an hour, and
+    `rebuild-store.command` -- whose entire claim is "move the file aside and the
+    running dashboard picks it up" -- silently stopped being a one-click fix.
+
+    The two settings answer different questions and must not be one number:
+    `refresh` is how stale the MARKET DATA may be; `STORE_REOPEN_SECONDS` is how
+    long the Operator waits after fixing the store. An operator who sets an hourly
+    fold is not asking to wait an hour after a rebuild.
+
+    This drives the real `_loop` thread rather than calling `_retry_open()`
+    directly -- the defect is in the WAIT, and a test that calls the probe by hand
+    cannot see it. `STORE_REOPEN_SECONDS` is overridden small so the suite does not
+    sleep; at the shipped value of 60 s the same arithmetic gives recovery within
+    ~70 s on an hourly fold, versus up to 3600 s before.
+    """
+    import time as _t
+
+    from navanax import dashboard as dash_mod
+    from navanax.dashboard import Dashboard
+
+    root, cfg = _dash_root(tmp, "reopen-throttle")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+    cfg = json.loads(json.dumps(cfg))
+    cfg.setdefault("dashboard", {})["refresh_seconds"] = 3600      # the documented slow fold
+
+    real = dash_mod.STORE_REOPEN_SECONDS
+    dash = None
+    try:
+        dash_mod.STORE_REOPEN_SECONDS = 0.05
+        dash = Dashboard(root, cfg, ["argonauts"])
+        check("reopen: the dashboard came up DEGRADED on the corrupt store, as it must",
+              dash.degraded() and dash.store_error is not None, str(dash.store_error)[:120])
+        check("reopen: ...with the hourly fold interval the Operator configured",
+              dash.refresh == 3600.0, str(dash.refresh))
+        dash.start()
+        db.rename(db.with_name(db.name + ".corrupt-test"))          # rebuild-store.command
+        deadline = _t.monotonic() + 20
+        while dash.degraded() and _t.monotonic() < deadline:
+            _t.sleep(0.05)
+        check("reopen: the probe fires on ITS OWN interval, not on the fold interval -- the "
+              "rebuilt store is picked up without waiting an hour and without a restart (R2-5)",
+              not dash.degraded() and dash.norm is not None and dash.store_error is None,
+              f"still degraded after 20 s of wall clock with refresh={dash.refresh}s; "
+              f"{str(dash.store_error)[:160]}")
+        check("reopen: at the SHIPPED constant the same arithmetic is min(3600, 60) = 60 s per "
+              "probe, so an hourly fold recovers inside ~70 s rather than inside an hour",
+              real == 60 and min(3600.0, real) == 60, f"STORE_REOPEN_SECONDS={real}")
+    finally:
+        if dash is not None:
+            dash.stop(timeout=5.0)
+            if dash.norm is not None:
+                dash.norm.close()
+        dash_mod.STORE_REOPEN_SECONDS = real
+
+    # The property, read off the loop itself: while degraded the wait is bounded by
+    # STORE_REOPEN_SECONDS. Asserted on the source as well as behaviourally, because
+    # the behavioural half needs a real thread and a real clock and would be the
+    # first thing deleted if it ever went flaky.
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    body = src.split("def _loop(self)", 1)[1].split("def _retry_open", 1)[0]
+    check("reopen: `_loop` waits min(refresh, STORE_REOPEN_SECONDS) while it has no store, "
+          "and the plain refresh once it does",
+          "min(self.refresh, STORE_REOPEN_SECONDS)" in body
+          and "self.norm is None" in body, body[:200])
+
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -35,15 +35,172 @@ second provider later.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
+import os
 import sqlite3
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .landing import read_file
 
 log = logging.getLogger("navanax.normalize")
+
+# How long a connection waits for another one to release a write lock before it
+# gives up with "database is locked". The fold holds the write lock for the
+# length of one batch insert; a job that only writes `tokens`/`traits` (the
+# traits importer) must wait that out rather than fail spuriously.
+BUSY_TIMEOUT_MS = 30_000
+
+# errno values that mean "THIS FILESYSTEM does not implement flock", as opposed
+# to "another process holds the lock". Defined once and shared with
+# `cli._single_instance`, which learned the distinction the expensive way
+# (tech-lead finding #4): an SMB/AFP share and some NFS mounts answer EOPNOTSUPP,
+# and treating that as contention stops the job entirely and tells the operator
+# to kill a process that does not exist.
+LOCK_UNSUPPORTED_ERRNOS = frozenset({
+    errno.EOPNOTSUPP, errno.ENOLCK, errno.EINVAL, errno.ENOSYS,
+    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+})
+
+
+class StoreWriterBusyError(RuntimeError):
+    """Another process is already folding into this analytical store.
+
+    A distinct type, like `cli.SingleInstanceError`, so a caller can tell
+    "someone else owns the store" from any other RuntimeError raised out of a
+    fold. It carries the holder's pid so the message can name it: BUG-20260910-067
+    happened because two dashboard processes folded into `data/analytics.sqlite`
+    alternately and one was killed mid-write, and the operator had no way to see
+    which pid to stop.
+    """
+
+    def __init__(self, message: str, *, pid: int | None = None,
+                 lock_path: Path | str | None = None) -> None:
+        super().__init__(message)
+        self.pid = pid
+        self.lock_path = str(lock_path) if lock_path is not None else None
+
+
+def writer_lock_path(db_path: str | Path) -> Path:
+    """`<store>.lock`, next to the sqlite file -- one lock per store, not per root."""
+    p = Path(db_path)
+    return p.with_name(p.name + ".lock")
+
+
+def _parse_lock_text(text: str) -> tuple[int | None, str | None]:
+    """`pid=123 started=2026-09-10T...` -> (123, '2026-09-10T...'). Never raises."""
+    pid: int | None = None
+    since: str | None = None
+    for part in (text or "").split():
+        if part.startswith("pid="):
+            try:
+                pid = int(part[4:])
+            except ValueError:
+                pid = None
+        elif part.startswith("started="):
+            since = part[8:] or None
+    return pid, since
+
+
+def store_writer_info(db_path: str | Path, *, lock_fh: Any = None) -> dict[str, Any]:
+    """Who holds the fold-writer lock on this store: {pid, since, alive, ...}.
+
+    A FREE function, not only a `Normalizer` method, because the caller who most
+    needs the answer may have no Normalizer at all: a dashboard running degraded
+    on a malformed store still has to say which process owns the store's write
+    side (BUG-20260910-067). Read from the lock FILE, so a writer, a reader and a
+    degraded process all answer the same question the same way, and a stale pid
+    is visible as `alive: false` rather than absent.
+    """
+    lock = writer_lock_path(db_path)
+    info: dict[str, Any] = {"pid": None, "since": None, "alive": None,
+                            "this_process": False, "lock": str(lock)}
+    try:
+        pid, since = _parse_lock_text(lock.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return info
+    info["pid"], info["since"] = pid, since
+    info["alive"] = _pid_alive(pid)
+    info["this_process"] = pid == os.getpid() and lock_fh is not None
+    return info
+
+
+def writer_lock_held(db_path: str | Path) -> bool | None:
+    """Is the fold-writer lock ACTUALLY held right now? True / False / None (cannot tell).
+
+    Asks the lock rather than the lock file. "Is the pid in the file still alive?"
+    is the wrong question and gives false refusals in both directions: a process
+    that closed its Normalizer but is still running leaves its own pid in the
+    file (the writer that just released is the commonest case of all), and a pid
+    can be reused by something unrelated. The only authority on whether a lock is
+    held is the lock.
+
+    Tested by taking it non-blocking and giving it straight back. Returns None
+    where flock is unavailable or the filesystem does not implement it -- the
+    caller must then fall back to the pid heuristic and SAY that is what it did,
+    because "cannot tell" and "not held" are different answers.
+    """
+    lock = writer_lock_path(db_path)
+    if not lock.exists():
+        return False
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    try:
+        fh = lock.open("a+")
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in LOCK_UNSUPPORTED_ERRNOS:
+                return None
+            return True                  # somebody else holds it
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        fh.close()
+
+
+def rebuild_recipe(db_path: str | Path) -> str:
+    """What to do about a corrupt analytical store. One sentence, in one place.
+
+    The store is DERIVED: every row in it is a fold of the landing zone, which is
+    append-only and untouched by any of this. So the answer to corruption is
+    never a repair and never an edit -- it is to move the file aside under a
+    dated name and let the next start re-fold it. Naming the recipe here rather
+    than in the message that happens to notice the fault means the dashboard,
+    the CLI and `rebuild-store.command` all say the same thing.
+    """
+    p = Path(db_path)
+    stamp = datetime.now(timezone.utc).date().isoformat()
+    return (f"The analytical store is DERIVED -- every row in it is a fold of the landing "
+            f"zone, which is append-only and was NOT touched. Rebuild it: move it aside "
+            f"under a dated name (`mv {p} {p}.corrupt-{stamp}`, which "
+            f"rebuild-store.command does for you), then restart the dashboard -- it re-folds "
+            f"from the landing zone on the next start. Never delete it, never edit it, and "
+            f"never touch data/landing.")
+
+
+def _pid_alive(pid: int | None) -> bool | None:
+    """True / False / None when this process may not ask (permission)."""
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # it exists; it just is not ours
+    except OSError:
+        return None
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -74,10 +231,21 @@ CREATE TABLE IF NOT EXISTS events (
     tx_hash        TEXT,
     criteria_n         INTEGER,          -- count of STRING criteria; NULL = not a criteria-bearing order
     criteria_numeric_n INTEGER,          -- count of NUMERIC criteria; see order_criteria
+    -- token_id as a NUMBER, so #10 sorts after #9 instead of before it (design §8.1.1,
+    -- the Operator asked for this by name). GENERATED, never written: a stored copy
+    -- can drift from token_id, an expression cannot. It is NULL unless token_id is
+    -- EXACTLY the decimal rendering of an integer -- '007' and '0x1f' are NULL rather
+    -- than 7 and 0, because a token whose id is not a plain number has no number and
+    -- guessing one would put it somewhere in the sort order that is not true.
+    token_num INTEGER GENERATED ALWAYS AS (
+        CASE WHEN token_id IS NOT NULL AND CAST(CAST(token_id AS INTEGER) AS TEXT) = token_id
+             THEN CAST(token_id AS INTEGER) END) VIRTUAL,
     PRIMARY KEY (run, seq)
 );
 CREATE INDEX IF NOT EXISTS ix_events_coll_valid ON events(collection, valid_ts);
 CREATE INDEX IF NOT EXISTS ix_events_type_valid ON events(event_type, valid_ts);
+-- The ledger's indexes are NOT here: they are created by `ensure_ledger_indexes()`
+-- below, which checks the columns exist first. See its docstring for why.
 -- Order lifecycle joins (live book, bid lifetimes) look up BY order_hash then
 -- filter by type and time. Without this composite the planner chose the
 -- (event_type, valid_ts) index for the join side and scanned every
@@ -184,7 +352,6 @@ def iso_to_ts(s: str | None) -> float | None:
     """ISO-8601 (as OpenSea and our envelope write it) -> epoch seconds, or None."""
     if not s or not isinstance(s, str):
         return None
-    from datetime import datetime, timezone
     t = s.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(t)
@@ -439,6 +606,70 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if cols and col not in cols:
             with conn:
                 conn.execute(f"ALTER TABLE events ADD COLUMN {col} INTEGER")
+    # token_num: the numeric sort key the ledger needs (design §8.1.1). Additive and
+    # GENERATED, so the migration writes no data at all -- the expression is evaluated
+    # from `token_id`, which is already there, and can never disagree with it.
+    # Guarded on `token_id` existing: a store so old (or so abbreviated) that it has no
+    # token_id column has nothing to derive a token number FROM, and adding a generated
+    # column over a missing one is an error at ALTER time, not at query time.
+    #
+    # `PRAGMA table_info` does NOT list a VIRTUAL generated column -- only `table_xinfo`
+    # does. Asking the wrong pragma here would re-ALTER an existing token_num on every
+    # open and raise "duplicate column"; asking it in `ensure_ledger_indexes` would skip
+    # the token_num index on a store that has the column. Both use xinfo.
+    xcols = {r[1] for r in conn.execute("PRAGMA table_xinfo(events)")}
+    if cols and "token_num" not in xcols and "token_id" in cols:
+        with conn:
+            conn.execute(
+                "ALTER TABLE events ADD COLUMN token_num INTEGER GENERATED ALWAYS AS ("
+                " CASE WHEN token_id IS NOT NULL AND CAST(CAST(token_id AS INTEGER) AS TEXT) = token_id"
+                " THEN CAST(token_id AS INTEGER) END) VIRTUAL")
+
+
+#: The ledger's sortable columns and the index each one needs (docs/08 §4e).
+#: `metrics.LEDGER_SORTS` names these by name and `test_ledger_refuses_a_sort_it_has_no
+#: _index_for` asserts each one exists in a real store, so the whitelist and the schema
+#: cannot drift apart.
+LEDGER_INDEXES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("ix_events_coll_tokennum", ("collection", "token_num", "valid_ts"),
+     "CREATE INDEX IF NOT EXISTS ix_events_coll_tokennum ON events(collection, token_num, valid_ts)"),
+    ("ix_events_coll_maker", ("collection", "maker", "valid_ts"),
+     "CREATE INDEX IF NOT EXISTS ix_events_coll_maker ON events(collection, maker, valid_ts)"),
+    ("ix_events_coll_type", ("collection", "event_type", "valid_ts"),
+     "CREATE INDEX IF NOT EXISTS ix_events_coll_type ON events(collection, event_type, valid_ts)"),
+    ("ix_events_coll_price", ("collection", "price_eth", "valid_ts"),
+     "CREATE INDEX IF NOT EXISTS ix_events_coll_price ON events(collection, price_eth, valid_ts)"),
+    ("ix_events_coll_observed", ("collection", "observed_ts"),
+     "CREATE INDEX IF NOT EXISTS ix_events_coll_observed ON events(collection, observed_ts)"),
+)
+
+
+def ensure_ledger_indexes(conn: sqlite3.Connection) -> list[str]:
+    """Create the ledger's five indexes, skipping (and NAMING) any whose columns are absent.
+
+    They are not in `SCHEMA` because `executescript` cannot be conditional, and an
+    index over a column an older store never had would make the whole schema step
+    fail -- i.e. the dashboard would refuse to open rather than opening without one
+    sort. The ledger's own refusal is the right place for that failure: a sort whose
+    index is missing is refused by name, with the reason, when it is asked for.
+
+    Returns the names of the indexes that were skipped, so a caller can say so.
+    """
+    # xinfo, not info: `token_num` is a VIRTUAL generated column and table_info hides it.
+    cols = {r[1] for r in conn.execute("PRAGMA table_xinfo(events)")}
+    if not cols:
+        return [name for name, _, _ in LEDGER_INDEXES]
+    skipped: list[str] = []
+    for name, needs, sql in LEDGER_INDEXES:
+        missing = [c for c in needs if c not in cols]
+        if missing:
+            skipped.append(name)
+            log.warning("ledger index %s not created: events has no column %s -- the ledger will "
+                        "refuse that sort by name rather than scanning the table", name, ", ".join(missing))
+            continue
+        with conn:
+            conn.execute(sql)
+    return skipped
 
 
 _LIFE_COLS = ["order_hash", "collection", "event_type", "scope_kind", "token_id", "maker",
@@ -582,24 +813,157 @@ def _refresh_chunk(conn: sqlite3.Connection, sql: str, args: list[Any], now_ts: 
 
 
 class Normalizer:
-    """Incremental landing-zone -> store sync. Safe to call every few seconds."""
+    """Incremental landing-zone -> store sync. Safe to call every few seconds.
 
-    def __init__(self, landing_root: str | Path, db_path: str | Path) -> None:
+    ONE FOLDING WRITER PER STORE (docs/07 §1). `writer=True` -- the default --
+    takes an exclusive `flock` on `<store>.lock` for the life of the object and
+    refuses to construct if another process already holds it. `writer=False`
+    opens the same file read-only (`mode=ro` URI), takes no lock, runs no
+    migration, and refuses to sync.
+
+    BUG-20260910-067. Before this, nothing stopped two processes folding into one
+    SQLite store. When a second dashboard was already listening on 8765, every
+    launchd retry of the first opened the store, folded new frames, and then died
+    on "Address already in use" -- 177 times, ten seconds apart -- and
+    `data/analytics.sqlite` (2.8 GB) ended as "database disk image is malformed".
+    The store is derived and was rebuilt from the landing zone, which is the only
+    reason that was survivable.
+
+    A job that writes `tokens`/`traits` but folds no events (the traits importer)
+    is NOT a second folding writer and deliberately does not take this lock: it
+    opens with a busy timeout and waits out a fold's batch instead (traits.open_store).
+    """
+
+    def __init__(self, landing_root: str | Path, db_path: str | Path, *,
+                 writer: bool = True) -> None:
         self.root = Path(landing_root)
         self.db_path = Path(db_path)
+        self.writer = bool(writer)
+        self.lock_path = writer_lock_path(self.db_path)
+        self._lock_fh: Any = None
+        self._locked_at: str | None = None
+        self._lock_enforced = False
+        if not self.writer:
+            self._open_readonly()
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        _migrate(self.conn)
-        self.conn.executescript(SCHEMA)
-        # A store folded by an earlier version has events but no lives. Build
-        # them once, here, rather than letting every reader see an empty book.
-        if (self.conn.execute("SELECT COUNT(*) FROM order_lives").fetchone()[0] == 0
-                and self.conn.execute(
-                    "SELECT EXISTS(SELECT 1 FROM events WHERE order_hash IS NOT NULL)").fetchone()[0]):
-            log.info("order_lives is empty on a populated store: building it once")
-            log.info("order_lives built: %d orders", refresh_order_lives(self.conn))
+        self._take_writer_lock()
+        try:
+            self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False,
+                                        timeout=BUSY_TIMEOUT_MS / 1000)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+            _migrate(self.conn)
+            self.conn.executescript(SCHEMA)
+            ensure_ledger_indexes(self.conn)
+            # A store folded by an earlier version has events but no lives. Build
+            # them once, here, rather than letting every reader see an empty book.
+            if (self.conn.execute("SELECT COUNT(*) FROM order_lives").fetchone()[0] == 0
+                    and self.conn.execute(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE order_hash IS NOT NULL)").fetchone()[0]):
+                log.info("order_lives is empty on a populated store: building it once")
+                log.info("order_lives built: %d orders", refresh_order_lives(self.conn))
+        except BaseException:
+            # Never hold the lock for a writer that did not come up: the next
+            # start would then refuse against a process that owns nothing.
+            self._release_writer_lock()
+            raise
+
+    # -- the writer lock -----------------------------------------------------
+    def _open_readonly(self) -> None:
+        """A reader. `mode=ro` is enforced by SQLite, not by our good intentions."""
+        if not self.db_path.exists():
+            raise FileNotFoundError(
+                f"cannot open {self.db_path} read-only: it does not exist. A reader never "
+                f"creates the store -- run the folding writer (the dashboard, or "
+                f"`navanax normalize`) first.")
+        uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+        self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False,
+                                    timeout=BUSY_TIMEOUT_MS / 1000)
+        self.conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+
+    def _take_writer_lock(self) -> None:
+        """Exclusive flock on `<store>.lock`, with `cli._single_instance`'s errno rules."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = self.lock_path.open("a+")
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._lock_enforced = True
+        except ImportError:
+            print(f"WARNING: this platform has no flock; a second process folding into "
+                  f"{self.db_path} cannot be detected.", file=sys.stderr)
+        except OSError as exc:
+            if exc.errno in LOCK_UNSUPPORTED_ERRNOS:
+                # The filesystem, not another process. Failing closed here would
+                # stop the dashboard folding at all on a network share.
+                print(f"WARNING: {self.lock_path.parent} does not support file locking "
+                      f"({errno.errorcode.get(exc.errno, exc.errno)}). This is normal on a "
+                      f"network share or an external volume.\n"
+                      f"         Folding will proceed, but a SECOND folding writer against "
+                      f"{self.db_path.name} cannot be detected, and two writers on one SQLite "
+                      f"store can corrupt it (BUG-20260910-067).\n"
+                      f"         Make sure only one dashboard is running.", file=sys.stderr)
+            else:
+                fh.seek(0)
+                holder = fh.read().strip()
+                fh.close()
+                pid, since = _parse_lock_text(holder)
+                who = f"pid={pid}" if pid is not None else "an unknown process"
+                if since:
+                    who += f", since {since}"
+                stop = (f" -- `kill {pid}`, or quit the dashboard that owns it"
+                        if pid is not None else "")
+                raise StoreWriterBusyError(
+                    f"another navanax process is already folding into "
+                    f"{self.db_path} ({who}).\n"
+                    "  Two writers on one SQLite store, with a process killed mid-write, is "
+                    "how this store became 'database disk image is malformed' on 2026-09-10 "
+                    "(BUG-20260910-067).\n"
+                    f"  Fix: stop the other one{stop};\n"
+                    "       or open this store read-only instead: Normalizer(..., writer=False).\n"
+                    f"  Lock file: {self.lock_path}",
+                    pid=pid, lock_path=self.lock_path) from None
+        self._locked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"pid={os.getpid()} started={self._locked_at}\n")
+        fh.flush()
+        self._lock_fh = fh
+
+    def _release_writer_lock(self) -> None:
+        fh, self._lock_fh = self._lock_fh, None
+        if fh is None:
+            return
+        try:
+            fh.close()          # closing the fd releases the flock
+        except OSError:
+            pass
+
+    def _require_writer(self, what: str) -> None:
+        if not self.writer:
+            raise RuntimeError(
+                f"{what}() needs the folding writer, and this Normalizer was opened with "
+                f"writer=False (read-only, {self.db_path}). A reader never folds: it would "
+                f"be the second writer on one store, which is BUG-20260910-067.")
+
+    def writer_info(self) -> dict[str, Any]:
+        """Who holds the fold-writer lock: {pid, since, alive, ...}.
+
+        Read from the lock FILE rather than from this object, so a reader and the
+        writer answer the same question the same way, and so a stale pid (a
+        writer that was killed) is visible as `alive: false` instead of absent.
+        """
+        # `enforced` is a BOOLEAN only for a writer. On a reader `False` would be
+        # indistinguishable from a writer whose filesystem has no flock -- and those
+        # are opposite facts: "this process never asked for the lock" versus "this
+        # process asked and cannot be protected, so a second writer could corrupt
+        # the store". Health renders this field; the two must not print alike.
+        return {**store_writer_info(self.db_path, lock_fh=self._lock_fh),
+                "enforced": (self._lock_enforced if self.writer else
+                             "not applicable (reader: this process never takes "
+                             "the fold-writer lock)")}
 
     # -- manifest-driven file discovery ------------------------------------
     def _files(self) -> list[dict[str, Any]]:
@@ -623,7 +987,7 @@ class Normalizer:
     # -- the sync ------------------------------------------------------------
     def sync(self) -> dict[str, int]:
         """Read every new complete frame from every landing file. Returns counts."""
-        from datetime import datetime, timezone
+        self._require_writer("sync")
         stats = {"files_checked": 0, "files_read": 0, "files_failed": 0, "files_short": 0, "last_error": None,
                  "rows_added": 0, "unparsed": 0,
                  "criteria_rows": 0, "lives_refreshed": 0}
@@ -727,6 +1091,7 @@ class Normalizer:
 
         Nothing here writes to the landing zone under any branch.
         """
+        self._require_writer("refold_criteria")
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
         raw_col = next((c for c in ("raw", "raw_frame") if c in cols), None)
         if raw_col is None:
@@ -780,6 +1145,7 @@ class Normalizer:
         `INSERT OR REPLACE` on (run, seq, idx), so the re-fold is idempotent
         even if it is interrupted and run again.
         """
+        self._require_writer("reset_for_refold")
         counts: dict[str, int] = {}
         with self.conn:
             for t in ("events", "order_criteria", "order_lives", "unparsed", "watermarks"):
@@ -790,4 +1156,18 @@ class Normalizer:
         return counts
 
     def close(self) -> None:
-        self.conn.close()
+        """Close the connection AND release the writer lock, in that order.
+
+        The lock must outlive the connection: releasing it first would let a
+        second writer in while this one still has a WAL checkpoint to do.
+        """
+        try:
+            self.conn.close()
+        finally:
+            self._release_writer_lock()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort on an abandoned object
+        try:
+            self._release_writer_lock()
+        except Exception as exc:  # noqa: BLE001 - a finaliser must never raise
+            log.debug("releasing the writer lock in __del__ failed: %s", exc)

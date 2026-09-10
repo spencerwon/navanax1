@@ -209,9 +209,13 @@ open needs to stay open.
 
   com.navanax.dashboard  serves the page at http://127.0.0.1:8765
                          Reachable from this computer only. Also
-                         restarts itself. Just open that address in
-                         Safari or Chrome whenever you want it --
-                         no window to keep open, no button to press.
+                         restarts itself, but no sooner than 30 seconds
+                         after it stops: if something else is already
+                         using port 8765 it says so in dashboard.log
+                         and waits, instead of retrying in a tight loop.
+                         Just open that address in Safari or Chrome
+                         whenever you want it -- no window to keep open,
+                         no button to press.
 
   com.navanax.traits     the trait finder. Runs every day at 3:30 AM
                          -- NOT right now. The first run spends up to

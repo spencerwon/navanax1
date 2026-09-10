@@ -9,6 +9,7 @@
 data/
 *.duckdb
 *.db
+*.sqlite.lock
 *.jsonl.zst
 *.jsonl.gz
 

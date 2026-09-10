@@ -28,6 +28,7 @@ from pathlib import Path
 from .codec import get_codec, verify_codec_roundtrip
 from .dotenv import DotenvError, require
 from .landing import LandingZoneWriter, is_integrity_failure, verify_manifest
+from .normalize import LOCK_UNSUPPORTED_ERRNOS, StoreWriterBusyError
 from .opstore import OperationalStore
 from .stream import StreamConsumer, new_run_id
 
@@ -94,11 +95,10 @@ def _single_instance(lock_path: Path):
             # the operator to stop a process that does not exist -- and a day
             # not recorded is a day that cannot be bought back, so failing
             # closed here is the wrong direction.
-            unsupported = {
-                errno.EOPNOTSUPP, errno.ENOLCK, errno.EINVAL, errno.ENOSYS,
-                getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-            }
-            if exc.errno in unsupported:
+            # The set lives in `normalize.LOCK_UNSUPPORTED_ERRNOS` so the
+            # analytical store's writer lock (BUG-20260910-067) applies exactly
+            # the same rule; two copies of this list would drift.
+            if exc.errno in LOCK_UNSUPPORTED_ERRNOS:
                 print(
                     f"WARNING: {lock_path.parent} does not support file locking "
                     f"({errno.errorcode.get(exc.errno, exc.errno)}). This is normal on a "
@@ -605,22 +605,71 @@ def cmd_import_traits(args) -> int:
     return 1 if (dis or dup) else 0
 
 
+# The exit-code contract `dashboard` owes launchd, in the same shape `ingest`
+# owes it above. Tested in tests/selftest.py; documented in docs/04 §8.
+#
+#   0  clean stop -- Ctrl-C or SIGTERM
+#   2  REFUSED BEFORE THE STORE WAS OPENED: the host is not loopback (REQ-N-13),
+#      or the port is already held -- almost always by a second dashboard.
+#   4  refused: another process holds the analytical store's fold-writer lock
+#   5  the analytical store is unreadable AND the dashboard could not degrade
+#      around it (see below)
+#
+# 2 rather than 3 for a bind failure is BUG-20260910-067's other half. Under
+# KeepAlive, launchd restarts on ANY non-zero code, so what makes a port
+# conflict safe is not the number but (a) `serve()` binding BEFORE it opens the
+# store, so a doomed retry never becomes a second writer, and (b)
+# `ThrottleInterval: 30` on the dashboard plist, so the retry is slow enough to
+# read in the log rather than 177 folds in half an hour.
+#
+# 5 SHOULD BE UNREACHABLE, and that is the point of having it (tech-lead B1).
+# `Dashboard._open_store` catches `sqlite3.DatabaseError` and comes up DEGRADED
+# -- the page and Health still serve, data endpoints answer 503 with the rebuild
+# recipe -- because a corrupt store is exactly when the Operator needs the page.
+# Before that existed, a malformed store raised out of `Dashboard.__init__`, was
+# caught by nothing here, and became a raw traceback and an UNDOCUMENTED exit 1,
+# repeated by KeepAlive every 30 s: the actual end state of the 2026-09-10
+# incident. This catch is the belt to that braces. If it ever fires, the message
+# says what to do rather than printing sqlite's stack.
+DASH_EXIT_OK = 0
+DASH_EXIT_REFUSED = 2
+DASH_EXIT_STORE_BUSY = 4
+DASH_EXIT_STORE_MALFORMED = 5
+
+
 def cmd_dashboard(args) -> int:
+    import sqlite3
+
     from .dashboard import serve
+    from .normalize import rebuild_recipe
     root = Path(args.root)
     cfg, slugs = _config(root)
     try:
         serve(root, cfg, slugs, port=args.port, open_browser=not args.no_browser)
     except ValueError as exc:
         print(f"REFUSING: {exc}", file=sys.stderr)
-        return 2
+        return DASH_EXIT_REFUSED
+    except StoreWriterBusyError as exc:
+        print(f"REFUSING TO FOLD\n\n{exc}", file=sys.stderr)
+        return DASH_EXIT_STORE_BUSY
+    except sqlite3.DatabaseError as exc:
+        # Should not happen -- the dashboard degrades instead of raising. If it
+        # does, say the same thing the degraded page would have said.
+        db = root / cfg["analytical"]["path"]
+        print(f"THE ANALYTICAL STORE IS UNREADABLE\n\n  {type(exc).__name__}: {exc}\n"
+              f"  {db}\n\n  {rebuild_recipe(db)}\n\n"
+              f"  Nothing in data/landing was touched, and nothing was lost: rebuilding "
+              f"re-folds every frame that was ever recorded.", file=sys.stderr)
+        return DASH_EXIT_STORE_MALFORMED
     except OSError as exc:
         print(f"could not bind the dashboard port: {exc}\n"
               f"  Is another dashboard already running? Open http://127.0.0.1:"
-              f"{args.port or (cfg.get('dashboard') or {}).get('port', 8765)}/ instead.",
+              f"{args.port or (cfg.get('dashboard') or {}).get('port', 8765)}/ instead.\n"
+              f"  The analytical store was NOT opened: nothing folded, nothing written "
+              f"(BUG-20260910-067).",
               file=sys.stderr)
-        return 3
-    return 0
+        return DASH_EXIT_REFUSED
+    return DASH_EXIT_OK
 
 
 def main(argv=None) -> int:

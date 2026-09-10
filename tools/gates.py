@@ -53,7 +53,9 @@ def corpus_fold(landing: Path, db: Path) -> None:
 
     from navanax.normalize import Normalizer, refresh_order_lives
     scratch = Path(tempfile.gettempdir()) / (db.stem + ".gates-scratch.sqlite")   # local disk, never next to the live store
-    for p in (scratch, scratch.with_suffix(".sqlite-wal"), scratch.with_suffix(".sqlite-shm")):
+    scratch_lock = scratch.with_name(scratch.name + ".lock")   # the fold-writer lock, BUG-20260910-067
+    for p in (scratch, scratch.with_suffix(".sqlite-wal"), scratch.with_suffix(".sqlite-shm"),
+              scratch_lock):
         if p.exists():
             p.unlink()
     # The live store may be mid-write (WAL) and, read over a mount, can look
@@ -96,6 +98,7 @@ def corpus_fold(landing: Path, db: Path) -> None:
         print(f"!!! event count changed on re-fold: {before['events']} -> {after['events']} -- a parser change or a bug; say which in the PR")
     n.close()
     scratch.unlink(missing_ok=True)
+    scratch_lock.unlink(missing_ok=True)
 
 
 def main() -> int:

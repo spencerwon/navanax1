@@ -29,8 +29,13 @@ WHAT EACH KEY MEANS (for a reader who has not met launchd before)
                          clean exit, `kill`. This is what makes the recorder
                          unattended.
   ThrottleInterval       launchd will not restart a job more often than this
-                         many seconds. 10 s. Without it, a job that fails
-                         instantly is respawned in a hot loop.
+                         many seconds. 10 s for the recorder and the traits job;
+                         30 s for the DASHBOARD, because the thing that makes it
+                         exit instantly is a port conflict with a second
+                         dashboard, and a hot loop of those is what corrupted the
+                         analytical store on 2026-09-10 (BUG-20260910-067).
+                         Without it, a job that fails instantly is respawned in a
+                         hot loop.
   ExitTimeOut            how long launchd waits after SIGTERM before SIGKILL.
                          The recorder flushes its final frame on SIGTERM
                          (cli._install_shutdown_handlers), so this must be
@@ -80,6 +85,24 @@ TRAITS_HOUR = 3
 TRAITS_MINUTE = 30
 
 THROTTLE_SECONDS = 10
+
+# The dashboard's own throttle, and why it is not 10 (BUG-20260910-067).
+#
+# The failure mode a throttle has to survive here is a PORT CONFLICT: a second
+# dashboard is already listening on 8765, so every start of this one fails to
+# bind and exits 2. At ThrottleInterval 10 that is 360 starts an hour -- and on
+# 2026-09-10 it was 177 of them, each of which opened the 2.8 GB analytical
+# store and folded new frames into it before dying, because the store was opened
+# BEFORE the bind. Two writers alternating on one SQLite store, with processes
+# killed mid-write, left it "database disk image is malformed".
+#
+# `dashboard.serve()` now binds first, so a doomed retry writes nothing at all;
+# that is the fix. 30 s is the second layer: it makes the loop slow enough to
+# read in dashboard.log rather than a wall of banners, and it bounds the cost of
+# any future start-up work that is not free. Not longer, because a genuinely
+# crashed dashboard should come back promptly -- the page is how the Operator
+# sees the record at all.
+DASHBOARD_THROTTLE_SECONDS = 30
 
 
 def log_path(root: Path, label: str) -> Path:
@@ -131,7 +154,7 @@ def job(label: str, root: Path | str, python: str = "python3",
             python, "-m", "navanax.cli", "dashboard", "--no-browser", "--port", str(port),
         ]
         plist["KeepAlive"] = True
-        plist["ThrottleInterval"] = THROTTLE_SECONDS
+        plist["ThrottleInterval"] = DASHBOARD_THROTTLE_SECONDS
         plist["ExitTimeOut"] = 30
     elif label == TRAITS:
         # No KeepAlive: this job is SUPPOSED to finish. KeepAlive on a job that

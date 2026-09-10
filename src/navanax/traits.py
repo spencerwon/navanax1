@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from .governor import Priority
+from .normalize import BUSY_TIMEOUT_MS
 from .rest import RestClient
 from .tls import ssl_context
 
@@ -689,7 +690,24 @@ def import_explorer_cache(conn: sqlite3.Connection, cache: dict[str, Any], *, sl
 
 
 def open_store(path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
+    """The traits job's connection: `tokens` and `traits` only, and NO writer lock.
+
+    BUG-20260910-067 put an exclusive flock on `<store>.lock` around the FOLD --
+    the landing-zone-to-events writer. This job is not that: it writes `tokens`
+    and `traits`, which come from metered REST reads, never from the landing
+    zone, and it folds no events. Taking the fold lock here would mean the daily
+    traits job and the dashboard could not run at the same time, which is a
+    worse outcome than the contention it would prevent.
+
+    What it needs instead is patience. An explicit `busy_timeout` (SQLite's
+    "wait this long for the other writer to finish" knob) means a fold holding
+    the write lock for the length of one batch insert makes this job WAIT rather
+    than fail with "database is locked" -- a spurious failure that reads exactly
+    like a real one.
+    """
+    conn = sqlite3.connect(str(path), check_same_thread=False,
+                           timeout=BUSY_TIMEOUT_MS / 1000)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     ensure_schema(conn)
     return conn

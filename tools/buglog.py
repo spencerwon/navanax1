@@ -276,7 +276,20 @@ def build(data: dict) -> None:
 def check(data: dict) -> list[str]:
     problems: list[str] = []
     md = MARKDOWN.read_text() if MARKDOWN.exists() else ""
-    ledger_ids = {b["id"] for b in data["bugs"]}
+    # (0) A DUPLICATE ID is the one defect that makes every other entry unciteable:
+    # a bug id is a name, and two entries under one name means "BUG-20260910-059"
+    # no longer identifies anything. This used to be a set comprehension, so two
+    # entries collapsed into one and the gate stayed green -- which is exactly what
+    # happens when two branches allocate the same number, and two branches in this
+    # repo are doing that right now with 059-061.
+    all_ids = [b["id"] for b in data["bugs"]]
+    ledger_ids = set(all_ids)
+    dupes = sorted({i for i in all_ids if all_ids.count(i) > 1})
+    for dupe in dupes:
+        problems.append(
+            f"{dupe}: appears {all_ids.count(dupe)} times in bugs.yaml -- a duplicate bug id "
+            f"means the id names two different defects, so every reference to it is ambiguous. "
+            f"Renumber the one that landed second (the branch that merges second renumbers).")
     md_ids = set(re.findall(r"BUG-\d{8}-\d{3}", md))
 
     for missing in sorted(ledger_ids - md_ids):

@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import bisect
 import heapq
+import json
 import logging
 import math
 import sqlite3
@@ -2639,3 +2640,864 @@ class MetricEngine:
         cur = self.conn.execute(
             f"SELECT event_type, COUNT(*) FROM events WHERE {where} GROUP BY event_type ORDER BY 2 DESC", args)
         return [{"event_type": t, "n": n} for t, n in cur]
+
+    # -- PR-9: the Event Ledger (design §8.1) ---------------------------------
+    def _ledger_where(self, collection: str, *, start: float | None = None, end: float | None = None,
+                      traits: dict[str, list[str]] | None = None,
+                      event_types: list[str] | None = None,
+                      token: str | None = None, maker: str | None = None, taker: str | None = None,
+                      price_min: float | None = None, price_max: float | None = None,
+                      order_hash: str | None = None, has_price: bool = False,
+                      window_plus: bool = False,
+                      ) -> tuple[str, list[Any], dict[str, Any]]:
+        """The WHERE the ledger, its count and its chart all share.
+
+        One builder, because three queries that filter "the same rows" and are
+        written twice are two definitions of the selection, and the chart is the
+        one the Operator reads a price off.
+
+        Every fragment is a bound parameter except the column names, which come
+        from literals here and from the whitelist in `ledger()`. No caller string
+        reaches SQL.
+        """
+        where = ["e.collection = ?"]
+        args: list[Any] = [collection]
+        applied: dict[str, Any] = {"collection": collection}
+        # `window_plus` writes the window as `+e.valid_ts >= ?`. The unary plus is
+        # SQLite's documented way of saying "do not use this term as an index
+        # constraint", and it is the whole of BUG-20260910-068's second half.
+        #
+        # Every ledger request the page makes carries a window. On an index whose
+        # SECOND column is not valid_ts -- maker, token_num, event_type, price_eth --
+        # SQLite would rather skip-scan (`ANY(collection) AND ANY(maker) AND
+        # valid_ts>?`) to use that range, and a skip-scan does NOT deliver rows in
+        # the index's order, so it then sorts: measured 864 ms for one 200-row page
+        # over 200,000 rows, at every page depth. With the plus, the index is used
+        # as `collection=?`, the scan IS the sort, and the same page takes 0.2 ms.
+        #
+        # WHAT IT COSTS, stated rather than implied. The window becomes a per-row
+        # filter, so on a non-`valid_ts` sort the scan walks the collection's index
+        # until `limit` rows have matched -- and a NARROW window matches rarely, so
+        # the cost scales with the COLLECTION, not with the answer. Measured on the
+        # same 200,000-row store, a 93-second window returning 93 rows:
+        #
+        #     sort=valid_ts   0.7 ms   (index range: cost scales with the answer)
+        #     sort=maker     27.0 ms   (full index walk: cost scales with the store)
+        #
+        # 27 ms is accepted for now -- it is two orders of magnitude better than the
+        # 864 ms it replaced, and the narrow-window-plus-exotic-sort combination is
+        # not what the page does by default. It is NOT free, and at 4 M rows/day it
+        # grows linearly while the 0.2 ms full-window case does not.
+        #
+        # TODO(BUG-20260910-068 follow-up): switch on window WIDTH rather than on
+        # sort alone. Both SQL shapes already exist here -- this flag is the only
+        # difference -- so the change is a predicate, not a rewrite: when the window
+        # covers a small fraction of the collection's recorded span, prefer the
+        # INDEXABLE form and accept the sort, because sorting a few hundred rows is
+        # cheaper than walking four million. The crossover has to be measured on the
+        # real corpus, not guessed, which is why it is a TODO and not a heuristic.
+        vts_plain = "e.valid_ts"     # kept named, so the two shapes stay visibly a pair
+        vts = "+e.valid_ts" if window_plus else vts_plain
+        if start is not None:
+            where.append(f"{vts} >= ?")
+            args.append(start)
+        if end is not None:
+            where.append(f"{vts} < ?")
+            args.append(end)
+        if start is not None or end is not None:
+            applied["window"] = {"start_ts": start, "end_ts": end,
+                                 "clock": "valid_ts -- when it was true on the market, not when we saw it"}
+        if event_types:
+            where.append(f"e.event_type IN ({','.join('?' * len(event_types))})")
+            args += list(event_types)
+            applied["event_types"] = list(event_types)
+        lo, hi = parse_token_spec(token)
+        if lo is not None or hi is not None:
+            # token_num is NULL for a token_id that is not a plain number, and a NULL
+            # never satisfies a comparison -- so a number filter excludes the
+            # un-numbered tokens rather than sweeping them in at 0.
+            if lo is not None:
+                where.append("e.token_num >= ?")
+                args.append(lo)
+            if hi is not None:
+                where.append("e.token_num <= ?")
+                args.append(hi)
+            applied["token_num"] = {"min": lo, "max": hi}
+        if maker:
+            where.append("e.maker = ?")
+            args.append(maker)
+            applied["maker"] = maker
+        if taker:
+            where.append("e.taker = ?")
+            args.append(taker)
+            applied["taker"] = taker
+        if price_min is not None:
+            where.append("e.price_eth >= ?")
+            args.append(price_min)
+        if price_max is not None:
+            where.append("e.price_eth <= ?")
+            args.append(price_max)
+        if price_min is not None or price_max is not None:
+            applied["price_band_eth"] = {"min": price_min, "max": price_max}
+        if order_hash:
+            where.append("e.order_hash = ?")
+            args.append(order_hash)
+            applied["order_hash"] = order_hash
+        if has_price:
+            where.append("e.price_eth IS NOT NULL")
+            applied["has_price"] = True
+        if traits:
+            # The same token-set rule the rest of the page uses. A collection offer
+            # carries no token_id, so a trait filter excludes it here: on the LEDGER
+            # that is right -- the row is not about a token this filter selects -- and
+            # the basis says so rather than leaving the reader to notice.
+            tf, targs = token_filter_sql(collection, traits, alias="e")
+            where.append(tf.removeprefix(" AND "))
+            args += targs
+            applied["traits"] = traits
+        return " AND ".join(where), args, applied
+
+    def _ledger_page_sql(self, collection: str, *, sort: str, direction: str,
+                         cursor: str | None, limit: int, **filters: Any):
+        """The exact SQL one ledger page runs, plus everything the caller needs to
+        describe it. Shared by `ledger()` and `ledger_query_plan()` so the plan a
+        test inspects is the plan the page executes, not a reconstruction of it.
+        """
+        if sort not in LEDGER_SORTS:
+            why = LEDGER_UNSORTABLE.get(sort)
+            raise ValueError(
+                f"ledger cannot sort by {sort!r}"
+                + (f": {why}" if why else " -- there is no index for it, and an unindexed sort of "
+                                           "the events table is a full scan of every row in it.")
+                + " Sortable (each has its own index): " + ", ".join(sorted(LEDGER_SORTS)) + ".")
+        direction = "desc" if str(direction).lower() != "asc" else "asc"
+        limit = max(1, min(LEDGER_PAGE_MAX, int(limit)))
+        key_sql, index_name, index_cols = LEDGER_SORTS[sort]
+        order_cols = [*index_cols, "e.rowid"]        # rowid is every index's implicit last column
+        # The count and the fingerprint use the INDEXABLE window (it is a range scan
+        # on ix_events_coll_valid and cheap); the page uses the de-optimised one,
+        # except when valid_ts is the sort key -- there the window is both the filter
+        # and the order, and the range scan is exactly what we want.
+        where, args, applied = self._ledger_where(collection, **filters)
+        page_only_where, _, _ = self._ledger_where(
+            collection, window_plus=(index_cols[0] != "e.valid_ts"), **filters)
+        fp = _ledger_fingerprint(sort, direction, where, args)
+
+        page_where, page_args = page_only_where, list(args)
+        if cursor:
+            c = decode_cursor(cursor)
+            vals = c.get("k")
+            if c.get("f") != fp or not isinstance(vals, list) or len(vals) != len(order_cols):
+                raise ValueError(
+                    "this ledger cursor belongs to a different query (the sort, the direction or a "
+                    "filter changed since it was issued). Ask for the first page again -- continuing "
+                    "would interleave two different result sets.")
+            clause, cargs = _keyset_clause(order_cols, vals, direction)
+            page_where = f"{page_only_where} AND {clause}"
+            page_args += cargs
+
+        d = "DESC" if direction == "desc" else "ASC"
+        # INDEXED BY, not a hint: with an unconditional time window in the WHERE the
+        # planner picks the range index and sorts (BUG-20260910-068). Naming the index
+        # makes the statement fail loudly if it ever stops being usable, which is the
+        # behaviour BUG-040 settled on for exactly this reason.
+        sql = (f"SELECT e.rowid, e.valid_at, e.observed_at, e.valid_ts, e.observed_ts, e.event_type,"
+               f" e.token_id, e.token_num, e.price_eth, e.price_usd, e.price_basis,"
+               f" e.maker, e.taker, e.order_hash, e.quantity, e.payment_symbol,"
+               f" ol.exit_reason, ol.t_term"
+               f" FROM events e INDEXED BY {index_name}"
+               f" LEFT JOIN order_lives ol ON ol.order_hash = e.order_hash"
+               f" WHERE {page_where}"
+               f" ORDER BY {', '.join(f'{c} {d}' for c in order_cols)} LIMIT ?")
+        return {"sql": sql, "args": [*page_args, limit + 1], "where": where, "where_args": args,
+                "applied": applied, "fingerprint": fp, "index": index_name, "sort": sort,
+                "direction": direction, "limit": limit, "order_cols": order_cols}
+
+    def ledger_query_plan(self, collection: str, *, sort: str = "valid_ts", direction: str = "desc",
+                          cursor: str | None = None, limit: int = 200, **filters: Any) -> dict[str, Any]:
+        """`EXPLAIN QUERY PLAN` for the page `ledger()` would run. Diagnostic only.
+
+        It exists so the index claim is TESTABLE: `basis.index` used to be a string
+        the response asserted about itself, and it was wrong for five of the six
+        sorts. Now a test reads the planner's own answer.
+        """
+        q = self._ledger_page_sql(collection, sort=sort, direction=direction,
+                                  cursor=cursor, limit=limit, **filters)
+        plan = [row[3] for row in self.conn.execute("EXPLAIN QUERY PLAN " + q["sql"], q["args"])]
+        return {"sql": q["sql"], "plan": plan, "index": q["index"], "sort": q["sort"],
+                "direction": q["direction"], "order_by": q["order_cols"]}
+
+    def ledger(self, collection: str, *, sort: str = "valid_ts", direction: str = "desc",
+               cursor: str | None = None, limit: int = 200, **filters: Any) -> dict[str, Any]:
+        """One page of the raw event record, keyset-paginated and sorted in SQL.
+
+        `sort` must be in `LEDGER_SORTS`; anything else is REFUSED with a message
+        naming the columns that work and, where we know it, why this one does not
+        (design §8.1.2: "a sort on a non-indexed column is refused with a message
+        naming the indexed ones -- not silently slow").
+
+        **The ordering tuple is the index's own column order.** Each composite index
+        is `(collection, key, valid_ts)`, so with `collection` fixed by an equality
+        the rows arrive in `(key, valid_ts, rowid)` order and `ORDER BY` asks for
+        exactly that -- no TEMP B-TREE, at any depth, with or without a time window
+        in the WHERE. `INDEXED BY` names the index so the planner cannot quietly
+        choose the range index and sort instead, which is what it did until
+        BUG-20260910-068. The two sorts whose index has no trailing `valid_ts`
+        (`valid_ts`, `observed_ts`) order on `(key, rowid)`; `LEDGER_SORTS` carries
+        the tuple per sort so the two can never drift.
+
+        The cursor encodes that tuple's values from the last row returned, plus a
+        fingerprint of the sort, direction and filter. The next page is then
+
+            WHERE <tuple> is strictly after <cursor tuple>
+            ORDER BY <tuple> DESC LIMIT n
+
+        which is constant time at any depth, and -- the property that matters while
+        a stream is appending 48 rows/s underneath -- it is anchored to a ROW, not
+        to an offset. Rows inserted between two page requests can change what page 1
+        WOULD look like now; they cannot make page 2 skip or repeat a row that page
+        1 already returned. `rowid` is the last element because it is the only
+        column guaranteed unique: without it a page boundary inside a tie repeats
+        or skips rows. NULLs are handled explicitly in `_keyset_clause`.
+        """
+        q = self._ledger_page_sql(collection, sort=sort, direction=direction,
+                                  cursor=cursor, limit=limit, **filters)
+        cur = self.conn.execute(q["sql"], q["args"])
+        raw = [dict(zip(_LEDGER_ROW_KEYS, r, strict=True)) for r in cur]
+        more = len(raw) > q["limit"]
+        raw = raw[:q["limit"]]
+        rows = [self._ledger_row(r) for r in raw]
+        next_cursor = None
+        if more and raw:
+            last = raw[-1]
+            next_cursor = encode_cursor({
+                "s": q["sort"], "d": q["direction"], "f": q["fingerprint"],
+                "k": [last.get(_LEDGER_KEY_FIELD[c]) for c in q["order_cols"]]})
+
+        # total: exact while it is cheap, a floor with `exact:false` above the cap.
+        n = self.conn.execute(
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM events e WHERE {q['where']} LIMIT ?)",
+            (*q["where_args"], LEDGER_COUNT_CAP + 1)).fetchone()[0]
+        exact = n <= LEDGER_COUNT_CAP
+        return {
+            "rows": rows, "next_cursor": next_cursor, "has_more": more,
+            "sort": q["sort"], "direction": q["direction"], "limit": q["limit"],
+            "sortable": sorted(LEDGER_SORTS), "unsortable": LEDGER_UNSORTABLE,
+            "total_estimate": n if exact else LEDGER_COUNT_CAP, "exact": exact,
+            "count_cap": LEDGER_COUNT_CAP,
+            "basis": {
+                "filter": q["applied"], "index": q["index"], "index_forced": True,
+                "pagination": ("keyset over (" + ", ".join(
+                    c.removeprefix("e.") for c in q["order_cols"]) + "), which is "
+                    f"{q['index']}'s own column order -- the scan IS the sort, so there is no "
+                    "TEMP B-TREE at any page depth (BUG-20260910-068)"),
+                "wash_filter": "raw", "timezone": self.tz,
+                "count_note": ("an exact count of the matching rows"
+                               if exact else
+                               f"more than {LEDGER_COUNT_CAP:,} rows match; counting them exactly on "
+                               "every request is how a 4 M-row ledger feels broken, so this is a floor "
+                               "and `exact` is false. Narrow the filter for an exact count."),
+                "left_truncation_note":
+                    "exit_reason comes from order_lives, which only knows orders whose PLACEMENT we "
+                    "witnessed; a row with no exit_reason may be an order that was already standing "
+                    "when recording started, not an order that never ended.",
+                "trait_note": ("a trait filter selects rows by token, so collection offers -- which "
+                               "carry no token -- are excluded from this page"
+                               if q["applied"].get("traits") else None),
+            },
+        }
+
+    @staticmethod
+    def _ledger_row(r: dict[str, Any]) -> dict[str, Any]:
+        lag = (r["observed_ts"] - r["valid_ts"]
+               if r["observed_ts"] is not None and r["valid_ts"] is not None else None)
+        return {"valid_at": r["valid_at"], "observed_at": r["observed_at"], "lag_s": lag,
+                "event_type": r["event_type"], "token_id": r["token_id"], "token_num": r["token_num"],
+                "price_eth": r["price_eth"], "price_usd": r["price_usd"], "price_basis": r["price_basis"],
+                "maker": r["maker"], "taker": r["taker"], "order_hash": r["order_hash"],
+                "quantity": r["quantity"], "payment_symbol": r["payment_symbol"],
+                "exit_reason": r["exit_reason"]}
+
+    def ledger_chart(self, collection: str, *, cap: int | None = None, **filters: Any) -> dict[str, Any]:
+        """"Chart this selection" (design §8.1.3): the matching rows as one series
+        per event type, oldest first, capped and SAYING SO.
+
+        Line segments join points WITHIN one event type only -- a listing and a bid
+        are not two readings of one quantity -- and every point keeps its own time,
+        so an ingestion gap stays a gap: nothing here interpolates, and the page
+        draws markers always because a token has a handful of events and a
+        markerless line draws nothing.
+
+        The cap is the MOST RECENT `cap` rows, and the response carries both
+        numbers so the panel can print `charting the 5,000 most recent of 41,208`.
+        Never a silent sample.
+        """
+        cap = LEDGER_CHART_CAP if cap is None else max(1, min(LEDGER_CHART_CAP, int(cap)))
+        where, args, applied = self._ledger_where(collection, **filters)
+        # BUG-20260910-069: count the rows the chart can actually DRAW, with the same
+        # predicate the row query below applies. Counting the whole filter and then
+        # drawing only the priced rows put a bigger number in the caption than the
+        # chart could ever contain, in the one sentence whose job is to say the
+        # picture is incomplete.
+        drawable = f"{where} AND e.price_eth IS NOT NULL AND e.valid_ts IS NOT NULL"
+        matched = self.conn.execute(
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM events e WHERE {drawable} LIMIT ?)",
+            (*args, LEDGER_COUNT_CAP + 1)).fetchone()[0]
+        matched_exact = matched <= LEDGER_COUNT_CAP
+        cur = self.conn.execute(
+            f"{_LEDGER_ROW_SQL} WHERE {drawable}"
+            f" ORDER BY e.valid_ts DESC, e.rowid DESC LIMIT ?", (*args, cap + 1))
+        raw = [dict(zip(_LEDGER_ROW_KEYS, r, strict=True)) for r in cur]
+        capped = len(raw) > cap
+        raw = raw[:cap]
+        raw.reverse()                                     # oldest first, for drawing
+        series: dict[str, dict[str, list[Any]]] = {}
+        for r in raw:
+            s = series.setdefault(r["event_type"], {"t": [], "price_eth": [], "price_usd": [],
+                                                    "token_id": [], "maker": [], "order_hash": []})
+            s["t"].append(r["valid_at"])
+            s["price_eth"].append(r["price_eth"])
+            s["price_usd"].append(r["price_usd"])
+            s["token_id"].append(r["token_id"])
+            s["maker"].append(r["maker"])
+            s["order_hash"].append(r["order_hash"])
+        # The caption branches on `matched_exact` exactly as `count_note` does: above
+        # the count cap the figure is a floor and must read as one (BUG-20260910-069).
+        of = (f"{matched:,}" if matched_exact
+              else f"more than {LEDGER_COUNT_CAP:,} (a floor, not a count)")
+        return {
+            "series": series, "charted": len(raw), "cap": cap, "capped": capped,
+            "matched": matched, "matched_exact": matched_exact, "count_cap": LEDGER_COUNT_CAP,
+            "counts": {k: len(v["t"]) for k, v in series.items()},
+            "basis": {
+                "filter": applied, "wash_filter": "raw", "timezone": self.tz,
+                "cap_note": (f"charting the {len(raw):,} most recent of {of} chartable rows "
+                             "-- narrow the filter" if capped else None),
+                "matched_predicate": "`matched` counts rows with BOTH a price and a valid_ts -- the "
+                                     "same predicate this chart draws from, so the caption is about "
+                                     "the chart and not about the table above it.",
+                "priced_only": "rows with no price cannot be drawn on a price axis and are excluded "
+                               "from this chart; they are still in the table above.",
+                "hole_note": "points are joined WITHIN one event type only, and nothing is "
+                             "interpolated between two observations -- an ingestion gap stays a gap.",
+            },
+        }
+
+    # -- PR-9: the Wallets view (design §8.2) ---------------------------------
+    def wallets(self, collection: str, start: float, end: float, *,
+                limit: int = 50, min_events: int = 0) -> dict[str, Any]:
+        """Addresses ranked by event count in the window, each share with its count.
+
+        Landing-zone-derived only: this is `events`, grouped. Holdings, funding and
+        anything else that lives on-chain are NOT here and are not guessed -- see
+        `wallet()`'s `chain` block, which says "not collected yet" rather than
+        rendering a zero.
+        """
+        total = self.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<?",
+            (collection, start, end)).fetchone()[0]
+        with_maker = self.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? "
+            "AND maker IS NOT NULL", (collection, start, end)).fetchone()[0]
+        cur = self.conn.execute(
+            """SELECT maker, COUNT(*) n,
+                      SUM(event_type='item_received_bid') bids,
+                      SUM(event_type='item_cancelled') cancels,
+                      SUM(event_type='item_listed') listings,
+                      SUM(event_type='item_sold') sold,
+                      SUM(event_type='collection_offer') coll_offers,
+                      SUM(event_type='trait_offer') trait_offers,
+                      MIN(valid_at), MAX(valid_at)
+               FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? AND maker IS NOT NULL
+               GROUP BY maker HAVING n >= ? ORDER BY n DESC, maker ASC LIMIT ?""",
+            (collection, start, end, max(0, int(min_events)), max(1, min(500, int(limit)))))
+        rows = []
+        for (addr, n, bids, cancels, listings, sold, co, to, first, last) in cur:
+            rows.append({"address": addr, "events": n,
+                         "events_share": share(n, with_maker),
+                         "bids": bids or 0, "cancels": cancels or 0, "listings": listings or 0,
+                         "sales_as_maker": sold or 0, "collection_offers": co or 0,
+                         "trait_offers": to or 0, "first_at": first, "last_at": last})
+        distinct = self.conn.execute(
+            "SELECT COUNT(DISTINCT maker) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? "
+            "AND maker IS NOT NULL", (collection, start, end)).fetchone()[0]
+        return {"rows": rows, "distinct_addresses": distinct,
+                "total_events": total, "total_events_with_maker": with_maker,
+                "basis": {"source": "events (landing-zone derived); no REST, no chain read",
+                          "share_denominator": "events in this window that carry a maker address",
+                          "window": {"start_ts": start, "end_ts": end}, "wash_filter": "raw",
+                          "timezone": self.tz}}
+
+    def counterparty_adjacency(self, collection: str, start: float, end: float,
+                               limit: int = 40) -> dict[str, Any]:
+        """rows = seller, columns = buyer, cell = count of sales seller -> buyer.
+
+        A heat-map, not a force graph (design §8.2.2): it is deterministic, it needs
+        no physics library, and a cell STATES 88 where a force layout would only say
+        "these two are near each other". Capped at `limit` addresses by trade volume
+        with the truncation printed, never silently.
+        """
+        pairs = self.conn.execute(
+            """SELECT maker, taker, COUNT(*) FROM events
+               WHERE collection=? AND event_type='item_sold' AND valid_ts>=? AND valid_ts<?
+                 AND maker IS NOT NULL AND taker IS NOT NULL
+               GROUP BY maker, taker""", (collection, start, end)).fetchall()
+        vol: dict[str, int] = {}
+        for a, b, n in pairs:
+            vol[a] = vol.get(a, 0) + n
+            vol[b] = vol.get(b, 0) + n
+        ordered = sorted(vol, key=lambda a: (-vol[a], a))
+        shown = ordered[:max(1, int(limit))]
+        idx = {a: i for i, a in enumerate(shown)}
+        m = [[0] * len(shown) for _ in shown]
+        for a, b, n in pairs:
+            if a in idx and b in idx:
+                m[idx[a]][idx[b]] = n
+        return {"addresses": shown, "matrix": m, "shown": len(shown), "total_addresses": len(ordered),
+                "trades": sum(n for _, _, n in pairs),
+                "truncation_note": (f"showing {len(shown)} of {len(ordered)} addresses, by trade volume"
+                                    if len(ordered) > len(shown) else None),
+                "basis": {"cell": "count of item_sold rows with this maker (seller) and this taker (buyer)",
+                          "scale": "sequential single hue -- counts have no meaningful midpoint",
+                          "window": {"start_ts": start, "end_ts": end}, "wash_filter": "raw"}}
+
+    def wallet(self, collection: str, address: str, start: float, end: float) -> dict[str, Any]:
+        """One address card (design §8.2.1), from the landing-zone record only.
+
+        Every percentage on it carries its count, every median carries `n` AND
+        `n_eff` (one address's 19,004 cancels are not 19,004 independent
+        observations -- the effective count is maker-episode clusters, the same
+        unit the survival band resamples over).
+
+        What is deliberately NOT here: holdings, funding source, ENS, anything
+        chain-sourced. Those need a public RPC that this PR does not add, so the
+        `chain` block says `collected: false` with the reason. A zero would read as
+        "this wallet holds nothing", which is a claim we have not earned.
+
+        The returned object is checked against the address-only boundary
+        (`_assert_address_only`) before it is returned, so the schema -- not the
+        rendering code -- is what a reviewer checks.
+        """
+        totals = self.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? "
+            "AND maker IS NOT NULL", (collection, start, end)).fetchone()[0]
+        row = self.conn.execute(
+            """SELECT COUNT(*),
+                      SUM(event_type='item_received_bid'), SUM(event_type='item_cancelled'),
+                      SUM(event_type='item_listed'), SUM(event_type='item_sold'),
+                      SUM(event_type='collection_offer'), SUM(event_type='trait_offer'),
+                      MIN(valid_at), MAX(valid_at), COUNT(DISTINCT token_id)
+               FROM events WHERE collection=? AND maker=? AND valid_ts>=? AND valid_ts<?""",
+            (collection, address, start, end)).fetchone()
+        (n, bids, cancels, listings, sold, coll_offers, trait_offers, first, last, tokens) = row
+        bought = self.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE collection=? AND taker=? AND event_type='item_sold' "
+            "AND valid_ts>=? AND valid_ts<?", (collection, address, start, end)).fetchone()[0]
+
+        # median bid life, with n and n_eff. n_eff is maker-episode clusters, the
+        # unit the survival estimator already treats as independent (metrics §4d).
+        lives = [{"maker": address, "scope_kind": sk, "token_id": tid,
+                  "t_place": tp, "duration": tt - tp}
+                 for tp, tt, sk, tid in self.conn.execute(
+                     """SELECT t_place, t_term, scope_kind, token_id FROM order_lives
+                        WHERE collection=? AND maker=? AND placement_seen=1
+                          AND event_type='item_received_bid'
+                          AND t_place IS NOT NULL AND t_term IS NOT NULL
+                          AND t_place>=? AND t_place<?""", (collection, address, start, end))]
+        durations = sorted(x["duration"] for x in lives)
+        n_eff = len(set(episode_ids(lives))) if lives else 0
+        filled = self.conn.execute(
+            """SELECT COUNT(*) FROM order_lives WHERE collection=? AND maker=?
+               AND event_type='item_received_bid' AND exit_reason='filled'
+               AND t_place IS NOT NULL AND t_place>=? AND t_place<?""",
+            (collection, address, start, end)).fetchone()[0]
+        placed = self.conn.execute(
+            """SELECT COUNT(*) FROM order_lives WHERE collection=? AND maker=?
+               AND event_type='item_received_bid' AND placement_seen=1
+               AND t_place IS NOT NULL AND t_place>=? AND t_place<?""",
+            (collection, address, start, end)).fetchone()[0]
+
+        cps = self.conn.execute(
+            """SELECT other, SUM(as_maker), SUM(as_taker), SUM(n), MIN(f), MAX(l) FROM (
+                   SELECT taker other, COUNT(*) n, COUNT(*) as_maker, 0 as_taker,
+                          MIN(valid_at) f, MAX(valid_at) l
+                   FROM events WHERE collection=? AND event_type='item_sold' AND maker=?
+                     AND taker IS NOT NULL AND valid_ts>=? AND valid_ts<? GROUP BY taker
+                   UNION ALL
+                   SELECT maker other, COUNT(*) n, 0 as_maker, COUNT(*) as_taker,
+                          MIN(valid_at) f, MAX(valid_at) l
+                   FROM events WHERE collection=? AND event_type='item_sold' AND taker=?
+                     AND maker IS NOT NULL AND valid_ts>=? AND valid_ts<? GROUP BY maker)
+               GROUP BY other ORDER BY SUM(n) DESC, other ASC LIMIT 20""",
+            (collection, address, start, end, collection, address, start, end)).fetchall()
+        trades_total = sum(r[3] for r in cps)
+        counterparties = [{"address": a, "trades": t, "as_seller": sm, "as_buyer": tk,
+                           "share_of_trades": share(t, trades_total),
+                           "first_at": f, "last_at": ll}
+                          for (a, sm, tk, t, f, ll) in cps]
+
+        profile: dict[str, Any] = {
+            "address": address,
+            "window": {"start_ts": start, "end_ts": end, "first_at": first, "last_at": last},
+            "behaviour": {
+                "events": n or 0,
+                "events_share": share(n, totals),
+                "bids": bids or 0, "cancels": cancels or 0, "listings": listings or 0,
+                "collection_offers": coll_offers or 0, "trait_offers": trait_offers or 0,
+                "sales_as_seller": sold or 0, "sales_as_buyer": bought or 0,
+                "distinct_tokens_touched": tokens or 0,
+                "cancel_ratio": share(cancels, bids),
+                "fill_ratio": share(filled, placed),
+                "bid_life": {
+                    # Withheld, not flagged, below the minimum n (REQ-F-19, Q-V3) -- the
+                    # same `pct()` every other percentile on this page goes through.
+                    "median_s": pct(durations, 0.5),
+                    "p10_s": pct(durations, 0.10),
+                    "p90_s": pct(durations, 0.90),
+                    "n": len(durations), "n_eff": n_eff,
+                    "min_n_for_percentiles": MIN_N_FOR_PERCENTILES,
+                    "percentiles_withheld": len(durations) < MIN_N_FOR_PERCENTILES,
+                    "episode_gap_s": EPISODE_GAP_SECONDS,
+                    # Named `*_rule`, not `note`: `note` is an identity marker now, and the
+                    # reason is that a free-text field on an address profile is exactly where
+                    # an off-chain identity arrives (BUG A6 / market-analyst charter).
+                    "n_eff_rule": "n is ended bids; n_eff is maker-episode clusters -- one wallet's "
+                                  "thousands of quotes are not thousands of independent observations, "
+                                  "and the uncertainty belongs to n_eff.",
+                },
+            },
+            "counterparties": {"rows": counterparties, "trades": trades_total,
+                               "source": "item_sold maker/taker pairs in this window"},
+            "chain": {
+                "collected": False,
+                "holdings": None, "acquired_30d": None, "disposed_30d": None,
+                "first_funded_by": None, "funded_at": None, "funded_value_eth": None,
+                # There is deliberately NO field for a self-attached ENS or marketplace
+                # handle. The charter permits one (it is self-declared and public), but the
+                # boundary is enforced by the SCHEMA, and a field that is null today and
+                # populated later is precisely the hole the guard exists to close. When it
+                # is collected it gets added here, deliberately, with the guard updated in
+                # the same commit and a reviewer looking at both.
+                "why_not_collected": "holdings and funding source are CHAIN data (public RPC / "
+                        "block explorer), not OpenSea REST and not in the landing zone. This "
+                        "build does not read the chain, so they are not collected yet. They are "
+                        "null rather than 0: 0 would read as 'this address holds nothing'.",
+            },
+            "cluster": {
+                "id": None, "members": None, "evidence_count": 0,
+                "evidence_rule": "no clustering evidence has been derived. A cluster is a "
+                        "hypothesis with evidence attached, and the word does not appear without "
+                        "it -- so nothing is asserted here rather than a cluster of one being "
+                        "implied.",
+            },
+            "flags": [],
+            "basis": {
+                "source": "events + order_lives (landing-zone derived); no REST, no chain read",
+                "flags_rule": "a flag renders only if its rows can be listed in the ledger. No "
+                              "pattern detector has been built and validated yet, so there are "
+                              "none -- an unevidenced flag is an accusation, not a finding.",
+                "boundary": "address-level only: this object has no field for a name, employer, "
+                            "company or location, and _assert_address_only refuses to return one "
+                            "(.claude/agents/market-analyst.md).",
+                "left_truncation":
+                    "bid lifetimes come from order_lives, which only holds orders whose placement "
+                    "we witnessed; this wallet's orders that were already standing when recording "
+                    "started are absent, so n is a floor.",
+                "wash_filter": "raw", "timezone": self.tz,
+            },
+        }
+        _assert_address_only(profile)
+        if set(profile) != set(WALLET_PROFILE_KEYS):
+            raise ValueError(f"wallet profile key set drifted from WALLET_PROFILE_KEYS: {sorted(profile)}")
+        return profile
+
+# ---------------------------------------------------------------------------
+# PR-9 -- the Event Ledger (design §8.1) and the Wallets view (design §8.2)
+#
+# The ledger is the raw record every other panel is an aggregate of, and it is
+# the one query on this page whose SHAPE decides whether the page survives real
+# volume. At the measured ~48 events/s the events table gains ~4.1 M rows a day,
+# and the two things `screener()` does -- sort in Python, page by OFFSET -- both
+# become unusable there:
+#
+#   * sorting in Python means loading every matching row into memory per page;
+#   * `LIMIT 50 OFFSET 2000000` scans two million rows in SQLite to throw them
+#     away, so deep pages take minutes.
+#
+# So this one sorts and filters in SQL against a WHITELIST (the same injection
+# safety a Python sort gives, without the memory) and pages by KEYSET: the cursor
+# carries the last row's (sort key, rowid) and the next page is a range scan.
+# `rowid` is the tiebreaker so rows sharing a timestamp -- and at 48/s there are
+# many -- can be neither skipped nor repeated.
+#
+# A sort on a column with no index is REFUSED, naming the ones that work. That is
+# a deliberate choice against the alternative (serve it, slowly): a page that
+# hangs for two minutes teaches the Operator that the ledger is broken, while a
+# refusal that names five working columns teaches him what the store can do.
+# ---------------------------------------------------------------------------
+
+#: sortable column -> (SQL expression, the index that serves it, the index's own
+#: column order after the leading `collection` equality).
+#:
+#: **That third element is the whole of BUG-20260910-068.** `dashboard._window` is
+#: unconditional, so every request the page makes carries `valid_ts >= ? AND
+#: valid_ts < ?`. Given a range predicate on `valid_ts`, SQLite prefers
+#: `ix_events_coll_valid` and satisfies `ORDER BY maker DESC, rowid DESC` with a
+#: TEMP B-TREE -- an in-memory sort of every row in the window, on every page.
+#: The keyset was constant time; the sort was not.
+#:
+#: The remedy is BUG-040's: name the index with `INDEXED BY`, and make the ORDER BY
+#: exactly the index's own column order, so the scan IS the sort. Each composite
+#: index is `(collection, key, valid_ts)`, so with `collection` fixed the rows come
+#: out in `(key, valid_ts, rowid)` order -- rowid being the implicit trailing
+#: column of every SQLite index. The cursor carries that same tuple, because a
+#: tiebreak that is not the ordering's own last column is not a tiebreak.
+#:
+#: `test_ledger_page_uses_its_index_under_a_time_window` reads EXPLAIN QUERY PLAN
+#: for every sort x direction and fails on any TEMP B-TREE.
+LEDGER_SORTS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "valid_ts":    ("e.valid_ts",    "ix_events_coll_valid",    ("e.valid_ts",)),
+    "observed_ts": ("e.observed_ts", "ix_events_coll_observed", ("e.observed_ts",)),
+    "token_num":   ("e.token_num",   "ix_events_coll_tokennum", ("e.token_num", "e.valid_ts")),
+    "maker":       ("e.maker",       "ix_events_coll_maker",    ("e.maker", "e.valid_ts")),
+    "event_type":  ("e.event_type",  "ix_events_coll_type",     ("e.event_type", "e.valid_ts")),
+    "price_eth":   ("e.price_eth",   "ix_events_coll_price",    ("e.price_eth", "e.valid_ts")),
+}
+#: The value of each ordering column, read off a returned row, for the cursor.
+_LEDGER_KEY_FIELD = {"e.valid_ts": "valid_ts", "e.observed_ts": "observed_ts",
+                     "e.token_num": "token_num", "e.maker": "maker",
+                     "e.event_type": "event_type", "e.price_eth": "price_eth",
+                     "e.rowid": "rowid"}
+#: Columns the UI shows that CANNOT be sorted, each with the reason, so the
+#: refusal is specific rather than "unsupported". `price_usd` is the interesting
+#: one: it is not a monotone function of `price_eth` (the rate moves), so it
+#: cannot borrow that index and sorting by it would be a full scan.
+LEDGER_UNSORTABLE: dict[str, str] = {
+    "price_usd": "the ETH/USD rate moves between rows, so a USD order is not the ETH order "
+                 "and cannot use the price index. Sort by price_eth.",
+    "token_id":  "token_id is TEXT and sorts lexically (#10 before #9). Sort by token_num, "
+                 "which is the same column as a number.",
+    "taker":     "no (collection, taker, valid_ts) index -- the taker is set on sales only, "
+                 "which is 3 rows in 40 minutes. Filter by taker instead.",
+    "lag":       "observed_ts - valid_ts is computed per row and cannot be indexed. Sort by "
+                 "observed_ts or valid_ts.",
+    "exit_reason": "it lives in order_lives, not events, and the join is per row. Filter by it "
+                   "if you need it grouped.",
+    "order_hash": "indexed for lifecycle joins, not for ordering under a collection filter.",
+    "name":      "token names live in `tokens`, not on the event row.",
+}
+#: An exact COUNT(*) over a filtered 4 M-row table on every keystroke is the other
+#: way to make this feel broken (design §8.1.2). We count up to this many and say
+#: which we got: `exact: true` under a filter narrow enough to be cheap, otherwise
+#: a floor with `exact: false`.
+LEDGER_COUNT_CAP = 50_000
+#: "chart this selection" caps at 5,000 rows and STATES the cap (design §8.1.3).
+LEDGER_CHART_CAP = 5_000
+LEDGER_PAGE_MAX = 500
+
+_LEDGER_ROW_SQL = """
+    SELECT e.rowid, e.valid_at, e.observed_at, e.valid_ts, e.observed_ts, e.event_type,
+           e.token_id, e.token_num, e.price_eth, e.price_usd, e.price_basis,
+           e.maker, e.taker, e.order_hash, e.quantity, e.payment_symbol,
+           ol.exit_reason, ol.t_term
+    FROM events e LEFT JOIN order_lives ol ON ol.order_hash = e.order_hash
+"""
+_LEDGER_ROW_KEYS = ("rowid", "valid_at", "observed_at", "valid_ts", "observed_ts", "event_type",
+                    "token_id", "token_num", "price_eth", "price_usd", "price_basis",
+                    "maker", "taker", "order_hash", "quantity", "payment_symbol",
+                    "exit_reason", "t_term")
+
+
+def parse_token_spec(spec: str | None) -> tuple[int | None, int | None]:
+    """`'4207'` -> (4207, 4207); `'4-500'` / `'4–500'` -> (4, 500); `''` -> (None, None).
+
+    Refuses anything else rather than ignoring it: a filter that is silently
+    dropped is a wrong answer that looks right.
+    """
+    if spec is None or str(spec).strip() == "":
+        return None, None
+    s = str(spec).strip().replace("–", "-").replace("—", "-").lstrip("#")
+    try:
+        if "-" in s:
+            a, b = s.split("-", 1)
+            lo = int(a) if a.strip() else None
+            hi = int(b) if b.strip() else None
+        else:
+            lo = hi = int(s)
+    except ValueError as exc:
+        raise ValueError(
+            f"token must be a number (`4207`) or a range (`4-500`); got {spec!r}") from exc
+    if lo is not None and hi is not None and lo > hi:
+        raise ValueError(f"token range needs low <= high; got {spec!r}")
+    return lo, hi
+
+
+def encode_cursor(payload: dict[str, Any]) -> str:
+    import base64
+    return base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), default=str).encode()).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> dict[str, Any]:
+    import base64
+    try:
+        pad = "=" * (-len(cursor) % 4)
+        return json.loads(base64.urlsafe_b64decode(cursor + pad).decode())
+    except Exception as exc:  # noqa: BLE001 - a bad cursor is a caller mistake, not a crash
+        raise ValueError(f"ledger cursor is not readable: {type(exc).__name__}") from exc
+
+
+def _keyset_clause(cols: list[str], vals: list[Any], direction: str) -> tuple[str, list[Any]]:
+    """SQL for "strictly AFTER `vals` in `ORDER BY cols <direction>`", with NULLs.
+
+    Two branches carry the whole correctness of pagination and both are easy to
+    leave out, because both are invisible until the data has nulls or ties:
+
+      * **NULLs.** SQLite orders NULLs FIRST ascending and LAST descending, and
+        `key < NULL` evaluates to NULL rather than to true. A naive `key < ?`
+        keyset therefore stops dead at the first null-keyed row and silently
+        returns a truncated result. So the comparison reproduces the ORDER BY's
+        own null placement: descending, nothing sorts after a NULL except a
+        smaller rowid within the same NULL; ascending, every non-NULL does.
+      * **The full tuple, ending in rowid.** At ~48 events/s many rows share a
+        timestamp, a maker and a price. Without a total order a page boundary
+        landing inside a tie repeats rows or skips them, and which one it does
+        depends on the data.
+
+    Built inner-to-outer, so the outermost (first) column's parameters have to be
+    prepended, not appended. `test_ledger_keyset_walks_nulls_and_ties_on_every_sort`
+    removes each branch in turn and proves the walk catches it.
+    """
+    desc = direction == "desc"
+
+    def after(col: str, v: Any) -> tuple[str, list[Any]]:
+        if v is None:
+            return ("0", []) if desc else (f"{col} IS NOT NULL", [])
+        return ((f"({col} < ? OR {col} IS NULL)", [v]) if desc else (f"{col} > ?", [v]))
+
+    def same(col: str, v: Any) -> tuple[str, list[Any]]:
+        return (f"{col} IS NULL", []) if v is None else (f"{col} IS ?", [v])
+
+    sql, args = "0", []                    # equal on every column INCLUDING rowid = the cursor row
+    for col, v in zip(reversed(cols), reversed(vals), strict=True):
+        a_sql, a_args = after(col, v)
+        s_sql, s_args = same(col, v)
+        sql = f"({a_sql} OR ({s_sql} AND {sql}))"
+        args = a_args + s_args + args
+    return sql, args
+
+
+def _ledger_fingerprint(sort: str, direction: str, where: str, args: list[Any]) -> str:
+    """A short hash of everything that decides the row ORDER and the row SET.
+
+    It travels in the cursor so a page-2 request whose filter or sort changed is
+    REFUSED rather than silently returning rows from a different query -- the
+    failure mode where a keyset paginator quietly interleaves two result sets.
+    """
+    import hashlib
+    blob = json.dumps([sort, direction, where, args], default=str, separators=(",", ":"))
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]   # noqa: S324 - not a security digest
+
+
+# --- the wallet profile schema, and the boundary it enforces ---------------
+#
+# `.claude/agents/market-analyst.md`: "the unit of analysis is the address", and
+# "you do not attempt to link an address to a legal name, a company or LLC, an
+# employer, a home city ... or any off-chain identity". Design §8.2.1 asks for
+# that boundary to be enforced BY THE SCHEMA rather than by discipline, so that a
+# reviewer checks the record rather than the rendering code:
+#
+#     the wallet profile object has no field for a name, employer, company,
+#     location or any off-chain identity. There is nowhere to put one.
+#
+# `_assert_address_only` runs on every profile this module returns, so a future
+# "notes" or "who is this" field fails here, in the layer that builds it, rather
+# than being caught by a reviewer reading the UI.
+WALLET_PROFILE_KEYS: tuple[str, ...] = (
+    "address", "window", "behaviour", "counterparties", "chain", "cluster", "flags", "basis")
+#: Every marker, matched as a whole NAME SEGMENT (`owner_label` -> `owner`, `label`),
+#: with a trailing plural tolerated. The free-text ones are the point: `notes`,
+#: `note`, `alias`, `label` and `tag` are where an off-chain identity actually
+#: arrives -- nobody adds a field called `legal_name`, they add `notes` and then
+#: type into it.
+IDENTITY_KEY_MARKERS: tuple[str, ...] = (
+    "name", "company", "employer", "location", "city", "country", "person",
+    "email", "phone", "identity", "legal", "real", "who_is", "whois",
+    "note", "notes", "alias", "handle", "ens", "owner", "label", "tag",
+    "twitter", "discord", "telegram", "bio", "profile",
+    # The free-text clause, completed. `note` alone was half a rule: a field called
+    # `comment`, `memo`, `remark`, `description`, `about` or `free_text` is the same
+    # field with a different name, and `contact` is the one that would arrive already
+    # holding an email. The rule is "no free text on an address profile", so every
+    # ordinary name for free text has to be in the list or the rule is decorative.
+    "comment", "comments", "memo", "remark", "remarks", "description",
+    "about", "free_text", "freetext", "contact",
+)
+#: The subset that is ALSO safe to match as a substring, for keys with no separator
+#: (`realname`, `ensname`). The others are deliberately segment-only, and that is not
+#: fussiness: `tokens` contains `ens` and `vintage` contains `tag`, so a substring
+#: rule would fire on `distinct_tokens_touched` and the guard would be deleted within
+#: a week for crying wolf. A guard nobody trusts protects nothing.
+IDENTITY_SUBSTRING_MARKERS: tuple[str, ...] = (
+    "name", "company", "employer", "location", "identity", "email", "phone",
+    "alias", "handle", "twitter", "discord", "telegram", "whois", "who_is", "real",
+    "comment", "memo", "remark", "description", "freetext", "free_text", "contact",
+    # `about` is deliberately NOT here: it is a substring of nothing we use today,
+    # but it is a common English fragment and the segment rule already catches the
+    # field name `about`. Short markers stay segment-only on purpose -- see above.
+)
+
+
+def _key_segments(key: str) -> set[str]:
+    """`owner_label` -> {owner, label}; `firstFundedBy` -> {first, funded, by}.
+
+    Splits on non-alphanumerics AND on camelCase boundaries, and adds the singular
+    of each segment so `notes` matches the marker `note`.
+    """
+    import re as _re
+    parts = [p for p in _re.split(r"[^A-Za-z0-9]+", _re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)) if p]
+    out = {p.lower() for p in parts}
+    out |= {p[:-1] for p in out if p.endswith("s") and len(p) > 2}
+    return out
+
+
+def _assert_address_only(obj: Any, path: str = "profile") -> None:
+    """Raise if any key ANYWHERE in a wallet profile could hold an off-chain identity.
+
+    Walks dicts and lists to any depth, because the leak this guards against is not
+    `profile["name"]` -- nobody would write that -- it is
+    `cluster.members[3].notes`, three levels down, added by whoever wires the
+    clustering. `.claude/agents/market-analyst.md`: the unit of analysis is the
+    address, and there must be nowhere in the record to put a person.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = str(k)
+            low = key.lower()
+            segs = _key_segments(key)
+            hit = next((m for m in IDENTITY_KEY_MARKERS if m in segs), None) or \
+                next((m for m in IDENTITY_SUBSTRING_MARKERS if m in low), None)
+            if hit:
+                raise ValueError(
+                    f"wallet profile field {path}.{key!r} matches the identity marker {hit!r}: "
+                    "the profile is address-level only and has no field for an off-chain "
+                    "identity, or for free text that could become one "
+                    "(.claude/agents/market-analyst.md). Remove the field; do not rename it "
+                    "past the guard.")
+            _assert_address_only(v, f"{path}.{key}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            _assert_address_only(v, f"{path}[{i}]")
+
+
+def share(n: int | None, of: int | None) -> dict[str, Any]:
+    """A percentage that cannot be quoted without its count (project rule 4).
+
+    Returns `{pct, n, of}` and never a bare float. `pct` is None when the
+    denominator is zero -- "0 of 0" is not 0%, it is undefined -- and the two
+    counts travel with it so the card can print `61.4% of 62,218` rather than
+    `61.4%`.
+    """
+    n = int(n or 0)
+    of = int(of or 0)
+    return {"pct": (100.0 * n / of) if of else None, "n": n, "of": of}

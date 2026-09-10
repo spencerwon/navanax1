@@ -124,7 +124,17 @@ input[type=search]{padding:6px 10px;min-width:0;width:100%;cursor:text}
 /* ---- layout ---- */
 .wrap{display:grid;grid-template-columns:272px 1fr;gap:0}
 aside{border-right:1px solid var(--border);padding:16px;position:sticky;top:var(--top,160px);height:calc(100vh - var(--top,160px));overflow:auto;background:var(--bg)}
-main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:16px 24px 32px;min-width:0}
+main{display:block;padding:16px 24px 32px;min-width:0}
+/* PR-9: one grid per VIEW. Exactly one carries `.on` at a time, so a panel is
+   never rendered under a tab it does not belong to, and a hidden view costs no
+   layout. The 12-column grid, the 14 px gap and the c* spans are unchanged --
+   the split moved panels between grids, it did not restyle any of them. */
+.view{display:none}
+.view.on{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;min-width:0}
+@media(max-width:1250px){.view.on{grid-template-columns:1fr}}
+.tabs{margin-left:0}
+.tabs button{min-width:0;padding:5px 13px}
+aside.ro .tvals,aside.ro .tgroup,aside.ro .tsearch{display:none}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;min-width:0;box-shadow:0 1px 0 rgba(255,255,255,.02) inset,0 8px 24px rgba(0,0,0,.25)}
 .card h2{font-size:13.5px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.card h2 em{color:var(--muted);font-style:normal;font-weight:500;font-size:12px}
 /* range chips: our own, because Plotly's rangeselector cannot be themed to match (DESIGN §2.3.1) */
@@ -192,6 +202,28 @@ aside h3{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spaci
 .tlg .legs{color:var(--text-2);font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px;padding-left:33px;margin-top:-2px}
 .tlg .notice{color:var(--warn);font-size:11.5px}
 .pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;color:var(--muted);font-size:12px}
+/* ---- PR-9: the ledger filter row, the wallet card and the health grid ---- */
+.fbar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin:8px 0 4px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.fbar .ctl label{font-size:10px}
+.fbar select,.fbar input{font-size:12px;padding:5px 9px;min-width:110px}
+.fbar input[type=search]{width:130px}
+.scrollx{overflow:auto;max-height:560px}
+th.dead{color:var(--faint);cursor:not-allowed}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:600;border:1px solid var(--border-2);background:var(--surface-2)}
+.wcard{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:10px}
+@media(max-width:1250px){.wcard{grid-template-columns:1fr}}
+.wcol h3{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
+.wrow{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:3px 0;border-bottom:1px solid var(--border)}
+.wrow b{font-variant-numeric:tabular-nums;font-weight:650}
+.wrow .cnt{color:var(--muted);font-size:11px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.hgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:1250px){.hgrid{grid-template-columns:repeat(2,1fr)}}
+.hstat{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-s);padding:10px 12px}
+.hstat small{display:block;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.hstat b{display:block;font-size:19px;font-weight:650;font-variant-numeric:tabular-nums;margin-top:2px}
+.hstat .sub{color:var(--faint);font-size:11px;margin-top:2px}
+.rowsel{background:var(--verde-dim)}
+tr.pick td{cursor:pointer}
 footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px solid var(--border)}
 </style></head><body>
 <header><div class="hwrap">
@@ -204,7 +236,11 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
   <div class="tile"><small>gaps open · backfill</small><b id="t-gaps">…</b></div>
   <div class="tile"><small>ETH / USD in use</small><b id="t-rate-usd">…</b></div>
   <div class="tile"><small>landing zone</small><b id="t-disk">…</b></div>
- </div></div></header>
+ </div></div>
+ <!-- PR-9: the view tabs. Routed on the URL hash (#/market …) so a view is
+      linkable — REQ-F-40 needs deep links into evidence and retrofitting routing
+      later costs more than doing it now (DESIGN §1). -->
+ <div class="hwrap" style="padding-top:0"><div class="seg tabs" id="tabs"></div></div></header>
 <div class="controls">
  <div class="ctl"><label>collection</label><select id="collection"></select></div>
  <div class="ctl"><label>interval</label><select id="interval"></select></div>
@@ -221,14 +257,33 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
  <h3>Traits <span id="tsum" style="text-transform:none;letter-spacing:0;font-weight:500"></span></h3>
  <div id="onboard"></div>
  <div id="chips"></div>
+ <div id="roChips"></div>
  <div id="traits"><div class="empty">no traits loaded yet — run <b>traits.command</b></div></div>
 </aside>
 <main>
+<!-- ===================== #/market ===================== -->
+<section class="view" id="v-market">
  <div class="kpis c12" id="kpis"></div>
- <div class="card c8"><h2><span id="h-prices">Prices</span><em id="h-prices-sub">lowest ask · highest collection offer · highest item bid, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="tlg" id="tlegend"></div><div class="basis" id="b-prices"></div></div>
+ <i id="anchor-market-hero" hidden></i>
+ <!-- The Prices / trait-chart card is ONE card and the router MOVES it between the
+      Market and Traits grids (the two anchors above and below). Two copies would be
+      two price panels showing different token sets, which is exactly how a trait
+      floor gets read as the collection floor (docs/08 §4b.5). -->
+ <div class="card c8" id="card-prices"><h2><span id="h-prices">Prices</span><em id="h-prices-sub">lowest ask · highest collection offer · highest item bid, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="tlg" id="tlegend"></div><div class="basis" id="b-prices"></div></div>
  <div class="card c4"><h2>Live book<em>standing orders</em></h2><div id="book"></div></div>
  <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer · holes = no bid or no ask</em><span class="chips" data-plot="p-imm"></span></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
+ <div class="card c4"><h2>Activity<em>per interval</em><span class="chips" data-plot="p-act"></span></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
+ <div class="card c4"><h2>Who is making this market<em>events by wallet · click a wallet for its card</em></h2><div id="makers"></div></div>
+ <div class="card c4"><h2>Sales tape<em>most recent</em></h2><div id="tape"></div></div>
  <div class="card c4"><h2>Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
+</section>
+<!-- ===================== #/traits ===================== -->
+<section class="view" id="v-traits">
+ <i id="anchor-traits-hero" hidden></i>
+ <div class="card c12"><h2>Tokens<em>every token matching the filters · click a column to sort</em></h2><div id="screener"></div></div>
+</section>
+<!-- ===================== #/flow ======================= -->
+<section class="view" id="v-flow">
  <div class="card c12"><h2>How long a bid stands<em id="s-sub">Kaplan–Meier · right-censored at as_of · competing risks · maker-episode cluster band</em></h2>
   <div class="survbar" id="s-bar"></div>
   <div class="basis" id="s-head"></div>
@@ -237,16 +292,55 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
   <div id="s-mini" class="plot mini"></div>
   <div id="s-drill"></div>
   <div class="basis" id="b-surv"></div></div>
- <div class="card c12"><h2>Tokens<em>every token matching the filters · click a column to sort</em></h2><div id="screener"></div></div>
- <div class="card c8"><h2>Activity<em>per interval</em><span class="chips" data-plot="p-act"></span></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
- <div class="card c4"><h2>Who is making this market<em>events by wallet, this window</em></h2><div id="makers"></div></div>
- <div class="card c6"><h2>Sales tape<em>most recent</em></h2><div id="tape"></div></div>
- <div class="card c6"><h2>Ingestion gaps<em>shaded on every chart</em></h2><div id="gaps"></div><h2 style="margin-top:16px">Integrity audit<em>checksums, every refresh</em></h2><div id="audit"></div></div>
+ <div class="card c12"><h2>Event ledger<em id="lg-sub">every event, newest first · the raw record every other panel is an aggregate of</em></h2>
+  <div class="fbar" id="lg-bar"></div>
+  <div id="ledger"></div>
+  <div class="basis" id="b-ledger"></div></div>
+ <div class="card c12" id="lg-chart-card" hidden><h2>Chart this selection<em>one series per event type · markers always · holes preserved</em><span class="chips" data-plot="p-ledger"></span></h2>
+  <div id="p-ledger" class="plot"></div><div class="basis" id="b-ledger-chart"></div></div>
+</section>
+<!-- ===================== #/wallets ==================== -->
+<section class="view" id="v-wallets">
+ <div class="card c4"><h2>Wallets<em>ranked by events in this window</em></h2><div id="wl-list"></div></div>
+ <div class="card c8"><h2 id="wl-title">Address card<em>address-level only · every percentage with its count</em></h2><div id="wl-card"><div class="empty">pick an address on the left</div></div></div>
+ <div class="card c12"><h2>Counterparty adjacency<em>rows = seller, columns = buyer, cell = trades · deterministic heat-map, not a force graph</em></h2><div id="wl-adj" class="plot"></div><div class="basis" id="b-adj"></div></div>
+</section>
+<!-- ===================== #/health ===================== -->
+<section class="view" id="v-health">
+ <div class="card c12"><h2>Can I trust the other tabs?<em id="hz-sub">recorder, coverage, alarms — every number that says the record is incomplete</em></h2><div id="hz-degraded"></div><div class="hgrid" id="hz-stats"></div><div class="basis" id="hz-basis"></div></div>
+ <div class="card c6"><h2>Ingestion gaps<em>shaded on every chart · never filled</em></h2><div id="gaps"></div></div>
+ <div class="card c6"><h2>Integrity audit<em>checksums, every refresh</em></h2><div id="audit"></div></div>
+ <div class="card c6"><h2>Crossed standing book<em>ask below the collection offer — a reconstruction defect, never an arbitrage</em></h2><div id="hz-crossed"></div></div>
+ <div class="card c6"><h2>Trait-offer criteria coverage<em>a criterion matching no trait value reads as a quiet market</em></h2><div id="hz-criteria"></div></div>
+ <div class="card c6"><h2>Normalizer<em>the fold from landing zone to store</em></h2><div id="hz-norm"></div></div>
+ <div class="card c6"><h2>Store<em>what every other tab is querying</em></h2><div id="hz-store"></div></div>
+</section>
 </main></div>
 <footer>Every number comes through the MetricRequest contract (docs/06 §3): observed quantities only, no fair value, no smoothing, wash filter = raw. Undefined values are drawn as holes, never filled. Times shown in <span id="tz"></span>.</footer>
 <script>
-/* ---------- state ---------- */
-const S={denom:'ETH',transform:'ABS',traits:{},tz:'America/Chicago',sort:'token_id',dir:'asc',page:0,traitTypes:[],sel:{}};
+/* ---------- state ----------
+   GLOBAL state (DESIGN §1): collection, range, interval, denomination, transform and
+   the trait filter persist ACROSS tabs and survive a reload. They live in the URL hash
+   so a view is linkable, and are mirrored to localStorage so opening the bare page
+   restores the last thing the Operator was looking at. Per-view controls (the survival
+   sub-bar, the ledger filter row) stay inside their view and are never global.        */
+const S={view:'market',denom:'ETH',transform:'ABS',traits:{},tz:'America/Chicago',
+ sort:'token_id',dir:'asc',page:0,traitTypes:[],sel:{},
+ touched:{range:false,interval:false},   // once he changes one, his choice sticks
+ wallet:null};
+const VIEWS=['market','traits','flow','wallets','health'];
+const VIEW_LABEL={market:'Market',traits:'Traits',flow:'Flow',wallets:'Wallets',health:'Health'};
+const GLOBAL_KEYS=['collection','interval','range','denom','transform','traits'];
+/* Each view may override the DEFAULT range/interval on FIRST visit. After the Operator
+   changes either one himself (`S.touched`), his choice follows him between tabs --
+   a view that silently reset the range every time he switched to it would be a view
+   that answers a different question from the one he asked. */
+const VIEW_DEFAULTS={market:{range:'6h',interval:'5m'},traits:{range:'24h',interval:'1h'},
+ flow:{range:'1h',interval:'1m'},wallets:{range:'24h',interval:'1h'},health:{range:'24h',interval:'1h'}};
+/* The trait sidebar shows on Market and Traits. On Flow, Wallets and Health the filter
+   is STILL APPLIED and still visible -- as a read-only chip row with a clear button --
+   but 272 px of checkboxes is not earning its place there (DESIGN §1). */
+const SIDEBAR_VIEWS=['market','traits'];
 /* ---------- the palette, read from the :root block so Plotly gets the same hex the CSS does.
    No colour literal lives in this script: `test_ui_contract` fails the build on one. ---------- */
 const CSS=getComputedStyle(document.documentElement);
@@ -365,7 +459,7 @@ function chipsFor(id){const host=document.querySelector(`.chips[data-plot="${id}
  host.innerHTML=(isChipRange(cur)?'':`<span class="rname" title="anchored range: it has no fixed width, so no chip is lit">${esc(rangeName())}</span>`)
   +RANGES.map(r=>`<button data-r="${r}" class="${r===cur?'on':''}" title="set the global range to ${r}">${r}</button>`).join('')
   +(S.sel[id]?`<button class="reset" data-reset="1" title="clear the selected window on this chart">reset ×</button>`:'');
- host.querySelectorAll('button[data-r]').forEach(b=>b.addEventListener('click',()=>{$('#range').value=b.dataset.r;S.sel={};all()}));
+ host.querySelectorAll('button[data-r]').forEach(b=>b.addEventListener('click',()=>{$('#range').value=b.dataset.r;S.touched.range=true;S.sel={};all()}));
  const rb=host.querySelector('button[data-reset]');
  if(rb)rb.addEventListener('click',()=>{delete S.sel[id];if(window.Plotly)Plotly.relayout(id,{'xaxis.autorange':true});chipsFor(id)})}
 function allChips(){document.querySelectorAll('.chips').forEach(h=>chipsFor(h.dataset.plot))}
@@ -593,7 +687,10 @@ async function book(){const p=base();const b=await J('/api/book?'+qs({collection
 async function tape(){const p=base();const t=await J('/api/tape?'+qs({collection:p.collection,traits:p.traits,limit:25}));const d=S.denom==='USD'?'price_usd':'price_eth';
  $('#tape').innerHTML=t.length?`<table><tr><th>when</th><th>item</th><th class="num">${S.denom}</th><th>seller</th><th>buyer</th></tr>${t.map(r=>`<tr><td>${clock(r.valid_at)}</td><td>#${esc(r.token_id||'?')}</td><td class="num">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td class="mono">${esc(short(r.taker))}</td></tr>`).join('')}</table>`:`<div class="empty">no sales in the store yet — a thin market can go hours between them</div>`}
 async function makers(){const p=base();const m=await J('/api/makers?'+qs({collection:p.collection,range:p.range}));const T=m.total_events_with_maker||1;
- $('#makers').innerHTML=m.top.length?`<table><tr><th>wallet</th><th class="num">events</th><th class="num">share</th><th class="num">bids</th><th class="num">cancels</th></tr>${m.top.map(r=>`<tr><td class="mono">${esc(short(r.maker))}</td><td class="num">${fmt(r.events,0)}</td><td class="num">${(100*r.events/T).toFixed(1)}%</td><td class="num">${fmt(r.bids,0)}</td><td class="num">${fmt(r.cancels,0)}</td></tr>`).join('')}</table><div class="basis">of ${fmt(T,0)} events with a wallet in this window</div>`:'<div class="empty">nothing in window</div>'}
+ $('#makers').innerHTML=m.top.length?`<table><tr><th>wallet</th><th class="num">events</th><th class="num">share</th><th class="num">bids</th><th class="num">cancels</th></tr>${m.top.map(r=>`<tr class="pick" data-a="${esc(r.maker)}"><td class="mono">${esc(short(r.maker))}</td><td class="num">${fmt(r.events,0)}</td><td class="num">${(100*r.events/T).toFixed(1)}%</td><td class="num">${fmt(r.bids,0)}</td><td class="num">${fmt(r.cancels,0)}</td></tr>`).join('')}</table><div class="basis">of ${fmt(T,0)} events with a wallet in this window · click a wallet to open its address card (DESIGN §8.2.3)</div>`:'<div class="empty">nothing in window</div>';
+ // Every maker/taker address on the page is one click from the Wallets view; the
+ // Wallets view is one click from the Ledger rows that back every claim on it.
+ $('#makers').querySelectorAll('tr.pick').forEach(tr=>tr.addEventListener('click',()=>{S.wallet=tr.dataset.a;location.hash='#/wallets'}))}
 /* ---------- PR-8: "how long a bid stands", rebuilt (DESIGN §4, quant §3) --------
    Three coupled pieces on the panel and one slide-down list:
      (a) the Kaplan-Meier step curve with the MAKER-EPISODE CLUSTER BOOTSTRAP band
@@ -627,11 +724,17 @@ function survBar(){
  $('#s-maker').addEventListener('change',e=>{SURV.mk=e.target.value;SURV.bin=null;surv()});
  $('#s-band').addEventListener('change',e=>{SURV.band=e.target.value;SURV.bin=null;surv()});
  const cw=$('#s-clearwin');if(cw)cw.addEventListener('click',()=>{SURV.from=SURV.to=null;SURV.bin=null;surv()})}
+/* BUG-20260910-066. These three strings go into `.textContent`, which never
+   interprets markup — so esc() here was not a safety measure, it was a display
+   defect: the withheld-percentiles reason contains `n_eff = 0 ... < 30`, and the
+   `<` was rendered to the Operator as the literal characters `&lt;`. Do NOT
+   "restore" esc() on a textContent target; escape at the innerHTML boundary,
+   which is where every other call site on this page does it. */
 function survHead(r){
  const pcts=r.percentiles?`p10 ${dur(r.percentiles.p10_s)} · median ${dur(r.percentiles.median_s)} · p90 ${dur(r.percentiles.p90_s)}`
-   :`percentiles WITHHELD — ${esc(r.percentiles_withheld_reason||'')}`;
+   :`percentiles WITHHELD — ${r.percentiles_withheld_reason||''}`;
  const rm=r.rmst.rmst_s!=null?`RMST(${dur(r.rmst.tau_s)}) = ${dur(r.rmst.rmst_s)} · P(not ended by τ*) = ${(100*r.rmst.p_alive_at_tau).toFixed(1)}%`
-   :`RMST — ${esc(r.rmst.note||'no data')}`;
+   :`RMST — ${r.rmst.note||'no data'}`;
  const res=(r.residual||[]).filter(x=>x.p_still_standing!=null)
    .map(x=>`age ${dur(x.age_s)} → +${dur(x.horizon_s)}: ${(100*x.p_still_standing).toFixed(1)}%`).join(' · ');
  $('#s-head').textContent=
@@ -639,7 +742,7 @@ function survHead(r){
   +`${pcts}\n${rm}${res?'\nresidual survival — '+res:''}`}
 function survBasis(r){
  const out=[];
- out.push(`as of ${clock(r.basis.as_of)} ${S.tz} · window ${clock(r.basis.window.start)} → ${clock(r.basis.window.end)} · kind ${esc(r.kind)}`);
+ out.push(`as of ${clock(r.basis.as_of)} ${S.tz} · window ${clock(r.basis.window.start)} → ${clock(r.basis.window.end)} · kind ${r.kind}`);   // textContent: see BUG-20260910-066
  out.push(`estimator: ${r.basis.estimator}`);
  out.push(`censoring: ${r.basis.censoring}`);
  if(r.unknown_terminator_n)out.push(`${fmt(r.unknown_terminator_n,0)} life/lives had a terminator we could not place in time — excluded from the risk set and counted, never called censored`);
@@ -753,9 +856,251 @@ async function survDrill(bin){
    :'<div class="empty">no orders in this bin under the current filters</div>')
   +`<div class="basis">${esc(d.floor_basis)} · both clocks are shown: observed − valid is our stream lag, and a bid whose whole life is shorter than the lag was never reachable · showing ${fmt(d.rows.length,0)} of ${fmt(d.total,0)}</div>`;
  const x=$('#s-drill-x');if(x)x.addEventListener('click',()=>{SURV.bin=null;$('#s-drill').innerHTML=''})}
-async function gapsAudit(){gaps=await J('/api/gaps');const a=await J('/api/audit');
- $('#gaps').innerHTML=gaps.length?`<table><tr><th>started</th><th>ended</th><th>reason</th><th>lost for good</th></tr>${gaps.slice(-10).reverse().map(g=>`<tr><td>${clock(g.started_at)}</td><td>${g.ended_at?clock(g.ended_at):'<span class=note>open</span>'}</td><td title="${esc(g.reason)}">${esc((g.reason||'').slice(0,48))}</td><td>${esc((g.irrecoverable_classes||[]).map(c=>c.replace('item_','')).join(', ')||'—')}</td></tr>`).join('')}</table>`:'<div class="empty">no gaps recorded</div>';
- $('#audit').innerHTML=(a.failures.length?a.failures.map(f=>`<div class="fail">${esc(f)}</div>`).join(''):'<div class="ok">clean</div>')+a.notes.map(n=>`<div class="note">${esc(n)}</div>`).join('')+`<div class="basis">${a.mode} · ${clock(a.at)}</div>`}
+/* Gaps are fetched on EVERY view, not only on Health: `gapShapes()` shades them on
+   every time chart (REQ-F-15), and a chart drawn over unshaded time we were not
+   listening in is the one lie this page must never tell. Rendering them is Health's
+   job; knowing about them is everyone's. */
+async function loadGaps(){gaps=await J('/api/gaps')}
+
+/* ---------- PR-9: the Health view ----------------------------------------
+   One request. `/api/health` aggregates the recorder, the gap register, the
+   integrity audit, the crossed-book alarm for EVERY watched collection, criteria
+   coverage, the normalizer's fold stats (files_failed / files_short -- the BUG-058
+   signature) and the store's size. Four requests would be a view that can render
+   three of them and silently drop the fourth. */
+const okbad=(good,txt)=>`<span class="${good?'ok':'fail'}">${txt}</span>`;
+async function health(){const h=await J('/api/health?'+qs({collection:base().collection}));
+ const g=h.gaps,nz=h.normalizer,st=h.store,cb=h.crossed_book,qc=h.quick_check||{},sw=h.store_writer||{};
+ const stale=st.last_observed_at?((Date.now()-Date.parse(st.last_observed_at))/1000):null;
+ const foldErr=nz.error?' · ERROR':'';
+ /* DEGRADED (BUG-20260910-067): the analytical store could not be opened, so every
+    other panel is answering 503. Health is where the rebuild recipe lives, and the
+    store is DERIVED — moving it aside loses no history. Rendered ABOVE the stat row
+    so it is the first thing read, and only when it applies. */
+ $('#hz-degraded').innerHTML=h.degraded
+   ?`<div class="fail"><b>The analytical store could not be opened — every other tab is empty until it is rebuilt.</b>`
+    +`<div class="sub">${esc(h.degraded.detail||'')}</div>`
+    +`<div class="sub">${esc(h.degraded.rebuild||'')}</div>`
+    +`<div class="sub">${esc(h.degraded.note||'')}</div></div>`:'';
+ $('#hz-stats').innerHTML=
+   `<div class="hstat"><small>recorder</small><b>${okbad(h.recorder.running,h.recorder.running?'recording':'stopped')}</b><div class="sub">last event ${age(st.last_observed_at)}${stale!=null&&stale>300?' · nothing for 5 min+':''}</div></div>`
+  +`<div class="hstat"><small>gaps open · backfill</small><b>${okbad(!g.open,fmt(g.open,0))} · ${fmt(g.awaiting_backfill,0)}</b><div class="sub">${fmt(g.total_recorded,0)} recorded in all · a gap is never filled</div></div>`
+  +`<div class="hstat"><small>crossed book (24h)</small><b>${okbad(!cb.alarms,fmt(cb.alarms,0))}</b><div class="sub">buckets where the ask sat below the collection offer</div></div>`
+  +`<div class="hstat"><small>integrity</small><b>${okbad(!h.integrity.failures.length,h.integrity.failures.length?fmt(h.integrity.failures.length,0)+' failed':'clean')}</b><div class="sub">${esc(h.integrity.mode)}</div></div>`
+  +`<div class="hstat"><small>files failed · short</small><b>${okbad(!nz.files_failed&&!nz.files_short,`${fmt(nz.files_failed,0)} · ${fmt(nz.files_short,0)}`)}</b><div class="sub">of ${fmt(nz.files_checked,0)} checked · BUG-058</div></div>`
+  +`<div class="hstat"><small>last fold</small><b>${age(nz.last_fold_at)}</b><div class="sub">every ${fmt(nz.refresh_seconds,0)}s · ${fmt(nz.took_ms,0)} ms${foldErr}</div></div>`
+  +`<div class="hstat"><small>store on disk</small><b>${bytes(st.bytes)}</b><div class="sub">landing zone ${bytes(st.landing_bytes)}</div></div>`
+  +`<div class="hstat"><small>store integrity</small><b>${okbad(qc.ok,qc.ok?'quick_check ok':(qc.result||[]).join('; ').slice(0,40)||'failed')}</b><div class="sub">checked ${age(qc.at)}${qc.cached?' (cached)':''} · at most every ${fmt(qc.ttl_seconds/60,0)} min</div></div>`
+  +`<div class="hstat"><small>events stored</small><b>${fmt(st.events,0)}</b><div class="sub">${fmt(st.events_last_60s,0)} in the last 60 s</div></div>`;
+ $('#hz-basis').textContent=`as of ${clock(h.at)} ${S.tz} · watchlist ${h.watchlist.join(', ')}`
+  +`\n${cb.note}\n${nz.files_note}`;
+ $('#gaps').innerHTML=gaps.length?`<table><tr><th>started</th><th>ended</th><th>reason</th><th>lost for good</th></tr>${gaps.slice(-10).reverse().map(g2=>`<tr><td>${clock(g2.started_at)}</td><td>${g2.ended_at?clock(g2.ended_at):'<span class=note>open</span>'}</td><td title="${esc(g2.reason)}">${esc((g2.reason||'').slice(0,48))}</td><td>${esc((g2.irrecoverable_classes||[]).map(c=>c.replace('item_','')).join(', ')||'—')}</td></tr>`).join('')}</table>`:'<div class="empty">no gaps recorded</div>';
+ $('#audit').innerHTML=(h.integrity.failures.length?h.integrity.failures.map(f=>`<div class="fail">${esc(f)}</div>`).join(''):'<div class="ok">clean</div>')+h.integrity.notes.map(n=>`<div class="note">${esc(n)}</div>`).join('')+`<div class="basis">${esc(h.integrity.mode)} · ${clock(h.integrity.at)}</div>`;
+ const cbr=Object.entries(cb.by_collection);
+ $('#hz-crossed').innerHTML=cbr.length?`<table><tr><th>collection</th><th class="num">crossed buckets</th><th class="num">buckets</th><th>window</th></tr>${cbr.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num ${v.negative_buckets?'fail':'ok'}">${fmt(v.negative_buckets,0)}</td><td class="num">${fmt(v.buckets,0)}</td><td>${esc(v.interval)} · ${esc(v.range)}</td></tr>`).join('')}</table><div class="basis">${cb.note}</div>`:'<div class="empty">no collection on the watchlist</div>';
+ const cc=Object.entries(h.criteria_coverage||{});
+ $('#hz-criteria').innerHTML=cc.length?`<table><tr><th>collection</th><th class="num">distinct criteria</th><th class="num">matching no trait</th><th class="num">share</th></tr>${cc.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num">${fmt(v.distinct_criteria,0)}</td><td class="num ${v.alert?'fail':'ok'}">${fmt(v.missing,0)}</td><td class="num">${v.distinct_criteria?(100*v.missing/v.distinct_criteria).toFixed(1)+'%':'—'}</td></tr>`).join('')}</table><div class="basis">a trait-offer criterion that matches no value in the traits table can never match a token, and that reads as "no trait-offer depth" — a quiet market — unless it is counted here. Share is of the distinct criteria in the store.</div>`:'<div class="empty">no criteria seen yet</div>';
+ $('#hz-norm').innerHTML=`<table>`
+  +[['last fold',clock(nz.last_fold_at)],['took',fmt(nz.took_ms,0)+' ms'],
+    ['files checked',fmt(nz.files_checked,0)],['files read',fmt(nz.files_read,0)],
+    ['files failed',fmt(nz.files_failed,0)],['files short',fmt(nz.files_short,0)],
+    ['rows added (last fold)',fmt(nz.rows_added,0)],['unparsed frames (last fold)',fmt(nz.unparsed,0)]]
+    .map(([k,v])=>`<tr><td>${k}</td><td class="num">${v}</td></tr>`).join('')
+  +`</table>`+(nz.last_error?`<div class="note">${esc(nz.last_error)}</div>`:'')
+  +(nz.error?`<div class="fail">${esc(nz.error)}</div>`:'')
+  +`<div class="basis">${nz.files_note}</div>`;
+ $('#hz-store').innerHTML=`<table>`
+  +[['events',fmt(st.events,0)],['order lives',fmt(st.order_lives,0)],['order criteria',fmt(st.order_criteria,0)],
+    ['unparsed',fmt(st.unparsed,0)],['tokens',fmt(st.tokens,0)],['traits',fmt(st.traits,0)],
+    ['landing files seen',fmt(st.watermarks,0)],['store on disk',bytes(st.bytes)],['landing zone',bytes(st.landing_bytes)],
+    ['last valid_at',clock(st.last_valid_at)],['last observed_at',clock(st.last_observed_at)],
+    ['fold writer',sw.pid?`pid ${sw.pid}${sw.this_process?' (this page)':''} since ${clock(sw.since)}`:'not recorded']]
+    .map(([k,v])=>`<tr><td>${k}</td><td class="num">${v}</td></tr>`).join('')
+  +`</table><div class="basis">observed − valid on the last row is our stream lag; if it drifts, every "now" on the other tabs is stale by that much. One process folds into this store at a time and holds ${esc(sw.lock||'the store lock')}; a second one refuses to start rather than becoming the second writer (BUG-20260910-067).</div>`}
+
+/* ---------- PR-9: the Event Ledger (DESIGN §8.1) --------------------------
+   Server-side sort and filter against a whitelist, keyset pagination, and a
+   selection chart. Nothing here sorts or filters in the browser: at ~4.1 M rows a
+   day the page never holds the result set, only the page it is showing. */
+const LG={sort:'valid_ts',dir:'desc',cursor:null,stack:[],type:'',token:'',maker:'',band:'',hash:'',hasPrice:false,chart:false};
+const LG_COLS=[['valid_at','time (valid)','valid_ts'],['observed_at','observed','observed_ts'],
+ ['lag_s','lag','lag'],['event_type','type','event_type'],['token_num','token #','token_num'],
+ ['price_eth','price ETH','price_eth'],['price_usd','price USD','price_usd'],
+ ['price_basis','basis','basis'],['maker','maker','maker'],['taker','taker','taker'],
+ ['exit_reason','exit','exit_reason'],['order_hash','order hash','order_hash']];
+const typeColor=t=>({item_listed:C.ask,item_received_bid:C.bid,item_received_offer:C.bid,
+ collection_offer:C.coll,trait_offer:C.trait,item_sold:C.sale,item_cancelled:C.cancel}[t]||C.muted);
+function lgQuery(){const p=base();
+ const q={collection:p.collection,traits:p.traits,range:p.range};
+ if(LG.type)q.type=LG.type; if(LG.token)q.token=LG.token; if(LG.maker)q.maker=LG.maker;
+ if(LG.band)q.price_band=LG.band; if(LG.hash)q.order_hash=LG.hash; if(LG.hasPrice)q.has_price='1';
+ return q}
+function lgBar(mk){
+ const chips=Object.entries(S.traits).flatMap(([t,vs])=>vs.map(v=>`<span class="pill">${esc(t)}: ${esc(v)}</span>`)).join('');
+ $('#lg-bar').innerHTML=
+   `<div class="ctl"><label>token #</label><input type="search" id="lg-token" placeholder="4207 or 4-500" value="${esc(LG.token)}"></div>`
+  +`<div class="ctl"><label>type</label><select id="lg-type"><option value="">every type</option>${['item_listed','item_received_bid','collection_offer','trait_offer','item_sold','item_cancelled','order_invalidate','item_transferred'].map(t=>`<option value="${t}" ${t===LG.type?'selected':''}>${t.replace('item_','')}</option>`).join('')}</select></div>`
+  +`<div class="ctl"><label>maker</label><select id="lg-maker"><option value="">every maker</option>${(mk||[]).map(m=>{const on=m.maker===LG.maker?'selected':'';return `<option value="${esc(m.maker)}" ${on}>${esc(short(m.maker))} · ${fmt(m.events,0)} ev</option>`}).join('')}</select></div>`
+  +`<div class="ctl"><label>price band</label><select id="lg-band">${BANDS.map(([v,l])=>`<option value="${v}" ${v===LG.band?'selected':''}>${l}</option>`).join('')}</select></div>`
+  +`<div class="ctl"><label>order hash</label><input type="search" id="lg-hash" placeholder="0x…" value="${esc(LG.hash)}"></div>`
+  +`<div class="ctl"><label>has price</label><label class="tval" style="padding:6px 5px"><input type="checkbox" id="lg-priced" ${LG.hasPrice?'checked':''}><span>priced rows only</span></label></div>`
+  +`<div class="ctl"><label>&nbsp;</label><button id="lg-chart-btn" class="primary">chart all matching</button></div>`
+  +`<div class="ctl"><label>traits (global)</label><div>${chips||'<span class="ro" style="color:var(--faint);font-size:11.5px">none</span>'}</div></div>`;
+ const reset=()=>{LG.cursor=null;LG.stack=[];ledger()};
+ $('#lg-type').addEventListener('change',e=>{LG.type=e.target.value;reset()});
+ $('#lg-maker').addEventListener('change',e=>{LG.maker=e.target.value;reset()});
+ $('#lg-band').addEventListener('change',e=>{LG.band=e.target.value;reset()});
+ $('#lg-priced').addEventListener('change',e=>{LG.hasPrice=e.target.checked;reset()});
+ $('#lg-token').addEventListener('change',e=>{LG.token=e.target.value.trim();reset()});
+ $('#lg-hash').addEventListener('change',e=>{LG.hash=e.target.value.trim();reset()});
+ $('#lg-chart-btn').addEventListener('click',()=>{LG.chart=true;ledgerChart()})}
+async function ledger(){
+ if(!S.lgMakers){try{S.lgMakers=(await J('/api/makers?'+qs({collection:base().collection,range:base().range,limit:20}))).top}catch(e){S.lgMakers=[]}}
+ let r;
+ try{r=await J('/api/ledger?'+qs({...lgQuery(),sort:LG.sort,dir:LG.dir,cursor:LG.cursor||'',limit:100}))}
+ catch(e){ // a refused sort or an unreadable filter is the API telling us what it can do
+  $('#ledger').innerHTML=`<div class="note">${esc(e.message)}</div>`;
+  $('#b-ledger').textContent='';lgBar(S.lgMakers);return}
+ lgBar(S.lgMakers);
+ const den=S.denom;
+ const th=LG_COLS.map(([k,l,sortKey])=>{
+  const can=r.sortable.includes(sortKey);
+  const num=['lag_s','token_num','price_eth','price_usd'].includes(k);
+  return `<th class="${can?'sortable':'dead'} ${LG.sort===sortKey?'sorted':''} ${num?'num':''}" data-k="${esc(sortKey)}" title="${can?'sort on the server':esc(r.unsortable[sortKey]||'not sortable')}">${l}${LG.sort===sortKey?(LG.dir==='asc'?' ▲':' ▼'):''}</th>`}).join('');
+ // The type's role colour is looked up ONCE into a local, so the interpolation the
+ // escaping property test sees is a palette token and not a store-derived field.
+ const row=x=>{const tc=typeColor(x.event_type);return `<tr class="pick" data-token="${esc(x.token_id||'')}">`
+  +`<td>${clock(x.valid_at)}</td><td>${clock(x.observed_at)}</td>`
+  +`<td class="num">${x.lag_s==null?'—':fmt(x.lag_s,2)+' s'}</td>`
+  +`<td><span class="chip" style="border-color:${tc};color:${tc}">${esc(String(x.event_type).replace('item_',''))}</span></td>`
+  +`<td class="num">${x.token_num==null?(x.token_id?'#'+esc(x.token_id):'—'):'#'+fmt(x.token_num,0)}</td>`
+  +`<td class="num ask">${money2(x.price_eth,'ETH')}</td>`
+  +`<td class="num">${money2(x.price_usd,'USD')}</td>`
+  +`<td>${esc(x.price_basis||'—')}</td>`
+  +`<td class="mono">${esc(short(x.maker))}</td>`
+  +`<td class="mono">${esc(short(x.taker))}</td>`
+  +`<td>${x.exit_reason?`<span class="swatch" style="background:${exitColor(x.exit_reason)}"></span>${esc(x.exit_reason)}`:'<span style="color:var(--faint)">—</span>'}</td>`
+  +`<td class="mono" title="${esc(x.order_hash||'')}">${esc(short(x.order_hash))}</td></tr>`};
+ $('#ledger').innerHTML=r.rows.length
+  ?`<div class="scrollx"><table><thead><tr>${th}</tr></thead><tbody>${r.rows.map(row).join('')}</tbody></table></div>`
+   +`<div class="pager"><span>${r.exact?fmt(r.total_estimate,0)+' rows match':'more than '+fmt(r.count_cap,0)+' rows match (a floor, not a count)'} · showing ${fmt(r.rows.length,0)} · sorted by ${esc(r.sort)} ${esc(r.direction)}</span>`
+   +`<button id="lg-prev" ${LG.stack.length?'':'disabled'}>‹</button><button id="lg-next" ${r.next_cursor?'':'disabled'}>›</button></div>`
+  :'<div class="empty">no events match these filters in this window</div>';
+ $('#b-ledger').textContent=lgBasis(r);
+ $('#ledger').querySelectorAll('th.sortable').forEach(h=>h.addEventListener('click',()=>{
+  const k=h.dataset.k;if(LG.sort===k)LG.dir=LG.dir==='asc'?'desc':'asc';else{LG.sort=k;LG.dir='desc'}
+  LG.cursor=null;LG.stack=[];ledger()}));
+ $('#ledger').querySelectorAll('tr.pick').forEach(tr=>tr.addEventListener('click',()=>{
+  const t=tr.dataset.token;if(!t)return;LG.token=t;LG.cursor=null;LG.stack=[];LG.chart=true;ledger();ledgerChart()}));
+ const nx=$('#lg-next'),pv=$('#lg-prev');
+ if(nx)nx.addEventListener('click',()=>{if(!r.next_cursor)return;LG.stack.push(LG.cursor);LG.cursor=r.next_cursor;ledger()});
+ if(pv)pv.addEventListener('click',()=>{LG.cursor=LG.stack.pop()||null;ledger()});
+ if(LG.chart)ledgerChart()}
+function lgBasis(r){const b=r.basis,out=[];
+ out.push(`sorted by ${r.sort} ${r.direction} on the server, over the index ${b.index} · keyset pages, never offset · ${r.limit} rows a page`);
+ out.push(b.count_note);
+ out.push(`sortable here: ${r.sortable.join(', ')}. The rest are shown but not sortable — ${Object.entries(r.unsortable).map(([k,v])=>`${k}: ${v}`).join('  ·  ')}`);
+ out.push(`⚠ ${b.left_truncation_note}`);
+ if(b.trait_note)out.push(`⚠ ${b.trait_note}`);
+ out.push(`times ${S.tz} · USD to the cent · wash filter ${b.wash_filter}`);
+ return out.join('\n')}
+async function ledgerChart(){
+ const c=await J('/api/ledger?'+qs({...lgQuery(),mode:'chart'}));
+ $('#lg-chart-card').hidden=false;
+ const den=S.denom,fld=den==='USD'?'price_usd':'price_eth';
+ const tr=Object.entries(c.series).map(([k,s])=>({
+  x:s.t.map(plotT),y:s[fld],name:String(k).replace('item_',''),
+  // Markers ALWAYS: a token has a handful of events and a markerless line draws
+  // nothing. Segments join points WITHIN one event type only — a listing and a bid
+  // are not two readings of one quantity — which is why this is one trace per type.
+  mode:'lines+markers',connectgaps:false,
+  line:{color:typeColor(k),width:k==='item_sold'?0:1.8},
+  marker:{color:typeColor(k),size:k==='item_sold'?9:5,line:{width:0}},
+  customdata:s.token_id.map((t,i)=>[t==null?'—':String(t),short(s.maker[i])]),
+  hovertemplate:(den==='USD'?'$%{y:,.2f}':'%{y:,.4f} Ξ')+'<br>token %{customdata[0]} · maker %{customdata[1]}<extra>'+String(k).replace('item_','')+'</extra>'}));
+ if(window.Plotly)draw('p-ledger',tr,{...L(),shapes:gapShapes(),
+  yaxis:{...L().yaxis,...(den==='USD'?{tickprefix:'$',tickformat:',.2f'}:{ticksuffix:' Ξ',tickformat:',.4f'}),
+   title:{text:den,font:{color:C.muted}}}});
+ const counts=Object.entries(c.counts).map(([k,v])=>`${k.replace('item_','')} ${fmt(v,0)}`).join(' · ');
+ $('#b-ledger-chart').textContent=
+  [c.basis.cap_note?`⚠ ${c.basis.cap_note}`:`charting all ${fmt(c.charted,0)} chartable rows (cap ${fmt(c.cap,0)})`,
+   `events by type: ${counts||'none'}`,
+   c.basis.matched_predicate,c.basis.priced_only,c.basis.hole_note,
+   `times ${S.tz} · wash filter ${c.basis.wash_filter} · n = 1 draws one dot and no line`].join('\n')}
+
+/* ---------- PR-9: the Wallets view (DESIGN §8.2) --------------------------
+   The unit of analysis is an ADDRESS. Every percentage is printed out of the
+   {pct, n, of} object the API sends, so the page CANNOT show a percentage the API
+   did not send a count with. Chain-sourced facts (holdings, funding, a self-
+   attached handle) are not read by this build and say "not collected yet" rather
+   than rendering a zero — 0 holdings is a claim we have not earned. */
+const pctOf=s=>(!s||s.pct==null)?`— <span class="cnt">(${fmt(s?s.n:0,0)} of ${fmt(s?s.of:0,0)})</span>`
+ :`${s.pct.toFixed(s.pct<1?3:1)}% <span class="cnt">(${fmt(s.n,0)} of ${fmt(s.of,0)})</span>`;
+async function wallets(){const p=base();
+ const w=await J('/api/wallets?'+qs({collection:p.collection,range:p.range,limit:60}));
+ $('#wl-list').innerHTML=w.rows.length
+  ?`<div class="scrollx"><table><thead><tr><th>address</th><th class="num">events</th><th class="num">share</th><th class="num">bids</th><th class="num">cancels</th></tr></thead><tbody>`
+   +w.rows.map(r=>`<tr class="pick ${r.address===S.wallet?'rowsel':''}" data-a="${esc(r.address)}"><td class="mono">${esc(short(r.address))}</td><td class="num">${fmt(r.events,0)}</td><td class="num">${r.events_share.pct==null?'—':r.events_share.pct.toFixed(1)+'%'}</td><td class="num">${fmt(r.bids,0)}</td><td class="num">${fmt(r.cancels,0)}</td></tr>`).join('')
+   +`</tbody></table></div><div class="basis">${fmt(w.distinct_addresses,0)} distinct addresses · shares are of ${fmt(w.total_events_with_maker,0)} events carrying a maker (of ${fmt(w.total_events,0)} in the window) · ${w.basis.source}</div>`
+  :'<div class="empty">no wallet activity in this window</div>';
+ $('#wl-list').querySelectorAll('tr.pick').forEach(tr=>tr.addEventListener('click',()=>{S.wallet=tr.dataset.a;writeHash();wallets()}));
+ if(!S.wallet&&w.rows.length)S.wallet=w.rows[0].address;
+ adjacency(w.adjacency);
+ if(S.wallet)await walletCard(S.wallet)}
+function adjacency(a){
+ $('#b-adj').textContent=[a.basis.cell,a.basis.scale,
+  a.truncation_note?`⚠ ${a.truncation_note}`:`${a.shown} address(es), ${fmt(a.trades,0)} trade(s) in this window`,
+  'a cell states the count exactly; a force layout would only say "these two are near each other", and its position is an artefact of the seed'].join('\n');
+ if(!window.Plotly)return;
+ if(!a.addresses.length){Plotly.react('wl-adj',[],{...L(),dragmode:false},CFG);return}
+ const lbl=a.addresses.map(x=>short(x));
+ Plotly.react('wl-adj',[{z:a.matrix,x:lbl,y:lbl,type:'heatmap',
+  // Sequential SINGLE HUE, built from a palette token: counts have no meaningful
+  // midpoint, so a diverging scale would invent one.
+  colorscale:[[0,rgba(C.coll,.05)],[.5,rgba(C.coll,.5)],[1,C.coll]],
+  hovertemplate:'seller %{y} → buyer %{x}<br>%{z:,d} trade(s)<extra></extra>',
+  colorbar:{tickfont:{color:C.tick},outlinewidth:0}}],
+  {...L(),dragmode:false,margin:{l:110,r:20,t:8,b:80},
+   xaxis:{...L().xaxis,showspikes:false,fixedrange:true,tickangle:-45,title:{text:'buyer',font:{color:C.tick,size:10}}},
+   yaxis:{...L().yaxis,fixedrange:true,autorange:'reversed',title:{text:'seller',font:{color:C.tick,size:10}}}},CFG)}
+async function walletCard(addr){const p=base();
+ const w=await J('/api/wallet/'+encodeURIComponent(addr)+'?'+qs({collection:p.collection,range:p.range}));
+ const b=w.behaviour,life=b.bid_life;
+ $('#wl-title').innerHTML=`<span class="mono">${esc(short(w.address))}</span><em>address-level only · every percentage with its count</em>`;
+ const rowline=(k,v,c)=>`<div class="wrow"><span>${k}</span><b>${v}${c?` <span class="cnt">${c}</span>`:''}</b></div>`;
+ $('#wl-card').innerHTML=`<div class="wcard">`
+  +`<div class="wcol"><h3>behaviour (this window)</h3>`
+   +rowline('events',fmt(b.events,0))
+   +rowline('share of events',pctOf(b.events_share))
+   +rowline('bids',fmt(b.bids,0))+rowline('cancels',fmt(b.cancels,0))
+   +rowline('listings',fmt(b.listings,0))
+   +rowline('collection offers',fmt(b.collection_offers,0))+rowline('trait offers',fmt(b.trait_offers,0))
+   +rowline('sold / bought',`${fmt(b.sales_as_seller,0)} / ${fmt(b.sales_as_buyer,0)}`)
+   +rowline('cancel ratio',pctOf(b.cancel_ratio))
+   +rowline('fill ratio',pctOf(b.fill_ratio))
+   +rowline('median bid life',life.median_s==null?'withheld':dur(life.median_s),
+     `n = ${fmt(life.n,0)} · n_eff = ${fmt(life.n_eff,0)}`)
+   +(life.percentiles_withheld?`<div class="note" style="font-size:11.5px">percentiles withheld: n = ${fmt(life.n,0)} &lt; ${fmt(life.min_n_for_percentiles,0)}</div>`:'')
+   +`<div class="basis">${life.n_eff_rule}</div></div>`
+  +`<div class="wcol"><h3>holdings &amp; flow</h3>`
+   +rowline('holds',w.chain.collected?fmt(w.chain.holdings,0):'not collected yet')
+   +rowline('first funded by',w.chain.collected?esc(short(w.chain.first_funded_by)):'not collected yet')
+   +`<div class="basis">${w.chain.why_not_collected}</div>`
+   +`<h3 style="margin-top:12px">cluster</h3>`
+   +rowline('cluster',w.cluster.id?esc(w.cluster.id):'none asserted',`${fmt(w.cluster.evidence_count,0)} piece(s) of evidence`)
+   +`<div class="basis">${w.cluster.evidence_rule}</div>`
+   +`<h3 style="margin-top:12px">flags</h3>`
+   +(w.flags.length?w.flags.map(f=>`<div class="wrow"><span>${esc(f.flag)}</span><b>${fmt(f.rows,0)} rows</b></div>`).join('')
+     :`<div class="basis">${w.basis.flags_rule}</div>`)+`</div>`
+  +`<div class="wcol"><h3>top counterparties</h3>`
+   +(w.counterparties.rows.length
+     ?`<table><thead><tr><th>address</th><th class="num">trades</th><th class="num">share</th></tr></thead><tbody>`
+      +w.counterparties.rows.map(c=>`<tr><td class="mono">${esc(short(c.address))}</td><td class="num">${fmt(c.trades,0)}</td><td class="num">${c.share_of_trades.pct==null?'—':c.share_of_trades.pct.toFixed(1)+'%'} <span class="cnt">(${fmt(c.share_of_trades.n,0)} of ${fmt(c.share_of_trades.of,0)})</span></td></tr>`).join('')
+      +`</tbody></table>`
+     :'<div class="empty">no trades with a counterparty in this window</div>')
+   +`<div class="basis">${w.counterparties.source}</div></div>`
+  +`</div>`
+  +`<div class="basis">${w.basis.boundary}\n⚠ ${w.basis.left_truncation}\n${w.basis.source} · wash filter ${w.basis.wash_filter} · times ${S.tz}</div>`}
 
 /* ---------- traits sidebar ---------- */
 async function traits(){const p=base();const t=await J('/api/traits?'+qs({collection:p.collection}));S.traitTypes=Object.keys(t.traits);
@@ -770,7 +1115,8 @@ async function traits(){const p=base();const t=await J('/api/traits?'+qs({collec
 function chips(){const active=Object.entries(S.traits).flatMap(([t,vs])=>vs.map(v=>[t,v]));
  $('#chips').innerHTML=active.length?active.map(([t,v])=>`<span class="pill">${esc(t)}: ${esc(v)}<button data-t="${esc(t)}" data-v="${esc(v)}" title="remove">×</button></span>`).join('')+`<div><button id="clear" style="margin:6px 0 10px;font-size:12px">clear all</button></div>`:'';
  $('#chips').querySelectorAll('.pill button').forEach(b=>b.addEventListener('click',()=>{S.traits[b.dataset.t]=(S.traits[b.dataset.t]||[]).filter(x=>x!==b.dataset.v);S.page=0;traits();all()}));
- const c=$('#clear');if(c)c.addEventListener('click',()=>{S.traits={};S.page=0;traits();all()})}
+ const c=$('#clear');if(c)c.addEventListener('click',()=>{S.traits={};S.page=0;traits();all()});
+ roChips()}
 
 /* ---------- screener ---------- */
 async function screener(){const p=base();const r=await J('/api/screener?'+qs({collection:p.collection,traits:p.traits,sort:S.sort,dir:S.dir,page:S.page,size:50,denom:S.denom}));
@@ -783,8 +1129,81 @@ async function screener(){const p=base();const r=await J('/api/screener?'+qs({co
  $('#screener').querySelectorAll('th.sortable').forEach(h=>h.addEventListener('click',()=>{const k=h.dataset.k;if(S.sort===k)S.dir=S.dir==='asc'?'desc':'asc';else{S.sort=k;S.dir=['lowest_ask','highest_bid','last_sale'].includes(k)?'desc':'asc'}S.page=0;screener()}));
  const pv=$('#pg-prev'),nx=$('#pg-next');if(pv)pv.addEventListener('click',()=>{S.page--;screener()});if(nx)nx.addEventListener('click',()=>{S.page++;screener()})}
 
+/* ---------- PR-9: the hash router ----------------------------------------
+   `#/traits?traits=Palette:Seafoam&range=6h` restores that exact view. The hash is
+   the source of truth while the page is open; localStorage is the fallback for a
+   bare URL. Only the ACTIVE view's panels are fetched -- five views' worth of
+   queries on every tab switch is how a local dashboard starts feeling remote. */
+function readHash(){
+ const h=location.hash.replace(/^#\/?/,'');
+ const [path,qsv]=h.split('?');
+ const view=VIEWS.includes(path)?path:null;
+ const q={};new URLSearchParams(qsv||'').forEach((v,k)=>{q[k]=v});
+ return {view,q}}
+function writeHash(){
+ const p=new URLSearchParams();
+ GLOBAL_KEYS.forEach(k=>{const v=k==='traits'?traitSpec():k==='denom'?S.denom:k==='transform'?S.transform:$('#'+k).value;
+  if(v)p.set(k,v)});
+ if(S.wallet)p.set('wallet',S.wallet);
+ p.set('t',S.touched.range?'1':'0');
+ const next='#/'+S.view+'?'+p.toString();
+ if(location.hash!==next){history.replaceState(null,'',next)}
+ try{localStorage.setItem('navanax.state',p.toString()+'&view='+S.view)}catch(e){/* private window: the hash still works */}}
+function applyGlobals(q){
+ if(q.collection&&[...$('#collection').options].some(o=>o.value===q.collection))$('#collection').value=q.collection;
+ if(q.interval&&[...$('#interval').options].some(o=>o.value===q.interval)){$('#interval').value=q.interval;S.touched.interval=true}
+ if(q.range&&[...$('#range').options].some(o=>o.value===q.range)){$('#range').value=q.range;S.touched.range=q.t!=='0'}
+ if(q.denom==='USD'||q.denom==='ETH')S.denom=q.denom;
+ if(q.transform)S.transform=q.transform;
+ if(q.wallet)S.wallet=q.wallet;
+ S.traits={};
+ (q.traits||'').split(';').filter(Boolean).forEach(part=>{const i=part.indexOf(':');if(i<0)return;
+  S.traits[part.slice(0,i)]=part.slice(i+1).split('|').filter(Boolean)});
+ ['denom','transform'].forEach(id=>$('#'+id).querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===S[id])));}
+function tabs(){
+ $('#tabs').innerHTML=VIEWS.map(v=>`<button data-v="${v}" class="${v===S.view?'on':''}" title="#/${v}">${VIEW_LABEL[v]}</button>`).join('');
+ $('#tabs').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{location.hash='#/'+b.dataset.v}))}
+/* The Prices card is one node. Moving it is what keeps "exactly one price panel"
+   true by construction rather than by discipline. */
+function hostHero(){const c=$('#card-prices');if(!c)return;
+ const a=$(S.view==='traits'?'#anchor-traits-hero':'#anchor-market-hero');
+ if(a&&c.previousElementSibling!==a)a.after(c);
+ c.className='card '+(S.view==='traits'?'c12':'c8')}
+function sidebarMode(){const full=SIDEBAR_VIEWS.includes(S.view);
+ document.querySelector('aside').classList.toggle('ro',!full);
+ $('#onboard').style.display=full?'':'none';
+ $('#chips').style.display=full?'':'none';
+ $('#traits').style.display=full?'':'none';
+ $('#roChips').style.display=full?'none':'';
+ if(!full)roChips()}
+function roChips(){const active=Object.entries(S.traits).flatMap(([t,vs])=>vs.map(v=>[t,v]));
+ $('#roChips').innerHTML=active.length
+  ?`<div class="basis" style="margin:0 0 6px">filter still applied on this view</div>`
+   +active.map(([t,v])=>`<span class="pill">${esc(t)}: ${esc(v)}</span>`).join('')
+   +`<div><button id="ro-clear" style="margin:6px 0 10px;font-size:12px">clear all</button></div>`
+  :'<div class="basis">no trait filter — set one on Market or Traits</div>';
+ const c=$('#ro-clear');if(c)c.addEventListener('click',()=>{S.traits={};S.page=0;traits();all()})}
+const VIEW_LOADERS={market:[kpis,prices,imm,act,mix,book,tape,makers],
+ traits:[prices,screener],flow:[surv,ledger],wallets:[wallets],health:[health]};
+function route(){
+ const {view,q}=readHash();
+ if(!view){          // bare URL: restore what he was last looking at, or Market
+  let saved='';try{saved=localStorage.getItem('navanax.state')||''}catch(e){saved=''}
+  const p=new URLSearchParams(saved);S.view=VIEWS.includes(p.get('view'))?p.get('view'):'market';
+  applyGlobals(Object.fromEntries(p.entries()));
+ }else{S.view=view;applyGlobals(q)}
+ // a per-view default applies only while he has not chosen one himself
+ const d=VIEW_DEFAULTS[S.view]||{};
+ if(!S.touched.range&&d.range)$('#range').value=d.range;
+ if(!S.touched.interval&&d.interval&&[...$('#interval').options].some(o=>o.value===d.interval))$('#interval').value=d.interval;
+ VIEWS.forEach(v=>$('#v-'+v).classList.toggle('on',v===S.view));
+ tabs();hostHero();sidebarMode();allChips();writeHash();
+ return all()}
+
 /* ---------- orchestration ---------- */
-async function all(){try{await status();await gapsAudit();await Promise.all([kpis(),prices(),imm(),act(),mix(),book(),tape(),makers(),surv(),screener()])}catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
+async function all(){try{await status();await loadGaps();
+  await Promise.all(VIEW_LOADERS[S.view].map(f=>f()));writeHash()}
+ catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
 function seg(id,key,cb){$('#'+id).querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{$('#'+id).querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');S[key]=b.dataset.v;cb()}))}
 function layout(){const h=document.querySelector('header').offsetHeight,c=document.querySelector('.controls').offsetHeight;document.documentElement.style.setProperty('--hdr',h+'px');document.documentElement.style.setProperty('--top',(h+c)+'px')}
 window.addEventListener('resize',layout);
@@ -793,7 +1212,15 @@ async function init(){layout();
  allChips();                       // chips are plain DOM: they render with or without the chart library
  const meta_=await J('/api/meta');$('#collection').innerHTML=meta_.watchlist.map(s=>`<option>${esc(s)}</option>`).join('');
  $('#interval').innerHTML=meta_.intervals.map(i=>`<option ${i==='5m'?'selected':''}>${i}</option>`).join('');
- ['collection','interval','range'].forEach(id=>$('#'+id).addEventListener('change',()=>{S.sel={};allChips();all()}));seg('denom','denom',all);seg('transform','transform',all);$('#refresh').addEventListener('click',()=>{traits();all()});
- await traits();await all();setInterval(all,10000);setInterval(traits,30000)}
+ // A change to a GLOBAL control follows the Operator between tabs, and `touched`
+ // is what stops a per-view default from overriding a choice he made himself.
+ $('#collection').addEventListener('change',()=>{S.sel={};S.wallet=null;S.lgMakers=null;S.survMakers=null;allChips();traits();all()});
+ $('#interval').addEventListener('change',()=>{S.touched.interval=true;S.sel={};allChips();all()});
+ $('#range').addEventListener('change',()=>{S.touched.range=true;S.sel={};allChips();all()});
+ seg('denom','denom',all);seg('transform','transform',all);
+ $('#refresh').addEventListener('click',()=>{traits();all()});
+ window.addEventListener('hashchange',route);
+ await traits();await route();
+ setInterval(()=>all(),10000);setInterval(traits,30000)}
 init();
 </script></body></html>

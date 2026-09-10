@@ -2255,3 +2255,335 @@ bugs:
   monitor_gap: "Nothing compares an estimator's horizon against the window it was asked about. Until this is settled the only guard is the `censoring` string in the response, which names this id."
   pr: 8
 
+- id: BUG-20260910-066
+  summary: "The survival panel ran three server-supplied strings through `esc()` and then assigned them to `.textContent`, which never interprets markup -- so the withheld-percentiles reason rendered to the Operator as the literal characters `&lt;` where it says `n_eff = 0 maker-episode cluster(s) < 30`"
+  severity: S4
+  priority: P3
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-10T15:05:00-05:00"
+  occurred_at: "2026-09-10T12:10:00-05:00"
+  resolved_at: "2026-09-10T15:20:00-05:00"
+  detected_by: "platform-engineer, PR-9, reading the Flow-view screenshot rather than the code"
+  detection_channel: platform-engineer
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-19
+  data_impact: "None on any number. Presentation only -- but on the one sentence that explains why a number is ABSENT. `percentiles_withheld_reason` is the string REQ-F-19 exists to make visible (`n_eff = 0 maker-episode cluster(s) < 30`), and it is the only string on the page that contains a `<`. So the single most important explanatory sentence on the survival panel was the single sentence that rendered as though the page were broken, which is the direction that costs trust in the numbers that ARE shown."
+  root_cause: >-
+    `esc()` is the page's HTML escaper and every other call site sends its result
+    into an `innerHTML` template, where escaping is the whole point. `#s-head` and
+    `#b-surv` are assigned with `.textContent`, which does not parse markup at all.
+    Escaping into `textContent` is therefore a double encoding, never a safety
+    measure, and nothing on the page distinguished the two sinks -- the escaping
+    property test in `test_ui_contract` deliberately scans `${...}` interpolations,
+    which is the innerHTML boundary, so a textContent target was outside what it
+    looks at and outside what it should look at.
+  resolution: "esc() removed from exactly three expressions, all of which feed `.textContent`: `percentiles_withheld_reason` and `rmst.note` in `survHead`, and `kind` in `survBasis`. Nothing that reaches `innerHTML` changed, and `test_ui_contract`'s escaping property test is untouched and still green. A comment above `survHead` names this id and says not to restore esc() on a textContent target, because the obvious 'fix' on re-reading is to add it back."
+  regression_test: tests/selftest.py::test_ui_escaping_matches_its_sink
+  monitor_gap: "The escaping test asserts the DANGEROUS direction (an unescaped third-party field reaching innerHTML) and had nothing to say about the harmless-but-wrong one (an escaped string reaching textContent). The new test asserts the pairing in both directions: every esc() call site is checked against the sink it feeds. It is a display-correctness test, and the reason it did not exist is that nobody had looked at the rendered page with a string in it that contained a metacharacter -- until an empty store made the withheld-percentiles branch the only branch that draws."
+  pr: 9
+
+- id: BUG-20260910-067
+  summary: "`dashboard.serve()` opened the analytical store and started the folding writer BEFORE binding 127.0.0.1:8765, so with a second dashboard already listening every launchd retry folded into `data/analytics.sqlite` and then died on 'Address already in use' -- two writers alternating on one SQLite store, 177 times in half an hour, until the 2.8 GB store became 'database disk image is malformed'"
+  severity: S3
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-10T20:15:00-05:00"
+  occurred_at: "2026-09-10T18:20:00-05:00"
+  resolved_at: "2026-09-10T21:40:00-05:00"
+  detected_by: "the Operator, from the dashboard failing to load; confirmed from data/logs/dashboard.log (177 restart banners) and `PRAGMA integrity_check`"
+  detection_channel: operator
+  branch: pr-10-writer-lock
+  locations:
+  - {file: src/navanax/dashboard.py, line: 1}
+  - {file: src/navanax/normalize.py, line: 1}
+  - {file: tools/launchd.py, line: 1}
+  requirement: REQ-N-07
+  data_impact: >-
+    S3 in consequence, S1-class in root cause. Nothing in the landing zone was
+    touched in any code path: the analytical store is DERIVED, and that is the
+    only reason 2.8 GB of corruption was survivable. The corrupt file was renamed
+    aside (never deleted, never edited) and the store was rebuilt from the landing
+    zone; every event, gap record and manifest entry came back, because the raw
+    frames are the record and the store is a fold of them. What was actually lost
+    was availability -- the dashboard was down and the Health page with it -- for
+    the length of the incident. The reason this is logged S3 rather than S4 is the
+    root cause, not the outcome: two writers on one store is silent while it is
+    happening. There was no error, no warning and no number anywhere on the page
+    that said a second process was folding; the first symptom was a store that
+    would not open. Had the same two writers been aimed at the landing zone rather
+    than at a derived file, this entry would be an S0a and the loss would be
+    permanent.
+  root_cause: >-
+    Ordering, and an unenforced rule. `serve()` constructed `Dashboard(...)` --
+    which opens the store and starts the normalizer thread that WRITES -- and only
+    then constructed the HTTP server that binds the port. So the bind, the one
+    check that would have refused a duplicate process, ran last, after the damage
+    was possible. Behind that, docs/07 §1's "one writer owns the read-write
+    connection, readers attach read-only" was a documented pattern with nothing
+    enforcing it: `Normalizer` took no lock and had no read-only mode, so any
+    number of processes could open the same store read-write. `ThrottleInterval:
+    10` on the dashboard plist then turned one conflict into 360 folds an hour.
+  resolution: >-
+    Three layers, in the order they take effect. (1) `serve()` binds the listening
+    socket FIRST and constructs `Dashboard` only after a successful bind, so a
+    process that cannot get its port exits without having opened the store at all;
+    `navanax dashboard` exits 2 on a bind failure and says the store was not
+    opened. (2) `Normalizer(..., writer=True)` -- the folding writer -- takes an
+    exclusive flock on `<store>.lock` next to the sqlite file for its lifetime; a
+    second folding writer is refused with `StoreWriterBusyError` naming the
+    holder's pid and the two ways out, and `close()` releases it. Readers pass
+    `writer=False`, which opens `mode=ro` (enforced by SQLite, not by intention),
+    takes no lock and refuses to sync/reset/refold. The flock errno rules are now
+    ONE set shared with `cli._single_instance`, so a filesystem that cannot lock
+    warns and proceeds instead of stopping the fold. The traits job is deliberately
+    outside the lock -- it writes tokens/traits and folds no events -- and instead
+    opens with an explicit `PRAGMA busy_timeout` so a concurrent fold makes it wait
+    rather than fail spuriously. (3) `ThrottleInterval: 30` on the dashboard plist,
+    so a port conflict cannot retry every 10 s. `/api/health` now reports
+    `store_writer` (pid, since) and a `PRAGMA quick_check` result cached for ten
+    minutes, so the next such fault is visible on Health before it is fatal.
+
+    SECOND ROUND (tech-lead B1/B2). All of the above prevents the store being
+    corrupted; none of it addressed what happens when it ALREADY IS, which was the
+    incident's actual end state. `sqlite3.connect()` is lazy and succeeds on a
+    corrupt file; the first `PRAGMA journal_mode=WAL` raises
+    `sqlite3.DatabaseError: database disk image is malformed` straight out of
+    `Dashboard.__init__`, which `cmd_dashboard` did not catch -- a raw traceback
+    and an UNDOCUMENTED exit 1, repeated by KeepAlive every 30 s, with the page
+    that explains the fault being the one thing the fault removed. (4) The
+    dashboard now comes up DEGRADED instead: `_open_store()` catches
+    `sqlite3.DatabaseError`, `serve()` binds and serves with `norm=None`,
+    `/api/health` answers 200 with a `degraded` block (fault, store, recipe) and
+    `quick_check.ok` false, `/api/meta` and `/api/gaps` still answer because they
+    read no analytical store, every other API route answers 503 with the reason
+    and the recipe rather than a 500 or a plausible-looking empty series, every
+    store-derived count is null rather than 0, and the page itself loads.
+    `StoreWriterBusyError` is deliberately not degraded around -- that is the
+    wrong process, not a broken store, and still exits 4. (5) `_loop` retries the
+    open every 60 s, so recovery is ONE step: `rebuild-store.command` renames the
+    store to `analytics.sqlite.corrupt-<date>` (a move, never a delete; it asks
+    the LOCK rather than the lock file before doing so, and names the holding pid
+    if it is held) and the running dashboard folds a fresh store within a minute
+    with no restart -- verified end to end against a deliberately malformed 0.4 MB
+    store: 503 -> rename -> 200 and `events` back to 3 in 35 s. (6)
+    `cmd_dashboard` catches `sqlite3.DatabaseError` anyway and maps it to a
+    documented `DASH_EXIT_STORE_MALFORMED = 5` with the recipe instead of a stack
+    trace. (7) tech-lead B2: `serve()`'s `except BaseException` path now closes
+    `norm` as well as the socket -- a failure after the store opened
+    (`make_handler`, `start()`, a Ctrl-C during the first fold) left the writer
+    lock held by an object nobody would ever close, so a retry inside the same
+    process was refused by its own stale lock.
+  regression_test:
+  - tests/selftest.py::test_dashboard_binds_before_it_opens_the_store
+  - tests/selftest.py::test_normalizer_writer_lock_is_one_writer_per_store
+  - tests/selftest.py::test_traits_writer_waits_and_takes_no_fold_lock
+  - tests/selftest.py::test_launchd_dashboard_cannot_retry_every_ten_seconds
+  - tests/selftest.py::test_health_names_the_store_writer_and_caches_quick_check
+  - tests/selftest.py::test_dashboard_serves_degraded_on_a_malformed_store
+  - tests/selftest.py::test_dashboard_picks_up_a_rebuilt_store_without_a_restart
+  - tests/selftest.py::test_cmd_dashboard_maps_an_unreadable_store_to_a_documented_exit_code
+  - tests/selftest.py::test_serve_releases_the_writer_lock_when_startup_fails_late
+  - tests/selftest.py::test_rebuild_store_command_moves_aside_and_refuses_a_live_writer
+  - tests/selftest.py::test_quick_check_reports_a_malformed_store_instead_of_raising
+  - tests/selftest.py::test_degraded_page_and_docs_carry_the_rebuild_recipe
+  monitor_gap: >-
+    Nothing looked at the analytical store's integrity, and nothing named the
+    process folding into it. `/api/health` reported the store's SIZE and the last
+    fold time but never asked whether the file was still readable, so corruption
+    was discovered by a crash loop rather than by a check -- and both new Health
+    fields exist because of that. The launchd log had the evidence all along (177
+    restart banners, each with a pid) and no check read it. More basically, the
+    suite had no test that started two of anything: every dashboard test built one
+    Dashboard, and one writer never contends with itself.
+
+    And -- the second round's version of the same gap -- no test had ever pointed
+    the dashboard at a store that was ALREADY broken. Every fixture built its
+    store by folding a fresh landing zone, so `Dashboard.__init__` was only ever
+    exercised on a healthy file, and the exit code that the real incident actually
+    produced (1, undocumented, with a traceback) was one no test had ever seen.
+    The fixture that closes it, `_garbage_store`, corrupts page 1 of a REAL
+    SQLite file, because the three ways to break a store fail differently and only
+    one of them is this bug: junk with a valid magic gives "file is not a
+    database", scribbled interior pages open fine and are caught by `quick_check`,
+    and a corrupted page 1 gives "database disk image is malformed" on the first
+    PRAGMA. Only the third reproduces the incident.
+  pr: 10
+
+- id: BUG-20260910-068
+  summary: "`/api/ledger` never used the index its own basis named: `dashboard._window` is unconditional, so every request carries a `valid_ts` range, and given that range SQLite skip-scanned the sort's index and then sorted the whole window into a TEMP B-TREE -- 106-459 ms per page (measured 864 ms at 200,000 rows) on five of the six sorts, at every page depth"
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T21:40:00-05:00"
+  occurred_at: "2026-09-10T19:30:00-05:00"
+  resolved_at: "2026-09-10T22:35:00-05:00"
+  detected_by: "tech-lead, gate on PR-9 (A1)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/metrics.py, line: 1}
+  - {file: src/navanax/normalize.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: >-
+    None on any number: every row returned was correct and the keyset never skipped
+    or repeated one. The damage is availability and, downstream of that, trust. The
+    ledger is the panel the design put a 4.1 M rows/day budget on, and it was the
+    one panel that could not survive its own volume -- a sort that takes half a
+    second per page at 200k rows takes ten at 4 M, which the Operator would read as
+    "the ledger is broken" and stop opening. Worse, `basis.index` NAMED the index on
+    every response, so the page was asserting a performance property that was false
+    and nothing compared the claim to the planner.
+  root_cause: >-
+    Two compounding mistakes, both invisible without EXPLAIN QUERY PLAN. First, the
+    query named no index at all and trusted the planner; with a range predicate on
+    `valid_ts` present in EVERY request (dashboard._window has no "no window" path),
+    the planner prefers `ix_events_coll_valid` and sorts. Second -- and this is the
+    one that survived the obvious fix -- adding `INDEXED BY` was NOT enough: SQLite
+    then skip-scanned the named index as `ANY(collection) AND ANY(maker) AND
+    valid_ts>?` in order to use the range term, and a skip-scan does not deliver
+    rows in the index's order, so the TEMP B-TREE stayed. The index was named, the
+    plan looked plausible, and the sort was still there.
+  resolution: >-
+    Three changes, and all three are needed. (1) `INDEXED BY <the sort's index>` on
+    `events`, following BUG-040's precedent -- a named index fails loudly if it ever
+    stops being usable rather than silently degrading. (2) The ORDER BY is now the
+    index's OWN column order: `(key, valid_ts, rowid)` for the five composite
+    indexes and `(key, rowid)` for the two that lead with a timestamp, with the
+    tuple stored per sort in `LEDGER_SORTS` so the ordering and the index cannot
+    drift; the cursor carries that same tuple, because a tiebreak that is not the
+    ordering's last column is not a tiebreak. (3) On the sorts whose index does not
+    lead with `valid_ts`, the window is written `+e.valid_ts >= ?` -- SQLite's
+    documented way to keep a term out of the index constraint -- which stops the
+    skip-scan. The trade is explicit and scoped: the window becomes a per-row filter
+    on those five sorts (right for a LIMITed page, wrong for a COUNT, so the count
+    query is built from the indexable form), and on the DEFAULT sort `valid_ts` the
+    range stays an index range because there the window IS the order. Measured on
+    200,000 rows: 864 ms -> 0.2 ms for page 1, 7-9 ms for a page 12,000 rows deep.
+    `basis.index_forced` and `basis.pagination` now state the tuple, and
+    `MetricEngine.ledger_query_plan()` exists so the claim is checkable.
+  regression_test: tests/selftest.py::test_ledger_page_uses_its_index_under_a_time_window
+  monitor_gap: >-
+    Nothing in this repo had ever read EXPLAIN QUERY PLAN. BUG-040 (a 29-second
+    query) was found by running the code on real data and noticing the wall clock;
+    the same defect one module over was invisible on a 12-row fixture, which is
+    every fixture the ledger tests use. The new test reads the planner's own output
+    for every sort x direction AND times a deep page over 200,000 rows, so both
+    halves -- the plan and the consequence -- are asserted rather than one standing
+    in for the other.
+  pr: 9
+
+- id: BUG-20260910-069
+  summary: "The `chart this selection` caption stated a CAPPED count as if it were exact, and counted rows without the price predicate the chart itself draws from -- so it named more rows than the chart could ever contain, in the one sentence whose job is to admit the picture is incomplete"
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T21:40:00-05:00"
+  occurred_at: "2026-09-10T18:20:00-05:00"
+  resolved_at: "2026-09-10T22:35:00-05:00"
+  detected_by: "tech-lead, gate on PR-9 (A2)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/metrics.py, line: 1}
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-19
+  data_impact: >-
+    None on a plotted value; every point drawn was a real observation. The damage is
+    to the basis line, which is the project's whole answer to "how do I know this
+    chart is the truth". Two independent errors in one sentence: `charting the 5,000
+    most recent of 41,208` counted every matching row while the chart draws only
+    rows that have a price and a valid_ts, so the reader was told a larger
+    denominator than exists and would conclude the chart was more truncated than it
+    was; and above the 50,000-row count cap the same figure was the CAP, printed
+    without the "a floor, not a count" the neighbouring `count_note` has always
+    printed. A capped number rendered as exact, inside the sentence that exists to
+    say the picture is incomplete, is the flattering-direction failure the project's
+    fifth rule is about.
+  root_cause: >-
+    The count and the row query were written as two separate statements against the
+    same WHERE, and the price predicate was appended to only one of them. The
+    exactness flag was already computed (`matched_exact`) and simply not consulted
+    when the sentence was built -- the neighbouring `count_note` branches on exactly
+    that flag, four lines away.
+  resolution: "Both queries are built from one `drawable` predicate (`WHERE <filter> AND price_eth IS NOT NULL AND valid_ts IS NOT NULL`), so the caption counts what the chart draws by construction. The sentence branches on `matched_exact` the same way `count_note` does: exact gives `of 20`, capped gives `of more than 50,000 (a floor, not a count)`. `basis.matched_predicate` states the predicate on screen so a reader can see why the chart holds fewer rows than the table above it."
+  regression_test: tests/selftest.py::test_ledger_chart_caption_counts_what_it_draws
+  monitor_gap: "The existing test asserted that a cap_note EXISTS and contains the phrase `most recent`; it never checked the number in it against the rows the chart could draw, and every fixture was far below the count cap so the floor branch was unreachable. The new test uses a fixture where 20 of 50 rows carry a price -- so a count without the predicate gives a visibly wrong 50 -- and lowers the cap constant to reach the floor branch."
+  pr: 9
+
+- id: BUG-20260910-070
+  summary: "`tools/buglog.py --check` collected bug ids into a SET, so two entries under one id collapsed into one and the gate stayed green on a duplicate -- the one defect that makes every other entry unciteable"
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-10T21:40:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  resolved_at: "2026-09-10T22:35:00-05:00"
+  detected_by: "tech-lead, gate on PR-9 (C1)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: tools/buglog.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: >-
+    None on the record. The damage is to the ledger's only real property: a bug id
+    is a NAME, and this repo now cites ids from source comments, test docstrings,
+    PR descriptions and BUGS.md. Two entries under one id means every one of those
+    references is ambiguous, and the gate whose whole purpose is to keep the ledger
+    citable could not see it. This is not hypothetical: 059-061 are currently
+    allocated on two branches at once, and the second to merge would have produced
+    exactly this with a green gate.
+  root_cause: "`ledger_ids = {b['id'] for b in data['bugs']}` -- a set comprehension written for membership tests, which silently deduplicates. Every other check in the file then operated on the deduplicated set, so nothing downstream could notice either."
+  resolution: "Ids are collected into a LIST; duplicates are counted and each is named in the failure with how many times it appears and the instruction that the branch merging second renumbers. The set is still built, from the list, for the membership checks that legitimately want one."
+  regression_test: tests/selftest.py::test_buglog_check_fails_on_a_duplicate_bug_id
+  monitor_gap: "The gate had four checks and all four were about a single entry's contents (does its file exist, does its test exist, is it in BUGS.md). Nothing checked a property of the ledger AS A COLLECTION. The new test appends a real second entry under an existing id to a temporary copy and asserts the gate fails and names it -- and separately asserts the live ledger is clean, so the gate is not landing already red."
+  pr: 9
+
+- id: BUG-20260910-071
+  summary: "The degraded-store reopen probe ran on the FOLD tick, so `refresh_seconds` capped it: at the documented `refresh_seconds: 3600` a rebuilt store went unnoticed for up to an hour and `rebuild-store.command` silently stopped being a one-click fix"
+  severity: S2
+  priority: P2
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-10T22:50:00-05:00"
+  occurred_at: "2026-09-10T20:10:00-05:00"
+  resolved_at: "2026-09-10T22:55:00-05:00"
+  detected_by: "tech-lead, PR-9 round 2 (R2-5)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/dashboard.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: >-
+    None on any stored row -- the landing zone is untouched and the analytical store
+    is derived. The damage is availability, and specifically the availability of the
+    recovery path: BUG-20260910-067's whole remedy is "the page stays up, Health
+    carries the rebuild recipe, and the running dashboard picks the rebuilt store up
+    on its next probe". On an hourly fold that last clause was false by up to a
+    factor of sixty. The Operator would move the corrupt file aside, watch a page
+    that still says DEGRADED, conclude the fix did not work, and restart -- which is
+    the second step the whole design was there to remove.
+  root_cause: >-
+    `_loop` waited `self.refresh` unconditionally and only THEN asked whether it was
+    degraded. `_retry_open`'s own `STORE_REOPEN_SECONDS` limit could therefore make
+    the probe less frequent than the fold, never more. The two settings answer
+    different questions -- `refresh` is how stale the market data may be,
+    `STORE_REOPEN_SECONDS` is how long the Operator waits after fixing the store --
+    and the loop had collapsed them into one.
+  resolution: "`_loop` computes its wait per tick: `min(self.refresh, STORE_REOPEN_SECONDS)` while `norm is None`, and the plain `refresh` once a store is open. At the shipped constant an hourly fold now recovers inside ~70 s instead of inside an hour, and a fast fold is unchanged."
+  regression_test: tests/selftest.py::test_degraded_reopen_probe_is_not_throttled_by_refresh_seconds
+  monitor_gap: >-
+    The existing recovery test called `dash._retry_open()` by hand, so it exercised
+    the probe and never the WAIT -- it would have stayed green at any refresh
+    interval. The new test drives the real `_loop` thread with `refresh_seconds:
+    3600` and a small `STORE_REOPEN_SECONDS` override, and additionally asserts the
+    property on the loop's source, because the behavioural half needs a real thread
+    and a real clock and would be the first thing deleted if it ever went flaky.
+  pr: 9
+
