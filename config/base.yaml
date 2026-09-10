@@ -57,6 +57,11 @@ analytical:
   path: "data/analytics.sqlite"
 
 traits:
+  # Argonauts: every token's metadata_url is NULL on OpenSea, so the direct
+  # path yields nothing and the only zero-read source is the Explorer cache
+  # (co-authored with the Operator's friend). import-traits.command reads it
+  # from here. Relative to the project root; keyed by token id; traits verbatim.
+  explorer_cache_path: "../GitHub/argonauts-explorer/data/tokens.json"
   # Token metadata is fetched from each token's own metadata_url -- not from
   # OpenSea, so it costs no REST budget. ipfs:// URLs go through this gateway.
   ipfs_gateway: "https://ipfs.io/ipfs/"
