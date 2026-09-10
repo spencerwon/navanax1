@@ -1767,3 +1767,115 @@ bugs:
   regression_test: tests/selftest.py::test_list_pass_keeps_traits_it_is_given
   monitor_gap: "Nothing compares what an endpoint RETURNS with what the code KEEPS. The raw response bodies of the 47 list reads were not landed (REST responses go through the governor, not the landing zone), so the discarded field left no trace to audit. Worth a follow-up: land REST bodies too, or at least log the top-level keys of the first page of every new endpoint."
   pr: null
+
+- id: BUG-20260909-055
+  summary: "tests/validator_probe.py could not import and was never executed -- a validator artifact that had sat in the repo since PR #5 looking like coverage while providing none"
+  severity: S3
+  priority: P1
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-10T09:10:00-05:00"
+  occurred_at: "2026-09-09T20:00:00-05:00"
+  resolved_at: "2026-09-10T10:40:00-05:00"
+  detected_by: "validator, triaging tests/ on pr7; reproduced with `python3 tests/validator_probe.py` (ImportError) and by reading pytest's default python_files patterns against the filename"
+  detection_channel: validator
+  branch: pr7
+  locations:
+  - {file: .github/workflows/ci.yml, line: 18}
+  - {file: pyproject.toml, line: 62}
+  requirement: REQ-N-01
+  data_impact: "None to stored data. The damage is to the validation record: the repo carried a file that asserted 15 behaviours nobody ever evaluated, and its presence in tests/ is what a reviewer counts as coverage."
+  root_cause: >-
+    The file was written on a branch whose trait-criteria design
+    (normalize.parse_trait_criteria, per-event trait_type/trait_value columns,
+    Normalizer.backfill_trait_criteria, metrics.trait_book) was never merged;
+    the line that landed solves the same problem with an order_criteria table
+    and order_lives. So it raises ImportError on import. Nothing noticed
+    because nothing ran it: CI invokes `python3 tests/selftest.py` by name and
+    then `pytest -q`, and `validator_probe.py` matches neither `test_*.py` nor
+    `*_test.py`, so pytest collected zero tests from it and exited 5, which the
+    workflow tolerates by design (BUG-20260909-019).
+  resolution: "Triaged probe by probe. The live probes were folded into tests/selftest.py against the merged APIs (standing_sql/order_lives, import_explorer_cache, the import-traits CLI, the read-only static check, and the landing-zone byte check); the two probes testing the superseded API were deleted as covered by test_order_criteria_parsing_and_migration; validator_probe.py is gone. There is now exactly one suite and CI runs it."
+  regression_test: tests/selftest.py::test_every_test_file_is_executed_by_something
+  monitor_gap: "Nothing checked that the files under tests/ are actually EXECUTED by anything. BUG-20260909-038 removed the hand-maintained list of test FUNCTIONS inside the suite; the same failure one level up -- a whole FILE nobody runs -- was still possible. The new guard fails the build unless every tests/*.py is named in CI, collected by pytest's default patterns, or imported by selftest.py."
+  pr: 7
+
+- id: BUG-20260909-056
+  summary: "order_lives kills an order when its invalidate and revalidate share a valid_ts; ASM-020 registers that tie as reopening the order, so the standing book silently drops a live order"
+  severity: S1
+  priority: P2
+  error_class: NRM
+  status: open
+  logged_at: "2026-09-10T09:25:00-05:00"
+  occurred_at: "2026-09-09T13:00:00-05:00"
+  detected_by: "validator, running the seven ASM-020 rules against the merged fold on pr7 (six agree, this one does not)"
+  detection_channel: validator
+  branch: pr7
+  locations:
+  - {file: src/navanax/normalize.py, line: 500}
+  - {file: config/assumptions.yaml, line: 27}
+  requirement: REQ-N-09
+  data_impact: "No stored record is wrong -- order_lives is derived and re-foldable. Display and any signal reading the standing book: an order whose invalidate and revalidate carry the same valid_ts is recorded exit_reason='invalidated' and vanishes from live_book, the screener and trait-filtered metrics. Understates liquidity, in the direction that makes a floor look thinner than it is. No instance has been observed in the corpus to date, so no published number is known to be affected."
+  root_cause: >-
+    `_fold_one_life._superseded` treats an invalidate as superseded only by a
+    revalidate STRICTLY later (`rt > r[4]`). ASM-020 records the decision as a
+    single `>=` comparison, chosen so that a same-instant pair reopens. The
+    register and the implementation were written on different branches and
+    nothing compared them.
+  resolution: null
+  regression_test: tests/selftest.py::test_standing_order_matches_the_assumption_register
+  monitor_gap: "No test read config/assumptions.yaml. A registered assumption that nothing asserts is a comment. The new test parses the ASM-020 value block and drives every one of its seven rules through standing_sql, so a change to either side without the other now shows up."
+  pr: 7
+
+- id: BUG-20260909-057
+  summary: "token_id is taken from Seaport itemType 4/5 criteria items, so a collection offer with criteria root '0' is recorded as a bid on token '0' and a trait offer as a bid on its Merkle root"
+  severity: S1
+  priority: P1
+  error_class: NRM
+  status: open
+  logged_at: "2026-09-10T09:40:00-05:00"
+  occurred_at: "2026-09-09T10:00:00-05:00"
+  detected_by: "validator, porting the last assertion of the superseded validator_probe.py::probe_parse_trait_criteria onto the merged parse_event"
+  detection_channel: validator
+  branch: pr7
+  locations:
+  - {file: src/navanax/normalize.py, line: 217}
+  - {file: src/navanax/metrics.py, line: 361}
+  requirement: REQ-N-01
+  data_impact: "Unknown extent, and that is the problem. Whether any recorded frame triggers it depends on whether OpenSea sends `protocol_data` on collection_offer / trait_offer -- the captured fixtures carry none, and the raw record has not been swept for it. Where it does fire, a collection-wide offer stops satisfying metrics.py's `token_id IS NULL AND event_type='collection_offer'` test and is counted against a single token instead of every token, and the screener's highest_bid for token 0 picks up an offer nobody made on it. The record itself is intact: token_id is DERIVED and a re-fold fixes every affected row."
+  root_cause: >-
+    `_token_id_from` accepts itemType 2, 3, 4 and 5 alike. 4 and 5 are
+    ERC721_WITH_CRITERIA / ERC1155_WITH_CRITERIA, where identifierOrCriteria is
+    a Merkle root over a SET of token ids, not a token id -- and a root of 0
+    means "any token in the collection". The truthiness guard
+    (`and entry.get("identifierOrCriteria")`) does not help: "0" is a non-empty
+    string.
+  resolution: null
+  regression_test: tests/selftest.py::test_token_id_is_never_taken_from_a_criteria_item
+  monitor_gap: "The real collection_offer and trait_offer fixtures carry no protocol_data, so no test could reach the branch -- the BUG-002 shape again, a fixture that cannot falsify the code. A sweep of the landing zone for offer frames that DO carry protocol_data is the first thing the fix should do, because it decides whether any stored row needs re-folding."
+  pr: 7
+
+- id: BUG-20260909-058
+  summary: "`navanax import-traits --generated` accepts any epoch, so a 0 stamps traits_at at 1970 and a millisecond timestamp stamps it in the year 58680"
+  severity: S3
+  priority: P2
+  error_class: TMP
+  status: open
+  logged_at: "2026-09-10T09:50:00-05:00"
+  occurred_at: "2026-09-09T16:00:00-05:00"
+  detected_by: "validator, porting validator_probe.py::probe_import_generated_zero onto the merged CLI"
+  detection_channel: validator
+  branch: pr7
+  locations:
+  - {file: src/navanax/cli.py, line: 423}
+  requirement: REQ-N-15
+  data_impact: "None yet -- the one real import used summary.json. If it fires, every token in the cache is stamped with an observation time that is wrong by decades, and traits_at is what an as-of query trusts. Recoverable only by re-importing with the right time, and only if someone notices."
+  root_cause: >-
+    `generated: float | None = args.generated` then `if generated is None`.
+    The refusal covers ABSENCE of a timestamp, which is the case the author had
+    in mind, and not implausibility of one that is present. 0.0 is not None,
+    and neither is 1788808192000.
+  resolution: null
+  regression_test: tests/selftest.py::test_import_traits_cli_refuses_an_implausible_observation_time
+  monitor_gap: "test_import_explorer_cache covers the no-timestamp path (exit 2) and the summary.json path, and never passes --generated at all. Nothing anywhere sanity-checks an observation time against a plausible window, which is the general form of this."
+  pr: 7

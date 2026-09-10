@@ -485,9 +485,53 @@ paths only for entries without them, and add `navanax import-traits` so the
 friend's cache loads with zero reads. Docstring now states what is verified
 and for which collection; other collections must be re-verified.
 
+### Round 14 — triaging an orphan validator artifact (pr7)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-055 | S3 | P1 | fixed | `tests/validator_probe.py` could not import and was never executed — a file that looked like coverage and was neither run nor runnable |
+| BUG-20260909-056 | S1 | P2 | **open** | `order_lives` kills an order whose invalidate and revalidate share a `valid_ts`; ASM-020 registers that tie as *reopening* it |
+| BUG-20260909-057 | S1 | P1 | **open** | `token_id` is taken from Seaport itemType 4/5 *criteria* items, so a collection offer with root `"0"` becomes a bid on token `0` |
+| BUG-20260909-058 | S3 | P2 | **open** | `import-traits --generated` accepts any epoch: `0` stamps `traits_at` at 1970, a millisecond timestamp at the year 58680 |
+
+**055 is the process one.** The probe file arrived on `main` in `aeb9ba9` (PR #5)
+written against a trait-criteria design that was never merged — per-event
+`trait_type` / `trait_value` columns, `normalize.parse_trait_criteria`,
+`Normalizer.backfill_trait_criteria`, `metrics.trait_book`. The line that did
+land solves the same problem with an `order_criteria` table and `order_lives`,
+so the file raised `ImportError` on import. Nothing noticed, because nothing ran
+it: CI invokes `python3 tests/selftest.py` **by name**, and `validator_probe.py`
+matches neither `test_*.py` nor `*_test.py`, so pytest collected nothing from it
+and exited 5 — which the workflow tolerates by design (BUG-20260909-019). The
+repo therefore advertised fifteen assertions that had never been evaluated.
+
+BUG-20260909-038 removed the hand-maintained list of test *functions* inside the
+suite. This is the same failure one level up: a whole *file* nobody runs. The
+guard now fails the build unless every `tests/*.py` is named in CI, collected by
+pytest's default patterns, or imported by `selftest.py`.
+
+**056, 057 and 058 came out of the triage itself** — each is a probe assertion
+that survived onto the merged code and does not pass there. `validator` writes
+tests, not the production code it reviews, so all three are filed open with the
+test that proves them already in the suite. They are reported by
+`selftest.py` as `DEFECT` lines against their bug id, and the harness fails the
+build the moment one of them starts passing without the ledger being updated.
+
+**056 is the one worth reading.** Six of ASM-020's seven standing-order rules
+hold against the merged fold; `revalidate_same_instant` does not.
+`_fold_one_life._superseded` supersedes an invalidate only with a revalidate
+*strictly* later (`rt > r[4]`); the register records the decision as a single
+`>=`, chosen so the tie reopens. The register and the implementation were
+written on different branches and nothing compared them — so nothing read
+`config/assumptions.yaml` at all. A registered assumption that no test asserts
+is a comment.
+
 ### Still open
 
-**None.** All 54 logged bugs are fixed.
+**Three.** BUG-20260909-056, -057 and -058, all filed 2026-09-10 by `validator`
+against `pr7`, all with a regression test already in `tests/selftest.py` and all
+awaiting a fix from `data-engineer` (`docs/05_BUG_TAXONOMY.md` §5.1 routes `NRM`
+and `TMP` there). The other 55 logged bugs are fixed.
 
 ### The lesson
 

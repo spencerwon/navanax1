@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -41,6 +42,7 @@ from navanax.stream import StreamConsumer, normalize_frame  # noqa: E402
 
 PASS: list[str] = []
 FAIL: list[str] = []
+DEFECT: list[str] = []
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -48,6 +50,50 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     PASS.append(name) if cond else FAIL.append(f"{name}{suffix}")
     print(f"{'PASS' if cond else 'FAIL'}  {name}"
           + (f"\n        {detail}" if detail and not cond else ""))
+
+
+def _bug_status(bug: str) -> str | None:
+    """Status of `bug` in the ledger, read as text so this file stays stdlib-only."""
+    text = (ROOT / "docs" / "logs" / "bugs.yaml").read_text()
+    block = re.search(rf"^- id: {re.escape(bug)}\s*$(.*?)(?=^- id: |\Z)", text, re.M | re.S)
+    if not block:
+        return None
+    st = re.search(r"^\s{2}status:\s*(\S+)\s*$", block.group(1), re.M)
+    return st.group(1) if st else None
+
+
+def known_defect(name: str, documented_rule_holds: bool, bug: str, detail: str = "") -> None:
+    """Assert the DOCUMENTED rule where the merged code is known to disagree.
+
+    BUG-20260909-055. `validator` may write tests but not the production code it
+    reviews, so a defect it finds is filed, not patched. A test that simply fails
+    would turn the suite permanently red, and a red suite stops distinguishing a
+    known defect from a new regression -- which is how a broken artifact sat in
+    `tests/` for a day looking like coverage.
+
+    So: while `bug` is OPEN in the ledger, a disagreement is reported loudly as
+    DEFECT and the build stays green. It cannot rot in either direction --
+
+      * the moment the code starts agreeing, this FAILS, demanding the bug be
+        marked fixed and the check promoted to `check()`;
+      * the moment the bug is marked fixed, this becomes an ordinary `check()`
+        and the ledger's own gate (`buglog.py --check`) requires it to exist.
+
+    `documented_rule_holds` is the documented rule's truth value against the code.
+    """
+    status = _bug_status(bug)
+    if status != "open":
+        check(f"{name}  [{bug} status={status}: promoted to a hard check]",
+              documented_rule_holds, detail)
+        return
+    if documented_rule_holds:
+        FAIL.append(f"{name} -- {bug} is open but the code now AGREES with the documented "
+                    f"rule: mark the bug fixed and turn this into check()")
+        print(f"FAIL  {name}\n        {bug} is open but the defect is gone -- promote this check")
+    else:
+        DEFECT.append(f"{name}  [{bug}]")
+        print(f"DEFECT  {name}\n        documented rule NOT met; open in the ledger as {bug}"
+              + (f"\n        {detail}" if detail else ""))
 
 
 class FakeClock:
@@ -1716,11 +1762,16 @@ def main() -> int:
             else:
                 fn()
         print("\n" + "=" * 72)
-        print(f"{len(tests)} test functions, {len(PASS)} passed, {len(FAIL)} failed")
+        print(f"{len(tests)} test functions, {len(PASS)} passed, {len(FAIL)} failed, "
+              f"{len(DEFECT)} known defect(s) standing")
         if FAIL:
             print("\nFAILURES:")
             for f in FAIL:
                 print("  " + f)
+        if DEFECT:
+            print("\nKNOWN DEFECTS (documented rule not met; open in docs/logs/bugs.yaml):")
+            for d in DEFECT:
+                print("  " + d)
         print("=" * 72)
         return 1 if FAIL else 0
     finally:
@@ -3469,6 +3520,403 @@ def test_orphan_open_gaps_are_closed_by_the_successor(tmp: Path) -> None:
     check("orphan: buckets after the closed gaps are defined again (0 sales while listening), not null",
           s["raw"][-1] == 0.0 and s["basis"]["gap_masked_buckets"] < len(s["raw"]), str(s["raw"]))
     nrm.close()
+
+
+# ===========================================================================
+# Absorbed from tests/validator_probe.py (BUG-20260909-055).
+#
+# That file arrived on main in aeb9ba9 written against a trait-criteria design
+# that was never merged (`normalize.parse_trait_criteria`, per-event
+# `trait_type`/`trait_value` columns, `Normalizer.backfill_trait_criteria`,
+# `metrics.trait_book`). It could not import here, and nothing ran it: CI
+# invokes `python3 tests/selftest.py` by name, and `validator_probe.py` matches
+# neither of pytest's default `python_files` patterns. It sat in the repo
+# looking like coverage while providing none.
+#
+# The probes that test APIs this branch actually has are below, driving the
+# merged signatures. There is now exactly ONE suite, and the last test in this
+# section is the guard that keeps it that way.
+# ===========================================================================
+def _asm_020() -> dict[str, str]:
+    """The ASM-020 `value:` block, read from the register as text (stdlib only).
+
+    The seven rules the standing-order predicate must obey are a DECISION in
+    config/assumptions.yaml, not a property of whatever the code happens to do.
+    Reading them here means an edit to the register that nobody implements shows
+    up as a test failure rather than as silent agreement.
+    """
+    text = (ROOT / "config" / "assumptions.yaml").read_text()
+    block = re.search(r"^  - id: ASM-020\s*$(.*?)(?=^  - id: |\Z)", text, re.M | re.S)
+    if not block:
+        return {}
+    val = re.search(r"^    value:\s*$(.*?)(?=^    \w+:|\Z)", block.group(1), re.M | re.S)
+    if not val:
+        return {}
+    out = {}
+    for line in val.group(1).splitlines():
+        m = re.match(r"^      (\w+):\s*(.+?)\s*(?:#.*)?$", line)
+        if m:
+            out[m.group(1)] = m.group(2).strip().strip('"')
+    return out
+
+
+def test_standing_order_matches_the_assumption_register(tmp: Path) -> None:
+    """ASM-020, rule by rule, against `metrics.standing_sql` as merged.
+
+    From validator_probe.py::probe_lifecycle, rewritten for the `order_lives`
+    implementation that actually landed (the probe drove a `standing_sql(alias)`
+    that took no `now_ts` and a `metrics.trait_book` that does not exist here).
+    """
+    from navanax.metrics import standing_sql
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    asm = _asm_020()
+    check("ASM-020 is registered and still says what this test asserts",
+          asm.get("null_expiration") == "standing" and asm.get("item_sold") == "final"
+          and asm.get("item_cancelled") == "final" and asm.get("order_invalidate") == "reopenable"
+          and asm.get("revalidate_same_instant") == "reopens"
+          and asm.get("revalidate_before_invalidate") == "no_effect"
+          and asm.get("unexpired") == "expiration_ts IS NULL OR expiration_ts > as_of", str(asm))
+
+    n, put = _lives_store(tmp, "asm020.sqlite")
+    far = {"expiration_at": "2026-09-09T20:00:00Z", "expiration_ts": iso_to_ts("2026-09-09T20:00:00Z")}
+    noexp = {"expiration_at": None, "expiration_ts": None}
+    reval = {"event_type": "order_revalidate"}
+    T = "2026-09-09T10:0"
+    seq = 0
+
+    def ev(raw, minute: str, oh: str, **over) -> None:
+        nonlocal seq
+        seq += 1
+        put(raw, f"{T}{minute}:00Z", seq, order_hash=oh, **over)
+
+    # A: listed, cancelled, invalidated, revalidated -> the cancel is still final
+    ev(DOC_LISTING, "0", "A", **far)
+    ev(REAL_CANCEL, "1", "A")
+    ev(REAL_INVALIDATE, "2", "A")
+    ev(REAL_INVALIDATE, "3", "A", **reval)
+    # B: invalidate -> revalidate -> invalidate again -> dead
+    ev(DOC_LISTING, "0", "B", **far)
+    ev(REAL_INVALIDATE, "1", "B")
+    ev(REAL_INVALIDATE, "2", "B", **reval)
+    ev(REAL_INVALIDATE, "3", "B")
+    # C: sold, then a revalidate arrives -> sold is final
+    ev(DOC_LISTING, "0", "C", **far)
+    ev(REAL_SALE, "1", "C")
+    ev(REAL_INVALIDATE, "2", "C", **reval)
+    # D: invalidate and revalidate at the SAME valid_ts -> ASM-020 says it reopens
+    ev(DOC_LISTING, "0", "D", **far)
+    ev(REAL_INVALIDATE, "1", "D")
+    ev(REAL_INVALIDATE, "1", "D", **reval)
+    # E: revalidate BEFORE the invalidate (out-of-order arrival) -> no rescue
+    ev(DOC_LISTING, "0", "E", **far)
+    ev(REAL_INVALIDATE, "1", "E", **reval)
+    ev(REAL_INVALIDATE, "2", "E")
+    # F: no expiration at all -> never expires on its own
+    ev(DOC_LISTING, "0", "F", **noexp)
+    # G: the cancel shares the placement's valid_ts -> dead
+    ev(DOC_LISTING, "0", "G", **far)
+    ev(REAL_CANCEL, "0", "G")
+    # H: an expiration that has passed, nothing else -> not standing
+    ev(DOC_LISTING, "0", "H", expiration_at="2026-09-09T11:00:00Z",
+       expiration_ts=iso_to_ts("2026-09-09T11:00:00Z"))
+    n.conn.commit()
+    now = iso_to_ts("2026-09-09T12:00:00Z")
+    refresh_order_lives(n.conn, now_ts=now)
+    sql, a = standing_sql("e", now)
+    live = {r[0] for r in n.conn.execute(
+        f"SELECT DISTINCT e.order_hash FROM events e WHERE e.collection='argonauts' AND {sql}", a)}
+
+    check("ASM-020 (item_cancelled: final): a cancel survives a later invalidate -> revalidate (A)",
+          "A" not in live, str(live))
+    check("ASM-020 (order_invalidate: reopenable): invalidate -> revalidate -> invalidate is dead (B)",
+          "B" not in live, str(live))
+    check("ASM-020 (item_sold: final): a later revalidate does not reopen a filled order (C)",
+          "C" not in live, str(live))
+    known_defect("ASM-020 (revalidate_same_instant: reopens): invalidate and revalidate at the SAME "
+                 "valid_ts leave the order standing (D)",
+                 "D" in live, "BUG-20260909-056",
+                 f"standing={sorted(live)}; normalize._fold_one_life._superseded compares `rt > r[4]`, "
+                 f"so the tie kills the order instead of reopening it")
+    check("ASM-020 (revalidate_before_invalidate: no_effect): an earlier revalidate does not rescue (E)",
+          "E" not in live, str(live))
+    check("ASM-020 (null_expiration: standing): no expiration means it never expires on its own (F)",
+          "F" in live, str(live))
+    check("ASM-020 (item_cancelled: final): a cancel at the placement's own valid_ts kills it (G)",
+          "G" not in live, str(live))
+    check("ASM-020 (unexpired): an expiration already passed is not standing (H)",
+          "H" not in live, str(live))
+    n.close()
+
+
+def test_import_cache_refuses_and_reports_rather_than_extending(tmp: Path) -> None:
+    """From validator_probe.py::probe_import_refuses_overwrite / probe_import_empty_traits_dict.
+
+    `test_import_explorer_cache` covers the disagreement path where BOTH sides
+    hold a value for the same trait_type. These are the three shapes it does not:
+    a trait_type only the CACHE has, a cache entry whose `traits` is empty while
+    the store has some, and a token stamped `traits_at` with no trait rows at all.
+    """
+    from navanax.traits import import_explorer_cache, open_store
+
+    conn = open_store(tmp / "refuse.sqlite")
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                 "VALUES ('argonauts','7','2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','opensea_nft')")
+    conn.execute("INSERT INTO traits VALUES ('argonauts','7','Cloak','Death')")
+    conn.commit()
+    r = import_explorer_cache(conn, {"7": {"id": "7", "traits": {"Cloak": "Clergy", "Relic": "Gold"}}},
+                              slug="argonauts", generated_at="2026-09-08T00:00:00Z")
+    rows = sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='7'"))
+    src = conn.execute("SELECT traits_source, traits_at FROM tokens WHERE token_id='7'").fetchone()
+    check("import: an already-traited token is not overwritten, not EXTENDED, and its source/time are untouched",
+          rows == [("Cloak", "Death")] and src == ("opensea_nft", "2026-09-09T01:00:00Z"), f"{rows} {src}")
+    check("import: a trait_type only the cache has is reported as a disagreement with stored=[], never added",
+          any(d["trait_type"] == "Relic" and d["stored"] == [] and d["cache"] == ["Gold"]
+              for d in r["disagreements"]), str(r["disagreements"]))
+
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                 "VALUES ('argonauts','8','2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','opensea_nft')")
+    conn.execute("INSERT INTO traits VALUES ('argonauts','8','Cloak','Death')")
+    conn.commit()
+    r = import_explorer_cache(conn, {"8": {"id": "8", "traits": {}}}, slug="argonauts",
+                              generated_at="2026-09-08T00:00:00Z")
+    stayed = sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='8'"))
+    check("import (policy): an empty cache `traits` is UNKNOWN -- counted, never stamped, never diffed "
+          "against what the store holds, so the Operator is not told the two sources differ",
+          (r["cache_tokens_without_traits"], r["imported"], r["diffed_disagree"], r["skipped_already_had"])
+          == (1, 0, 0, 0) and stayed == [("Cloak", "Death")], str(r))
+
+    # traits_at set with ZERO trait rows -- reachable after a manual DELETE
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                 "VALUES ('argonauts','9','2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','opensea_nft')")
+    conn.commit()
+    r = import_explorer_cache(conn, {"9": {"id": "9", "traits": {"Cloak": "X"}}}, slug="argonauts",
+                              generated_at="2026-09-08T00:00:00Z")
+    check("import: `traits_at` set with no trait rows counts as HAS traits -- the cache is refused and "
+          "reported, not quietly used to fill the hole",
+          r["imported"] == 0 and r["diffed_disagree"] == 1
+          and conn.execute("SELECT COUNT(*) FROM traits WHERE token_id='9'").fetchone()[0] == 0, str(r))
+    conn.close()
+
+
+def test_import_traits_cli_refuses_an_implausible_observation_time(tmp: Path) -> None:
+    """From validator_probe.py::probe_import_generated_zero.
+
+    `test_import_explorer_cache` proves the CLI refuses when there is NO
+    timestamp source. It never asks what happens when there is one and it is
+    nonsense. `traits_at` is an observation time: a wrong one is a bitemporal
+    lie that no later read can detect (docs/05 TMP).
+    """
+    from navanax.cli import main as cli_main
+
+    def run(generated: str) -> tuple[object, object]:
+        root = tmp / f"gen{generated.replace('-', 'm').replace('.', '_')}"
+        (root / "config").mkdir(parents=True)
+        (root / "config" / "base.yaml").write_text(
+            "environment: local\nanalytical:\n  path: data/an.sqlite\n"
+            "opstore:\n  path: data/ops.db\nlanding:\n  root: data/landing\n")
+        (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+        tj = root / "tokens.json"
+        tj.write_text(json.dumps({"1": {"id": "1", "traits": {"Cloak": "Death"}}}))
+        try:
+            rc = cli_main(["--root", str(root), "import-traits", str(tj),
+                           "--collection", "argonauts", "--generated", generated])
+        except Exception as exc:                       # noqa: BLE001 -- what it does IS the finding
+            return f"crashed: {type(exc).__name__}: {exc}", None
+        db = root / "data" / "an.sqlite"
+        stamped = None
+        if db.exists():
+            import sqlite3
+            c = sqlite3.connect(str(db))
+            row = c.execute("SELECT traits_at FROM tokens WHERE token_id='1'").fetchone()
+            stamped = row[0] if row else None
+            c.close()
+        return rc, stamped
+
+    rc0, ts0 = run("0")
+    known_defect("import CLI: `--generated 0` is refused rather than stamping traits_at at the epoch",
+                 rc0 == 2 and ts0 is None, "BUG-20260909-058", f"rc={rc0} traits_at={ts0}")
+    rc_ms, ts_ms = run("1788808192000")     # milliseconds pasted where seconds were wanted
+    known_defect("import CLI: an epoch in MILLISECONDS is REFUSED (exit 2) -- the realistic version of "
+                 "the same mistake -- rather than stamping the far future or dying on a traceback",
+                 rc_ms == 2 and ts_ms is None, "BUG-20260909-058", f"rc={rc_ms} traits_at={ts_ms}")
+
+
+def test_token_id_is_never_taken_from_a_criteria_item(tmp: Path) -> None:
+    """Ported from validator_probe.py::probe_parse_trait_criteria, last check.
+
+    Seaport itemType 4 and 5 are ERC721/ERC1155 *_WITH_CRITERIA: their
+    `identifierOrCriteria` is a MERKLE ROOT over a set of token ids, not a token
+    id. `_token_id_from` accepts itemTypes 2, 3, 4 and 5 alike, so a
+    collection offer whose criteria root is "0" is recorded as a bid on token
+    "0", and a trait offer is recorded as a bid on a token numbered by its root.
+
+    Nothing in `test_order_criteria_parsing_and_migration` reaches this: the real
+    collection_offer and trait_offer fixtures carry no `protocol_data` at all.
+    """
+    from navanax.normalize import parse_event
+
+    def offer(event_type: str, criteria: str) -> dict:
+        return {"event_type": event_type, "sent_at": "2026-09-09T10:19:24Z",
+                "payload": {"chain": "ethereum", "collection": {"slug": "argonauts"},
+                            "event_timestamp": "2026-09-09T10:19:23Z", "base_price": "1",
+                            "order_hash": "0xc0" + criteria[:6], "quantity": 1, "item": None,
+                            "payment_token": {"decimals": 18, "eth_price": "1", "symbol": "WETH",
+                                              "usd_price": "1"},
+                            "protocol_data": {"parameters": {
+                                "offer": [{"itemType": 1, "token": "0xc02a",
+                                           "identifierOrCriteria": "0"}],
+                                "consideration": [{"itemType": 4, "token": "0xabc",
+                                                   "identifierOrCriteria": criteria}]}}}}
+
+    coll = parse_event(_env(1, ["1", None, "collection:argonauts", "collection_offer",
+                                offer("collection_offer", "0")], "2026-09-09T10:19:32Z"))
+    known_defect("parse_event: a collection offer whose criteria root is the STRING '0' does not become "
+                 "a bid on token_id '0'",
+                 coll["token_id"] is None, "BUG-20260909-057",
+                 f"token_id={coll['token_id']!r}; metrics.py's trait filter keys the collection-wide "
+                 f"case on `token_id IS NULL AND event_type='collection_offer'`, so this offer stops "
+                 f"counting as collection-wide and starts counting against one token")
+    tr = parse_event(_env(2, ["1", None, "collection:argonauts", "trait_offer",
+                              offer("trait_offer", "831572299943853139516")], "2026-09-09T10:19:32Z"))
+    known_defect("parse_event: a trait offer's Merkle root does not become its token_id",
+                 tr["token_id"] is None, "BUG-20260909-057", f"token_id={tr['token_id']!r}")
+    check("the criteria itemTypes really are the criteria ones: itemType 2 (a plain ERC-721 "
+          "consideration) is still where a token id legitimately comes from",
+          parse_event(_env(3, REAL_BID, "2026-09-09T10:18:41Z"))["token_id"] == "7531")
+
+
+def test_derived_paths_hold_no_file_write_primitive() -> None:
+    """From validator_probe.py::probe_no_landing_writes, widened.
+
+    Project rule 2: the landing zone is append-only and irreplaceable. The
+    modules on the DERIVED side of the boundary -- the ones that read the record
+    and build the store, the metrics and the dashboard from it -- must not be
+    able to touch a file at all. `landing.py`, `stream.py` and `cli.py` are the
+    writers and are deliberately not in this list.
+    """
+    import io
+    import tokenize
+
+    words = ("write_text", "write_bytes", ".rename(", "os.remove", "os.unlink",
+             ".unlink(", "os.replace", "shutil.", "os.truncate")
+    write_mode = re.compile(r"""open\(\s*[^)]*?["'][rwaxbt+]*[wax+][rwaxbt+]*["']""")
+
+    def code_only(src: str) -> str:
+        """Source with comments and docstrings removed.
+
+        Ordinary string literals stay, because an `open(p, "w")` is found by its
+        mode. Prose does not: without this the check fires on a docstring that
+        merely NAMES a primitive (dashboard.py explains that ManifestWriter uses
+        `os.replace`), and a checker that cries wolf gets switched off.
+        """
+        out, prev = [], tokenize.INDENT
+        for t in tokenize.generate_tokens(io.StringIO(src).readline):
+            if t.type == tokenize.COMMENT:
+                continue
+            docstring = t.type == tokenize.STRING and prev in (
+                tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT)
+            if not docstring:
+                out.append(t.string)
+            prev = t.type
+        return "".join(out)
+
+    for mod in ("normalize.py", "traits.py", "metrics.py", "dashboard.py"):
+        src = code_only((ROOT / "src" / "navanax" / mod).read_text())
+        bad = [w for w in words if w in src] + write_mode.findall(src)
+        check(f"static: {mod} contains no file-write primitive -- the record is unreachable from it",
+              bad == [], str(bad))
+
+
+def test_landing_zone_is_byte_identical_across_a_full_refold(tmp: Path) -> None:
+    """Ported from validator_probe.py::probe_backfill_idempotent_and_readonly.
+
+    The probe checked this against `backfill_trait_criteria`, which was never
+    merged; the equivalent operation here is `reset_for_refold()` + `sync()`.
+    `test_order_criteria_parsing_and_migration` compares the landing zone's file
+    NAMES before and after. That would pass if a file were rewritten in place,
+    which is precisely the failure the rule exists to prevent -- so this hashes
+    the BYTES.
+    """
+    import hashlib
+
+    from navanax.normalize import Normalizer
+    from navanax.traits import ensure_schema
+
+    clock = FakeClock(datetime(2026, 9, 9, 10, 19, 0, tzinfo=timezone.utc))
+    root = tmp / "lz-bytes"
+    w = LandingZoneWriter(root, "run-bytes", codec=GzipCodec(), clock=clock.now,
+                          monotonic=clock.monotonic, flush_events=2, auto_flush=False)
+    for raw in (REAL_TRAIT_OFFER, REAL_BID, REAL_COLL_OFFER):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+        clock.advance(1)
+    w.flush()
+    w.close()
+
+    def digest() -> str:
+        h = hashlib.sha256()
+        for p in sorted(root.rglob("*")):
+            if p.is_file():
+                h.update(str(p.relative_to(root)).encode())
+                h.update(p.read_bytes())
+        return h.hexdigest()
+
+    before = digest()
+    n = Normalizer(root, tmp / "bytes.sqlite")
+    ensure_schema(n.conn)
+    n.sync()
+    rows_first = sorted(n.conn.execute("SELECT * FROM events"))
+    crit_first = sorted(n.conn.execute("SELECT * FROM order_criteria"))
+    check("re-fold: a sync of the record leaves the landing zone byte-identical, not merely "
+          "same-named -- an in-place rewrite would pass a filename comparison",
+          digest() == before)
+    n.reset_for_refold()
+    n.sync()
+    check("re-fold: the landing zone is STILL byte-identical after reset_for_refold + a second sync",
+          digest() == before)
+    check("re-fold: and the derived rows come back identical -- the record, not the store, is the truth",
+          sorted(n.conn.execute("SELECT * FROM events")) == rows_first
+          and sorted(n.conn.execute("SELECT * FROM order_criteria")) == crit_first)
+    n.close()
+
+
+def test_every_test_file_is_executed_by_something() -> None:
+    """The monitor gap behind BUG-20260909-055: nothing checked that the files in
+    `tests/` are actually RUN.
+
+    `validator_probe.py` was broken on arrival and unexecuted for a day while
+    looking, to any reader of the repo, like coverage. A file under `tests/` is
+    executed only if CI names it, pytest collects it, or this suite imports it.
+    Anything else is a third orphan suite waiting to happen, and it fails here
+    rather than rotting.
+    """
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    check("pytest's collection patterns are the defaults this test reasons about "
+          "(nothing in pyproject widens `python_files`)",
+          "python_files" not in pyproject, "pyproject overrides python_files -- update this test")
+    me = Path(__file__).name
+    mine = (ROOT / "tests" / me).read_text()
+    orphans = []
+    for p in sorted((ROOT / "tests").glob("*.py")):
+        name = p.name
+        collected_by_pytest = name.startswith("test_") or name.endswith("_test.py")
+        named_in_ci = name in ci
+        imported_here = (name != me
+                         and (f"import {p.stem}" in mine or f"from {p.stem}" in mine))
+        if not (name == me or collected_by_pytest or named_in_ci or imported_here):
+            orphans.append(name)
+    check("every file under tests/ is run by CI, collected by pytest, or imported by this suite",
+          orphans == [],
+          f"orphaned test files (present, never executed): {orphans}")
+    check("this suite is the one CI actually runs, by name", f"tests/{me}" in ci)
+    # The known_defect harness is only honest if it can tell an open bug from a
+    # fixed one; a mis-read status would silently downgrade a real failure.
+    check("known_defect reads the ledger correctly: a fixed bug and an open one are distinguished",
+          _bug_status("BUG-20260909-055") == "fixed" and _bug_status("BUG-20260909-056") == "open"
+          and _bug_status("NOT-A-BUG-ID") is None,   # not BUG-shaped: buglog.py --check scans this file
+          f"{_bug_status('BUG-20260909-055')} / {_bug_status('BUG-20260909-056')}")
 
 
 if __name__ == "__main__":
