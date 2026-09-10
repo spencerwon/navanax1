@@ -37,3 +37,40 @@ assumptions:
       no observed instance yet; it was chosen to keep the predicate a single
       >= comparison and is listed so it can be revisited when one appears.
     applies_to: [live_book, screener, trait_book]
+
+  - id: ASM-021
+    name: standing_book_series_and_crossed_book_rule
+    layer: derivation
+    decided: 2026-09-10
+    decided_by: Spencer (Operator) for the book choice; data-engineer for the reporting rules, under tech-lead PR-3
+    owner: data-engineer
+    review: 2026-12-01
+    code: src/navanax/metrics.py::standing_series, src/navanax/metrics.py::standing_spread
+    value:
+      default_book: standing              # floor_ask, collection_bid, immediacy_cost
+      observed_book: reachable_and_labelled   # book='observed'; never the default
+      no_standing_ask: "null"              # a bucket with no live ask is a hole, not 0 and not the last price
+      bucket_statistic: time_weighted_median   # not the interval extremum, not the last sample
+      sampling: every_event_time_in_the_bucket # sweep line, not bucket boundaries
+      immediacy_bid_leg: collection_offer_only # leg discipline: it applies to every token, so it is the bid on the floor token
+      crossed_book: "null + counted + logged"  # ask < bid at ANY tau nulls the WHOLE bucket
+      median_below_min_n: reported         # it is the level of a step function, a fact at n = 1
+      band_below_min_n: withheld           # [p10, p90] is a distributional claim; REQ-F-19
+      min_n_for_percentiles: 30
+    rationale: >
+      docs/01 §3.2 defines immediacy_cost on the STANDING book; the interval
+      extremum that shipped before 2026-09-10 was a different quantity, biased
+      narrow and able to go negative (BUG-20260910-057). Two reasonable people
+      could still disagree about three of the rules above, which is why they are
+      here rather than only in code. (1) Nulling the WHOLE bucket on a single
+      crossed sample is deliberately blunt: a crossed book means the
+      reconstruction is wrong, and the median of the uncrossed remainder would
+      hide it behind a plausible number. (2) Reporting the time-weighted median
+      below the percentile minimum while withholding the band treats the two as
+      different objects -- a level that was observed continuously versus a claim
+      about its distribution -- and the alternative (withhold both) would blank
+      the chart wherever the book is genuinely one listing deep, which on this
+      collection is most of it. (3) The bid leg is collection offers only; a
+      union over item bids and trait offers is a different metric and is not
+      substituted here.
+    applies_to: [floor_ask, collection_bid, immediacy_cost, market_kpi]

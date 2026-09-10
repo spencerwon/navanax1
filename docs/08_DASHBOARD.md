@@ -97,20 +97,44 @@ Every chart on the page is the tuple from docs/06 §3: `{metric, collection, den
 - **Ranges** are trailing (`1h`…`30d`) or anchored (`HTD`/`DTD`/`MTD`/`YTD`), and anchored ranges start on **display-timezone** boundaries (`config.display.timezone`), because "today" means your today. Buckets of a day or longer align the same way; sub-day buckets are UTC.
 - **Denominations** `ETH` / `USD` select the event's own value at its own timestamp.
 - **Transforms** `ABS`, `PCT`, `LOG`, `DIFF`, `BPS` per docs/06 §2.2. Baseline is the first non-null value in the window, and the response says what it was and when.
-- **Every response carries its basis** — metric, label, denomination, transform, baseline value and time, window, interval, timezone, `wash_filter`, `as_of`, bucket count, undefined-bucket count. The page prints it under each chart.
+- **Every response carries its basis** — metric, label, denomination, transform, baseline value and time, window, interval, timezone, `wash_filter`, `as_of`, bucket count, undefined-bucket count, and **`book`** (§4c: which book a price metric was read off). The page prints it under each chart.
 
 Metrics available now (all *observed* quantities — no fair value, no smoothing):
 
-| metric | definition |
-|---|---|
-| `floor_ask` | lowest `item_listed` price seen in the interval |
-| `collection_bid` | highest `collection_offer` seen in the interval |
-| `top_item_bid` | highest `item_received_bid` seen in the interval |
-| `immediacy_cost` | `floor_ask − collection_bid` (REQ-F-13a), also as % of ask. **Undefined when either side is absent** — drawn as a hole, never filled |
-| `sale_price`, `volume`, `sales_count` | median / sum / count of `item_sold` |
-| `listing_count`, `bid_count`, `cancel_count`, `event_count` | counts |
+| metric | definition | book |
+|---|---|---|
+| `floor_ask` | lowest **standing** ask over the bucket, time-weighted | `standing` (default) |
+| `collection_bid` | highest **standing** collection offer over the bucket, time-weighted | `standing` (default) |
+| `top_item_bid` | highest `item_received_bid` seen in the interval | `observed` only — see §4c |
+| `immediacy_cost` | standing lowest ask − standing highest collection offer, both legs on the same τ (REQ-F-13a, docs/01 §3.2), also as % of ask. **Undefined when either leg is absent** — drawn as a hole, never filled | `standing` (default) |
+| `sale_price`, `volume`, `sales_count` | median / sum / count of `item_sold` | n/a — flow, not a book |
+| `listing_count`, `bid_count`, `cancel_count`, `event_count` | counts | n/a |
 
-Non-series views, all reading the one standing-book relation (§3.3): the **live book** (`standing_sql` at `now`, with **depth in units** — a quantity-5 offer is five), the **sales tape**, **makers** (who is generating the flow), **bid lifetimes** (one life per order, ended durations plus the censored, `unknown`-terminator and **orphan** counts; percentiles only above n = 30, REQ-F-19), and the **event mix**.
+### 4c. `book=standing` vs `book=observed` — the difference, and why the default moved
+
+Set by the Operator on 2026-09-10: **floors and lowest-ask lines are built from standing asks only. A bucket with no live ask is a hole** — not a zero, not the last price seen.
+
+Until BUG-20260910-057 every price metric was an **interval extremum**: the lowest ask *seen* in the bucket, the highest offer *seen* in the bucket. For `immediacy_cost` the two were then subtracted, and **the two legs need never have coexisted.** That is not the quantity docs/01 §3.2 defines — *"what you pay to force time-to-clear to zero by hitting the **standing** collection offer"* — it is biased **narrow**, the bias grows with the interval, and because the legs are unrelated in time it can come out **negative**, which the KPI card would show as a free arbitrage.
+
+`book=standing` (the default for the three metrics above) reads the resting book off `order_lives` (§3.3) instead:
+
+- The book is **sampled at every event time** inside the bucket — a sweep line over placements and terminations — not at bucket boundaries. Boundary sampling would miss a listing that appeared and was cancelled inside one bucket, which on this collection is most of them.
+- The bucket's value is the **time-weighted median** of the extremum: the level that actually held for most of the bucket, not a single extreme that may have lived for one second of the hour.
+- Every point carries **`coverage`** (seconds the leg stood ÷ observable bucket seconds — for `immediacy_cost`, seconds *both* legs stood) and **`n`** (distinct orders that were standing). A floor with coverage 0.05 and n = 1 is a different object from one with coverage 1.0 and n = 40, and the response says which you have.
+- **`[p10, p90]`** accompanies the median, and is **withheld** below `min_n_for_percentiles` distinct orders (REQ-F-19). The median is not withheld: it is the level of a continuously observed step function and is a fact at n = 1. The band is a claim about a *distribution*, and machine quotes are not independent observations.
+- **A crossed book is an alarm, not a data point.** If `ask < bid` at any τ inside a bucket, the whole bucket is `null`, counted in `basis.negative_buckets`, and logged once. A crossed book means the reconstruction is wrong — a stale ask, a misparsed price, a left-truncated leg — and publishing the median of the remaining τ would hide it behind a plausible number (project rule 5).
+- **Leg discipline** (quant §1 metric 1). The bid leg of `immediacy_cost` is a **collection offer and nothing else**. A collection offer carries no token and applies to every one of them, so it is by construction a bid available on whichever token is at the floor. Item bids and trait offers are per-token and per-criteria; maxing over all three would pair the ask on one token with the bid on another, and *"mixing those populations is how a spread goes negative."* A union bid leg is a separate metric (PR-5).
+- **The standing book is LEFT-TRUNCATED and every response says so.** We only see orders whose *placement* we witnessed. Argonauts had ~801 standing listings before recording started, so the reconstructed floor is an **upper bound** on the true floor and the reconstructed best bid a **lower bound** on the true best bid: a stream-only spread is biased **wide**. `basis.left_truncated` and `basis.left_truncation_note` carry this on every standing series. Seeding the ask side from a REST listings snapshot is the fix, and it is a later PR.
+
+`book=observed` returns the **old numbers, unchanged**, and labels them: `basis.book = "observed"` plus an `observed_book_warning` saying what the number is not. It answers a different question — what was seen changing hands in this interval — and it is the comparison line that makes the size of the correction visible. Do not quote it as the spread.
+
+`top_item_bid` deliberately has **no standing variant yet**: an item bid applies to one token, so a standing "highest item bid" is not interchangeable with a collection-wide leg, and it belongs with the `highest_bid(S)` work where the Operator's leg-discipline decision applies. Asking for `book=standing` on it is refused with that reason rather than silently answered.
+
+API: `/api/series?...&book=standing|observed`. Omit it and each metric uses its own default.
+
+Non-series views, all reading the one standing-book relation (§3.3): the **live book** (`standing_sql` at `now`, with **depth in units** — a quantity-5 offer is five), the **sales tape**, **makers** (who is generating the flow), **bid lifetimes** (one life per order, ended durations plus the censored, `unknown`-terminator and **orphan** counts), and the **event mix**.
+
+**Percentiles are withheld, not flagged** (REQ-F-19, docs/00:199). Below `min_n_for_percentiles` = 30, `bid_lifetimes` returns `None` for **all three** of p10, median and p90 — a median is a percentile too — together with `n`, `min_n_for_percentiles` and `percentiles_withheld` so the caller can say *why* the number is missing. Returning the number with a `percentiles_reliable: false` beside it did not make quoting it impossible, which is what the requirement asks for; a number on screen is a number that gets quoted. One helper, `metrics.pct()`, enforces it for every caller.
 
 Bid lifetimes still *counts* censoring rather than modelling it, so the percentiles are biased short; Kaplan–Meier with competing risks reads these same rows and is a later PR. The median may move in **either** direction from the old number (9 s), because the old estimator was biased short by dropped censoring and long by the cross-product join — a large change is the expected consequence of two known defects, not a discovery.
 
@@ -120,15 +144,31 @@ Bid lifetimes still *counts* censoring rather than modelling it, so the percenti
 
 **Loading traits costs REST reads; the design spends as few as possible.** OpenSea's per-token endpoint would cost one read per token — 9,212 reads for Argonauts, three days of the measured 120/hour budget. Instead:
 
-1. **Token list** — `GET /collection/{slug}/nfts?limit=200`, about 47 governed reads, resumable from the saved cursor if interrupted (`ops.db` → `onboarding.last_cursor`). Records each token's `metadata_url`.
-2. **Traits** — fetched **directly from each token's `metadata_url`** (IPFS through the configured gateway, Arweave, or HTTP). These are not OpenSea calls and are not metered. Six at a time (`traits.concurrency`).
-3. **Fallback** — for tokens whose metadata cannot be read, the OpenSea per-token endpoint, capped at `traits.opensea_fallback_budget` (50) per run so a dead metadata host cannot spend the hour.
+1. **Token list** — `GET /collection/{slug}/nfts?limit=200`, about 47 governed reads, resumable from the saved cursor if interrupted (`ops.db` → `onboarding.last_cursor`). Records each token's `metadata_url` — **and its `traits`, which this response carries** (verified for Argonauts 2026-09-09 against a second tool's raw pull; BUG-054, when the field was being discarded and 9,161 per-token reads planned in its place). Traits found here are stored as they arrive, `traits_source = 'opensea_nft_list'`. For Argonauts this is where essentially all of them come from. **Other collections must be re-verified** — the field may be absent where OpenSea has not indexed metadata.
+2. **Traits** — fetched **directly from each token's `metadata_url`** (IPFS through the configured gateway, Arweave, or HTTP). These are not OpenSea calls and are not metered. Six at a time (`traits.concurrency`). **For Argonauts this pass does nothing**: every Argonaut's `metadata_url` is NULL, so there is no URL to fetch. A run that reports `attempted: 0` here after a complete pass 1 is the pass working, not failing.
+3. **Fallback** — for tokens neither pass got traits for, the OpenSea per-token endpoint, capped at `traits.opensea_fallback_budget` (50) per run so a dead metadata host cannot spend the hour. A token whose **contract is unknown** consumes no slot: the cap counts reads made, not tokens considered (BUG-055 — the decrement used to run before the contract check, so a contract-less token burned a budgeted read that was never issued, and a token that could have used it went without).
+4. **Offline import** — `navanax import-traits <tokens.json>`, or double-click **`import-traits.command`**, loads a cache another tool already pulled. **Zero reads.** Covered in full below.
 
 **What it costs.** 47 governed reads for the list plus up to 50 fallback reads — up to 97 of the 120/hour, and more if a call is retried after a 429 (every attempt, retries included, is what `requests_spent` reports; BUG-047). It shares the budget with the recorder's backfill: run it when `status.command` shows no gaps awaiting backfill. A `metadata_url` on an OpenSea domain (`opensea.io`, `seadn.io`, `openseauserdata.com`) is **never fetched directly** — that would be a metered call outside the governor (BUG-046); such tokens take the fallback. Bodies are capped at 2 MB; the list loop stops on a repeated cursor.
 
-Double-click **`traits.command`** once per collection; it reports pages, tokens, reads spent and the trait-type summary, and is safe to re-run: the list step is skipped once complete, tokens that succeeded are not refetched, and tokens that **failed are retried** (`traits_at` stays NULL on failure). A token may carry two values of one trait type; both are kept. Progress is written to `onboarding` so the page can show *"onboarding: 63% of tokens have traits — metrics are provisional"* (REQ-F-07a) while it runs.
+Double-click **`traits.command`** once per collection; it reports pages, tokens, reads spent, the trait-type summary and the coverage line (*"N of M tokens now have traits"*), and is safe to re-run: the list step is skipped once complete, tokens that succeeded are not refetched, and tokens that **failed are retried** (`traits_at` stays NULL on failure). `traits_from_list` counts **writes**, not list entries carrying traits — an entry the store already had is counted separately, and one whose value *disagrees* with what was recorded first is printed with both sides rather than dropped (BUG-055). A token may carry two values of one trait type; both are kept. Progress is written to `onboarding` so the page can show *"onboarding: 63% of tokens have traits — metrics are provisional"* (REQ-F-07a) while it runs.
 
 Values are stored **verbatim**: `"Blue"` and `"blue"` are two values until a human says otherwise. That is structure, not judgement.
+
+**Importing a cache (`import-traits.command`, `navanax import-traits`).** The Explorer tool writes a `tokens.json` of every token's traits and a `summary.json` beside it carrying the epoch it was pulled at. That epoch — not now — is what `traits_at` records: the traits were observed then, and stamping "now" would be a bitemporal lie the store cannot detect afterwards (docs/05 TMP). The command asks for nothing; it looks for the cache at `traits.explorer_cache_path` in config, then in a `cache/` folder beside it, and if it finds none it prints every path it looked in.
+
+What the import refuses to do is most of what it is:
+
+- **It never overwrites.** A token that already has traits from any source is diffed against the cache per trait type, and every disagreement is printed with both sides. Exit code 1. One of the two sources is wrong and the Operator decides which; neither is quietly preferred.
+- **It never writes a token the cache contradicts itself about.** Two entries resolving to one token id with different traits are a disagreement *inside the cache*, reported the same way — no row, no traits, nothing (BUG-055; before the fix the second entry silently won and `imported` counted both).
+- **It never coerces.** A cache entry that is not an object, or a trait whose value is a nested object or a list, is skipped and counted as `malformed`. `str({'a': 1})` in `traits.value` would be a plausible substitute for a value we could not read, which is the one thing this layer must never write.
+- **It never believes an impossible observation time.** `--generated` and `summary.json`'s `generated` must fall in `[2020-01-01, now + 1 h]`. Outside it the run refuses **before writing anything**, and where the value looks like milliseconds — the JavaScript default, and the source tool is a JS tool — the message says so and gives the value in seconds.
+
+**Provenance.** `traits_source` on an imported row is `explorer_cache:<sha256[:12]>` — the digest of the exact file — and a `trait_imports` row records the file, its size, its digest, the generated time and the run's counts. `explorer_cache` alone names no particular cache, and two caches that disagree are indistinguishable a week later without it.
+
+**Reconciliation** compares the token ids the cache *claims* against the ids the table *holds*, both resolved from `entry["id"]` — not from the cache's keys, which need not be token ids at all and were the source of a total false-mismatch report before BUG-055. A stored `contract` that differs from the one being imported is **reported**: `COALESCE` keeps what is stored, which is right, but it also hides the disagreement, and a wrong contract sends every fallback read to the wrong collection.
+
+**Every import ends with three checks printed.** How many of the collection's tokens now have traits (`N of M`); `criteria_trait_coverage` — every distinct string criterion in `order_criteria` matching no trait value, the same question `MetricEngine.criteria_coverage()` answers for the page, asked here because a casing mismatch is cheapest to see the moment the traits land; and a **case-folded near-miss report** over trait types and values, which is what makes the verbatim-storage rule safe. `Cloak` and `cloak` are two values by design — and a filter on one matching none of the other reads as an illiquid market rather than as a bug, unless something says so out loud. It reports; it never merges.
 
 **Filters.** The sidebar lists every trait type with every value and its count. Selections are **AND across types, OR within a type**: `Background:Blue|Red;Eyes:Laser` means (Blue or Red) and Laser. The same filter (`traits=` on the API) applies to the price charts, the live book, the tape and the screener. Three kinds of event meet a filter: **token-level** events (listings, item bids, sales, cancels) must match every clause; **collection offers** carry no token and pass, because they are bids on every token (their criteria set is empty, so it is trivially satisfied); **trait offers** carry no token either, and are matched on their stored criteria by the rule below.
 
@@ -175,15 +215,59 @@ Set by the Operator on 2026-09-09; pinned by `test_ui_contract` so they cannot r
 - **Layout language:** OpenSea/Coinbase — near-black ground, cards with 14 px radii, quiet grid, strong marks. Accent is **Austin FC Verde `#00B140`**. Colour roles: asks orange, item bids blue, collection offers green, spread yellow, gaps shaded red.
 - **Contrast:** every text/background pair ≥ 4.5:1. `color-scheme: dark` is declared so macOS cannot paint native controls white (BUG-041); selects and buttons are custom-drawn.
 - **Time:** everything on screen is in `display.timezone` (America/Chicago) and says so — header, footer, every basis line. Stored data stays UTC (BUG-042). Sub-day buckets are UTC-aligned; day-and-longer buckets align to local midnight (docs/06).
-- **Numbers:** USD to the cent, always. ETH to 3–4 decimals with Ξ. Counts with thousands separators. Hover cards are dark with light monospace text and carry the unit (BUG-043).
+- **Numbers:** USD to the cent, always — **aggregates included**. `compact()` is gone from the page; a long total shrinks its own type (`.sm` → 21 px, `.xs` → 17 px) rather than being abbreviated or truncated. ETH to 3–4 decimals with Ξ. Counts with thousands separators. Hover cards are dark with light monospace text and carry the unit (BUG-043).
 - **Honesty over smoothness:** lines are straight between observations; undefined intervals are holes, and every series is on the full bucket grid so a hole is a real null, not a missing point (§4a). Third-party strings — trait names and values, token names, image URLs — are escaped before they reach the page (BUG-048). A moving-average overlay, labelled with its window, is planned once there is ≥ 24 h of data — it will be an overlay, never a replacement.
-- **KPI cards** at the top: lowest ask now, collection offer now, 24 h volume, 24 h sales — each with a 24-hour sparkline and, for the prices, change versus the first hour of the window with the count of hours that had an observation.
+
+### 4b.1 The palette — three classes, and why the boundary matters
+
+The `:root` block in `src/navanax/ui/index.html` is the whole palette, and it is now split into three **classes** marked with `/* @chrome */`, `/* @status */`, `/* @data */`. The split exists because of a real defect (factcheck D-V3): `#19C95A` was at the same time the brand accent, the `--coll` token, the KPI sparkline stroke, the collection-offer price line, the *sales* bar series and the *event-mix* bars. A green mark on the page could be any of five different things.
+
+| class | tokens | rule |
+|---|---|---|
+| **@chrome** | `--bg` `--bg-2` `--surface` `--surface-2` `--border` `--border-2` `--text` `--text-2` `--muted` `--faint` `--verde` `--verde-2` `--verde-dim` `--verde-glow` `--grid` `--hover-bg` `--hover-border` | brand, surfaces, ink, chart furniture. **Austin FC Verde is UI chrome only** — active state, focus ring, primary button, links, pills. Never a data series. |
+| **@status** | `--bad` `#FF6B6B` · `--warn` `#FFB84D` | reserved state colours (failure, warning). Never a data series. |
+| **@data** | `--ask` `#FF8A65` · `--bid` `#7CC4FF` · `--coll` `#33E7C6` · `--trait-offer` `#C792EA` · `--sale` `#FFFFFF` · `--spread` `#FFD166` · `--cancel` `#E24E9B` · `--gap-fill` `rgba(255,107,107,.10)` | hue = event role. Every mark on every chart reads one of these. |
+
+Role assignments: ask/listing orange · item bid blue · collection offer green-cyan · trait offer purple · sale/fill **pure white** · cancel magenta · spread yellow · ingestion gap red at 10 %. Event-mix bars are neutral `--text-2`, because that panel's bars encode a *quantity*, not a role.
+
+Two hexes were chosen by measurement rather than by eye, using the OKLab ΔE (×100) and Machado CVD simulation in the dataviz validator, against the `--surface` `#141B17` ground:
+
+- **`--coll` `#33E7C6`.** Worst-case ΔE across normal/protan/deutan vision is 11.4 against `--bid` and 11.4 against `--ask`; 15.1 against `--bid` under normal vision; 12.3 from `--verde-2`, which is what actually severs the brand/data collision. Contrast 11.2 : 1. *DESIGN §5.4's suggested `#2ED573` was measured and rejected: it is ΔE 4.0 from `--verde-2` (so it does not fix D-V3 at all) and ΔE 2.5 from `--ask` under deuteranopia.*
+- **`--cancel` `#E24E9B`.** DESIGN §5.4 assigns cancel to `--bad` `#FF6B6B`, but the cancels and listings bars sit adjacent in one stack on the Activity chart at ΔE 4.6 (deutan) / 6.9 (normal) — below the readability floor. `#E24E9B` sits at 16.1 / 17.9 from `--ask`, contrast 4.8 : 1, and keeps `--bad` reserved for status. **This is a deliberate deviation from §5.4 and is the design-lead's to confirm.**
+
+Two measured problems are recorded rather than silently fixed: `--trait-offer` `#C792EA` is ΔE 5.0 from `--bid` under deuteranopia (it is not drawn by any chart until PR-6, which is where it should be re-picked), and every mark on the page sits above the validator's dark-mode lightness band because the Operator chose bright marks on a near-black ground.
+
+**No panel may reference a colour literal.** `test_ui_contract` asserts that the `<script>` block contains **no** six-digit hex at all: the chart code reads each token back out of `:root` with `getComputedStyle`, so the CSS and Plotly can never drift apart.
+
+### 4b.2 Chart interaction
+
+The Plotly toolbar is gone (`displayModeBar:false`) and `scrollZoom:false` is written explicitly — **not** because wheel-zoom was hijacking the page (it was never enabled; factcheck D-W1) but so a future Plotly default cannot enable it. What was genuinely annoying and is now fixed: a drag used to box-zoom and **rescale the y-axis**.
+
+- **y is locked** (`yaxis.fixedrange:true`). Price can no longer be rescaled by dragging.
+- **x is deliberately free** (`fixedrange:false`, D-W2). `dragmode:'select'` with `selectdirection:'h'` makes a drag select a time window on that chart; a `reset ×` chip appears in the panel header while a selection is live, which is the proof that something happened. The event-mix panel is the one chart that locks x — it is a horizontal bar chart, not a time axis.
+- **Range chips** `1h · 6h · 24h · 7d · 30d` sit in the header of every time chart. They drive the same global `range` control, so the two can never disagree, and they replace nothing — the full range select (with HTD/DTD/MTD/YTD) stays. Chips are plain DOM and still render when the Plotly CDN is unreachable.
+- **Crosshair:** `hovermode:'x unified'` with a 1 px `--border-2` spike across the plot, snapped to the cursor.
+- **Hover card:** Plotly's `hoverlabel`, restyled to `--hover-bg` `#0E1512` on a `--hover-border` rule, monospace, `namelength:-1` so no series name is truncated. Each row carries the value **with its unit**, and — where `/api/series` supplies them — `cov NN%` (share of observable bucket seconds the leg actually stood), `n=` (orders in the book) and the `p10–p90` band. The header is the bucket time formatted `%b %d, %H:%M:%S` plus the live zone abbreviation (CDT/CST). *Known limit: in unified mode Plotly omits a null series from the card rather than printing `— no observation`; getting that row requires the hand-built hover card in DESIGN §5.2.*
+- **Markers** are drawn when a series has fewer than 120 observed points and dropped above it, so eight listings in a window draw eight visible marks rather than an empty pane.
+
+### 4b.3 KPI cards
+
+Four cards: **lowest ask now · collection offer now · volume 24 h · sales 24 h**, on a 24 × 1 h grid, each with a hand-rolled SVG sparkline (no chart library — the row still renders offline) stroked in its own role colour.
+
+- **The delta is `now` versus the value 24 hours ago** — the Operator's rule, decided 2026-09-10 against DESIGN §6-Q2. Not "last observed vs first observed", which silently compares two hours chosen by where the holes happened to fall.
+- **Both endpoints are printed under the number**, with the zone abbreviation, in `--text-2`.
+- **If either endpoint is a hole there is no percentage at all.** The card prints `no observation 24h ago` or `no observation in the current hour` in `--warn`. A hole is not a zero and it is not its nearest neighbour. If the current hour is a hole, the big number falls back to the last observed value and is labelled `· last observed`.
+- The sub-line always carries the observed-bucket count out of the total, and a 24 h **sum** over a window containing holes says so: `⚠ N hour(s) not observed — this total covers the M we watched`.
+
+### 4b.4 The basis line under a standing-book chart
+
+Under the Prices and Immediacy-cost charts the basis line now also renders, from the PR-3 `series()` response: which `book` produced the number (`standing` or `observed`), the **median coverage** — share of observable bucket seconds both legs actually stood — with its bucket count and denominator, the median number of orders in the book per bucket (both legs, for the spread), `p10–p90 withheld (n<30) in N of M buckets` wherever the band arrays are null, a **crossed-book alarm** when `basis.negative_buckets > 0` (a crossed book is a reconstruction defect, never an arbitrage — BUG-20260910-057), the left-truncation warning, and the `observed_book_warning` when the interval-extremum variant is in use.
 
 ## 5. What it does not do yet — read this before trusting a number
 
 - **SQLite, not DuckDB.** docs/07 specifies DuckDB + Parquet for the analytical store. The environment this was built in cannot install DuckDB, and shipping an untested store for irreplaceable data is how BUG-010 happened. Every query is plain SQL DuckDB accepts; the swap is the `analytical.path` line. Revisit when the store passes ~50 M rows or a query is slow.
 - **No wash filter, no `qa_index`, no trait model.** Prices are raw observations. Methodology §4.4 and REQ-F-13 are Phase 1.
-- **`immediacy_cost` uses the highest collection offer *seen in the interval*,** not the standing best offer at each instant. At 5-minute intervals on a bot-made book the difference is small; at 1-day intervals it is not. A resting-book reconstruction is the next step.
+- **The standing book only contains orders whose placement we witnessed.** `immediacy_cost`, `floor_ask` and `collection_bid` are now resting-book quantities (§4c), but the resting book is reconstructed from the stream and is left-truncated: ~801 Argonauts listings were already resting when recording started and none of them are in it. The reconstructed floor is an **upper bound**. Until the ask side is seeded from a REST listings snapshot, read every standing spread as an upper bound on the true spread, which is what `basis.left_truncated` says.
 - **No cross-sectional views, no heatmap, no rarity or trait pricing model** (REQ-F-05..11) — one collection so far. The screener shows observed prices per token; it does not yet estimate what a trait is worth.
 - **No moving average yet** — waiting for 24 h of data so the window is a choice, not a guess.
 - **Open decision for the Operator:** under a trait filter, should `immediacy_cost` use the collection-wide offer as its bid leg (current behaviour, labelled) or refuse to compute? Both are defensible; the page labels the current choice until he decides.
@@ -193,4 +277,4 @@ Set by the Operator on 2026-09-09; pinned by `test_ui_contract` so they cannot r
 
 ## 6. Files
 
-`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/rest.py` · `src/navanax/traits.py` · `src/navanax/ui/index.html` · `dashboard.command` · `traits.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`, `test_traits_pipeline`, `test_screener_sort_and_filter`, `test_trait_filtered_metrics`, `test_series_gap_masking`, `test_rest_client_accounting`, `test_ui_contract`, `test_order_lives_primitive`, `test_bid_lifetimes_censoring_and_orphans`, `test_order_criteria_parsing_and_migration`, `test_trait_offer_matching_rule`) — fixtures are **real frames** from the 2026-09-09 capture.
+`src/navanax/normalize.py` · `src/navanax/metrics.py` · `src/navanax/dashboard.py` · `src/navanax/rest.py` · `src/navanax/traits.py` · `src/navanax/ui/index.html` · `dashboard.command` · `traits.command` · tests in `tests/selftest.py` (`test_normalizer_*`, `test_metric_engine_contract`, `test_dashboard_serves_localhost_only`, `test_traits_pipeline`, `test_screener_sort_and_filter`, `test_trait_filtered_metrics`, `test_series_gap_masking`, `test_rest_client_accounting`, `test_ui_contract`, `test_order_lives_primitive`, `test_bid_lifetimes_censoring_and_orphans`, `test_order_criteria_parsing_and_migration`, `test_trait_offer_matching_rule`, `test_standing_series_is_time_weighted_over_the_bucket`, `test_immediacy_cost_is_a_standing_book_spread`, `test_percentiles_are_withheld_below_min_n`) — fixtures are **real frames** from the 2026-09-09 capture.

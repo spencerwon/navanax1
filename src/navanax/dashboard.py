@@ -128,6 +128,10 @@ class Dashboard:
         return slug
 
     def api_series(self, q: dict[str, str]) -> dict[str, Any]:
+        # `book` selects the standing book (the default for floor_ask,
+        # collection_bid and immediacy_cost -- Operator, 2026-09-10) or the old
+        # interval extremum as `book=observed`. Passed through untouched; the
+        # engine owns the per-metric default and the basis says which was used.
         with self.lock:
             return self.engine.series(
                 metric=q.get("metric", "immediacy_cost"),
@@ -137,6 +141,7 @@ class Dashboard:
                 interval=q.get("interval", "5m"),
                 range_=q.get("range", "6h"),
                 traits=parse_trait_filter(q.get("traits")),
+                book=q.get("book"),
                 gaps=self._gap_spans())
 
     def api_multi(self, q: dict[str, str]) -> dict[str, Any]:
@@ -255,9 +260,38 @@ class Dashboard:
                                  f"trait value in the store ({'traits table is empty -- run traits.command' if n_tok == 0 else 'casing or spelling differs from the metadata'})")
         except Exception as exc:  # noqa: BLE001 - the audit must still report checksums
             notes.append(f"criteria coverage check failed: {type(exc).__name__}: {exc}")
+        # Crossed standing book, for EVERY watched collection (tech-lead re-review
+        # 2026-09-10, item 5). A crossed book -- best ask below best collection
+        # offer at some instant -- is a reconstruction defect: a stale ask, a
+        # misparsed price, a left-truncated leg. It is never an arbitrage, and
+        # docs/05 rule 5 says a surprisingly good result is evidence of a bug.
+        #
+        # Before this, the alarm existed in exactly two places, and neither of
+        # them is where an operator looks: a `negative_buckets` integer in the
+        # basis of the ONE collection currently selected on the Prices panel, and
+        # one log line per process. Health is the panel that is meant to say "the
+        # record is wrong", so the count belongs here, for every slug on the
+        # watchlist, whether or not it is the one on screen.
+        crossed: dict[str, Any] = {}
+        try:
+            with self.lock:
+                for slug in self.slugs:
+                    b = self.engine.series(metric="immediacy_cost", collection=slug,
+                                           interval="1h", range_="24h",
+                                           book="standing")["basis"]
+                    crossed[slug] = {"negative_buckets": int(b.get("negative_buckets") or 0),
+                                     "interval": "1h", "range": "24h",
+                                     "buckets": b.get("buckets")}
+            for slug, c in crossed.items():
+                if c["negative_buckets"] > 0:
+                    notes.append(
+                        f"{slug}: {c['negative_buckets']} bucket(s) had ask < collection offer in the "
+                        f"last 24h — book reconstruction bug, escalate (docs/05 rule 5)")
+        except Exception as exc:  # noqa: BLE001 - the audit must still report checksums
+            notes.append(f"crossed-book check failed: {type(exc).__name__}: {exc}")
         return {"at": _now_iso(), "mode": "shallow (checksums; run status.command for the deep audit)",
                 "failures": [p for p in problems if is_integrity_failure(p)],
-                "notes": notes, "criteria_coverage": coverage}
+                "notes": notes, "criteria_coverage": coverage, "crossed_book": crossed}
 
     def api_meta(self) -> dict[str, Any]:
         return {"metrics": {k: v["label"] for k, v in METRICS.items()},

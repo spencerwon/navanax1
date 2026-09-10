@@ -1739,3 +1739,240 @@ bugs:
   regression_test: tests/selftest.py::test_expiry_is_never_in_the_future
   monitor_gap: "The unit fixtures had no order whose expiration lay in the future relative to the fold. A censored count of 1 in 46,814 on the real run should have been read as a bug by whoever quoted it -- the fifth project rule, applied to a liquidity number."
   pr: 5
+
+- id: BUG-20260909-054
+  summary: "The collection list endpoint carries each token's `traits`; the list pass discarded them and left 9,161 tokens to a per-token fallback (~76 h of REST budget) where the 47 list reads already had the data"
+  severity: S3
+  priority: P1
+  error_class: RTL
+  status: fixed
+  logged_at: "2026-09-09T15:30:00-05:00"
+  occurred_at: "2026-09-09T11:00:00-05:00"
+  resolved_at: "2026-09-09T16:00:00-05:00"
+  detected_by: "data-engineer, comparing SpencerTinker/scrape.py parse_tokens (reads nft['traits'] from GET /collection/{slug}/nfts; 8,798 tokens with traits in 44 reads) against the traits.py list pass"
+  detection_channel: operator
+  branch: feat/explorer-traits
+  locations:
+  - {file: src/navanax/traits.py, line: 9}
+  - {file: src/navanax/traits.py, line: 186}
+  requirement: REQ-D-01
+  data_impact: "No wrong record. The 2026-09-09 list pass spent 47 governed reads and stored name/image/metadata_url only; every Argonauts token has metadata_url NULL, so the only path left to traits was the budgeted OpenSea per-token fallback -- 50 tokens got traits (source opensea_nft) and 9,161 did not. Completing that way costs 9,161 reads: 76 hours of the shared 120/hr budget, during which reconciliation and any INTERACTIVE read compete with it."
+  root_cause: >-
+    The module docstring asserted the list endpoint "gives each token's name,
+    image and metadata_url. NOT its traits" and the code was written to the
+    docstring. The assertion was never checked against a response body. The
+    test fixture (FakeRest) was written from the same assumption and so could
+    not falsify it -- the BUG-002 shape again.
+  resolution: "list_tokens() parses `traits` on every list entry and stores it at once (traits_source='opensea_nft_list', traits_at set) for tokens that do not already have traits; fetch_traits() then runs only for tokens whose entry carried none. Docstring corrected to state what is verified (Argonauts, 2026-09-09, from a second tool's raw pull) and that other collections must be re-verified. Separately, `navanax import-traits` loads the friend's cache with zero reads so the already-spent 47 do not need repeating."
+  regression_test: tests/selftest.py::test_list_pass_keeps_traits_it_is_given
+  monitor_gap: "Nothing compares what an endpoint RETURNS with what the code KEEPS. The raw response bodies of the 47 list reads were not landed (REST responses go through the governor, not the landing zone), so the discarded field left no trace to audit. Worth a follow-up: land REST bodies too, or at least log the top-level keys of the first page of every new endpoint."
+  pr: null
+
+- id: BUG-20260909-055
+  summary: "The trait-cache import silently overwrote: two cache entries resolving to one token id both wrote (second wins, `imported` counted twice), the list pass counted traits it never wrote and dropped a conflicting OpenSea value uncounted, reconciliation compared cache KEYS against rows written under `entry[\"id\"]`, and any float was accepted as the cache's generated time"
+  severity: S1
+  priority: P0
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-10T02:10:00-05:00"
+  occurred_at: "2026-09-09T16:00:00-05:00"
+  resolved_at: "2026-09-10T02:40:00-05:00"
+  detected_by: "tech-lead, reviewing the `navanax import-traits` PR (BUG-054's second half) before merge"
+  detection_channel: review
+  branch: feat/explorer-traits
+  locations:
+  - {file: src/navanax/traits.py, line: 527}
+  - {file: src/navanax/traits.py, line: 180}
+  - {file: src/navanax/cli.py, line: 400}
+  requirement: REQ-D-01
+  data_impact: >-
+    Not yet realised -- the import had not been run against the real Explorer
+    cache when the gate caught it. Had it been: a cache with two entries for one
+    token would have recorded the second entry's traits as fact with no trace
+    that a first ever disagreed, and `imported` would have over-reported the
+    gain. The list pass reported `traits_from_list` equal to the number of
+    entries CARRYING traits (for Argonauts, effectively the whole collection)
+    rather than the number written, so a re-run over an already-populated store
+    would have claimed thousands of writes it did not make. Reconciliation on a
+    cache keyed by anything but the bare token id would have reported every
+    token missing from both sides while the import itself was fine -- a false
+    alarm that trains the Operator to ignore the real one. Worst: a `generated`
+    epoch in milliseconds (the JavaScript default, and the Explorer tool is a
+    JS tool) crashed with a raw ValueError, and one in the future was written
+    into `traits_at` unchallenged, where nothing downstream can distinguish it
+    from a real observation.
+  root_cause: >-
+    Four instances of one habit: trusting an identifier or a number without
+    resolving it first. The cache key was treated as the token id in two places
+    and the entry's `id` in a third. `_store` returned None, so the only thing
+    the caller could count was its own intention. `datetime.fromtimestamp` was
+    handed a float nobody had bounded. Each was individually small and each was
+    in the write path of the only source of trait data the project has.
+  resolution: >-
+    `import_explorer_cache` resolves every entry to a token id in a first pass
+    that writes nothing, collapses duplicates, and refuses to write ANY row for
+    an id whose entries disagree -- reporting it as a disagreement, like the
+    store-vs-cache diff. Reconciliation sets are built from the resolved ids
+    before any insert. `_store` returns whether it wrote; the list pass counts
+    only writes, counts agreement separately, and reports a conflicting value
+    instead of dropping it. `--generated` and summary.json's `generated` must
+    fall in [2020-01-01, now + 1 h] or the run refuses before writing anything,
+    with a message that names milliseconds where the value looks like them. In
+    the same pass: malformed entries and non-scalar trait values are counted and
+    never coerced to a Python repr; the cache's sha256 goes into
+    `traits_source` and a `trait_imports` row; a token with no known contract no
+    longer burns a budgeted fallback slot; a stored contract differing from the
+    one being imported is reported rather than hidden by COALESCE; and the run
+    ends by printing coverage, criteria coverage and case near-misses.
+  regression_test: tests/selftest.py::test_import_duplicate_token_ids_are_never_a_silent_overwrite
+  monitor_gap: >-
+    The import's own test used a cache whose keys WERE the token ids, whose ids
+    were all distinct, and whose timestamp was a plausible second-epoch integer
+    -- so it could not falsify any of the four. The BUG-002 shape once more: a
+    fixture written from the same assumption as the code. The fixtures now carry
+    a cache keyed by `argonaut-4`, a repeated id, a non-object entry, a
+    non-scalar trait value, and a millisecond epoch.
+  pr: null
+
+- id: BUG-20260910-056
+  summary: "config/assumptions.yaml -- the assumptions registry docs/06 §4.4 requires -- was deleted by an unrelated change, and nothing noticed because no code reads it"
+  severity: S3
+  priority: P1
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-10T02:15:00-05:00"
+  occurred_at: "2026-09-10T02:12:00-05:00"
+  resolved_at: "2026-09-10T02:20:00-05:00"
+  detected_by: "tech-lead, gate on the trait-cache import PR"
+  detection_channel: review
+  branch: feat/explorer-traits
+  locations:
+  - {file: config/assumptions.yaml, line: 1}
+  requirement: REQ-N-09
+  data_impact: "None to any record. The registry is documentation of the system's opinions, not an input to a computation; ASM-020 (the standing-order definition) is implemented in metrics.py::standing_sql either way. The loss is auditability: the one file that lets the Operator read every judgement the code embodies without reading the code."
+  root_cause: "A file no code imports and no test asserts on is invisible to every gate the project has. It was removed in a change that had nothing to do with assumptions and the deletion passed all four gates green."
+  resolution: "Restored verbatim from the uploaded working copy, and a test now asserts the file exists, parses, and still carries ASM-020 with its layer, owner, rationale and the code it governs -- so the next deletion fails a gate instead of passing one."
+  regression_test: tests/selftest.py::test_config_assumptions_registry_exists
+  monitor_gap: "The gates check code, the bug ledger and secrets. Nothing checks that the configuration files the docs require still exist. This test is the narrow fix; the general one is a gate over config/ against docs/06 §4.4, which is worth doing when a second registry-style file appears."
+  pr: null
+
+- id: BUG-20260910-057
+  summary: "`immediacy_cost` was an INTERVAL EXTREMUM, not the standing-book quantity docs/01 §3.2 defines -- biased narrow, and able to render negative on the front page"
+  severity: S1
+  priority: P0
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T07:30:00-05:00"
+  occurred_at: "2026-09-09T08:00:00-05:00"
+  resolved_at: "2026-09-10T09:10:00-05:00"
+  detected_by: "quant-research (T2) and tech-lead (Q-V8/Q-W4), fact-checking the 2026-09-09 metric proposals against docs/01 §3.2"
+  detection_channel: review
+  branch: feat/standing-book-spread
+  locations:
+  - {file: src/navanax/metrics.py, line: 29}
+  - {file: src/navanax/metrics.py, line: 74}
+  - {file: docs/08_DASHBOARD.md, line: 109}
+  requirement: REQ-F-13a
+  data_impact: >-
+    No record is wrong; every stored event is untouched. The damage is entirely
+    in what was computed from them and charted. `_bucketed` aggregated MIN over
+    the ask leg and MAX over the bid leg WITHIN a bucket and subtracted the two,
+    so the number on the front page was the distance between the cheapest ask
+    seen at any point in the interval and the richest offer seen at any other
+    point -- two prices that need never have coexisted, and on this collection
+    usually did not. The bias has a known sign: the spread is too NARROW, and
+    the error grows with the interval, so the 1d bars were worse than the 5m
+    bars in exactly the way nobody would notice. Because the two legs are
+    unrelated in time it could also go NEGATIVE, which the KPI card would have
+    rendered as a free arbitrage -- and a negative immediacy cost on a screen
+    whose purpose is trade decisions is the fifth project rule's exact failure
+    shape. On the fixture that reproduces it the old path returns -0.10 and the
+    new one returns null with an alarm. Separately, `bid_lifetimes` returned
+    p10/median/p90 at ANY n with a `percentiles_reliable: false` flag beside
+    them, and `ui/index.html:215` rendered the numbers and appended the flag as
+    a string, which REQ-F-19 (docs/00:199) says the system SHALL make
+    impossible.
+  root_cause: >-
+    The metric was implemented from its NAME rather than from its definition.
+    docs/01 §3.2 says "what you pay to force time-to-clear to zero by hitting
+    the STANDING collection offer"; the code computed an interval extremum,
+    which is a different quantity that happens to coincide with it when the
+    interval is short and the book is deep. Neither condition holds here. The
+    deeper cause is that until PR-2 there was no relation that could answer
+    "what was resting at time tau", so a bucket aggregate was the only thing
+    available and it was written before `order_lives` existed. The percentile
+    half is the same habit at one remove: a flag next to a number was mistaken
+    for a refusal to produce the number.
+  resolution: >-
+    `immediacy_cost` is recomputed from `order_lives` as a standing-book spread.
+    `MetricEngine.standing_series(kind, ...)` sweeps placements and terminations
+    (a lazily-cleaned heap, O(events log events), never a per-bucket scan) to
+    produce the running extremum of the resting book as constant segments, and
+    reports per bucket the TIME-WEIGHTED median with [p10, p90], coverage =
+    seconds the leg stood / observable bucket seconds, and n = distinct orders
+    standing. `MetricEngine.standing_spread` intersects the ask and bid segment
+    lists so both legs are read at the SAME tau, and any bucket in which the
+    book crossed (ask < bid at any tau) is returned as null, counted in
+    `basis.negative_buckets` and logged once per collection/interval/denomination
+    rather than charted. Leg discipline per quant metric 1 -- the bid leg is a
+    COLLECTION offer, which applies to every token and is therefore a bid on
+    whichever token is at the floor; item bids and trait offers are per-token and
+    would mix populations. `floor_ask` and `collection_bid` take the same
+    standing treatment and default to it (Operator's decision, 2026-09-10:
+    floors are built from standing asks only, and a bucket with no live ask is a
+    hole). The old interval-extremum behaviour stays reachable as
+    `book='observed'`, is labelled in `basis.book`, and carries an
+    `observed_book_warning` saying what it is not. `/api/series` passes `book`
+    through. Percentiles: one `pct(values, p, min_n=MIN_N_FOR_PERCENTILES)`
+    helper that returns None below the minimum, applied to `bid_lifetimes` for
+    all three quantiles -- a median is a percentile too -- and to the [p10, p90]
+    band of every standing series. The standing MEDIAN is not suppressed: it is
+    the level of a continuously observed step function, a fact at n = 1, and
+    withholding it would blank the chart wherever the book is genuinely one
+    listing deep. Every standing response carries `left_truncated: true` with the
+    reason, because the reconstructed floor is an upper bound.
+  regression_test:
+  - tests/selftest.py::test_immediacy_cost_is_a_standing_book_spread
+  - tests/selftest.py::test_standing_series_is_time_weighted_over_the_bucket
+  - tests/selftest.py::test_percentiles_are_withheld_below_min_n
+  monitor_gap: >-
+    Every existing test asserted the metric against its own implementation. The
+    contract test checked "immediacy_cost = lowest ask - highest collection
+    offer, in the ONE interval with both" -- the extremum definition restated,
+    so it could not falsify it -- and the 5-minute case asserted that two legs in
+    different buckets produce UNDEFINED, which is the defect written down as
+    intended behaviour. No fixture ever placed an ask and a bid that were alive
+    at the same instant but seen in different buckets, and none ever crossed the
+    book, so nothing could produce the negative value. The general lesson is the
+    one this log keeps recording: a test written from the code cannot find a
+    requirement violation. The narrow fix is that every metric with a definition
+    in docs/01 §3 now needs a test written from that TEXT, not from the
+    function.
+  pr: null
+
+- id: BUG-20260910-058
+  summary: "sync() reported a landing file it could not decode as 'read' with zero rows -- a corpus fold on a machine without the zstd codec printed '115 files read, 0 rows added, ALL GATES GREEN'"
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-10T04:10:00-05:00"
+  occurred_at: "2026-09-10T03:55:00-05:00"
+  resolved_at: "2026-09-10T04:20:00-05:00"
+  detected_by: "orchestrator, running tools/gates.py --corpus in the device VM (Python 3.10, no zstandard): every file skipped with a WARNING log line and a green gate"
+  detection_channel: orchestrator
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 665}
+  - {file: tools/gates.py, line: 76}
+  requirement: REQ-N-07
+  data_impact: "None to stored data. A reader that could not decode the landing zone would fold NOTHING and report success -- an empty analytical store presented as a quiet market, and a gate that passes on zero evidence."
+  root_cause: >-
+    The per-file except logged and continued without counting; the stats a
+    caller sees had no failure field. Separately, the codec's tolerate_truncation
+    reads a corrupt file as an empty one, so a manifest-closed file yielding
+    fewer frames than its recorded last_seq went unnoticed.
+  resolution: "sync() stats carry files_failed, files_short and last_error; a closed file read short of its manifest last_seq is counted short. tools/gates.py fails the corpus gate on either. gates.command runs the fold on the Mac, where the codec is, and saves the report to data/logs/."
+  regression_test: tests/selftest.py::test_sync_counts_unreadable_files_instead_of_reporting_zero_rows
+  monitor_gap: "A log WARNING is not a signal a caller sees. The fifth rule applied to a gate: '0 rows, green' is a surprisingly clean result and should have been read as a bug by whoever ran it -- and it was, on the second look."
+  pr: 6

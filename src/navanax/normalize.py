@@ -624,7 +624,8 @@ class Normalizer:
     def sync(self) -> dict[str, int]:
         """Read every new complete frame from every landing file. Returns counts."""
         from datetime import datetime, timezone
-        stats = {"files_checked": 0, "files_read": 0, "rows_added": 0, "unparsed": 0,
+        stats = {"files_checked": 0, "files_read": 0, "files_failed": 0, "files_short": 0, "last_error": None,
+                 "rows_added": 0, "unparsed": 0,
                  "criteria_rows": 0, "lives_refreshed": 0}
         touched: list[str] = []
         for rec in self._files():
@@ -663,8 +664,20 @@ class Normalizer:
                     if row.get("order_hash"):
                         touched.append(row["order_hash"])
             except Exception as exc:  # noqa: BLE001 - one bad file must not stop the sync
+                # ...but it must not vanish either. A missing codec on the reading
+                # machine used to yield "115 files read, 0 rows added" with no
+                # error anywhere a caller looks (BUG-058). Counted and named now.
                 log.warning("could not read %s: %s", fname, exc)
+                stats["files_failed"] += 1
+                stats["last_error"] = f"{fname}: {type(exc).__name__}: {exc}"
                 continue
+            # A closed file the manifest says runs to last_seq, from which we
+            # read fewer frames, is SHORT: truncated, corrupt, or decoded by a
+            # codec that tolerates truncation into silence (BUG-058). Counted
+            # and named; deep `verify` is the authority on why.
+            if rec.get("status") == "closed" and rec.get("last_seq") is not None and high < rec["last_seq"]:
+                stats["files_short"] = stats.get("files_short", 0) + 1
+                stats["last_error"] = f"{fname}: read up to seq {high} of {rec['last_seq']} the manifest records"
             with self.conn:
                 if rows:
                     self.conn.executemany(

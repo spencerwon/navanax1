@@ -468,14 +468,108 @@ known defects — not a discovery, and not a new bug.
 |---|---|---|---|---|
 | BUG-20260909-052 | S1 | P0 | fixed | A gap left open by a dead run was never closed — one stale record masked every chart to infinity; launchd restarts made it routine |
 | BUG-20260909-053 | S1 | P0 | fixed | `order_lives` inferred expiry at a time that had not arrived — standing orders recorded as ended, lifetimes biased long |
+| BUG-20260909-054 | S3 | P1 | fixed | The collection list endpoint carries `traits`; the list pass discarded them and left 9,161 tokens to a ~76-hour per-token fallback |
 
 Both found by the tech-lead reproducing the change by running it, both in the
 flattering direction (a quiet market; a durable book), both fixed the same hour
 with a test that failed first.
 
+Found by reading a second tool's scraper against ours. `SpencerTinker/scrape.py`
+reads `nft["traits"]` from the SAME `GET /collection/{slug}/nfts` pages that
+`traits.py` walked on 2026-09-09, and got traits for all 8,798 indexed
+Argonauts in 44 reads. Our docstring said the field was not there; the code
+believed the docstring; the fixture was written from the docstring. The
+47 reads were spent and the field thrown away. Fix: store list-carried
+traits immediately (`opensea_nft_list`), keep the metadata_url / fallback
+paths only for entries without them, and add `navanax import-traits` so the
+friend's cache loads with zero reads. Docstring now states what is verified
+and for which collection; other collections must be re-verified.
+
+### Round 14 — the gate on the trait-cache import
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-055 | S1 | P0 | fixed | The trait-cache import silently overwrote — duplicate ids, counts of writes that never happened, reconciliation on the wrong key, and any float accepted as the observation time |
+| BUG-20260910-056 | S3 | P1 | fixed | `config/assumptions.yaml`, the assumptions registry, was deleted by an unrelated change and no gate noticed |
+
+Four defects in one import path, all the same habit: trusting an identifier or a
+number without resolving it first. Two cache entries resolving to one token id
+both wrote, second wins, `imported` counting both — the cache's own internal
+contradiction becoming our record with no trace. The list pass counted
+`traits_from_list` for every entry that *carried* traits, including the ones
+`_store` refused to write, so the number reported was the response's size and
+not the store's gain; a conflicting OpenSea value was dropped uncounted in the
+same line. Reconciliation compared the cache's *keys* against rows written under
+`entry["id"]`. And `--generated` took any float: a millisecond epoch — which is
+what the JavaScript tool that produced the cache emits by default — crashed with
+a raw `ValueError`, and a future one was written straight into `traits_at`,
+where nothing downstream can tell it from a real observation.
+
+None of it had run against the real cache yet. The import's own fixture was
+written from the same assumptions as the code — keys that *were* the ids, all
+distinct, a plausible second-epoch integer — so it could not falsify any of the
+four. The BUG-002 shape for the fifth time.
+
+`config/assumptions.yaml` is the smaller finding with the more uncomfortable
+cause: a file no code imports and no test asserts on is invisible to every gate
+this project has, so deleting it passed all four green.
+
+### Round 15 — the gate on PR-3 (the standing-book spread)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-057 | S1 | P0 | fixed | `immediacy_cost` was an interval extremum, not the standing-book quantity docs/01 §3.2 defines — biased narrow, and able to render negative on the front page |
+
+The metric was built from its name rather than from its definition. docs/01 §3.2
+says *"what you pay to force time-to-clear to zero by hitting the **standing**
+collection offer"*. The code aggregated `MIN` over the ask leg and `MAX` over the
+bid leg **within a bucket** and subtracted them, so the number on the front page
+was the distance between the cheapest ask seen at some point in the interval and
+the richest offer seen at some other point — two prices that need never have
+coexisted, and on this collection usually did not.
+
+The bias has a known sign — too **narrow** — and it grows with the interval, so
+the 1-day bars were worse than the 5-minute bars in the way nobody would notice.
+And because the legs are unrelated in time it could go **negative**, which the
+KPI card would have rendered as a free arbitrage. On the fixture that reproduces
+it the old path returns **−0.10** and the new one returns **null with an alarm**.
+
+The fix is not a chart fix. `immediacy_cost`, `floor_ask` and `collection_bid`
+are now read off `order_lives` by a sweep line over placements and terminations,
+and reported per bucket as the **time-weighted median with [p10, p90]**, with
+`coverage` (seconds the legs stood ÷ observable bucket seconds) and `n` beside
+every point. Both legs are sampled at the same τ. The Operator's decision of
+2026-09-10 — *floors are built from standing asks only; a bucket with no live ask
+is a hole* — is what the default now implements; the old behaviour stays
+reachable as `book='observed'` and says in its own basis what it is not.
+
+Shipped with it: percentiles are **withheld** below `min_n_for_percentiles`
+rather than printed with a warning beside them (REQ-F-19, docs/00:199). All
+three of `bid_lifetimes`' quantiles go together — a median is a percentile too.
+The standing series' median does not, and the distinction is deliberate: it is
+the level of a continuously observed step function, a fact at n = 1, and
+withholding it would blank the chart wherever the book is genuinely one listing
+deep.
+
+Every existing test asserted the metric against its own implementation — the
+contract test restated the extremum definition, and the 5-minute case asserted
+that two legs in different buckets are UNDEFINED, which is the defect written
+down as intended behaviour. **A test written from the code cannot find a
+requirement violation.**
+
+### Round 16 — the gate that passed on zero evidence
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-058 | S1 | P0 | fixed | `sync()` reported an undecodable landing file as read-with-zero-rows; a corpus fold with no codec printed "115 files read, 0 rows, ALL GATES GREEN" |
+
+Found by the orchestrator running the new `tools/gates.py --corpus` in the
+device VM. Fix: failures and short files are counted in the sync stats and fail
+the gate; `gates.command` runs the fold on the Mac where the codec lives.
+
 ### Still open
 
-**None.** All 53 logged bugs are fixed.
+**None.** All 58 logged bugs are fixed.
 
 ### The lesson
 

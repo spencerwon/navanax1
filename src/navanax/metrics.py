@@ -26,20 +26,48 @@ a duplicate cancel (BUG-049, BUG-050). A trait offer's criteria are matched by
 `criteria_cover_sql()` and the guard in its docstring is load-bearing
 (BUG-051).
 
-`immediacy_cost` (REQ-F-13a, methodology §3.2): lowest ask minus highest
-COLLECTION offer in the interval. Undefined -- returned as null, never
-substituted -- when either side is absent. "No bid at any price" is the most
-important liquidity fact about a collection, and a chart must show it as a
-hole, not a guess.
+`immediacy_cost` (REQ-F-13a, methodology §3.2): "what you pay to force
+time-to-clear to zero by **hitting the standing collection offer**". Note the
+word *standing*. Until BUG-20260910-057 this was computed as an interval
+extremum -- `MIN(ask)` over a bucket minus `MAX(collection offer)` over the same
+bucket -- and the two legs need not ever have coexisted. That is a different
+quantity from the one docs/01 §3.2 defines: biased narrow, worse at wider
+intervals, and capable of rendering NEGATIVE on the front page, where a KPI
+would read as free arbitrage. It is now built from the STANDING book
+(`order_lives`), both legs sampled on the same tau, and a negative value is an
+alarm rather than a data point. The old behaviour is still reachable as
+`book='observed'` and is labelled as such wherever it is used.
+
+**The Operator's decision of 2026-09-10:** floors and lowest-ask lines are built
+from STANDING asks only. A bucket with no live ask is a hole, not a zero and not
+the last price seen. `book='observed'` exists for comparison, never as the
+default.
+
+Undefined -- returned as null, never substituted -- when either leg is absent.
+"No bid at any price" is the most important liquidity fact about a collection,
+and a chart must show it as a hole, not a guess.
+
+**The standing book is LEFT-TRUNCATED and every standing series says so.** We
+only see orders whose placement we witnessed; Argonauts had ~801 standing
+listings before recording started (docs/06 §249, quant §0). So the
+reconstructed floor is an OVER-estimate of the true floor and the reconstructed
+best bid an UNDER-estimate: a stream-only spread is biased WIDE, and it is an
+upper bound, not a measurement. `basis.left_truncated` carries this on every
+response.
 """
 
 from __future__ import annotations
 
+import bisect
+import heapq
+import logging
 import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("navanax.metrics")
 
 try:
     from zoneinfo import ZoneInfo
@@ -48,15 +76,53 @@ except ImportError:  # pragma: no cover
 
 TRANSFORMS = ("ABS", "PCT", "LOG", "DIFF", "BPS")
 DENOMS = ("ETH", "USD")
+BOOKS = ("standing", "observed")
+
+# REQ-F-19 / Q-V3: below this many observations a percentile is not reported at
+# all. A flag next to a number is not a refusal -- docs/00:199 says the system
+# SHALL make quoting an unreliable percentile impossible, and a rendered number
+# with a warning beside it is exactly what people quote.
+#
+# REQ-N-09 tension, stated rather than hidden: this is a threshold and thresholds
+# belong in config. It lived as a bare `30` inside `bid_lifetimes` before; one
+# named constant used by every caller is strictly better than that, and moving it
+# to `config/base.yaml` needs a MetricEngine constructor change that this PR was
+# told not to make in dashboard.py. Raised for the tech-lead.
+MIN_N_FOR_PERCENTILES = 30
 
 # metric id -> (event_type filter, aggregate, price column?, description)
+#
+# `book`      : the standing-book kind this metric has, if any (STANDING_KINDS).
+# `book_default`: which book the metric uses when the caller does not say.
 METRICS: dict[str, dict[str, Any]] = {
     "collection_bid":  {"types": ("collection_offer",), "agg": "MAX", "price": True,
-                        "label": "Highest collection offer seen in interval"},
+                        "book": "collection_bid", "book_default": "standing",
+                        "label": "Highest collection offer seen in interval",
+                        "standing_label": "Highest STANDING collection offer "
+                                          "(time-weighted median over the bucket)"},
+    # `top_item_bid` HAS a standing-book kind -- `item_bid` in STANDING_KINDS --
+    # and its default is nevertheless `observed`, which is the one metric where
+    # those two differ. Tech-lead re-review, 2026-09-10: the `book` key was
+    # missing entirely, and three wrong behaviours followed from that one
+    # omission. (1) `series(book='standing')` was refused with the reason "it is
+    # a count or flow metric", which is false -- it is a price metric with a
+    # resting book, and the real reason is leg discipline. (2) The basis printed
+    # `book: "n/a (top_item_bid is a count/flow metric...)"`, so the page told the
+    # Operator the wrong thing about a line it was drawing. (3) The
+    # `observed_book_warning` is gated on `"book" in spec`, so the ONE price line
+    # on the Prices panel that is always an interval extremum was the one line
+    # carrying no warning that it is one. The default stays `observed`; what
+    # changes is that the refusal, the basis and the warning now tell the truth.
     "top_item_bid":    {"types": ("item_received_bid",), "agg": "MAX", "price": True,
-                        "label": "Highest item bid seen in interval"},
+                        "book": "item_bid", "book_default": "observed",
+                        "label": "Highest item bid seen in interval",
+                        "standing_label": "Highest STANDING item bid "
+                                          "(time-weighted median over the bucket)"},
     "floor_ask":       {"types": ("item_listed",), "agg": "MIN", "price": True,
-                        "label": "Lowest listing seen in interval"},
+                        "book": "ask", "book_default": "standing",
+                        "label": "Lowest listing seen in interval",
+                        "standing_label": "Lowest STANDING ask "
+                                          "(time-weighted median over the bucket)"},
     "sale_price":      {"types": ("item_sold",), "agg": "MEDIAN", "price": True,
                         "label": "Median sale price in interval"},
     "volume":          {"types": ("item_sold",), "agg": "SUM", "price": True,
@@ -72,8 +138,57 @@ METRICS: dict[str, dict[str, Any]] = {
     "event_count":     {"types": None, "agg": "COUNT", "price": False,
                         "label": "All market events in interval"},
     "immediacy_cost":  {"derived": ("floor_ask", "collection_bid"),
-                        "label": "Lowest ask minus highest collection offer (REQ-F-13a)"},
+                        "book": "spread", "book_default": "standing",
+                        "label": "Lowest ask minus highest collection offer (REQ-F-13a)",
+                        "standing_label": "STANDING lowest ask minus STANDING highest collection "
+                                          "offer, both legs on the same tau (REQ-F-13a, docs/01 §3.2)"},
 }
+
+# The standing-book legs `standing_series` can build. Each is one event type,
+# one extremum, and whether a trait filter narrows it.
+#
+# `collection_offer` is deliberately NOT token-scoped: a collection offer carries
+# no token and bids on every one of them, so it is the bid that is available on
+# whichever token is at the floor. That is the whole of the quant's leg
+# discipline for metric 1 -- the bid leg must be a bid on the token at the floor,
+# not the global best bid over all tokens, "mixing those populations is how a
+# spread goes negative" (quant §1 metric 1). Item bids and trait offers are
+# per-token or per-criteria and so are NOT interchangeable with this leg; a bid
+# leg that maxes over all three is a different metric (PR-5).
+STANDING_KINDS: dict[str, dict[str, Any]] = {
+    "ask":            {"event_type": "item_listed", "want": "min", "token_scoped": True,
+                       "label": "lowest standing ask"},
+    "collection_bid": {"event_type": "collection_offer", "want": "max", "token_scoped": False,
+                       "label": "highest standing collection offer"},
+    "item_bid":       {"event_type": "item_received_bid", "want": "max", "token_scoped": True,
+                       "label": "highest standing item bid"},
+}
+
+# Metrics that HAVE a standing-book kind but whose STANDING variant `series()`
+# deliberately does not offer yet, with the reason. The reason is returned to the
+# caller verbatim, so it has to be true: a refusal that misstates why is worse
+# than no refusal, because it is the sentence the next person reasons from.
+STANDING_NOT_OFFERED: dict[str, str] = {
+    "top_item_bid": (
+        "an item bid is PER-TOKEN. A standing 'highest item bid' maxes over bids on "
+        "different tokens, which is not interchangeable with a collection-wide leg -- "
+        "mixing those populations is how a spread goes negative (quant §1 metric 1 leg "
+        "discipline, Operator's decision of 2026-09-10). The union bid leg that would "
+        "make it comparable is PR-5. The primitive already exists and is reachable "
+        "directly -- standing_series('item_bid', ...) -- it is only the metric DEFAULT "
+        "that is deliberately not moved. Ask for it without `book`, or with "
+        "book='observed', and read the observed_book_warning in the basis."),
+}
+
+# Negative-spread alarms are logged once per (collection, interval, denomination,
+# bucket_start) per process. The dashboard re-renders every 10 s and an alarm that
+# floods the log is an alarm nobody reads -- but the key used to omit the bucket,
+# so once ANY bucket for a collection had crossed, every LATER crossing on that
+# collection was swallowed for the life of the process. A dashboard left open
+# overnight would log the 09:00 crossing and never mention the 14:00 one. The
+# bucket start is in the key so a NEW crossing always logs, while re-rendering the
+# SAME crossed bucket stays deduped, which is the flooding the cap was for.
+_NEGATIVE_LOGGED: set[tuple[str, str, str, float]] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +441,195 @@ def standing_sql(alias: str, now_ts: float) -> tuple[str, list[Any]]:
 
 
 # ---------------------------------------------------------------------------
+# percentiles -- refused, not flagged, below the minimum n (REQ-F-19, Q-V3)
+# ---------------------------------------------------------------------------
+def pct(sorted_values: list[float], p: float, *, min_n: int = MIN_N_FOR_PERCENTILES) -> float | None:
+    """The p-quantile of an ALREADY SORTED sample, or None below `min_n`.
+
+    `docs/00:199` (REQ-F-19) says the system SHALL make it impossible to quote a
+    percentile computed from too few observations. Returning the number with a
+    `percentiles_reliable: false` beside it does not make it impossible -- the
+    page rendered `p10 / median / p90` unconditionally and appended the warning
+    as a string, and a number on screen is a number that gets quoted. None is
+    the refusal; the count and the minimum travel with it so the caller can say
+    WHY it is missing.
+    """
+    n = len(sorted_values)
+    if n == 0 or n < min_n:
+        return None
+    return sorted_values[min(n - 1, int(p * n))]
+
+
+# ---------------------------------------------------------------------------
+# the standing book over time: a sweep line, not a per-bucket scan
+# ---------------------------------------------------------------------------
+def _extremum_segments(live: list[tuple[float, float, float]],
+                       want_min: bool) -> list[tuple[float, float, float]]:
+    """The running min (or max) of a set of intervals, as constant segments.
+
+    `live` is [(t_from, t_to, price)] already clipped to the window. The result
+    is [(t0, t1, value)] -- the value of the extremum over [t0, t1), one entry
+    per change, in time order, with no entry for time when nothing stood.
+
+    A sweep line over placements and terminations with a lazily-cleaned heap:
+    O(E log E) in the number of order ENDPOINTS, never O(buckets x table). The
+    naive alternative -- re-querying the book at every bucket boundary -- is
+    O(buckets) full scans, which is how the 29-second query of BUG-040 happened
+    on a table two orders of magnitude smaller than this one will be.
+    """
+    sign = 1.0 if want_min else -1.0
+    by_t: dict[float, list[tuple[int, int]]] = {}
+    for i, (a, b, _price) in enumerate(live):
+        by_t.setdefault(a, []).append((1, i))
+        by_t.setdefault(b, []).append((-1, i))
+    times = sorted(by_t)
+    alive: set[int] = set()
+    heap: list[tuple[float, int]] = []
+    segs: list[tuple[float, float, float]] = []
+    for idx, t in enumerate(times):
+        # Apply EVERY event at t before reading the state: standing(h, tau) is
+        # `t_place <= tau AND t_term > tau`, so an order placed at t is standing
+        # at t and one terminated at t is not, and the two orderings must not
+        # race each other when they share a timestamp.
+        for typ, i in by_t[t]:
+            if typ == 1:
+                alive.add(i)
+                heapq.heappush(heap, (sign * live[i][2], i))
+            else:
+                alive.discard(i)
+        if idx + 1 >= len(times):
+            break
+        nxt = times[idx + 1]
+        while heap and heap[0][1] not in alive:
+            heapq.heappop(heap)
+        if heap and nxt > t:
+            segs.append((t, nxt, sign * heap[0][0]))
+    return segs
+
+
+def _join_segments(a: list[tuple[float, float, float]], b: list[tuple[float, float, float]],
+                   ) -> list[tuple[float, float, float, float]]:
+    """[(t0, t1, a_value, b_value)] over the time BOTH legs stood.
+
+    Both inputs are sorted and non-overlapping, so this is a linear merge. This
+    is what "both legs on the same tau samples" means mechanically: a bucket's
+    spread is only ever computed from an ask and a bid that were simultaneously
+    live, which is the property the interval-extremum version did not have.
+    """
+    out: list[tuple[float, float, float, float]] = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        a0, a1, av = a[i]
+        b0, b1, bv = b[j]
+        lo, hi = max(a0, b0), min(a1, b1)
+        if hi > lo:
+            out.append((lo, hi, av, bv))
+        if a1 <= b1:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
+def _bucket_windows(grid: list[float], start: float, horizon: float,
+                    interval: dict[str, Any], tz_name: str) -> list[tuple[float, float]]:
+    """The observable [lo, hi) of every bucket on the grid.
+
+    A bucket at the edge of the range is only observable over its intersection
+    with the query window, and NOTHING is observable past `horizon` (= min(end,
+    now)) -- a censored order stands "until further notice", and treating that as
+    standing into the future would be imputing the future (docs/06 §4.3). So the
+    coverage denominator is the observable width, and the basis reports it.
+    """
+    out: list[tuple[float, float]] = []
+    for i, b in enumerate(grid):
+        nxt = grid[i + 1] if i + 1 < len(grid) else _next_bucket_start(b, interval, tz_name)
+        out.append((max(b, start), min(nxt, horizon)))
+    return out
+
+
+def _next_bucket_start(b: float, interval: dict[str, Any], tz_name: str) -> float:
+    step = int(interval["duration"]) if "duration" in interval else 86400
+    t = b + step
+    for _ in range(400):                     # a calendar month is at most 31 steps of a day
+        nb = bucket_of(t, interval, tz_name)
+        if nb > b:
+            return nb
+        t += step
+    return b + step
+
+
+def _accumulate(segs: list[tuple[float, float, float]], grid: list[float],
+                windows: list[tuple[float, float]]) -> dict[int, list[tuple[float, float]]]:
+    """Split constant segments at bucket boundaries -> {bucket index: [(seconds, value)]}.
+
+    Total work is O(segments + buckets): a segment spanning k buckets emits k
+    pairs, and sum over segments of (1 + duration/step) is bounded by
+    (segments + buckets). No segment is ever visited per-bucket-of-the-range.
+    """
+    out: dict[int, list[tuple[float, float]]] = {}
+    for t0, t1, v in segs:
+        i = max(0, bisect.bisect_right(grid, t0) - 1)
+        while i < len(grid) and grid[i] < t1:
+            lo, hi = windows[i]
+            a, b = max(t0, lo), min(t1, hi)
+            if b > a:
+                out.setdefault(i, []).append((b - a, v))
+            i += 1
+    return out
+
+
+def _distinct_per_bucket(live: list[tuple[float, float, float]], grid: list[float]) -> list[int]:
+    """How many DISTINCT orders stood at any point in each bucket.
+
+    A difference array, so an order standing across ten thousand buckets is one
+    increment and one decrement rather than ten thousand of each. This is the
+    `n` that travels with every median: project rule 4 -- never a point estimate
+    without its count.
+    """
+    diff = [0] * (len(grid) + 1)
+    for a, b, _p in live:
+        i = max(0, bisect.bisect_right(grid, a) - 1)
+        j = min(len(grid) - 1, bisect.bisect_left(grid, b) - 1)
+        if j < i:
+            continue
+        diff[i] += 1
+        diff[j + 1] -= 1
+    out, run = [], 0
+    for i in range(len(grid)):
+        run += diff[i]
+        out.append(run)
+    return out
+
+
+def time_weighted_quantile(pairs: list[tuple[float, float]], p: float) -> float | None:
+    """The p-quantile of a step function, weighted by how long each value held.
+
+    `pairs` is [(seconds, value)]. On a bot-quoted book the instantaneous
+    extremum changes many times inside one bucket and a single extreme is not
+    the level (quant §1 metric 1): the value that held for most of the bucket is.
+    Convention: the smallest value whose cumulative time reaches `p` of the
+    total, which for p = 0.5 is the ordinary weighted median.
+    """
+    if not pairs:
+        return None
+    agg: dict[float, float] = {}
+    for w, v in pairs:
+        agg[v] = agg.get(v, 0.0) + w
+    total = sum(agg.values())
+    if total <= 0:
+        return None
+    acc, target = 0.0, p * total
+    last = None
+    for v in sorted(agg):
+        acc += agg[v]
+        last = v
+        if acc >= target - 1e-9:
+            return v
+    return last
+
+
+# ---------------------------------------------------------------------------
 # the engine
 # ---------------------------------------------------------------------------
 class MetricEngine:
@@ -385,10 +689,271 @@ class MetricEngine:
                 out[b] = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
         return out
 
+    # -- the standing book ---------------------------------------------------
+    def _standing_live(self, kind: str, collection: str, denom: str, start: float,
+                       horizon: float, traits: dict[str, list[str]] | None,
+                       ) -> list[tuple[float, float, float]]:
+        """Every order of `kind` that stood at any point in [start, horizon), as
+        [(t_from, t_to, price)] clipped to the window.
+
+        Read off `order_lives`, not `events`: one row per order_hash, with the
+        duplicate cancel collapsed, the revalidate honoured and the untimed
+        terminator marked `unknown` (BUG-049/050). The predicate here is
+        `standing_sql`'s, expressed as an interval rather than a point:
+
+            t_place <= tau  AND  exit_reason <> 'unknown'
+            AND (t_term IS NULL OR t_term > tau)
+            AND (expiration_ts IS NULL OR expiration_ts > tau)
+
+        so the interval is [t_place, min(t_term, expiration_ts)). An order with
+        neither stands to `horizon` and no further -- see `_bucket_windows`.
+
+        A trait filter narrows the token-scoped kinds only. A collection offer
+        carries no token and bids on every one of them, so it passes every
+        filter; that is not a special case, it is what `C = {}` means.
+        """
+        spec = STANDING_KINDS[kind]
+        col = "price_usd" if denom == "USD" else "price_eth"
+        where = ["ol.collection = ?", "ol.event_type = ?", "ol.placement_seen = 1",
+                 "ol.t_place IS NOT NULL", "ol.t_place < ?", "ol.exit_reason <> 'unknown'",
+                 f"ol.{col} IS NOT NULL",
+                 "(ol.t_term IS NULL OR ol.t_term > ?)",
+                 "(ol.expiration_ts IS NULL OR ol.expiration_ts > ?)"]
+        args: list[Any] = [collection, spec["event_type"], horizon, start, start]
+        if traits and spec["token_scoped"]:
+            tf, targs = token_filter_sql(collection, traits, alias="ol")
+            where.append(tf[len(" AND "):])
+            args.extend(targs)
+        rows = self.conn.execute(
+            f"SELECT ol.t_place, ol.t_term, ol.expiration_ts, ol.{col} FROM order_lives ol "
+            f"WHERE {' AND '.join(where)}", args)
+        live: list[tuple[float, float, float]] = []
+        for t_place, t_term, exp_ts, price in rows:
+            ends = [x for x in (t_term, exp_ts) if x is not None]
+            t_end = min(ends) if ends else horizon
+            a, b = max(t_place, start), min(t_end, horizon)
+            if b > a:
+                live.append((a, b, price))
+        return live
+
+    def standing_series(self, kind: str, collection: str, start: float, end: float,
+                        interval: str | dict[str, Any], denom: str = "ETH",
+                        traits: dict[str, list[str]] | None = None,
+                        now: datetime | None = None) -> dict[str, Any]:
+        """The standing book's extremum, per bucket, time-weighted.
+
+        For every bucket on the FULL grid of [start, end): the time-weighted
+        median of the lowest standing ask (or the highest standing bid) over the
+        bucket, with [p10, p90], `coverage` = seconds the leg stood / observable
+        bucket seconds, and `n` = distinct orders that were standing.
+
+        The book is sampled at every event time inside the bucket -- a sweep line
+        over placements and terminations -- which is both cheaper and strictly
+        more informative than sampling at bucket boundaries. Boundary sampling
+        would miss a listing that appeared and was cancelled inside one bucket,
+        which on this collection is the majority of them (median bid life 9 s).
+
+        **Median vs percentiles, and why they are treated differently.** The
+        median here is the LEVEL of a continuously observed step function -- the
+        price that was actually standing for most of the bucket. It is a fact
+        with n = 1 (one listing stood, at that price, for that long) and is
+        reported. [p10, p90] is a claim about the DISTRIBUTION of that level
+        across the bucket, and quant §2.3 is explicit that machine quotes are not
+        independent observations; below `MIN_N_FOR_PERCENTILES` distinct orders
+        it is refused, not flagged (REQ-F-19). Suppressed buckets are counted in
+        the basis.
+
+        Nulls where nothing stood. Never zero: zero is a price, and "no standing
+        ask" is not the price zero (Operator's decision, 2026-09-10).
+        """
+        if kind not in STANDING_KINDS:
+            raise ValueError(f"unknown standing kind {kind!r}; one of {sorted(STANDING_KINDS)}")
+        if denom not in DENOMS:
+            raise ValueError(f"unknown denomination {denom!r}; one of {DENOMS}")
+        ispec = self.intervals["intervals"][interval] if isinstance(interval, str) else interval
+        now_ts = (now or datetime.now(timezone.utc)).timestamp()
+        horizon = min(end, now_ts)
+        grid = bucket_grid(start, end, ispec, self.tz)
+        spec = STANDING_KINDS[kind]
+        live = self._standing_live(kind, collection, denom, start, horizon, traits)
+        windows = _bucket_windows(grid, start, horizon, ispec, self.tz)
+        segs = _extremum_segments(live, spec["want"] == "min")
+        per = _accumulate(segs, grid, windows)
+        counts = _distinct_per_bucket(live, grid)
+
+        median: list[float | None] = []
+        p10: list[float | None] = []
+        p90: list[float | None] = []
+        coverage: list[float | None] = []
+        stood: list[float] = []
+        suppressed = 0
+        for i in range(len(grid)):
+            pairs = per.get(i, [])
+            secs = sum(w for w, _ in pairs)
+            width = max(0.0, windows[i][1] - windows[i][0])
+            stood.append(secs)
+            coverage.append((secs / width) if width > 0 else None)
+            median.append(time_weighted_quantile(pairs, 0.5))
+            if counts[i] >= MIN_N_FOR_PERCENTILES:
+                p10.append(time_weighted_quantile(pairs, 0.10))
+                p90.append(time_weighted_quantile(pairs, 0.90))
+            else:
+                if pairs:
+                    suppressed += 1
+                p10.append(None)
+                p90.append(None)
+        return {
+            "keys": grid,
+            "t": [datetime.fromtimestamp(k, tz=timezone.utc).isoformat() for k in grid],
+            "median": median, "p10": p10, "p90": p90,
+            "coverage": coverage, "n": counts,
+            "standing_seconds": stood,
+            "bucket_seconds": [max(0.0, hi - lo) for lo, hi in windows],
+            "basis": {
+                "book": "standing", "kind": kind, "leg": spec["label"],
+                "event_type": spec["event_type"],
+                "orders_in_window": len(live),
+                "aggregation": "time-weighted median over the bucket, sampled at every "
+                               "placement and termination inside it",
+                "coverage_denominator": "observable bucket seconds = the bucket clipped to the "
+                                        "query window and to now; nothing past now is observable",
+                "percentiles_min_n": MIN_N_FOR_PERCENTILES,
+                "percentiles_suppressed_buckets": suppressed,
+                "left_truncated": True,
+                "left_truncation_note": "the standing book contains only orders whose PLACEMENT we "
+                                        "witnessed; orders resting before recording started are "
+                                        "invisible, so a reconstructed floor is an upper bound and "
+                                        "a reconstructed best bid a lower one (quant §0, Q-V9)",
+                "as_of": datetime.fromtimestamp(horizon, tz=timezone.utc).isoformat(),
+            },
+        }
+
+    def standing_spread(self, collection: str, start: float, end: float,
+                        interval: str | dict[str, Any], denom: str = "ETH",
+                        traits: dict[str, list[str]] | None = None,
+                        now: datetime | None = None) -> dict[str, Any]:
+        """`immediacy_cost` as docs/01 §3.2 defines it: a STANDING-book spread.
+
+            spread(tau) = lowest standing ask(tau) - highest standing collection offer(tau)
+
+        Both legs on the SAME tau. Reported per bucket as the time-weighted
+        median with [p10, p90], with `coverage` = both-legs seconds / observable
+        bucket seconds, and null wherever either leg was absent -- "no bid at any
+        price" is the liquidity fact, not a missing pixel.
+
+        **Leg discipline (quant §1 metric 1).** The bid leg is a COLLECTION offer
+        and nothing else. A collection offer carries no token and applies to
+        every one of them, so it is by construction a bid available on whichever
+        token is at the floor. Item bids and trait offers are per-token and
+        per-criteria: maxing over them would pair the ask on one token with the
+        bid on another, and "mixing those populations is how a spread goes
+        negative." A bid leg that unions all three is a different metric (PR-5).
+
+        **A negative spread is an alarm, not a data point.** If any tau inside a
+        bucket has ask < bid, the whole bucket is null and counted in
+        `negative_buckets`: a crossed book means the reconstruction is wrong (a
+        stale ask, a misparsed price, a left-truncated leg), and publishing the
+        median of the remaining tau would hide it behind a plausible number.
+        Project rule 5 -- a surprisingly good result is evidence of a bug.
+        """
+        ispec = self.intervals["intervals"][interval] if isinstance(interval, str) else interval
+        now_ts = (now or datetime.now(timezone.utc)).timestamp()
+        horizon = min(end, now_ts)
+        grid = bucket_grid(start, end, ispec, self.tz)
+        windows = _bucket_windows(grid, start, horizon, ispec, self.tz)
+        ask_live = self._standing_live("ask", collection, denom, start, horizon, traits)
+        bid_live = self._standing_live("collection_bid", collection, denom, start, horizon, traits)
+        ask_segs = _extremum_segments(ask_live, True)
+        bid_segs = _extremum_segments(bid_live, False)
+        joint = _join_segments(ask_segs, bid_segs)
+
+        spread_segs = [(t0, t1, a - b) for t0, t1, a, b in joint]
+        ask_on_joint = [(t0, t1, a) for t0, t1, a, _b in joint]
+        bid_on_joint = [(t0, t1, b) for t0, t1, _a, b in joint]
+        pct_segs = [(t0, t1, (a - b) / a) for t0, t1, a, b in joint if a]
+        neg_segs = [(t0, t1, 1.0) for t0, t1, a, b in joint if a - b < 0]
+
+        acc_spread = _accumulate(spread_segs, grid, windows)
+        acc_ask = _accumulate(ask_on_joint, grid, windows)
+        acc_bid = _accumulate(bid_on_joint, grid, windows)
+        acc_pct = _accumulate(pct_segs, grid, windows)
+        acc_neg = _accumulate(neg_segs, grid, windows)
+        n_ask = _distinct_per_bucket(ask_live, grid)
+        n_bid = _distinct_per_bucket(bid_live, grid)
+
+        raw: list[float | None] = []
+        p10: list[float | None] = []
+        p90: list[float | None] = []
+        coverage: list[float | None] = []
+        pctv: list[float | None] = []
+        leg_ask: list[float | None] = []
+        leg_bid: list[float | None] = []
+        negative_buckets = 0
+        negative_starts: list[float] = []
+        suppressed = 0
+        for i in range(len(grid)):
+            pairs = acc_spread.get(i, [])
+            width = max(0.0, windows[i][1] - windows[i][0])
+            both = sum(w for w, _ in pairs)
+            coverage.append((both / width) if width > 0 else None)
+            if acc_neg.get(i):
+                negative_buckets += 1
+                negative_starts.append(grid[i])
+                for arr in (raw, p10, p90, pctv, leg_ask, leg_bid):
+                    arr.append(None)
+                continue
+            raw.append(time_weighted_quantile(pairs, 0.5))
+            leg_ask.append(time_weighted_quantile(acc_ask.get(i, []), 0.5))
+            leg_bid.append(time_weighted_quantile(acc_bid.get(i, []), 0.5))
+            pctv.append(time_weighted_quantile(acc_pct.get(i, []), 0.5))
+            n_eff = min(n_ask[i], n_bid[i])
+            if n_eff >= MIN_N_FOR_PERCENTILES:
+                p10.append(time_weighted_quantile(pairs, 0.10))
+                p90.append(time_weighted_quantile(pairs, 0.90))
+            else:
+                if pairs:
+                    suppressed += 1
+                p10.append(None)
+                p90.append(None)
+        iv_id = interval if isinstance(interval, str) else str(ispec.get("id", "?"))
+        # One log line per CROSSED BUCKET, not per (collection, interval, denom).
+        # Re-rendering the same crossed bucket every 10 s stays silent; a bucket
+        # that crosses for the first time hours later always speaks up.
+        fresh = [b for b in negative_starts
+                 if (collection, iv_id, denom, b) not in _NEGATIVE_LOGGED]
+        if fresh:
+            for b in fresh:
+                _NEGATIVE_LOGGED.add((collection, iv_id, denom, b))
+            log.warning(
+                "immediacy_cost: %d newly-seen bucket(s) had a CROSSED standing book (ask < bid) "
+                "for %s at %s/%s, starting %s -- returned as null, not charted. A crossed book is "
+                "a reconstruction defect (stale ask, misparsed price, left-truncated leg), never "
+                "an arbitrage. BUG-20260910-057.",
+                len(fresh), collection, iv_id, denom,
+                ", ".join(datetime.fromtimestamp(b, tz=timezone.utc).isoformat() for b in fresh[:8])
+                + (" ..." if len(fresh) > 8 else ""))
+        return {
+            "keys": grid,
+            "t": [datetime.fromtimestamp(k, tz=timezone.utc).isoformat() for k in grid],
+            "median": raw, "p10": p10, "p90": p90, "coverage": coverage,
+            "pct_of_ask": pctv, "leg_ask": leg_ask, "leg_bid": leg_bid,
+            "n_ask": n_ask, "n_bid": n_bid,
+            "basis": {
+                "book": "standing", "interval_id": iv_id,
+                "negative_buckets": negative_buckets,
+                "percentiles_min_n": MIN_N_FOR_PERCENTILES,
+                "percentiles_suppressed_buckets": suppressed,
+                "coverage_denominator": "both-legs seconds / observable bucket seconds",
+                "left_truncated": True,
+                "as_of": datetime.fromtimestamp(horizon, tz=timezone.utc).isoformat(),
+            },
+        }
+
     def series(self, *, metric: str, collection: str, denomination: str = "ETH",
                transform: str = "ABS", interval: str = "1h", range_: str = "24h",
                now: datetime | None = None, traits: dict[str, list[str]] | None = None,
-               gaps: list[tuple[float, float | None]] | None = None) -> dict[str, Any]:
+               gaps: list[tuple[float, float | None]] | None = None,
+               book: str | None = None) -> dict[str, Any]:
         """One metric on the full bucket grid of the range.
 
         A price bucket with no observation is None (undefined). A COUNT/SUM
@@ -396,6 +961,34 @@ class MetricEngine:
         is a fact, not a hole -- EXCEPT inside an ingestion gap, where every
         metric is None: we were not listening, so we do not know (REQ-F-15).
         `gaps` is [(start_ts, end_ts_or_None)] from the landing-zone manifest.
+
+        `book` selects which book a price metric is read off, and the basis
+        always says which was used:
+
+          * `'standing'` -- the resting book at each instant, from `order_lives`,
+            reported as the time-weighted median over the bucket with [p10, p90],
+            `coverage` and `n`. **The default** for `floor_ask`,
+            `collection_bid` and `immediacy_cost` (Operator, 2026-09-10).
+          * `'observed'` -- the old interval extremum: the lowest ask *seen*
+            in the bucket, the highest offer *seen*. Kept reachable and
+            labelled, because it answers a different question (what traded
+            hands in this interval) and because a comparison line is how the
+            size of the correction gets seen. It is NOT the quantity docs/01
+            §3.2 defines (BUG-20260910-057).
+
+        A count or flow metric has no resting book, so `book='standing'` on one
+        is REFUSED with that reason rather than answered from a book that does
+        not exist, and its basis reads `book: "n/a (...)"`.
+
+        `top_item_bid` is refused too, but for a DIFFERENT reason, and the two
+        must not be conflated: it is a price metric and it does have a resting
+        book (`STANDING_KINDS['item_bid']`). What it does not have is a
+        collection-wide leg -- an item bid applies to one token, so a standing
+        "highest item bid" maxes over bids on different tokens. That belongs with
+        the union bid leg of PR-5. Its default is therefore `observed`, its basis
+        says `observed` rather than `n/a`, and it carries the
+        `observed_book_warning` like every other observed-book price line. See
+        `STANDING_NOT_OFFERED` for the reason the refusal actually returns.
         """
         if metric not in METRICS:
             raise ValueError(f"unknown metric {metric!r}; one of {sorted(METRICS)}")
@@ -403,15 +996,47 @@ class MetricEngine:
             raise ValueError(f"unknown denomination {denomination!r}; one of {DENOMS}")
         if interval not in self.intervals["intervals"]:
             raise ValueError(f"unknown interval {interval!r}; one of {sorted(self.intervals['intervals'])}")
+        if book is not None and book not in BOOKS:
+            raise ValueError(f"unknown book {book!r}; one of {BOOKS}")
         now = now or datetime.now(timezone.utc)
         start_dt, end_dt = parse_range(range_, self.intervals, now, self.tz)
         start, end = start_dt.timestamp(), end_dt.timestamp()
         ispec = self.intervals["intervals"][interval]
 
         spec = METRICS[metric]
+        if "book" not in spec:
+            if book == "standing":
+                raise ValueError(
+                    f"{metric!r} has no standing-book variant: it is a count or flow metric, not a "
+                    f"resting-book quantity. Ask for it without `book`, or with book='observed'.")
+            book_used = f"n/a ({metric} is a count/flow metric, not a book quantity)"
+        else:
+            book_used = book or spec.get("book_default", "observed")
+            if book_used == "standing" and metric in STANDING_NOT_OFFERED:
+                raise ValueError(
+                    f"{metric!r} has a standing book but series() does not offer the standing "
+                    f"variant: {STANDING_NOT_OFFERED[metric]}")
         keys = bucket_grid(start, end, ispec, self.tz)
         legs: dict[str, str] = {}
-        if "derived" in spec:
+        extra: dict[str, Any] = {}
+        book_basis: dict[str, Any] = {}
+        if book_used == "standing" and spec.get("book") == "spread":
+            st = self.standing_spread(collection, start, end, ispec, denomination, traits, now)
+            raw = list(st["median"])
+            parts = {"floor_ask": list(st["leg_ask"]), "collection_bid": list(st["leg_bid"])}
+            pct = list(st["pct_of_ask"])
+            extra = {"p10": st["p10"], "p90": st["p90"], "coverage": st["coverage"],
+                     "n_ask": st["n_ask"], "n_bid": st["n_bid"]}
+            book_basis = dict(st["basis"])
+            legs = self._spread_legs(traits, standing=True)
+        elif book_used == "standing":
+            st = self.standing_series(spec["book"], collection, start, end, ispec,
+                                      denomination, traits, now)
+            raw = list(st["median"])
+            parts, pct = {}, None
+            extra = {"p10": st["p10"], "p90": st["p90"], "coverage": st["coverage"], "n": st["n"]}
+            book_basis = dict(st["basis"])
+        elif "derived" in spec:
             a, b = spec["derived"]
             ga = self._bucketed(a, collection, denomination, start, end, ispec, traits)
             gb = self._bucketed(b, collection, denomination, start, end, ispec, traits)
@@ -419,18 +1044,7 @@ class MetricEngine:
             parts = {"floor_ask": [ga.get(k) for k in keys],
                      "collection_bid": [gb.get(k) for k in keys]}
             pct = [((ga[k] - gb[k]) / ga[k]) if (k in ga and k in gb and ga[k]) else None for k in keys]
-            if traits:
-                # The ask leg is trait-filtered (listings carry a token). The bid
-                # leg is the collection-wide offer, because a collection offer is
-                # the only standing bid those tokens have. Said out loud, every time.
-                legs = {"floor_ask": "trait-filtered: lowest ask on tokens matching the filter",
-                        "collection_bid": "collection-wide: collection offers carry no token and apply to every "
-                                          "token. Trait offers do NOT enter this leg -- `collection_bid` is "
-                                          "collection offers by definition, and a trait-offer bid leg is a "
-                                          "separate metric. Where a metric does include trait offers (bid_count, "
-                                          "event_count) they are now matched by the COVER rule on their stored "
-                                          "criteria; offers with no parsed criteria or with numeric criteria are "
-                                          "excluded and counted (MetricEngine.trait_offer_verdicts)"}
+            legs = self._spread_legs(traits, standing=False)
         else:
             g = self._bucketed(metric, collection, denomination, start, end, ispec, traits)
             empty = 0.0 if spec["agg"] in ("COUNT", "SUM") else None
@@ -449,10 +1063,22 @@ class MetricEngine:
                             leg[i] = None
                         if pct is not None:
                             pct[i] = None
+                    # A standing series has its own arrays and every one of them
+                    # is a claim about a window we were not listening in.
+                    for key in ("p10", "p90", "coverage"):
+                        if key in extra:
+                            extra[key][i] = None
+                    for key in ("n", "n_ask", "n_bid"):
+                        if key in extra:
+                            extra[key][i] = 0
 
         values, basis = apply_transform(raw, transform)
+        basis.update(book_basis)
         basis.update({
-            "metric": metric, "label": spec["label"], "collection": collection,
+            "metric": metric,
+            "label": (spec.get("standing_label", spec["label"]) if book_used == "standing"
+                      else spec["label"]),
+            "book": book_used, "collection": collection,
             "denomination": denomination, "interval": interval,
             "range": {"spec": range_, "start": start_dt.isoformat(), "end": end_dt.isoformat()},
             "display_timezone": self.tz,
@@ -469,12 +1095,53 @@ class MetricEngine:
         })
         if legs:
             basis["legs"] = legs
+        if book_used == "observed" and "book" in spec:
+            tail = ("Kept for comparison; do not quote it as the spread."
+                    if spec.get("book") == "spread" else
+                    "Kept for comparison; do not quote it as the level of the book.")
+            basis["observed_book_warning"] = (
+                f"book='observed' on {metric!r} is the INTERVAL EXTREMUM -- the best price SEEN "
+                "at any instant in the bucket, from orders that need never have coexisted and need "
+                "not have been standing at the end of it. It is not the standing-book quantity "
+                "docs/01 §3.2 defines and it is biased optimistic, more so at wider intervals "
+                f"(BUG-20260910-057). {tail}")
         out = {"t": [datetime.fromtimestamp(k, tz=timezone.utc).isoformat() for k in keys],
                "v": values, "raw": raw, "basis": basis}
         if parts:
             out["parts"] = parts
             out["pct_of_ask"] = pct
+        if extra:
+            # The band, the coverage and the counts describe the RAW series and
+            # are never transformed: a [p10, p90] in ETH under a PCT transform
+            # would be two numbers on a different scale from the line they sit
+            # under, which is the kind of chart that gets read wrong once.
+            basis["bands_untransformed"] = True
+            basis["bands_note"] = (f"p10/p90 are in {denomination} on the raw series; coverage is a "
+                                   f"fraction of bucket seconds; n is a count of orders. The "
+                                   f"transform applies to the plotted line only.")
+        out.update(extra)
         return out
+
+    @staticmethod
+    def _spread_legs(traits: dict[str, list[str]] | None, *, standing: bool) -> dict[str, str]:
+        """What each leg of the derived spread is, said out loud, every time.
+
+        Only emitted under a trait filter, where the two legs are drawn from
+        different populations and the reader has to know it.
+        """
+        if not traits:
+            return {}
+        book = "standing " if standing else "observed (interval-extremum) "
+        return {
+            "floor_ask": f"trait-filtered: {book}lowest ask on tokens matching the filter",
+            "collection_bid": f"collection-wide: {book}collection offers carry no token and apply to every "
+                              "token. Trait offers do NOT enter this leg -- `collection_bid` is "
+                              "collection offers by definition, and a trait-offer bid leg is a "
+                              "separate metric. Where a metric does include trait offers (bid_count, "
+                              "event_count) they are now matched by the COVER rule on their stored "
+                              "criteria; offers with no parsed criteria or with numeric criteria are "
+                              "excluded and counted (MetricEngine.trait_offer_verdicts)",
+        }
 
     # -- non-series views ----------------------------------------------------
     def live_book(self, collection: str, now: datetime | None = None, limit: int = 25,
@@ -553,7 +1220,14 @@ class MetricEngine:
         (censored), untimed terminators (unknown), and the orphan rate -- the
         share of terminations in the window whose placement we never saw, which
         is the direct estimator of how left-truncated this book still is
-        (quant metric 12). Percentiles above a minimum n only (REQ-F-19).
+        (quant metric 12).
+
+        **Percentiles are WITHHELD, not flagged, below `MIN_N_FOR_PERCENTILES`**
+        (REQ-F-19, Q-V3). All three -- p10, median and p90 -- are quantiles of a
+        duration sample, so all three are refused together; `n`,
+        `min_n_for_percentiles` and `percentiles_withheld` travel with the None
+        so the caller can say why the number is missing rather than showing a
+        number with a warning beside it, which is what people quote.
 
         The estimator is still naive: censored lives are counted, not modelled.
         Kaplan-Meier with competing risks is PR-8 and reads these same rows.
@@ -574,16 +1248,16 @@ class MetricEngine:
                 ended.append(t_term - t_place)
         d = sorted(ended)
         n = len(d)
-
-        def pct(p: float) -> float | None:
-            return d[min(n - 1, int(p * n))] if n else None
         terms, orphans = self.conn.execute(
             """SELECT COUNT(*), SUM(placement_seen = 0) FROM order_lives
                WHERE collection = ? AND exit_source = 'observed' AND t_term IS NOT NULL
                  AND t_term >= ? AND t_term < ?""", (collection, start, end)).fetchone()
         orphans = orphans or 0
-        return {"n": n, "p10_s": pct(0.10), "median_s": pct(0.5), "p90_s": pct(0.9),
-                "min_n_for_percentiles": 30, "percentiles_reliable": n >= 30,
+        return {"n": n,
+                "p10_s": pct(d, 0.10), "median_s": pct(d, 0.5), "p90_s": pct(d, 0.9),
+                "min_n_for_percentiles": MIN_N_FOR_PERCENTILES,
+                "percentiles_reliable": n >= MIN_N_FOR_PERCENTILES,
+                "percentiles_withheld": n < MIN_N_FOR_PERCENTILES,
                 "kind": kind, "orders_at_risk": at_risk,
                 "censored_n": censored, "unknown_terminator_n": unknown,
                 "terminations_in_window": terms, "orphan_terminations": orphans,

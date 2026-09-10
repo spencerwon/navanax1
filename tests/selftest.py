@@ -1072,23 +1072,45 @@ def test_no_superseded_rate_limit_in_operator_text(tmp: Path) -> None:
     # test "scans every operator-facing file... so this class cannot recur
     # silently". It recurred silently in five files. Scan the whole repo, the
     # way tools/buglog.py already does for bug ids.
-    # Scan the files the repo actually CLAIMS -- i.e. tracked files. A
-    # generated artifact sitting in the working tree is output, not an
-    # assertion; a tracked one is an assertion. `tools/preflight_report.json`
-    # was both at once until it was untracked, which is why it is now
-    # gitignored: the report the documents get corrected FROM must not itself
-    # become a stale claim in the repo.
+    # Scan every file in the working tree that is not deliberately excluded --
+    # tracked AND untracked-but-not-ignored.
+    #
+    # Tech-lead re-review, 2026-09-10: the previous enumeration was plain
+    # `git ls-files`, i.e. TRACKED ONLY, on the theory that "a generated
+    # artifact in the working tree is output, not an assertion". That theory is
+    # false here and the failure mode is the same one BUG-014 already recurred
+    # under. At the time of this fix 39 of the repo's 78 files were tracked;
+    # every file this very PR touches -- src/navanax/metrics.py,
+    # src/navanax/dashboard.py, src/navanax/ui/index.html, config/assumptions.yaml,
+    # docs/08_DASHBOARD.md, four agent charters -- was untracked and therefore
+    # UNSCANNED. A file being new is not evidence that it makes no claim; it is
+    # the state every file passes through on the day it is written, which is
+    # exactly the day a falsified figure gets copied into it.
+    #
+    # `--exclude-standard` still honours .gitignore, so the genuinely generated
+    # artifacts stay out: `tools/preflight_report.json` is gitignored precisely
+    # so the report the documents get corrected FROM cannot itself become a
+    # stale claim in the repo. That exclusion is expressed once, in .gitignore,
+    # where the operator can see it -- not implicitly by whether someone has
+    # run `git add` yet.
     import subprocess
-    skip_dirs = {".git", "__pycache__", ".venv", "node_modules", "data"}
+    skip_dirs = {".git", "__pycache__", ".venv", "node_modules", "data", ".sync"}
+    binary_suffixes = {".xlsx", ".gz", ".zst", ".db", ".pyc", ".png", ".jpg", ".jpeg",
+                       ".gif", ".pdf", ".sqlite", ".zip", ".so", ".dylib"}
     try:
-        tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
-                                 text=True, timeout=30, check=True).stdout.split()
-        candidates = [ROOT / t for t in tracked]
+        listed = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+                                cwd=ROOT, capture_output=True, text=True,
+                                timeout=30, check=True).stdout.split()
+        candidates = [ROOT / t for t in listed]
     except (OSError, subprocess.SubprocessError):
-        candidates = sorted(ROOT.rglob("*"))
+        # No git binary, or ROOT is not a repository (a tarball of the source, a
+        # CI image without git). Walk the tree instead: an unscanned repo would
+        # PASS this test silently, which is the one outcome it must never have.
+        candidates = sorted(p for p in ROOT.rglob("*") if p.is_file())
     offenders = []
+    scanned: set[str] = set()
     for f in candidates:
-        if not f.is_file() or f.suffix.lower() in {".xlsx", ".gz", ".zst", ".db", ".pyc"}:
+        if not f.is_file() or f.suffix.lower() in binary_suffixes:
             continue
         if any(part in skip_dirs for part in f.relative_to(ROOT).parts):
             continue
@@ -1099,9 +1121,19 @@ def test_no_superseded_rate_limit_in_operator_text(tmp: Path) -> None:
             lines = f.read_text(encoding="utf-8").splitlines()
         except (UnicodeDecodeError, OSError):
             continue
+        scanned.add(name)
         for i, line in enumerate(lines, 1):
             if asserts.search(line) and not corrects.search(line):
                 offenders.append(f"{name}:{i}: {line.strip()[:70]}")
+    # The enumeration itself is the thing that regressed, so assert it directly:
+    # these four are operator-facing and were UNTRACKED when this was fixed. If
+    # the enumeration ever narrows back to `git ls-files` (tracked only), this
+    # fails loudly instead of the 600/hr scan passing over a shrunken corpus.
+    must_scan = ["src/navanax/metrics.py", "src/navanax/dashboard.py",
+                 "src/navanax/ui/index.html", "config/assumptions.yaml"]
+    unscanned = [m for m in must_scan if m not in scanned and (ROOT / m).is_file()]
+    check("BUG-014: the scan reaches UNTRACKED operator-facing files, not just tracked ones",
+          not unscanned, f"never opened -> {unscanned} (scanned {len(scanned)} files)")
     check("BUG-014: no operator-facing file still asserts the 600/hr figure",
           not offenders, "still present -> " + " | ".join(offenders))
 
@@ -1975,10 +2007,26 @@ def test_metric_engine_contract(tmp: Path) -> None:
           len(s["t"]) == 6 and s["basis"]["buckets"] == 6 and s["basis"]["undefined_buckets"] == 5, f"got {s['t']}")
     check("metrics: ...and % of ask alongside (REQ-F-13a: both percentage and absolute)",
           abs([p for p in s["pct_of_ask"] if p is not None][0] - (1.59 - 0.348) / 1.59) < 1e-9)
-    s5 = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h", now=now)
-    check("metrics: at 5m the offer and the listing fall in different buckets -> UNDEFINED, not filled",
+    s5 = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h",
+                    now=now, book="observed")
+    check("metrics (book='observed'): at 5m the offer and the listing fall in different buckets "
+          "-> UNDEFINED, not filled -- the OLD behaviour, still reachable and labelled",
           all(v is None for v in s5["raw"]) and s5["basis"]["undefined_buckets"] == len(s5["raw"]) and len(s5["raw"]) == 72,
           f"got {len(s5['raw'])}")
+    check("metrics (book='observed'): ...and the response warns that it is not the docs/01 §3.2 quantity",
+          "interval" in s5["basis"]["observed_book_warning"].lower()
+          and "BUG-20260910-057" in s5["basis"]["observed_book_warning"])
+    s5s = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h", now=now)
+    # The correction BUG-20260910-057 exists for: the offer (valid at 10:19:23,
+    # expires 2026-09-10) and the listing (valid at 10:27:21, expires 2026-10-09)
+    # are both STANDING from 10:27:21 onward, so all seven 5m buckets from 10:25
+    # to 11:00 have a real spread. The interval-extremum version called every one
+    # of them undefined because the two legs were SEEN in different buckets.
+    defined5 = [v for v in s5s["raw"] if v is not None]
+    check("metrics (book='standing', the default): the two legs are both RESTING after 10:27 so the "
+          "spread is defined in every 5m bucket after it -- the extremum version saw none of them",
+          len(defined5) == 7 and all(abs(v - (1.59 - 0.348)) < 1e-9 for v in defined5)
+          and s5s["basis"]["book"] == "standing", f"got {defined5}")
     u = eng.series(metric="floor_ask", collection="argonauts", denomination="USD", interval="1h", range_="6h", now=now)
     check("metrics: USD denomination uses the event's own USD at its timestamp",
           [v for v in u["raw"] if v is not None] == [3959.5929] and u["raw"].count(None) == 5)
@@ -2012,9 +2060,145 @@ def test_metric_engine_contract(tmp: Path) -> None:
           and len(book["collection_offers"]) == 1,
           f"got bids={len(book['item_bids'])} asks={len(book['asks'])} coll={len(book['collection_offers'])}")
     lt = eng.bid_lifetimes("argonauts", 0, now.timestamp())
-    check("metrics: bid lifetime = cancel.valid_ts - bid.valid_ts, with its n",
-          lt["n"] == 1 and abs(lt["median_s"] - 22.49) < 0.01 and lt["percentiles_reliable"] is False, f"got {lt}")
+    # PR-3 / REQ-F-19: the duration is still cancel.valid_ts - bid.valid_ts and
+    # `n` still counts orders, but at n = 1 the percentiles are WITHHELD, not
+    # printed with a warning beside them (BUG-20260910-057, Q-V3). The duration
+    # itself is checked in test_percentiles_are_withheld_below_min_n, above n.
+    check("metrics: bid lifetime carries its n, and at n = 1 every percentile is withheld",
+          lt["n"] == 1 and lt["median_s"] is None and lt["p10_s"] is None and lt["p90_s"] is None
+          and lt["percentiles_reliable"] is False and lt["percentiles_withheld"] is True, f"got {lt}")
     n.close()
+
+
+def test_top_item_bid_declares_the_book_it_has(tmp: Path) -> None:
+    """Tech-lead re-review 2026-09-10, T3. `top_item_bid` carried no `book` key,
+    and three separate untruths followed from that one omission:
+
+      1. `series(book='standing')` was refused with the reason "it is a count or
+         flow metric, not a resting-book quantity". `top_item_bid` is a PRICE
+         metric and it does have a resting book -- STANDING_KINDS['item_bid'].
+         The real reason is leg discipline: an item bid is per-token, and the
+         union bid leg that would make it comparable is PR-5. A refusal that
+         misstates why is worse than no refusal, because it is the sentence the
+         next person reasons from.
+      2. The basis printed `book: "n/a (top_item_bid is a count/flow metric...)"`,
+         so the Prices panel told the Operator the wrong thing about a line it
+         was drawing.
+      3. `observed_book_warning` is gated on `"book" in spec`, so the one price
+         line on that panel that is ALWAYS an interval extremum was the only one
+         carrying no warning that it is one.
+
+    The DEFAULT does not change -- it stays `observed`. What changes is that the
+    refusal, the basis and the warning now say something true.
+    """
+    from navanax.metrics import (
+        METRICS,
+        STANDING_KINDS,
+        STANDING_NOT_OFFERED,
+        MetricEngine,
+        load_intervals,
+    )
+    from navanax.normalize import COLS, Normalizer, parse_event, refresh_order_lives
+
+    iv = load_intervals(ROOT / "config" / "intervals.yaml")
+    n = Normalizer(tmp / "tib-lz", tmp / "tib.sqlite")
+    for i, (raw, recv) in enumerate(((REAL_BID, "10:20:16"), (REAL_COLL_OFFER, "10:20:17"),
+                                     (DOC_LISTING, "10:30:01")), 1):
+        row = parse_event(_env(i, raw, f"2026-09-09T{recv}Z"))
+        row["file"] = "f"
+        n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})",
+                       tuple(row.get(c) for c in COLS))
+    n.conn.commit()
+    refresh_order_lives(n.conn)
+    eng = MetricEngine(n.conn, iv, "America/Chicago")
+    now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+
+    spec = METRICS["top_item_bid"]
+    check("top_item_bid: the metric declares the standing-book kind it actually has, "
+          "and its default stays 'observed' (the Operator's leg discipline is unchanged)",
+          spec.get("book") == "item_bid" and spec["book"] in STANDING_KINDS
+          and spec.get("book_default") == "observed",
+          f"book={spec.get('book')!r} default={spec.get('book_default')!r}")
+
+    s = eng.series(metric="top_item_bid", collection="argonauts", interval="1h", range_="6h", now=now)
+    check("top_item_bid: the basis reads book 'observed' -- not the false 'n/a (count/flow...)'",
+          s["basis"]["book"] == "observed", f"got {s['basis']['book']!r}")
+    check("top_item_bid: ...and the observed-book warning is ATTACHED to the line that most needs it",
+          "observed_book_warning" in s["basis"]
+          and "BUG-20260910-057" in s["basis"]["observed_book_warning"]
+          and "top_item_bid" in s["basis"]["observed_book_warning"],
+          f"basis keys {sorted(s['basis'])}")
+    check("top_item_bid: the DEFAULT series is unchanged -- still the interval extremum, 0.88 ETH",
+          0.88 in s["raw"], f"got {s['raw']}")
+
+    try:
+        eng.series(metric="top_item_bid", collection="argonauts", interval="1h",
+                   range_="6h", now=now, book="standing")
+        refusal = ""
+    except ValueError as exc:
+        refusal = str(exc)
+    low = refusal.lower()
+    check("top_item_bid: book='standing' is STILL refused -- the union bid leg is PR-5", bool(refusal))
+    check("top_item_bid: ...and the refusal names the TRUE reason (per-token, PR-5), never 'count or flow'",
+          "per-token" in low and "pr-5" in low
+          and "count" not in low and "flow" not in low, refusal[:240])
+    check("top_item_bid: the reason the caller is handed is the one the module documents",
+          STANDING_NOT_OFFERED["top_item_bid"] in refusal)
+
+    # The primitive is reachable, which is what makes the refusal a routing
+    # decision rather than a missing capability.
+    st = eng.standing_series("item_bid", "argonauts", now.timestamp() - 6 * 3600,
+                             now.timestamp(), iv["intervals"]["1h"], "ETH", None, now)
+    check("top_item_bid: standing_series('item_bid', ...) still answers directly -- only the "
+          "metric default is withheld",
+          st["basis"]["book"] == "standing" and len(st["median"]) == 6, f"got {list(st['basis'])}")
+
+    # A count metric must keep the OTHER reason, unchanged: the two refusals are
+    # different facts and collapsing them is what caused this.
+    try:
+        eng.series(metric="sales_count", collection="argonauts", interval="1h",
+                   range_="6h", now=now, book="standing")
+        cnt = ""
+    except ValueError as exc:
+        cnt = str(exc)
+    check("counts keep the other refusal: a count metric really has no resting book",
+          "count or flow" in cnt.lower(), cnt[:160])
+    n.close()
+
+
+def test_min_n_for_percentiles_cannot_drift_from_assumptions_yaml() -> None:
+    """Tech-lead re-review 2026-09-10, item 3. `min_n_for_percentiles: 30` is written
+    twice -- once in config/assumptions.yaml (ASM-021, where the Operator and the
+    reviewer read it) and once as metrics.MIN_N_FOR_PERCENTILES (where it is
+    enforced). Nothing tied them together, so editing the assumption register
+    would have changed the documented threshold and not the code, and the register
+    is the artifact a reviewer trusts. REQ-N-09 says the threshold belongs in
+    config; until the MetricEngine constructor is allowed to take it, this
+    assertion is what keeps the two copies honest.
+    """
+    import yaml
+
+    from navanax.metrics import MIN_N_FOR_PERCENTILES
+
+    doc = yaml.safe_load((ROOT / "config" / "assumptions.yaml").read_text())
+    hits = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if "min_n_for_percentiles" in node:
+                hits.append(node["min_n_for_percentiles"])
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(doc)
+    check("assumptions: config/assumptions.yaml states min_n_for_percentiles exactly once",
+          len(hits) == 1, f"found {hits}")
+    check("assumptions: the stated threshold IS the one metrics.py enforces (ASM-021 cannot drift)",
+          bool(hits) and hits[0] == MIN_N_FOR_PERCENTILES,
+          f"assumptions.yaml says {hits} · metrics.MIN_N_FOR_PERCENTILES is {MIN_N_FOR_PERCENTILES}")
 
 
 def test_dashboard_serves_localhost_only(tmp: Path) -> None:
@@ -2073,6 +2257,20 @@ def test_dashboard_serves_localhost_only(tmp: Path) -> None:
         st, body = get("/api/series?metric=nope&collection=argonauts")
         check("dashboard: a bad request is a 400 with the reason, not a crash",
               st == 400 and b"unknown metric" in body)
+        # PR-3: `book` is a query param the engine owns the default for, and the
+        # response always says which book produced the number.
+        st, body = get("/api/series?metric=immediacy_cost&collection=argonauts&interval=1h&range=YTD")
+        check("dashboard: /api/series defaults immediacy_cost to the STANDING book",
+              st == 200 and json.loads(body)["basis"]["book"] == "standing", f"{st} {body[:160]}")
+        st, body = get("/api/series?metric=immediacy_cost&collection=argonauts&interval=1h&range=YTD&book=observed")
+        j = json.loads(body)
+        check("dashboard: ...and book=observed reaches the engine and is labelled as what it is",
+              st == 200 and j["basis"]["book"] == "observed"
+              and "BUG-20260910-057" in j["basis"]["observed_book_warning"], f"{st} {body[:160]}")
+        st, body = get("/api/series?metric=sales_count&collection=argonauts&interval=1h&range=YTD&book=standing")
+        check("dashboard: asking a flow metric for a standing book is a 400 with the reason, "
+              "not a number computed from a book that does not exist",
+              st == 400 and b"no standing-book variant" in body, f"{st} {body[:160]}")
         st, body = get("/")
         check("dashboard: serves the page", st == 200 and b"navanax" in body.lower())
         st, _ = get("/../pyproject.toml")
@@ -2197,6 +2395,502 @@ def test_traits_pipeline(tmp: Path) -> None:
     asyncio.run(job2.fetch_traits())
     check("traits: the re-run retries only the unresolved token", attempts["flaky"] == 2)
     conn.close()
+
+
+def test_list_pass_keeps_traits_it_is_given(tmp: Path) -> None:
+    """BUG-20260909-054: the collection list endpoint carries `traits` (verified for
+    Argonauts from a raw pull). The list pass used to discard them and plan
+    9,161 per-token reads. Now a list entry with traits is stored at once; one
+    without still goes through metadata_url / the budgeted fallback."""
+    import asyncio
+
+    from navanax.opstore import OperationalStore
+    from navanax.traits import TraitsJob, open_store
+
+    class Rest:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.requests_made = 0
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.calls.append(path)
+            self.requests_made += 1
+            if path.endswith("/nfts") and "collection/" in path:
+                return 200, {"nfts": [
+                    {"identifier": "1", "contract": "0xc", "name": "A", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Death"}, {"trait_type": "Bones", "value": "Bone"}]},
+                    {"identifier": "2", "contract": "0xc", "name": "B", "metadata_url": None, "traits": []},
+                    {"identifier": "3", "contract": "0xc", "name": "C", "metadata_url": None}], "next": None}
+            if "/contract/0xc/nfts/" in path:
+                return 200, {"nft": {"traits": [{"trait_type": "Cloak", "value": "Clergy"}]}}
+            return 404, {}
+
+    conn = open_store(tmp / "lp.sqlite")
+    ops = OperationalStore(tmp / "lp-ops.db")
+    rest = Rest()
+    job = TraitsJob(conn, rest, ops, slug="argonauts", opensea_fallback_budget=5)
+    r1 = asyncio.run(job.list_tokens())
+    check("list pass: traits on the list response are stored during the list pass, source opensea_nft_list",
+          r1["traits_from_list"] == 1
+          and conn.execute("SELECT traits_source, traits_at IS NOT NULL FROM tokens WHERE token_id='1'").fetchone() == ("opensea_nft_list", 1)
+          and sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='1'")) == [("Bones", "Bone"), ("Cloak", "Death")],
+          str(r1))
+    check("list pass: an empty or absent traits list leaves traits_at NULL (nothing invented)",
+          [r[0] for r in conn.execute("SELECT traits_at FROM tokens WHERE token_id IN ('2','3') ORDER BY token_id")] == [None, None])
+    r2 = asyncio.run(job.fetch_traits())
+    check("list pass: the per-token fallback runs ONLY for tokens the list gave no traits for -- 2 reads, not 3",
+          sorted(c for c in rest.calls if "/contract/" in c) == ["/chain/ethereum/contract/0xc/nfts/2", "/chain/ethereum/contract/0xc/nfts/3"]
+          and r2["attempted"] == 2 and r2["ok"] == 2, str(rest.calls))
+    check("list pass: the list-sourced token keeps its list traits (fallback never overwrote it)",
+          conn.execute("SELECT value FROM traits WHERE token_id='1' AND trait_type='Cloak'").fetchone()[0] == "Death")
+    conn.close()
+
+
+def test_import_explorer_cache(tmp: Path) -> None:
+    """`navanax import-traits`: zero REST, observation time = the cache's generated
+    time, never overwrites, diffs what it cannot write, exact counts, idempotent."""
+    from navanax.cli import main as cli_main
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "1": {"id": "1", "name": "Argonaut #1", "image": "https://x/1.svg", "rank": 3, "price": 0.5,
+              "traits": {"Cloak": "Death", "Bones": "Bone"}},
+        "2": {"id": "2", "name": "Argonaut #2", "image": "https://x/2.svg", "traits": {"Cloak": "Clergy"}},
+        "3": {"id": "3", "name": "Argonaut #3", "image": "https://x/3.svg", "traits": {"Cloak": "Clergy", "Relic": "Gold"}},
+        "4": {"id": "4", "name": "Argonaut #4", "image": None, "traits": {}},
+    }
+    conn = open_store(tmp / "imp.sqlite")
+    # token 2 already has traits from OpenSea and AGREES; token 3 has traits and DISAGREES on Cloak;
+    # token 9 is in the table and not in the cache; token 1 is in the table with no traits yet.
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at) VALUES ('argonauts','1','2026-09-09T00:00:00Z')")
+    for tid in ("2", "3"):
+        conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                     "VALUES ('argonauts',?,'2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','opensea_nft')", (tid,))
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at) VALUES ('argonauts','9','2026-09-09T00:00:00Z')")
+    conn.executemany("INSERT INTO traits VALUES ('argonauts',?,?,?)",
+                     [("2", "Cloak", "Clergy"), ("3", "Cloak", "Death"), ("3", "Relic", "Gold")])
+    conn.commit()
+
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    check("import: exact counts -- 1 imported (token 1, present without traits), 2 skipped, 1 inserted (4), 1 without traits",
+          (r["imported"], r["skipped_already_had"], r["tokens_inserted"], r["cache_tokens_without_traits"]) == (1, 2, 1, 1), str(r))
+    check("import: set arithmetic -- 1 cache id not in the table (4), 1 table id not in the cache (9)",
+          r["in_cache_not_in_table"] == 1 and r["in_table_not_in_cache"] == 1, str(r))
+    check("import: diff per trait_type -- token 2 Cloak agrees, token 3 Relic agrees, token 3 Cloak disagrees",
+          r["diffed_agree"] == 2 and r["diffed_disagree"] == 1
+          and r["disagreements"] == [{"token_id": "3", "trait_type": "Cloak", "stored": ["Death"], "cache": ["Clergy"]}], str(r))
+    check("import: the disagreeing token was NOT overwritten (the store keeps its own observation)",
+          conn.execute("SELECT value FROM traits WHERE token_id='3' AND trait_type='Cloak'").fetchone()[0] == "Death"
+          and conn.execute("SELECT traits_source FROM tokens WHERE token_id='3'").fetchone()[0] == "opensea_nft")
+    row = conn.execute("SELECT traits_at, traits_source, contract, image_url, metadata_url FROM tokens WHERE token_id='1'").fetchone()
+    check("import: traits_at is the cache's generated time, not now; source explorer_cache; known contract filled in",
+          row == (gen, "explorer_cache", "0x387c41b0b2f1128de44db1bcf8baad085f26392c", "https://x/1.svg", None), str(row))
+    check("import: traits written verbatim from `traits` only -- rank/price never enter the store",
+          sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='1'")) == [("Bones", "Bone"), ("Cloak", "Death")]
+          and "rank" not in {c[1] for c in conn.execute("PRAGMA table_info(tokens)")})
+    check("import: a cache token with no traits is inserted but keeps traits_at NULL",
+          conn.execute("SELECT traits_at FROM tokens WHERE token_id='4'").fetchone() == (None,))
+    before = sorted(conn.execute("SELECT * FROM tokens")) + sorted(conn.execute("SELECT * FROM traits"))
+    r2 = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    after = sorted(conn.execute("SELECT * FROM tokens")) + sorted(conn.execute("SELECT * FROM traits"))
+    check("import: idempotent -- a second run inserts and imports nothing and the tables are byte-identical",
+          before == after and r2["imported"] == 0 and r2["tokens_inserted"] == 0 and r2["diffed_disagree"] == 1, str(r2))
+    conn.close()
+
+    # -- the CLI: reads summary.json for the timestamp, exits 1 on a disagreement, 0 when clean
+    root = tmp / "imp-root"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "base.yaml").write_text("environment: local\nanalytical:\n  path: data/an.sqlite\n"
+                                               "opstore:\n  path: data/ops.db\nlanding:\n  root: data/landing\n")
+    (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    d = tmp / "explorer"
+    d.mkdir()
+    (d / "tokens.json").write_text(json.dumps(cache))
+    (d / "summary.json").write_text(json.dumps({"generated": 1788808192}))
+    rc = cli_main(["--root", str(root), "import-traits", str(d / "tokens.json"), "--collection", "argonauts"])
+    conn = open_store(root / "data" / "an.sqlite")
+    check("import CLI: clean import exits 0 and stamps traits_at from summary.json `generated`",
+          rc == 0 and conn.execute("SELECT traits_at FROM tokens WHERE token_id='1'").fetchone()[0]
+          == datetime.fromtimestamp(1788808192, tz=timezone.utc).isoformat().replace("+00:00", "Z"))
+    conn.execute("UPDATE traits SET value='Death' WHERE token_id='2' AND trait_type='Cloak'")
+    conn.commit()
+    conn.close()
+    rc = cli_main(["--root", str(root), "import-traits", str(d / "tokens.json"), "--collection", "argonauts"])
+    check("import CLI: a disagreement exits non-zero so the Operator sees it", rc == 1)
+    (d / "summary.json").unlink()
+    rc = cli_main(["--root", str(root), "import-traits", str(d / "tokens.json")])
+    check("import CLI: with no timestamp source it refuses rather than stamping `now`", rc == 2)
+
+
+# ---------------------------------------------------------------------------
+# BUG-20260909-055 -- the silent-overwrite class in the trait-cache import.
+# One test per blocking finding, each of which FAILS on the code as it stood.
+# ---------------------------------------------------------------------------
+def _cache_root(tmp: Path, name: str) -> Path:
+    """A minimal --root a `navanax import-traits` run can be pointed at."""
+    root = tmp / name
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "base.yaml").write_text(
+        "environment: local\nanalytical:\n  path: data/an.sqlite\n"
+        "opstore:\n  path: data/ops.db\nlanding:\n  root: data/landing\n")
+    (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    return root
+
+
+def test_import_duplicate_token_ids_are_never_a_silent_overwrite(tmp: Path) -> None:
+    """B1. Two cache entries resolving to ONE token id used to be written twice --
+    the second silently overwriting the first, and `imported` counting both. A
+    repeated id whose traits DISAGREE is evidence about the cache, so it is a
+    disagreement and nothing is written for that token."""
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "7":     {"id": "7", "name": "Argonaut #7", "traits": {"Cloak": "Death"}},
+        "seven": {"id": "7", "name": "Argonaut #7", "traits": {"Cloak": "Clergy"}},
+        "8":     {"id": "8", "name": "Argonaut #8", "traits": {"Bones": "Bone"}},
+        "8-again": {"id": "8", "name": "Argonaut #8", "traits": {"Bones": "Bone"}},
+    }
+    conn = open_store(tmp / "dup.sqlite")
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    check("dup ids: four entries resolving to two tokens import ONE token, not four "
+          "(the repeated-but-identical id is collapsed, the contradictory one is refused)",
+          r["imported"] == 1 and r["duplicate_ids_same"] == 1 and r["duplicate_ids_conflicting"] == 1,
+          str({k: v for k, v in r.items() if k != "disagreements"}))
+    check("dup ids: the contradictory id is reported like an import disagreement, naming both cache keys",
+          len(r["duplicate_id_disagreements"]) == 1
+          and r["duplicate_id_disagreements"][0]["token_id"] == "7"
+          and sorted(r["duplicate_id_disagreements"][0]["keys"]) == ["7", "seven"],
+          str(r["duplicate_id_disagreements"]))
+    check("dup ids: NOTHING is written for the contradictory token -- no traits, no traits_at",
+          conn.execute("SELECT COUNT(*) FROM traits WHERE token_id='7'").fetchone()[0] == 0
+          and conn.execute("SELECT traits_at FROM tokens WHERE token_id='7'").fetchone() in (None, (None,)))
+    check("dup ids: the token whose duplicate agreed is written exactly once, from the first entry",
+          sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='8'")) == [("Bones", "Bone")])
+    conn.close()
+
+
+def test_list_pass_counts_only_the_traits_it_actually_wrote(tmp: Path) -> None:
+    """B2. `traits_from_list` counted every list entry that CARRIED traits, including
+    ones `_store(only_if_missing=True)` refused to write -- so the number reported
+    to the Operator was the cache's size, not the store's gain. Worse, an OpenSea
+    value that DISAGREED with what was already stored was dropped with no count
+    at all."""
+    import asyncio
+
+    from navanax.opstore import OperationalStore
+    from navanax.traits import TraitsJob, open_store
+
+    class Rest:
+        def __init__(self) -> None:
+            self.requests_made = 0
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.requests_made += 1
+            if path.endswith("/nfts") and "collection/" in path:
+                return 200, {"nfts": [
+                    # 1: already stored from metadata_url, and OpenSea DISAGREES
+                    {"identifier": "1", "contract": "0xc", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Clergy"}]},
+                    # 2: already stored, and OpenSea AGREES
+                    {"identifier": "2", "contract": "0xc", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Death"}]},
+                    # 3: nothing stored -- this is the only real write
+                    {"identifier": "3", "contract": "0xc", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Bone"}]}], "next": None}
+            return 404, {}
+
+    conn = open_store(tmp / "lpcount.sqlite")
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                 "VALUES ('argonauts','1','2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','metadata_url')")
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                 "VALUES ('argonauts','2','2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','metadata_url')")
+    conn.executemany("INSERT INTO traits VALUES ('argonauts',?,?,?)",
+                     [("1", "Cloak", "Death"), ("2", "Cloak", "Death")])
+    conn.commit()
+    job = TraitsJob(conn, Rest(), OperationalStore(tmp / "lpcount-ops.db"), slug="argonauts")
+    r1 = asyncio.run(job.list_tokens())
+    check("list count: `traits_from_list` counts WRITES only -- 1 of 3 entries, not 3",
+          r1["traits_from_list"] == 1, str(r1))
+    check("list count: an entry skipped because the store already agreed is counted separately",
+          r1["traits_skipped_same"] == 1, str(r1))
+    check("list count: an entry skipped whose value DISAGREES is counted and reported, never dropped silently",
+          r1["traits_skipped_conflict"] == 1
+          and r1["traits_disagreements"] == [{"token_id": "1", "trait_type": "Cloak",
+                                              "stored": ["Death"], "list": ["Clergy"]}], str(r1))
+    check("list count: the disagreeing token keeps its own observation (nothing overwritten)",
+          conn.execute("SELECT value FROM traits WHERE token_id='1'").fetchone()[0] == "Death"
+          and conn.execute("SELECT traits_source FROM tokens WHERE token_id='1'").fetchone()[0] == "metadata_url")
+    check("list count: `_store` reports whether it wrote, so a caller can count writes",
+          job._store("3", [("Cloak", "Bone")], "opensea_nft_list", None, only_if_missing=True) is False
+          and job._store("3", [("Cloak", "Bone")], "opensea_nft_list", None) is True)
+    conn.close()
+
+
+def test_import_reconciliation_uses_resolved_token_ids(tmp: Path) -> None:
+    """B3. `in_cache_not_in_table` / `in_table_not_in_cache` were built from the
+    cache's KEYS while every row was written under `entry["id"]`. A cache keyed by
+    anything but the bare token id therefore reported a total mismatch -- every
+    token 'missing' on both sides -- while the import itself was fine."""
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "argonaut-4": {"id": "4", "name": "Argonaut #4", "traits": {"Cloak": "Death"}},
+        "argonaut-5": {"id": "5", "name": "Argonaut #5", "traits": {"Cloak": "Clergy"}},
+    }
+    conn = open_store(tmp / "recon.sqlite")
+    for tid in ("4", "5", "6"):
+        conn.execute("INSERT INTO tokens (collection, token_id, listed_at) VALUES ('argonauts',?,'x')", (tid,))
+    conn.commit()
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    check("reconciliation: the sets are built from RESOLVED ids -- 0 cache ids missing from the table, "
+          "1 table id (6) missing from the cache",
+          r["in_cache_not_in_table"] == 0 and r["in_table_not_in_cache"] == 1, str(r))
+    check("reconciliation: the rows really were written under the resolved id, not the key",
+          conn.execute("SELECT COUNT(*) FROM traits WHERE token_id IN ('4','5')").fetchone()[0] == 2
+          and conn.execute("SELECT COUNT(*) FROM tokens WHERE token_id LIKE 'argonaut-%'").fetchone()[0] == 0)
+    conn.close()
+
+
+def test_import_cli_refuses_an_impossible_generated_timestamp(tmp: Path) -> None:
+    """B4. `--generated` (and summary.json's `generated`) took any float. A future
+    epoch was written straight into `traits_at` -- a bitemporal lie the store has
+    no way to detect later -- and a millisecond epoch, which is what every JS
+    tool emits, crashed with a raw `ValueError` out of `fromtimestamp`."""
+    from navanax.cli import main as cli_main
+    from navanax.traits import open_store
+
+    root = _cache_root(tmp, "ts-root")
+    d = tmp / "ts-explorer"
+    d.mkdir()
+    cache = {"1": {"id": "1", "name": "Argonaut #1", "traits": {"Cloak": "Death"}}}
+    (d / "tokens.json").write_text(json.dumps(cache))
+    args = ["--root", str(root), "import-traits", str(d / "tokens.json"), "--collection", "argonauts"]
+
+    def run(*extra) -> object:
+        try:
+            return cli_main(args + list(extra))
+        except SystemExit as exc:                     # argparse's own refusal is still a refusal
+            return int(exc.code or 0)
+        except Exception as exc:                      # noqa: BLE001 - a raw crash IS the finding
+            return f"crashed: {type(exc).__name__}: {exc}"
+
+    ms = 1788808192000                                 # milliseconds, the JS default
+    check("generated: a millisecond epoch is refused with a message, not a raw ValueError",
+          run("--generated", str(ms)) == 2, str(run("--generated", str(ms))))
+    future = datetime.now(timezone.utc).timestamp() + 86400
+    check("generated: a time in the FUTURE is refused -- traits_at must never claim to be tomorrow",
+          run("--generated", str(future)) == 2, str(run("--generated", str(future))))
+    check("generated: an epoch before 2020-01-01 is refused",
+          run("--generated", "0") == 2, str(run("--generated", "0")))
+    check("generated: a non-numeric value is refused with a message",
+          run("--generated", "yesterday") == 2, str(run("--generated", "yesterday")))
+    (d / "summary.json").write_text(json.dumps({"generated": ms}))
+    check("generated: the same bounds apply to summary.json's `generated`, not just --generated",
+          run() == 2, str(run()))
+    db = root / "data" / "an.sqlite"
+    check("generated: after every refusal the store holds NO token -- nothing was written",
+          not db.exists() or open_store(db).execute(
+              "SELECT COUNT(*) FROM tokens").fetchone()[0] == 0)
+    (d / "summary.json").write_text(json.dumps({"generated": 1788808192}))
+    check("generated: a plausible epoch still imports cleanly", run() == 0)
+
+
+def test_config_assumptions_registry_exists(tmp: Path) -> None:
+    """B5. `config/assumptions.yaml` is the assumptions registry docs/06 §4.4
+    requires -- the one file that lists every judgement the code embodies. It was
+    deleted by an unrelated change. Nothing referenced it, so nothing noticed."""
+    import yaml
+    p = ROOT / "config" / "assumptions.yaml"
+    check("assumptions: config/assumptions.yaml exists", p.exists(), str(p))
+    data = yaml.safe_load(p.read_text()) if p.exists() else {}
+    ids = {a.get("id") for a in (data.get("assumptions") or [])}
+    check("assumptions: it parses and still carries ASM-020 (the standing-order definition)",
+          "ASM-020" in ids, str(sorted(ids)))
+    check("assumptions: ...and ASM-021, the standing-book reporting rules PR-3 decided",
+          "ASM-021" in ids, str(sorted(ids)))
+    for aid in ("ASM-020", "ASM-021"):
+        asm = next((a for a in (data.get("assumptions") or []) if a.get("id") == aid), {})
+        check(f"assumptions: {aid} names its layer, owner, rationale and the code it governs",
+              all(asm.get(k) for k in ("layer", "owner", "rationale", "code", "value")), str(sorted(asm)))
+
+
+def test_import_malformed_entries_are_counted_never_stored(tmp: Path) -> None:
+    """A cache entry that is not an object, and a trait whose value is a list or an
+    object, are structure we cannot record. Storing `str(value)` would write the
+    Python repr `{'a': 1}` into `traits.value` as though it were a trait. They are
+    skipped and counted."""
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "1": {"id": "1", "traits": {"Cloak": "Death"}},
+        "2": ["not", "an", "object"],
+        "3": "neither is this",
+        "4": {"id": "4", "traits": {"Cloak": {"nested": "object"}, "Bones": ["a", "list"], "Relic": "Gold"}},
+        "5": {"id": "5", "traits": "a string, not a mapping"},
+    }
+    conn = open_store(tmp / "malformed.sqlite")
+    try:
+        r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    except Exception as exc:  # noqa: BLE001 - a crash on junk input IS the finding
+        r = {"crashed": f"{type(exc).__name__}: {exc}"}
+    check("malformed: junk entries and non-scalar trait values are counted, not crashed on",
+          r.get("malformed") == 5, str(r))
+    check("malformed: a non-scalar trait value NEVER reaches the store as a Python repr",
+          [v for (v,) in conn.execute("SELECT value FROM traits")
+           if v.startswith(("{", "[")) or "'" in v] == [])
+    check("malformed: the scalar traits alongside a malformed one are still imported",
+          sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='4'")) == [("Relic", "Gold")])
+    conn.close()
+
+
+def test_import_records_its_provenance(tmp: Path) -> None:
+    """Which file, of which bytes, with which digest, generated when -- recorded on
+    the row (`explorer_cache:<sha256[:12]>`) and in a `trait_imports` table. Without
+    it "this token's traits came from the Explorer cache" names no particular
+    cache, and two caches that disagree are indistinguishable after the fact."""
+    import hashlib
+
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {"1": {"id": "1", "traits": {"Cloak": "Death"}}}
+    blob = json.dumps(cache).encode()
+    sha = hashlib.sha256(blob).hexdigest()
+    conn = open_store(tmp / "prov.sqlite")
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen,
+                              cache_file="/x/tokens.json", cache_bytes=len(blob), cache_sha256=sha)
+    check("provenance: traits_source names the exact cache file by digest",
+          conn.execute("SELECT traits_source FROM tokens WHERE token_id='1'").fetchone()[0]
+          == f"explorer_cache:{sha[:12]}", str(r.get("traits_source")))
+    row = conn.execute("SELECT cache_file, cache_bytes, cache_sha256, generated_at FROM trait_imports").fetchone()
+    check("provenance: a trait_imports row records file, bytes, digest and the cache's generated time",
+          row == ("/x/tokens.json", len(blob), sha, gen), str(row))
+    counts = json.loads(conn.execute("SELECT counts_json FROM trait_imports").fetchone()[0])
+    check("provenance: the row carries the run's counts, so a later reader can audit it without the cache",
+          counts.get("imported") == 1, str(counts))
+    check("provenance: with no digest given the source stays the plain `explorer_cache` (no fake precision)",
+          import_explorer_cache(conn, {"2": {"id": "2", "traits": {"Cloak": "Bone"}}},
+                                slug="argonauts", generated_at=gen)["traits_source"] == "explorer_cache")
+    conn.close()
+
+
+def test_unknown_contract_does_not_burn_a_fallback_slot(tmp: Path) -> None:
+    """`fallback_left -= 1` ran BEFORE the `if contract:` check, so a token whose
+    contract we do not know -- exactly what an imported cache leaves behind for a
+    slug with no entry in KNOWN_CONTRACTS -- spent a budgeted OpenSea slot on a
+    read that was never made, and a token that could have used it went without."""
+    import asyncio
+
+    from navanax.opstore import OperationalStore
+    from navanax.traits import TraitsJob, open_store
+
+    class Rest:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.requests_made = 0
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.calls.append(path)
+            self.requests_made += 1
+            return 200, {"nft": {"traits": [{"trait_type": "Cloak", "value": "Death"}]}}
+
+    conn = open_store(tmp / "slot.sqlite")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) VALUES ('argonauts','1',NULL,'x')")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) VALUES ('argonauts','2','0xc','x')")
+    conn.commit()
+    rest = Rest()
+    job = TraitsJob(conn, rest, OperationalStore(tmp / "slot-ops.db"), slug="argonauts",
+                    opensea_fallback_budget=1)
+    res = asyncio.run(job.fetch_traits())
+    check("fallback slot: the contract-less token consumes no slot, so the one budgeted read goes to the token that can use it",
+          rest.calls == ["/chain/ethereum/contract/0xc/nfts/2"], str(rest.calls))
+    check("fallback slot: that token really got its traits; the contract-less one stays unresolved for the next run",
+          res["ok"] == 1 and conn.execute("SELECT traits_at FROM tokens WHERE token_id='1'").fetchone()[0] is None)
+    conn.close()
+
+
+def test_import_reports_a_contract_mismatch(tmp: Path) -> None:
+    """`COALESCE(contract, ?)` fills a blank and keeps what is there -- which is
+    right -- but it also HIDES the case where the list pass stored one contract and
+    KNOWN_CONTRACTS says another. One of the two is wrong, and a wrong contract
+    sends every fallback read to the wrong collection."""
+    from navanax.traits import KNOWN_CONTRACTS, import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    conn = open_store(tmp / "contract.sqlite")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) "
+                 "VALUES ('argonauts','1','0xdeadbeef','x')")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) VALUES "
+                 "('argonauts','2',?,'x')", (KNOWN_CONTRACTS["argonauts"],))
+    conn.commit()
+    r = import_explorer_cache(conn, {"1": {"id": "1", "traits": {"Cloak": "Death"}},
+                                     "2": {"id": "2", "traits": {"Cloak": "Bone"}}},
+                              slug="argonauts", generated_at=gen)
+    check("contract: a stored contract that differs from the one being imported is reported, not swallowed by COALESCE",
+          r["contract_mismatches"] == 1
+          and r["contract_mismatch_examples"][0]["token_id"] == "1"
+          and r["contract_mismatch_examples"][0]["stored"] == "0xdeadbeef", str(r.get("contract_mismatch_examples")))
+    check("contract: the stored value is still not overwritten -- reporting is not deciding",
+          conn.execute("SELECT contract FROM tokens WHERE token_id='1'").fetchone()[0] == "0xdeadbeef")
+    conn.close()
+
+
+def test_post_import_coverage_and_case_near_misses(tmp: Path) -> None:
+    """After an import: how many tokens now have traits, which order criteria match
+    no trait value at all, and which trait types/values differ ONLY by case. Values
+    are stored verbatim precisely so a casing mismatch stays visible; the check is
+    what makes it visible instead of a silently empty filter."""
+    from navanax.traits import case_near_misses, criteria_trait_coverage, open_store, trait_coverage
+
+    conn = open_store(tmp / "cov.sqlite")
+    for tid in ("1", "2", "3"):
+        conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at) VALUES "
+                     "('argonauts',?,'x',?)", (tid, "2026-09-09T00:00:00Z" if tid != "3" else None))
+    conn.executemany("INSERT INTO traits VALUES ('argonauts',?,?,?)",
+                     [("1", "Cloak", "Death"), ("2", "cloak", "death")])
+    conn.commit()
+    cov = trait_coverage(conn, "argonauts")
+    check("coverage: 'N of M tokens now have traits' is exact and counts tokens, not trait rows",
+          (cov["with_traits"], cov["tokens"]) == (2, 3), str(cov))
+    nm = case_near_misses(conn, "argonauts")
+    check("near miss: 'Cloak' and 'cloak' are reported as one case-folded group",
+          nm["trait_type_near_misses"] == [{"casefolded": "cloak", "variants": ["Cloak", "cloak"]}], str(nm))
+    check("near miss: 'Death' and 'death' are reported too, with the type they sit under",
+          nm["value_near_misses"] == [{"trait_type": "cloak", "casefolded": "death",
+                                       "variants": ["Death", "death"]}] and nm["alert"] is True, str(nm))
+    check("coverage: with no order_criteria table the criteria check says so rather than reporting 0 missing",
+          criteria_trait_coverage(conn, "argonauts")["available"] is False)
+    conn.execute("CREATE TABLE events (run TEXT, seq INTEGER, collection TEXT)")
+    conn.execute("CREATE TABLE order_criteria (run TEXT, seq INTEGER, trait_type TEXT, value TEXT, kind TEXT)")
+    conn.execute("INSERT INTO events VALUES ('r',1,'argonauts')")
+    conn.executemany("INSERT INTO order_criteria VALUES ('r',1,?,?,'string')",
+                     [("Cloak", "Death"), ("Cloak", "Clergy")])
+    conn.commit()
+    cc = criteria_trait_coverage(conn, "argonauts")
+    check("coverage: a criterion with no matching trait value is counted and named",
+          cc["distinct_criteria"] == 2 and cc["missing"] == 1
+          and cc["missing_pairs"] == [{"trait_type": "Cloak", "value": "Clergy"}], str(cc))
+    conn.close()
+
+
+def test_import_traits_command_finds_its_cache_without_asking(tmp: Path) -> None:
+    """`import-traits.command` is a double-click: it asks for nothing, finds the
+    cache itself, and when it cannot, prints every path it looked at rather than a
+    bare failure."""
+    text = (ROOT / "import-traits.command").read_text() if (ROOT / "import-traits.command").exists() else ""
+    check("import-traits.command: exists and is executable",
+          (ROOT / "import-traits.command").exists() and os.access(ROOT / "import-traits.command", os.X_OK))
+    check("import-traits.command: never prompts for a path -- no `read -p` before the run",
+          "read -r -p \"Enter the path" not in text and "$1" not in text.split("# ---")[0], text[:0])
+    check("import-traits.command: looks in a cache/ folder and in whatever config records",
+          "cache/" in text and "explorer_cache_path" in text)
+    check("import-traits.command: prints where it looked when the cache is absent",
+          "looked in" in text.lower() or "looked for" in text.lower())
+    check("traits.command: says pass 2 finds nothing for Argonauts (metadata_url is NULL) "
+          "and that the list pass now carries traits",
+          "metadata_url is NULL" in (ROOT / "traits.command").read_text()
+          and "opensea_nft_list" in (ROOT / "traits.command").read_text())
 
 
 def test_trait_filtered_metrics(tmp: Path) -> None:
@@ -2408,7 +3102,9 @@ def test_ui_contract() -> None:
           "appearance:none" in html and "select option{background:" in html)
     check("ui: every timestamp goes through the display timezone from /api/status (BUG-042)",
           "display_timezone" in html and "timeZone:S.tz" in html and "plotT(" in html)
-    check("ui: hover cards have an explicit high-contrast background and font", "hoverlabel:{bgcolor:'#1A231E'" in html and "namelength:-1" in html)
+    check("ui: hover cards have an explicit high-contrast background and font (BUG-043)",
+          "hoverlabel:{bgcolor:C.hoverBg,bordercolor:C.hoverBd" in html and "namelength:-1" in html
+          and "--hover-bg:" in html and "--hover-border:" in html)
     check("ui: USD is shown to the cent", "minimumFractionDigits:2,maximumFractionDigits:2" in html)
     check("ui: Austin FC Verde is the accent; the old blue accent is gone", "#00B140" in html and "#58a6ff" not in html.lower())
     check("ui: trait filters and the screener are wired to the trait endpoints",
@@ -2444,6 +3140,214 @@ def test_ui_contract() -> None:
           all(c in html.split("const esc=")[1].split("\n")[0] for c in ("&amp;", "&lt;", "&gt;", "&quot;", "&#39;")))
     check("ui: the basis line prints the bucket alignment and, under a filter, which leg is filtered",
           "bucket_alignment" in html and "b.legs" in html)
+
+    # -----------------------------------------------------------------------
+    # PR-7 -- chart interaction and the palette split.
+    #
+    # The defect this pins (factcheck D-V3) is not "two tokens share a hex". It is
+    # that ONE hex, #19C95A, was simultaneously the brand accent AND four unrelated
+    # data roles, so a green mark on the page could be a collection offer, a sale,
+    # an event-mix bar, a sparkline, or a piece of chrome. The assertions below are
+    # the PROPERTY, not a list of the four call sites: any future literal, and any
+    # future token reuse, fails here.
+    # -----------------------------------------------------------------------
+    root_body = html.split(":root{", 1)[1].split("}", 1)[0]
+    outside_root = html.replace(root_body, "", 1)
+
+    def _tokens(block: str) -> dict[str, str]:
+        return {m.group(1): m.group(2).upper()
+                for m in re.finditer(r"--([a-z0-9-]+)\s*:\s*(#[0-9A-Fa-f]{3,8})\s*;", block)}
+
+    def _slice(start: str, end: str) -> dict[str, str]:
+        seg = root_body.split(start, 1)
+        return _tokens(seg[1].split(end, 1)[0]) if len(seg) > 1 else {}
+
+    chrome = _slice("/* @chrome", "/* @status")
+    status = _slice("/* @status", "/* @data")
+    data = _slice("/* @data", "/* @end-tokens")
+    check("ui/palette: the :root block declares @chrome / @status / @data classes",
+          bool(chrome) and bool(status) and bool(data),
+          f"chrome={len(chrome)} status={len(status)} data={len(data)}")
+
+    dupes = [f"{a}={b} both {h}" for h, names in
+             {h: [n for n, v in data.items() if v == h] for h in set(data.values())}.items()
+             if len(names) > 1 for a, b in [(names[0], names[1])]]
+    check("ui/palette: no two DATA-role tokens share a hex (a mark's colour names its role)",
+          not dupes, "; ".join(dupes))
+
+    reserved = {**chrome, **status}
+    collisions = [f"--{n} {h} == --{m}" for n, h in data.items()
+                  for m, v in reserved.items() if v == h]
+    check("ui/palette: no DATA-role token equals a chrome or status token (D-V3: verde is chrome only)",
+          not collisions, "; ".join(collisions))
+    check("ui/palette: --coll is off #19C95A and --sale is pure white, not --text (D-V3, D-W3)",
+          data.get("coll") not in (None, chrome.get("verde-2"), chrome.get("verde"))
+          and data.get("sale") == "#FFFFFF" and data.get("sale") != chrome.get("text"),
+          f"--coll={data.get('coll')} --sale={data.get('sale')} --text={chrome.get('text')}")
+    check("ui/palette: the roles DESIGN §5.4 names all exist as tokens",
+          all(k in data for k in ("ask", "bid", "coll", "trait-offer", "sale", "spread", "cancel")),
+          f"have {sorted(data)}")
+
+    # No chart literal may bypass the tokens. Two halves: a data hex must not appear
+    # anywhere outside :root, and the whole <script> block must carry no colour
+    # literal at all -- every mark reads its hex back out of :root via getComputedStyle,
+    # so the CSS and Plotly can never drift apart.
+    leaked = sorted({h for h in data.values()
+                     if re.search(re.escape(h), outside_root, re.IGNORECASE)})
+    check("ui/palette: no data-role hex appears outside the :root block (the four #19C95A literals are gone)",
+          not leaked, ", ".join(leaked))
+    script = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    script_hex = sorted(set(re.findall(r"#[0-9A-Fa-f]{6}(?![0-9A-Za-z_-])", script)))
+    check("ui/palette: the chart script contains NO colour literal -- every mark reads a token",
+          not script_hex and "getComputedStyle(document.documentElement)" in script,
+          ", ".join(script_hex))
+
+    # Interaction. Note what is deliberately NOT asserted: nothing here claims to have
+    # fixed wheel-zoom. scrollZoom was already false by default and was never enabled
+    # (D-W1); it is written explicitly only so a future Plotly default cannot turn it on.
+    #
+    # Everything below reads a PARSED object, never the raw file. Tech-lead re-review,
+    # 2026-09-10: the modebar/scrollZoom assertions used to be `"displayModeBar:false"
+    # in html`, and the block comment above `const L=()` at index.html:201-202 contains
+    # both of those exact strings while explaining the decision. So the test was
+    # satisfied by the PROSE and would have stayed green with `displayModeBar:true` in
+    # the code -- it asserted that the rule is documented, not that it is in force.
+    # `_obj()` brace-matches the real object, so only the code can satisfy it.
+    def _obj(src: str, opener: str) -> str:
+        """Body of the `{...}` that follows `opener`, by brace matching."""
+        i = src.index(opener) + len(opener)
+        depth, j = 1, i
+        while depth and j < len(src):
+            depth += (src[j] == "{") - (src[j] == "}")
+            j += 1
+        return src[i:j - 1]
+
+    def _flags(body: str) -> dict[str, str]:
+        """Top-level `key:value` pairs of a flat JS object literal, values verbatim."""
+        return {m.group(1): m.group(2).strip()
+                for m in re.finditer(r"([A-Za-z_$][\w$]*)\s*:\s*([^,{}]+)", body)}
+
+    cfg = _flags(_obj(html, "const CFG={"))
+    check("ui/charts: the modebar is gone -- asserted on the PARSED CFG, not the doc-comment",
+          cfg.get("displayModeBar") == "false", f"CFG.displayModeBar={cfg.get('displayModeBar')!r}")
+    check("ui/charts: scrollZoom is pinned false in CFG so a future Plotly default cannot enable it (D-W1)",
+          cfg.get("scrollZoom") == "false", f"CFG.scrollZoom={cfg.get('scrollZoom')!r}")
+    check("ui/charts: no modebar button list is configured -- the bar is gone, not curated",
+          "modeBarButtonsToRemove" not in html)
+    # The shared layout L() is the one place both axes are configured; read its two
+    # axis literals rather than grepping the whole file, so a per-panel override
+    # (the event-mix panel legitimately locks x -- it is a horizontal bar chart, not
+    # a time axis, and nothing brushes it) cannot mask a regression in the default.
+    layout = html.split("const L=()=>(", 1)[1].split("const CFG=", 1)[0]
+
+    lx, ly = _obj(layout, "xaxis:{"), _obj(layout, "yaxis:{")
+    check("ui/charts: the shared layout LOCKS y so a drag can never rescale price",
+          "fixedrange:true" in ly, ly[:120])
+    check("ui/charts: the shared layout leaves x FREE -- shift-drag time selection needs it (D-W2)",
+          "fixedrange:false" in lx and "dragmode:'select'" in layout, lx[:120])
+    check("ui/charts: our own range chips replace the toolbar, and a reset chip proves a selection",
+          "const RANGES=['1h','6h','24h','7d','30d']" in html
+          and "plotly_selected" in html and "data-reset" in html)
+    check("ui/charts: the hover header carries the bucket time in the display timezone",
+          "hoverformat:'%b %d, %H:%M:%S '+zone()" in html and "timeZoneName:'short'" in html)
+    check("ui/charts: hover rows carry coverage and n where the API supplies them",
+          "s.coverage[i]" in html and "%{customdata}" in html)
+
+    # Numbers and the KPI rule the Operator set on 2026-09-10.
+    check("ui/kpi: USD aggregates are to the cent -- compact()/abbreviated totals are gone",
+          "compact=" not in html and "notation:'compact'" not in html
+          and "money2(sum(vol),S.denom)" in html)
+    check("ui/kpi: the delta is now vs the value 24 HOURS AGO, with both timestamps printed",
+          "iNow=v.length-1" in html and "vThen=v[0]" in html
+          and "24h ago ${stamp(t[0])}" in html and "% = now vs 24 h ago" in html)
+    check("ui/kpi: a hole at either endpoint prints its reason instead of a percentage",
+          "no observation 24h ago" in html and "no observation in the current hour" in html)
+    check("ui/basis: the standing-book basis is rendered -- book, coverage, crossed-book alarm",
+          "book: ${b.book}" in html and "coverage: median" in html and "CROSSED standing book" in html)
+    check("ui/basis: a withheld percentile band is printed, never silently dropped",
+          "p10–p90 withheld (n<${minN})" in html)
+
+
+def test_ui_range_chips_name_an_anchored_range() -> None:
+    """Tech-lead re-review 2026-09-10, S4. The <select> offers nine ranges; the chip
+    row offers five. The other four -- HTD, DTD, MTD, YTD -- are ANCHORED: "today"
+    is 3 hours long at 03:00 and 23 at 23:00, so there is no fixed-width chip they
+    could match, and `r===cur` lit none of them.
+
+    Nothing lit is not neutral. Five chips, none highlighted, is what the row also
+    looks like the instant before a range is chosen, so the panel silently stopped
+    saying what window it was drawing exactly when the window was the least
+    obvious one. The repair is to NAME the range in the row rather than to invent
+    four more chips of invisible width: the row must always answer "what am I
+    looking at", and for an anchored range only a name can.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+
+    def _obj(src: str, opener: str) -> str:
+        i = src.index(opener) + len(opener)
+        depth, j = 1, i
+        while depth and j < len(src):
+            depth += (src[j] == "{") - (src[j] == "}")
+            j += 1
+        return src[i:j - 1]
+
+    # The premise, read off the page itself rather than assumed: the four anchored
+    # ranges really are offered by the <select> and really are absent from RANGES.
+    chip_ranges = re.search(r"const RANGES=\[([^\]]*)\]", html).group(1).replace("'", "").split(",")
+    sel = html.split('<select id="range">', 1)[1].split("</select>", 1)[0]
+    options = dict(re.findall(r'<option value="([^"]+)"[^>]*>([^<]+)</option>', sel))
+    anchored = [r for r in options if r not in chip_ranges]
+    check("ui/chips: the range <select> offers four anchored ranges that no chip can match",
+          sorted(anchored) == ["DTD", "HTD", "MTD", "YTD"],
+          f"select={sorted(options)} chips={chip_ranges}")
+
+    body = _obj(html, "function chipsFor(id){")
+    check("ui/chips: a chip lights ONLY on an exact match, so an anchored range lights nothing "
+          "-- no chip is allowed to stand in for 'today'",
+          "class=\"${r===cur?'on':''}\"" in body, body[:200])
+    check("ui/chips: ...and when the range is anchored the row prints its NAME instead, "
+          "so an unlit row is never the only thing the panel says",
+          "isChipRange(cur)?''" in body and 'class="rname"' in body
+          and "esc(rangeName())" in body, body[:400])
+    check("ui/chips: the name comes from the <select>'s own option text, so the two can never "
+          "disagree about what 'MTD' is called",
+          "const rangeName=()=>{const s=$('#range'),o=s.options[s.selectedIndex]" in html)
+    check("ui/chips: the label is muted, not another accent competing with the lit chip",
+          re.search(r"\.chips \.rname\{[^}]*color:var\(--muted\)", html) is not None)
+    # Split defensively: if the label is missing the check above has already
+    # failed, and a crash here would abort the whole suite instead of reporting.
+    tail = body.split('class="rname"', 1)[1].split("</span>", 1)[0] if 'class="rname"' in body else "<button"
+    check("ui/chips: it is a label, not a button -- clicking it must not set a range",
+          "<button" not in tail, tail[:120])
+
+
+def test_ui_palette_delta_e_figures_match_the_measurements() -> None:
+    """Tech-lead re-review 2026-09-10, S4 (second). The :root comment reported the
+    --coll separations as "vs --bid 11.4 · vs --ask 11.4 · vs --verde-2 12.3". The
+    tech-lead's own run of the validator gives 12.3 against --ask, 11.4 against
+    --bid and 13.6 against --verde-2 -- the ask and verde figures were wrong and
+    the ask/bid pair had been transposed onto one number.
+
+    This pins the REVIEWER'S MEASUREMENTS, not a recomputation: the figures come
+    from the dataviz validator (OKLab dE x100, Machado CVD sim, worst of
+    normal/protan/deutan) which is not vendored here, so re-deriving them in the
+    suite would be pinning a second implementation rather than the measurement.
+    What this makes impossible is the comment drifting away from the numbers
+    somebody actually ran -- the palette block is the only place a future reader
+    is told how far apart these hues are, and a wrong number there is worse than
+    no number, because it retires the question.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    measured = {"--ask": "12.3", "--bid": "11.4", "--verde-2": "13.6"}
+    line = next((ln for ln in html.splitlines() if "--coll" in ln and "vs --" in ln), "")
+    stated = dict(re.findall(r"vs (--[a-z0-9-]+) (\d+\.\d)", line))
+    check("ui/palette: the comment reports --coll against all three neighbours it names",
+          set(stated) == set(measured), f"stated {stated} on line: {line.strip()[:110]}")
+    wrong = {k: (stated.get(k), v) for k, v in measured.items() if stated.get(k) != v}
+    check("ui/palette: every stated ΔE is the tech-lead's measured figure (2026-09-10)",
+          not wrong, "; ".join(f"{k}: comment says {a}, measured {b}" for k, (a, b) in wrong.items()))
 
 
 # ===========================================================================
@@ -3015,8 +3919,11 @@ def test_bid_lifetimes_censoring_and_orphans(tmp: Path) -> None:
           pairs == 2, f"got {pairs}")
     eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
     lt = eng.bid_lifetimes("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
-    check("bid lifetimes: n counts ORDERS, and the duration is to the FIRST termination",
-          lt["n"] == 1 and lt["median_s"] == 10.0, str(lt))
+    check("bid lifetimes: n counts ORDERS, and at n = 1 the percentiles are withheld (REQ-F-19), "
+          "so the duration is checked on the relation itself, not through a percentile",
+          lt["n"] == 1 and lt["median_s"] is None
+          and n.conn.execute("SELECT t_term - t_place FROM order_lives WHERE order_hash='0xa'"
+                             ).fetchone()[0] == 10.0, str(lt))
     check("bid lifetimes: a bid still standing at window end is censored -- counted, not dropped",
           lt["censored_n"] == 1 and lt["orders_at_risk"] == 2, str(lt))
     check("bid lifetimes: the orphan rate is reported WITH its counts (project rule 4)",
@@ -3255,6 +4162,373 @@ def test_trait_offer_matching_rule(tmp: Path) -> None:
     n.close()
 
 
+# ===========================================================================
+# PR-3 (BUG-20260910-057): immediacy_cost becomes the standing-book quantity
+# docs/01 §3.2 defines, and percentiles are withheld rather than flagged.
+#
+# Every check below fails against the pre-PR-3 code, and fails for a reason, not
+# by accident: `standing_series` / `standing_spread` did not exist, `series()`
+# took no `book`, and `bid_lifetimes` returned a percentile at any n. The
+# before/after of each is in the PR description.
+# ===========================================================================
+NO_EXP = {"expiration_at": None, "expiration_ts": None}
+H11 = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+
+
+def _standing_engine(tmp: Path, name: str, rows: list[tuple], fold_at: str = "2026-09-09T12:00:00Z"):
+    """A store holding `rows` = [(fixture, iso, seq, overrides)], folded to order_lives."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    for raw, iso, seq, over in rows:
+        put(raw, iso, seq, **over)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(fold_at))
+    return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def test_standing_series_is_time_weighted_over_the_bucket(tmp: Path) -> None:
+    """A floor is what is STANDING, for as long as it stood (Operator, 2026-09-10).
+
+    Fails today: `MetricEngine.standing_series` does not exist, and `floor_ask`
+    is `MIN(price) over the events SEEN in the bucket` -- a price that may have
+    lived for one second of the hour, reported as the hour's floor, with no
+    coverage, no n and no dispersion beside it.
+    """
+    from navanax.metrics import time_weighted_quantile
+    from navanax.normalize import iso_to_ts
+
+    ts = iso_to_ts
+    # One listing at 1.0, standing 10:00 -> 10:20 of a 10:00 bucket, then cancelled.
+    n, eng = _standing_engine(tmp, "st1.sqlite", [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xL", "token_id": "1",
+                                                  "price_eth": 1.0, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:20:00Z", 2, {"order_hash": "0xL", "token_id": "1"}),
+    ])
+    s = eng.standing_series("ask", "argonauts", ts("2026-09-09T09:00:00Z"),
+                            ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    check("standing series: coverage is the SECONDS the leg stood over the bucket seconds -- "
+          "20 minutes of an hour is 1/3, not '1 observation'",
+          abs(s["coverage"][1] - 1 / 3) < 1e-9 and s["standing_seconds"][1] == 1200.0,
+          f"got coverage={s['coverage']} standing={s['standing_seconds']}")
+    check("standing series: the median of a book with one order in it is that order's price",
+          s["median"][1] == 1.0 and s["n"][1] == 1, str(s["median"]))
+    check("standing series: a bucket where NOTHING stood is null with coverage 0 and n 0 -- "
+          "never 0.0, because 0 is a price and 'no standing ask' is not the price zero",
+          s["median"][0] is None and s["coverage"][0] == 0.0 and s["n"][0] == 0,
+          f"got {s['median'][0]!r} / {s['coverage'][0]!r} / {s['n'][0]!r}")
+    fa = eng.series(metric="floor_ask", collection="argonauts", interval="1h",
+                    range_="2h", now=H11)
+    check("standing series: ...and the same hole reaches the chart through series(), as null",
+          fa["raw"][0] is None and fa["raw"][1] == 1.0 and fa["basis"]["book"] == "standing",
+          str(fa["raw"]))
+    check("standing series: every response says the book is LEFT-TRUNCATED -- the reconstructed "
+          "floor is an upper bound, because orders resting before we connected are invisible",
+          fa["basis"]["left_truncated"] is True and "upper bound" in fa["basis"]["left_truncation_note"])
+    n.close()
+
+    # Two overlapping listings: 1.0 standing all hour, 0.8 standing only the first
+    # 20 minutes. The interval extremum calls the hour's floor 0.8. It was 0.8 for
+    # a third of the hour and 1.0 for two thirds.
+    n2, eng2 = _standing_engine(tmp, "st2.sqlite", [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xHI", "token_id": "1",
+                                                  "price_eth": 1.0, **NO_EXP}),
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 2, {"order_hash": "0xLO", "token_id": "2",
+                                                  "price_eth": 0.8, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:20:00Z", 3, {"order_hash": "0xLO", "token_id": "2"}),
+    ])
+    s2 = eng2.standing_series("ask", "argonauts", ts("2026-09-09T10:00:00Z"),
+                              ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    old = eng2.series(metric="floor_ask", collection="argonauts", interval="1h",
+                      range_="1h", now=H11, book="observed")
+    check("standing series: with 0.8 standing 20 min and 1.0 standing 60, the time-weighted "
+          "median is 1.0 -- the level that actually held -- where the interval extremum says 0.8",
+          s2["median"][0] == 1.0 and old["raw"][0] == 0.8, f"standing={s2['median']} observed={old['raw']}")
+    check("standing series: both listings are counted and the book was covered the whole bucket",
+          s2["n"][0] == 2 and abs(s2["coverage"][0] - 1.0) < 1e-9, str(s2))
+    segs = [(1200.0, 0.8), (2400.0, 1.0)]
+    check("standing series: the dispersion is over TIME, so [p10, p90] spans both levels -- "
+          "0.8 held a third of the bucket and is the p10, 1.0 held the rest and is the p90",
+          time_weighted_quantile(segs, 0.10) == 0.8 and time_weighted_quantile(segs, 0.90) == 1.0
+          and time_weighted_quantile(segs, 0.5) == 1.0)
+    n2.close()
+
+
+def test_immediacy_cost_is_a_standing_book_spread(tmp: Path) -> None:
+    """REQ-F-13a / docs/01 §3.2: the spread between legs that COEXISTED.
+
+    Fails today three ways: `standing_spread` does not exist; `series()` takes no
+    `book`; and the old path renders a NEGATIVE spread on the front page, which
+    a KPI card reads as free arbitrage.
+    """
+    # An ask at 0.5 and a collection offer at 0.4, both standing the whole hour --
+    # plus a SECOND collection offer at 0.6 alive only 10:30 -> 10:40. For those
+    # ten minutes the book is crossed: the best bid is above the best ask.
+    rows = [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xASK", "token_id": "1",
+                                                  "price_eth": 0.5, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T10:00:00Z", 2, {"order_hash": "0xBID", "price_eth": 0.4, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T10:30:00Z", 3, {"order_hash": "0xCROSS", "price_eth": 0.6, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:40:00Z", 4, {"order_hash": "0xCROSS", "token_id": None}),
+    ]
+    n, eng = _standing_engine(tmp, "sp1.sqlite", rows)
+    s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                   range_="1h", now=H11)
+    check("immediacy_cost: a bucket whose standing book CROSSED at any tau is null and counted "
+          "as an alarm, not charted -- ask < bid is a reconstruction defect, never an arbitrage",
+          s["raw"][0] is None and s["basis"]["negative_buckets"] == 1
+          and s["basis"]["book"] == "standing", f"got {s['raw']} basis={s['basis'].get('negative_buckets')}")
+    old = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                     range_="1h", now=H11, book="observed")
+    check("immediacy_cost (book='observed'): ...and this is exactly what the old path put on the "
+          "front page for that bucket -- MIN(ask seen) - MAX(offer seen) = 0.5 - 0.6 = -0.1",
+          abs(old["raw"][0] - (0.5 - 0.6)) < 1e-9 and old["basis"]["book"] == "observed",
+          f"got {old['raw']}")
+    n.close()
+
+    # The control: the same book WITHOUT the crossing offer. The bucket has a
+    # value, so the null above is caused by the crossing and not by absence.
+    n2, eng2 = _standing_engine(tmp, "sp2.sqlite", rows[:2])
+    ok = eng2.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                     range_="1h", now=H11)
+    check("immediacy_cost: the same book without the crossing offer is a real number, so the null "
+          "above is the alarm firing and not an empty bucket",
+          abs(ok["raw"][0] - (0.5 - 0.4)) < 1e-9 and ok["basis"]["negative_buckets"] == 0,
+          f"got {ok['raw']}")
+    check("immediacy_cost: coverage is BOTH-legs seconds over bucket seconds, and both legs are "
+          "reported on the same tau samples",
+          abs(ok["coverage"][0] - 1.0) < 1e-9 and ok["parts"]["floor_ask"][0] == 0.5
+          and ok["parts"]["collection_bid"][0] == 0.4, str(ok.get("coverage")))
+    check("immediacy_cost: the counts travel with the number, one per leg (project rule 4)",
+          ok["n_ask"][0] == 1 and ok["n_bid"][0] == 1, str(ok.get("n_ask")))
+
+    # The legs need never have coexisted under the old rule. Here they do not:
+    # the ask is gone before the offer arrives.
+    n3, eng3 = _standing_engine(tmp, "sp3.sqlite", [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xA1", "token_id": "1",
+                                                  "price_eth": 0.5, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:10:00Z", 2, {"order_hash": "0xA1", "token_id": "1"}),
+        (REAL_COLL_OFFER, "2026-09-09T10:20:00Z", 3, {"order_hash": "0xB1", "price_eth": 0.4, **NO_EXP}),
+    ])
+    never = eng3.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                        range_="1h", now=H11)
+    never_old = eng3.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                            range_="1h", now=H11, book="observed")
+    check("immediacy_cost: legs that never coexisted produce NO spread -- the old path subtracted "
+          "an ask that was cancelled at 10:10 from an offer that arrived at 10:20 and called it 0.1",
+          never["raw"][0] is None and never["coverage"][0] == 0.0
+          and abs(never_old["raw"][0] - 0.1) < 1e-9,
+          f"standing={never['raw']} observed={never_old['raw']}")
+    n2.close()
+    n3.close()
+
+
+def test_crossed_book_alarm_relogs_for_a_new_bucket(tmp: Path) -> None:
+    """Tech-lead re-review 2026-09-10, item 5 (second half). The alarm was deduped
+    on `(collection, interval, denomination)` for the LIFE OF THE PROCESS.
+
+    The dashboard re-renders every 10 s, so some cap is needed -- an alarm that
+    floods the log is an alarm nobody reads. But that key throws away the one
+    thing that distinguishes a re-render from a new event. Once ANY bucket on a
+    collection had crossed, every LATER crossing on that collection was swallowed:
+    a dashboard left open overnight logs the 09:00 crossing and never mentions the
+    14:00 one, which is the crossing that means the reconstruction broke again.
+    Keying on the bucket start keeps the flood control and restores the signal.
+    """
+    import logging
+
+    from navanax import metrics as M
+
+    # Two SEPARATE crossings, four hours apart: 10:30-10:40 and 14:30-14:40.
+    base = [
+        (DOC_LISTING, "2026-09-09T09:00:00Z", 1, {"order_hash": "0xASK", "token_id": "1",
+                                                  "price_eth": 0.5, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T09:00:00Z", 2, {"order_hash": "0xBID", "price_eth": 0.4, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T10:30:00Z", 3, {"order_hash": "0xX1", "price_eth": 0.6, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:40:00Z", 4, {"order_hash": "0xX1", "token_id": None}),
+        (REAL_COLL_OFFER, "2026-09-09T14:30:00Z", 5, {"order_hash": "0xX2", "price_eth": 0.7, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T14:40:00Z", 6, {"order_hash": "0xX2", "token_id": None}),
+    ]
+    n, eng = _standing_engine(tmp, "relog.sqlite", base, fold_at="2026-09-09T16:00:00Z")
+
+    records: list[logging.LogRecord] = []
+    h = logging.Handler()
+    h.emit = records.append  # type: ignore[assignment]
+    logging.getLogger("navanax.metrics").addHandler(h)
+    M._NEGATIVE_LOGGED.clear()
+    noon = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 9, 9, 16, 0, tzinfo=timezone.utc)
+    try:
+        def render(now):
+            return eng.series(metric="immediacy_cost", collection="argonauts",
+                              interval="1h", range_="6h", now=now)
+
+        first = render(noon)
+        check("crossed alarm: the 10:00 bucket crossed and is nulled and counted",
+              first["basis"]["negative_buckets"] == 1, str(first["raw"]))
+        after_first = len(records)
+        check("crossed alarm: the first render of a crossed bucket LOGS", after_first == 1,
+              f"{after_first} records")
+        for _ in range(5):
+            render(noon)
+        check("crossed alarm: re-rendering the SAME crossed bucket stays deduped -- the dashboard "
+              "redraws every 10 s and a flooded log is a log nobody reads",
+              len(records) == after_first, f"{len(records)} records after 6 renders")
+
+        second = render(later)
+        check("crossed alarm: four hours on, the window holds BOTH crossed buckets -- 10:00 (already "
+              "reported) and 14:00 (new)",
+              second["basis"]["negative_buckets"] == 2, str(second["raw"]))
+        check("crossed alarm: ...and the NEW one logs, exactly once -- the old (collection, interval, "
+              "denom) key swallowed every crossing after the first for the life of the process",
+              len(records) == after_first + 1, f"{len(records)} records; expected {after_first + 1}")
+        msg = records[-1].getMessage()
+        check("crossed alarm: the new line reports ONE newly-seen bucket and names it, so the "
+              "already-reported 10:00 bucket is not re-announced alongside it",
+              "1 newly-seen bucket" in msg and "14:00" in msg and "10:00" not in msg
+              and "BUG-20260910-057" in msg, msg[:220])
+        for _ in range(3):
+            render(later)
+        check("crossed alarm: the second bucket is deduped too, once it has been reported",
+              len(records) == after_first + 1, f"{len(records)} records")
+    finally:
+        logging.getLogger("navanax.metrics").removeHandler(h)
+        M._NEGATIVE_LOGGED.clear()
+    n.close()
+
+
+def test_audit_surfaces_crossed_books_for_every_watched_collection(tmp: Path) -> None:
+    """Tech-lead re-review 2026-09-10, item 5 (first half). A crossed standing book
+    was visible in exactly two places, neither of which an operator looks at: a
+    `negative_buckets` integer inside the basis of the ONE collection currently
+    selected on the Prices panel, and a log line. Health is the panel that exists
+    to say "the record is wrong", so `/api/audit` now reports the count for every
+    slug on the watchlist and puts an escalation note in `notes` when it is > 0.
+    """
+    import threading
+
+    from navanax.dashboard import Dashboard
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    # Anchored to the real clock, because api_audit asks for "the last 24h" as of
+    # now -- there is no `now` to inject, which is itself the point: this is what
+    # the running dashboard computes.
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    t = lambda h, m=0: (now - timedelta(hours=h, minutes=-m)).isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    n, put = _lives_store(tmp, "audit-crossed.sqlite")
+    put(DOC_LISTING, t(5), 1, order_hash="0xASK", token_id="1", price_eth=0.5, **NO_EXP)
+    put(REAL_COLL_OFFER, t(5), 2, order_hash="0xBID", price_eth=0.4, **NO_EXP)
+    put(REAL_COLL_OFFER, t(3), 3, order_hash="0xCROSS", price_eth=0.9, **NO_EXP)   # crosses the ask
+    put(REAL_CANCEL, t(3, 20), 4, order_hash="0xCROSS", token_id=None)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(t(0)))
+
+    landing = tmp / "audit-crossed-lz"
+    landing.mkdir(parents=True, exist_ok=True)
+    d = Dashboard.__new__(Dashboard)
+    d.landing, d.norm, d.slugs = landing, n, ["argonauts"]
+    d.lock = threading.Lock()           # api_audit takes it twice, sequentially, as the real one does
+    d.engine = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"),
+                            "America/Chicago")
+
+    audit = d.api_audit()
+    check("audit: /api/audit reports a crossed-book count for EVERY watched collection, "
+          "not only the one the Prices panel happens to be showing",
+          set(audit.get("crossed_book", {})) == {"argonauts"}, str(audit.get("crossed_book")))
+    cb = audit["crossed_book"]["argonauts"]
+    check("audit: it is the standing spread over the last 24h at 1h, with its bucket count",
+          cb["interval"] == "1h" and cb["range"] == "24h" and cb["buckets"] == 24, str(cb))
+    check("audit: the crossing is counted", cb["negative_buckets"] >= 1, str(cb))
+    notes = [x for x in audit["notes"] if "ask < collection offer" in x]
+    check("audit: ...and it is escalated in `notes`, in the words docs/05 rule 5 asks for",
+          len(notes) == 1
+          and notes[0].startswith(f"argonauts: {cb['negative_buckets']} bucket(s) had ask < "
+                                  "collection offer in the last 24h")
+          and "book reconstruction bug, escalate (docs/05 rule 5)" in notes[0],
+          str(audit["notes"]))
+    n.close()
+
+    # The control: the same book with no crossing raises no note and reports zero.
+    n2, put2 = _lives_store(tmp, "audit-clean.sqlite")
+    put2(DOC_LISTING, t(5), 1, order_hash="0xASK", token_id="1", price_eth=0.5, **NO_EXP)
+    put2(REAL_COLL_OFFER, t(5), 2, order_hash="0xBID", price_eth=0.4, **NO_EXP)
+    n2.conn.commit()
+    refresh_order_lives(n2.conn, now_ts=iso_to_ts(t(0)))
+    d2 = Dashboard.__new__(Dashboard)
+    d2.landing, d2.norm, d2.slugs = landing, n2, ["argonauts"]
+    d2.lock = threading.Lock()
+    d2.engine = MetricEngine(n2.conn, load_intervals(ROOT / "config" / "intervals.yaml"),
+                             "America/Chicago")
+    clean = d2.api_audit()
+    check("audit: an uncrossed book reports 0 and adds NO note -- the alarm is not always-on",
+          clean["crossed_book"]["argonauts"]["negative_buckets"] == 0
+          and not [x for x in clean["notes"] if "ask < collection offer" in x],
+          str(clean["crossed_book"]))
+    n2.close()
+
+
+def test_percentiles_are_withheld_below_min_n(tmp: Path) -> None:
+    """REQ-F-19 / Q-V3: below the minimum n a percentile is REFUSED, not flagged.
+
+    Fails today: `bid_lifetimes` returned p10/median/p90 at any n and handed the
+    caller a `percentiles_reliable` flag, which `ui/index.html:215` rendered as a
+    warning string next to the numbers. docs/00:199 says the system SHALL make
+    quoting such a number impossible; a number on screen is a number that gets
+    quoted.
+    """
+    from navanax.metrics import MIN_N_FOR_PERCENTILES, pct
+    from navanax.normalize import iso_to_ts
+
+    check("percentiles: the minimum is one named constant, not a literal in each caller",
+          MIN_N_FOR_PERCENTILES == 30)
+    sample = sorted(float(i) for i in range(MIN_N_FOR_PERCENTILES - 1))
+    check("percentiles: pct() returns None one short of the minimum and a number at it",
+          pct(sample, 0.5) is None and pct([*sample, 99.0], 0.5) is not None
+          and pct([], 0.5) is None)
+
+    ts = iso_to_ts
+    # 29 bids, each placed and cancelled inside the window: one short of the minimum.
+    rows: list[tuple] = []
+    for i in range(29):
+        rows.append((REAL_BID, "2026-09-09T10:00:00Z", 2 * i + 1,
+                     {"order_hash": f"0xb{i}", "token_id": str(i), "price_eth": 0.1 + i / 100, **NO_EXP}))
+        rows.append((REAL_CANCEL, "2026-09-09T10:00:30Z", 2 * i + 2,
+                     {"order_hash": f"0xb{i}", "token_id": str(i)}))
+    n, eng = _standing_engine(tmp, "pctl.sqlite", rows)
+    lt = eng.bid_lifetimes("argonauts", ts("2026-09-09T09:00:00Z"), ts("2026-09-09T11:00:00Z"))
+    check("percentiles: at n = 29 bid_lifetimes withholds ALL THREE -- a median is a percentile too",
+          lt["n"] == 29 and lt["p10_s"] is None and lt["median_s"] is None and lt["p90_s"] is None
+          and lt["percentiles_withheld"] is True, str(lt))
+    check("percentiles: ...and the refusal carries its own reason -- n and the minimum, so the "
+          "caller can say WHY the number is missing",
+          lt["min_n_for_percentiles"] == 30 and lt["percentiles_reliable"] is False)
+    n.close()
+
+    # 30 standing asks: the standing series now has enough distinct orders for a band.
+    rows30 = [(DOC_LISTING, "2026-09-09T10:00:00Z", i + 1,
+               {"order_hash": f"0xa{i}", "token_id": str(i), "price_eth": 1.0 + i / 100, **NO_EXP})
+              for i in range(30)]
+    n2, eng2 = _standing_engine(tmp, "pctl2.sqlite", rows30)
+    s = eng2.standing_series("ask", "argonauts", ts("2026-09-09T10:00:00Z"),
+                             ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    check("percentiles: a standing series with 30 distinct orders reports its [p10, p90] band",
+          s["n"][0] == 30 and s["p10"][0] is not None and s["p90"][0] is not None, str(s))
+    n2.close()
+
+    n3, eng3 = _standing_engine(tmp, "pctl3.sqlite", rows30[:29])
+    s29 = eng3.standing_series("ask", "argonauts", ts("2026-09-09T10:00:00Z"),
+                               ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    check("percentiles: one order short, the band is withheld and counted -- but the MEDIAN "
+          "stands, because it is the level of the book and not a quantile of a sample",
+          s29["n"][0] == 29 and s29["p10"][0] is None and s29["p90"][0] is None
+          and s29["median"][0] == 1.0
+          and s29["basis"]["percentiles_suppressed_buckets"] == 1, str(s29))
+    n3.close()
+
+
 def test_expiry_is_never_in_the_future(tmp: Path) -> None:
     """Tech-lead PR-2 review, S1: an order whose expiration has NOT arrived is
     censored (still standing), never 'expired'. Recording a future end is
@@ -3344,6 +4618,30 @@ def test_orphan_open_gaps_are_closed_by_the_successor(tmp: Path) -> None:
     check("orphan: buckets after the closed gaps are defined again (0 sales while listening), not null",
           s["raw"][-1] == 0.0 and s["basis"]["gap_masked_buckets"] < len(s["raw"]), str(s["raw"]))
     nrm.close()
+
+
+def test_sync_counts_unreadable_files_instead_of_reporting_zero_rows(tmp: Path) -> None:
+    """BUG-058: a landing file the reader cannot decode (wrong codec on this
+    machine, corrupt file) was logged and skipped, and sync() reported it as
+    READ with zero rows. The orchestrator ran a corpus fold on a machine without
+    zstandard and got '115 files read, 0 rows added, ALL GATES GREEN'."""
+    from navanax.landing import LandingZoneWriter
+    from navanax.normalize import Normalizer
+
+    root = tmp / "badcodec-lz"
+    w = LandingZoneWriter(root, "run-x", codec=GzipCodec())
+    w.write(frame("argonauts", "2026-09-09T10:00:00Z"), topic="collection:argonauts", event_timestamp="2026-09-09T10:00:00Z")
+    w.close()
+    # corrupt the one data file in place (test fixture only; never the real landing zone)
+    files = [p for p in root.rglob("*.jsonl.gz")]
+    check("bug-058: fixture wrote one landing file", len(files) == 1)
+    files[0].write_bytes(b"\x1f\x8bthis is not gzip data at all")
+    n = Normalizer(root, tmp / "badcodec.sqlite")
+    stats = n.sync()
+    check("bug-058: an unreadable file is COUNTED (failed or short), never reported as read-with-zero-rows",
+          (stats["files_failed"] + stats["files_short"]) == 1 and stats["rows_added"] == 0
+          and stats["last_error"] and "jsonl.gz" in stats["last_error"], str(stats))
+    n.close()
 
 
 if __name__ == "__main__":

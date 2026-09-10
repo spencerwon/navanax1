@@ -4,12 +4,30 @@
 <meta name="color-scheme" content="dark">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <style>
-/* ---- palette: Austin FC Verde on near-black. Every text/background pair below is >= 4.5:1. ---- */
+/* ---- palette: Austin FC Verde on near-black. Every text/background pair below is >= 4.5:1.
+   THREE CLASSES, and the boundary between them is load-bearing (factcheck D-V3):
+   one hex must never be both a brand accent and a data series, or a green mark on
+   the page could be a collection offer, a sale, a sparkline, or a piece of chrome.
+   `test_ui_contract` parses the @chrome / @status / @data markers below and fails
+   the build if a data hex is reused, or if any data hex appears outside this block. ---- */
 :root{
+/* @chrome — brand, surfaces, ink, chart furniture. NEVER a data mark. */
   --bg:#0B0F0D; --bg-2:#10161300; --surface:#141B17; --surface-2:#1A231E; --border:#25332B; --border-2:#30423A;
   --text:#F1F5F2; --text-2:#B7C4BC; --muted:#8A9891; --faint:#5E6B65;
   --verde:#00B140; --verde-2:#19C95A; --verde-dim:rgba(0,177,64,.14); --verde-glow:0 0 0 3px rgba(0,177,64,.22);
-  --ask:#FF8A65; --bid:#7CC4FF; --coll:#19C95A; --spread:#FFD166; --bad:#FF6B6B; --warn:#FFB84D;
+  --grid:#1E2923; --hover-bg:#0E1512; --hover-border:#3B5044;
+/* @status — reserved state colours (error, warning). NEVER a data series. */
+  --bad:#FF6B6B; --warn:#FFB84D;
+/* @data — chart roles. Every mark on every chart reads one of these through
+   getComputedStyle, so Plotly is handed the same hex the CSS is.
+   Hue = event role (DESIGN §5.4). Measured on --surface #141B17 with the dataviz
+   validator (OKLab dE x100, Machado CVD sim, worst of normal/protan/deutan):
+     --coll  vs --ask 12.3 · vs --bid 11.4 · vs --verde-2 13.6 · contrast 11.2:1
+     --cancel vs --ask 16.1 (the old #FF6B6B cancel bar sat at 4.6 beside --ask)
+   --sale is pure white and is the ONLY white on the page: not --text #F1F5F2 (D-W3). */
+  --ask:#FF8A65; --bid:#7CC4FF; --coll:#33E7C6; --trait-offer:#C792EA; --sale:#FFFFFF;
+  --spread:#FFD166; --cancel:#E24E9B; --gap-fill:rgba(255,107,107,.10);
+/* @end-tokens — non-colour design tokens below this line. */
   --r:14px; --r-s:9px;
   color-scheme: dark;
 }
@@ -53,15 +71,28 @@ aside{border-right:1px solid var(--border);padding:16px;position:sticky;top:var(
 main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:16px 24px 32px;min-width:0}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;min-width:0;box-shadow:0 1px 0 rgba(255,255,255,.02) inset,0 8px 24px rgba(0,0,0,.25)}
 .card h2{font-size:13.5px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.card h2 em{color:var(--muted);font-style:normal;font-weight:500;font-size:12px}
+/* range chips: our own, because Plotly's rangeselector cannot be themed to match (DESIGN §2.3.1) */
+.chips{display:inline-flex;gap:4px;flex-wrap:wrap;margin-left:auto;align-self:center}
+.chips button{border:1px solid var(--border-2);background:var(--surface-2);color:var(--text-2);border-radius:999px;padding:2px 9px;font-size:11px;min-width:0;line-height:1.5}
+.chips button:hover{border-color:var(--verde);color:var(--text)}
+.chips button.on{background:var(--verde);color:#03140A;border-color:var(--verde);font-weight:650}
+.chips button.reset{border-color:var(--warn);color:var(--warn)}
+/* the name of an anchored range (HTD/DTD/MTD/YTD), which has no chip of its own */
+.chips .rname{align-self:center;color:var(--muted);font-size:11px;letter-spacing:.02em;padding-right:2px;white-space:nowrap}
 .basis{color:var(--faint);font-size:11px;margin-top:6px;font-family:ui-monospace,"SF Mono",Menlo,monospace;white-space:pre-wrap;line-height:1.45}
 .c12{grid-column:span 12}.c8{grid-column:span 8}.c7{grid-column:span 7}.c6{grid-column:span 6}.c5{grid-column:span 5}.c4{grid-column:span 4}
 @media(max-width:1250px){.c8,.c7,.c6,.c5,.c4{grid-column:span 12}.wrap{grid-template-columns:1fr}aside{position:static;height:auto;border-right:0;border-bottom:1px solid var(--border)}}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}@media(max-width:1250px){.kpis{grid-template-columns:repeat(2,1fr)}}
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px 8px;min-width:0}
 .kpi small{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+/* USD is shown to the cent everywhere, aggregates included (Operator). A long total
+   shrinks the type rather than being abbreviated or truncated (DESIGN §5.1). */
 .kpi b{display:block;font-size:26px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin:2px 0 0}
+.kpi b.sm{font-size:21px}.kpi b.xs{font-size:17px;letter-spacing:-.01em}
 .kpi .chg{font-size:12px;font-weight:600;margin-left:8px;vertical-align:4px}.up{color:var(--verde-2)}.down{color:var(--bad)}.flat{color:var(--muted)}
-.kpi svg{display:block;width:100%;height:44px;margin-top:6px}.kpi .sub{color:var(--faint);font-size:11px;margin-top:2px}
+.kpi .nochg{font-size:11px;font-weight:600;margin-left:8px;vertical-align:4px;color:var(--warn)}
+.kpi svg{display:block;width:100%;height:44px;margin-top:6px}.kpi .sub{color:var(--faint);font-size:11px;margin-top:2px;line-height:1.5}
+.kpi .stamps{color:var(--text-2);font-size:11px;margin-top:3px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
 .plot{width:100%;height:300px}.plot.tall{height:360px}.plot.short{height:200px}
 table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}
 th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
@@ -118,12 +149,12 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
 </aside>
 <main>
  <div class="kpis c12" id="kpis"></div>
- <div class="card c8"><h2>Prices<em>lowest ask · highest collection offer · highest item bid, per interval</em></h2><div id="p-prices" class="plot tall"></div><div class="basis" id="b-prices"></div></div>
+ <div class="card c8"><h2>Prices<em>lowest ask · highest collection offer · highest item bid, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="basis" id="b-prices"></div></div>
  <div class="card c4"><h2>Live book<em>standing orders</em></h2><div id="book"></div></div>
- <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer · holes = no bid or no ask</em></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
+ <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer · holes = no bid or no ask</em><span class="chips" data-plot="p-imm"></span></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
  <div class="card c4"><h2>How long a bid stands<em>placed → cancelled</em></h2><div id="life"></div><h2 style="margin-top:16px">Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
  <div class="card c12"><h2>Tokens<em>every token matching the filters · click a column to sort</em></h2><div id="screener"></div></div>
- <div class="card c8"><h2>Activity<em>per interval</em></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
+ <div class="card c8"><h2>Activity<em>per interval</em><span class="chips" data-plot="p-act"></span></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
  <div class="card c4"><h2>Who is making this market<em>events by wallet, this window</em></h2><div id="makers"></div></div>
  <div class="card c6"><h2>Sales tape<em>most recent</em></h2><div id="tape"></div></div>
  <div class="card c6"><h2>Ingestion gaps<em>shaded on every chart</em></h2><div id="gaps"></div><h2 style="margin-top:16px">Integrity audit<em>checksums, every refresh</em></h2><div id="audit"></div></div>
@@ -131,7 +162,15 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
 <footer>Every number comes through the MetricRequest contract (docs/06 §3): observed quantities only, no fair value, no smoothing, wash filter = raw. Undefined values are drawn as holes, never filled. Times shown in <span id="tz"></span>.</footer>
 <script>
 /* ---------- state ---------- */
-const S={denom:'ETH',transform:'ABS',traits:{},tz:'America/Chicago',sort:'token_id',dir:'asc',page:0,traitTypes:[]};
+const S={denom:'ETH',transform:'ABS',traits:{},tz:'America/Chicago',sort:'token_id',dir:'asc',page:0,traitTypes:[],sel:{}};
+/* ---------- the palette, read from the :root block so Plotly gets the same hex the CSS does.
+   No colour literal lives in this script: `test_ui_contract` fails the build on one. ---------- */
+const CSS=getComputedStyle(document.documentElement);
+const tok=n=>CSS.getPropertyValue(n).trim();
+const C={ask:tok('--ask'),bid:tok('--bid'),coll:tok('--coll'),trait:tok('--trait-offer'),sale:tok('--sale'),
+ spread:tok('--spread'),cancel:tok('--cancel'),gap:tok('--gap-fill'),
+ grid:tok('--grid'),axis:tok('--border'),spike:tok('--border-2'),tick:tok('--muted'),muted:tok('--muted'),
+ ink:tok('--text'),ink2:tok('--text-2'),hoverBg:tok('--hover-bg'),hoverBd:tok('--hover-border')};
 const $=s=>document.querySelector(s);
 const esc=v=>v==null?'':String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeImg=u=>(typeof u==='string'&&/^(https:\/\/|data:image\/)/i.test(u))?esc(u):'';
@@ -144,44 +183,145 @@ const base=()=>({collection:$('#collection').value,interval:$('#interval').value
 const fmtLocal=(iso,opts)=>iso?new Intl.DateTimeFormat('en-US',{timeZone:S.tz,hour12:false,...opts}).format(new Date(iso)):'—';
 const clock=iso=>fmtLocal(iso,{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
 const hhmm=iso=>fmtLocal(iso,{hour:'2-digit',minute:'2-digit'});
+// A timestamp on a KPI card carries its zone abbreviation every time (DESIGN §5.1).
+const stamp=iso=>fmtLocal(iso,{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZoneName:'short'});
+const zone=()=>{const p=new Intl.DateTimeFormat('en-US',{timeZone:S.tz,timeZoneName:'short'}).formatToParts(new Date()).find(x=>x.type==='timeZoneName');return p?p.value:''};
 // Plotly renders date strings as given: convert UTC ISO -> local "YYYY-MM-DD HH:mm:ss" so the axis is Central.
 const plotT=iso=>{const p=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:S.tz,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(iso)).map(x=>[x.type,x.value]));return `${p.year}-${p.month}-${p.day} ${p.hour==='24'?'00':p.hour}:${p.minute}:${p.second}`};
 const age=s=>{if(!s)return '—';const d=(Date.now()-Date.parse(s))/1000;return d<60?`${d.toFixed(0)}s ago`:d<3600?`${(d/60).toFixed(1)}m ago`:`${(d/3600).toFixed(1)}h ago`};
 const fmt=(v,d=4)=>v==null?'—':(+v).toLocaleString(undefined,{maximumFractionDigits:d});
 const money=v=>v==null?'—':S.denom==='USD'?'$'+(+v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):fmt(v,3)+' Ξ';
 const money2=(v,den)=>v==null?'—':den==='USD'?'$'+(+v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):fmt(v,3)+' Ξ';
-const compact=v=>v==null?'—':S.denom==='USD'?'$'+(+v).toLocaleString(undefined,{notation:'compact',maximumFractionDigits:2}):(+v).toLocaleString(undefined,{maximumFractionDigits:2})+' Ξ';
+// compact() is deliberately gone: the Operator's rule is USD to the cent EVERYWHERE,
+// aggregates included. A long total shrinks the type (.sm/.xs); it is never abbreviated.
 const short=a=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
+const fit=s=>s.length>18?'xs':s.length>13?'sm':'';
 const bytes=b=>b<1e6?(b/1e3).toFixed(0)+' KB':b<1e9?(b/1e6).toFixed(1)+' MB':(b/1e9).toFixed(2)+' GB';
 
-/* ---------- chart theme (Tableau-ish: quiet grid, strong marks, unified hover) ---------- */
-const L=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:'#B7C4BC',size:11.5,family:'-apple-system,BlinkMacSystemFont,Inter,Segoe UI,Roboto,sans-serif'},
- margin:{l:56,r:56,t:8,b:40},xaxis:{gridcolor:'#1E2923',zeroline:false,linecolor:'#25332B',tickfont:{color:'#8A9891'}},yaxis:{gridcolor:'#1E2923',zeroline:false,linecolor:'#25332B',tickfont:{color:'#8A9891'}},
- legend:{orientation:'h',y:1.1,x:0,font:{color:'#F1F5F2'}},hovermode:'x unified',hoverlabel:{bgcolor:'#1A231E',bordercolor:'#3B5044',font:{color:'#F1F5F2',size:12.5,family:'ui-monospace,SF Mono,Menlo,monospace'},namelength:-1,align:'left'}});
-const CFG={displaylogo:false,responsive:true,modeBarButtonsToRemove:['lasso2d','select2d']};
+/* ---------- chart theme (Tableau-ish: quiet grid, strong marks, unified hover) ----------
+   Interaction model, per DESIGN §2.3 as corrected by factcheck D-W1/D-W2:
+     · the modebar goes (`displayModeBar:false`) — the Operator asked for it;
+     · `scrollZoom:false` is written explicitly even though it is ALREADY Plotly's
+       cartesian default, so a future default change cannot silently enable it.
+       Wheel-zoom was never on, and this does not "fix" it (D-W1);
+     · y is LOCKED (`fixedrange:true`) — a drag can no longer rescale price. That is
+       the behaviour the Operator called clunky;
+     · x is deliberately NOT locked (D-W2): brushing needs it. `dragmode:'select'`
+       makes a drag select a time window instead of box-zooming, and a `reset` chip
+       appears in the panel header while a selection is live. */
+const L=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:C.ink2,size:11.5,family:'-apple-system,BlinkMacSystemFont,Inter,Segoe UI,Roboto,sans-serif'},
+ margin:{l:56,r:56,t:8,b:40},dragmode:'select',selectdirection:'h',
+ xaxis:{gridcolor:C.grid,zeroline:false,linecolor:C.axis,tickfont:{color:C.tick},fixedrange:false,
+        showspikes:true,spikemode:'across',spikesnap:'cursor',spikethickness:1,spikedash:'solid',spikecolor:C.spike,
+        hoverformat:'%b %d, %H:%M:%S '+zone()},
+ yaxis:{gridcolor:C.grid,zeroline:false,linecolor:C.axis,tickfont:{color:C.tick},fixedrange:true},
+ legend:{orientation:'h',y:1.1,x:0,font:{color:C.ink}},hovermode:'x unified',
+ hoverlabel:{bgcolor:C.hoverBg,bordercolor:C.hoverBd,font:{color:C.ink,size:12.5,family:'ui-monospace,SF Mono,Menlo,monospace'},namelength:-1,align:'left'}});
+const CFG={displayModeBar:false,displaylogo:false,responsive:true,scrollZoom:false,doubleClick:false};
 let gaps=[];
-const gapShapes=()=>gaps.filter(g=>g.started_at).map(g=>({type:'rect',xref:'x',yref:'paper',x0:plotT(g.started_at),x1:plotT(g.ended_at||new Date().toISOString()),y0:0,y1:1,fillcolor:'rgba(255,107,107,0.10)',line:{width:0}}));
+const gapShapes=()=>gaps.filter(g=>g.started_at).map(g=>({type:'rect',xref:'x',yref:'paper',x0:plotT(g.started_at),x1:plotT(g.ended_at||new Date().toISOString()),y0:0,y1:1,fillcolor:C.gap,line:{width:0}}));
 const basis=b=>`${b.label}\n${b.denomination} · ${b.transform}${b.baseline_value!=null&&b.transform!=='ABS'?` · baseline ${fmt(b.baseline_value)} at ${clock(b.baseline_at)}`:''} · ${b.interval} bars aligned ${b.bucket_alignment||'UTC'} · ${b.range.spec} (${clock(b.range.start)} → ${clock(b.range.end)} ${S.tz}) · ${b.buckets} buckets, ${b.undefined_buckets} with no observation (holes)${Object.keys(b.trait_filter||{}).length?` · traits: ${esc(traitSpec())}`:''} · wash filter ${b.wash_filter}${b.legs?`\n⚠ under a trait filter the two legs differ — ask: ${b.legs.floor_ask}; bid: ${b.legs.collection_bid}`:''}`;
+
+/* ---------- the standing-book basis: which book, how much of the bucket the legs
+   actually stood, whether the book ever crossed, and where the band was withheld.
+   These arrays arrive from metrics.series() (PR-3). A withheld band is PRINTED,
+   never silently dropped — a missing [p10, p90] is a fact about n, not clutter. ---------- */
+const med=a=>{const s=a.slice().sort((x,y)=>x-y);return s.length?(s.length%2?s[(s.length-1)/2]:(s[s.length/2-1]+s[s.length/2])/2):null};
+function bookBasis(s){const b=s.basis||{},out=[];
+ out.push(`book: ${b.book}`);
+ const cov=(s.coverage||[]).filter(x=>x!=null);
+ if(cov.length)out.push(`coverage: median ${(100*med(cov)).toFixed(0)}% of observable bucket seconds over ${cov.length} bucket(s)${b.coverage_denominator?` (${b.coverage_denominator})`:''}`);
+ const ns=(s.n||s.n_ask||[]).filter(x=>x!=null);
+ if(ns.length)out.push(`orders in the book: median ${fmt(med(ns),0)} per bucket${s.n_bid?`, bid leg median ${fmt(med(s.n_bid.filter(x=>x!=null)),0)}`:''}`);
+ if(s.p10){const minN=b.percentiles_min_n||30;
+  const w=s.p10.reduce((a,x,i)=>a+((x==null&&s.raw&&s.raw[i]!=null)?1:0),0);
+  if(w)out.push(`p10–p90 withheld (n<${minN}) in ${w} of ${s.p10.length} buckets`);}
+ if(b.negative_buckets)out.push(`⚠ ${b.negative_buckets} bucket(s) had a CROSSED standing book (ask < bid) — returned as null and not charted. A crossed book is a reconstruction defect, never an arbitrage.`);
+ if(b.left_truncated)out.push('⚠ left-truncated: the book holds only orders whose PLACEMENT we witnessed, so a reconstructed floor is an upper bound and a reconstructed best bid a lower one.');
+ if(b.observed_book_warning)out.push('⚠ '+b.observed_book_warning);
+ return out.join('\n')}
+/* Per-point hover extras: coverage % and n where the API supplies them, appended to
+   the value. The header carries the bucket time in the display timezone (xaxis.hoverformat). */
+const meta=s=>(s.t||[]).map((_,i)=>{const bits=[];
+ if(s.coverage&&s.coverage[i]!=null)bits.push(`cov ${(100*s.coverage[i]).toFixed(0)}%`);
+ if(s.n&&s.n[i]!=null)bits.push(`n=${fmt(s.n[i],0)}`);
+ else if(s.n_ask&&s.n_ask[i]!=null)bits.push(`n ask ${fmt(s.n_ask[i],0)} / bid ${fmt(s.n_bid?s.n_bid[i]:null,0)}`);
+ if(s.p10&&s.p10[i]!=null)bits.push(`p10–p90 ${fmt(s.p10[i],4)}–${fmt(s.p90[i],4)}`);
+ return bits.length?'  ('+bits.join(' · ')+')':''});
 const yTitle=()=>S.transform==='ABS'?(S.denom==='USD'?'USD':'ETH'):S.transform==='PCT'?'% change vs baseline':S.transform==='LOG'?'log return vs baseline':S.transform==='DIFF'?'difference vs baseline':'bps vs baseline';
 const scale=v=>S.transform==='PCT'?v.map(x=>x==null?null:x*100):v;
 const yfmt=()=>S.transform!=='ABS'?{tickformat:',.2f'}:S.denom==='USD'?{tickprefix:'$',tickformat:',.2f'}:{ticksuffix:' Ξ',tickformat:',.3f'};
 const hov=()=>S.transform!=='ABS'?'%{y:,.2f}':S.denom==='USD'?'$%{y:,.2f}':'%{y:,.4f} Ξ';
 
-/* ---------- KPI cards: value now, 24h sparkline, change vs 24h ago ---------- */
+/* ---------- range chips + drag-to-select, replacing the modebar (DESIGN §2.3 items 1 and 3).
+   The chips set the GLOBAL range (they drive the same <select>, so the two can never
+   disagree). A drag on any time chart selects a window on that chart's x-axis only,
+   and the `reset ×` chip is the proof that something happened. Chips are plain DOM:
+   they still render when the Plotly CDN is unreachable. ---------- */
+const RANGES=['1h','6h','24h','7d','30d'];
+/* Anchored ranges — HTD, DTD, MTD, YTD — are the four the <select> offers that
+   RANGES does not, because they are not fixed widths: "today" is 3 hours long at
+   03:00 and 23 at 23:00. So no chip can be lit for them, and a chip row with
+   nothing lit reads as "no range is set", which is false and was the S4 the
+   tech-lead raised on 2026-09-10. The row now NAMES the range instead, in muted
+   type, so it always says what the charts are actually showing. Deliberately not
+   the other repair: adding HTD/DTD/MTD/YTD chips would put four buttons of
+   unequal, invisible width beside five of known width. */
+const isChipRange=r=>RANGES.includes(r);
+const rangeName=()=>{const s=$('#range'),o=s.options[s.selectedIndex];return o?o.text:s.value};
+function chipsFor(id){const host=document.querySelector(`.chips[data-plot="${id}"]`);if(!host)return;
+ const cur=$('#range').value;
+ host.innerHTML=(isChipRange(cur)?'':`<span class="rname" title="anchored range: it has no fixed width, so no chip is lit">${esc(rangeName())}</span>`)
+  +RANGES.map(r=>`<button data-r="${r}" class="${r===cur?'on':''}" title="set the global range to ${r}">${r}</button>`).join('')
+  +(S.sel[id]?`<button class="reset" data-reset="1" title="clear the selected window on this chart">reset ×</button>`:'');
+ host.querySelectorAll('button[data-r]').forEach(b=>b.addEventListener('click',()=>{$('#range').value=b.dataset.r;S.sel={};all()}));
+ const rb=host.querySelector('button[data-reset]');
+ if(rb)rb.addEventListener('click',()=>{delete S.sel[id];if(window.Plotly)Plotly.relayout(id,{'xaxis.autorange':true});chipsFor(id)})}
+function allChips(){document.querySelectorAll('.chips').forEach(h=>chipsFor(h.dataset.plot))}
+function bindSelect(id){const el=document.getElementById(id);if(!el||!el.on||el._selBound)return;el._selBound=true;
+ el.on('plotly_selected',ev=>{if(ev&&ev.range&&ev.range.x){S.sel[id]=ev.range.x;Plotly.relayout(id,{'xaxis.range':ev.range.x.slice()});chipsFor(id)}});
+ el.on('plotly_deselect',()=>{delete S.sel[id];chipsFor(id)})}
+function draw(id,traces,layout){Plotly.react(id,traces,layout,CFG);bindSelect(id);chipsFor(id)}
+
+/* ---------- KPI cards: value now, 24h sparkline, change vs the value 24 HOURS AGO ---------- */
 function spark(v,color){// x = bucket position on the full time grid (the API returns every bucket, holes as null), so gaps stay gaps
  const pts=v.map((y,i)=>[i,y]).filter(([,y])=>y!=null);if(pts.length<2)return '<svg viewBox="0 0 100 30"></svg>';
  const ys=pts.map(p=>p[1]),lo=Math.min(...ys),hi=Math.max(...ys),n=v.length-1||1;const X=i=>(i/n*100).toFixed(2),Y=y=>(28-(hi===lo?14:(y-lo)/(hi-lo)*26)).toFixed(2);
  let d='',prev=null;v.forEach((y,i)=>{if(y==null){prev=null;return}d+=(prev==null?'M':'L')+X(i)+' '+Y(y)+' ';prev=y});
  return `<svg viewBox="0 0 100 30" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`}
-function chg(a,b){if(a==null||b==null||!a)return '';const p=(b-a)/a*100;return `<span class="chg ${p>0?'up':p<0?'down':'flat'}">${p>0?'+':''}${p.toFixed(1)}%</span>`}
+/* The delta is NOW versus the value 24 HOURS AGO — the Operator's rule, decided
+   2026-09-10 against DESIGN §6-Q2. Not "last observed vs first observed": that
+   silently compares two hours chosen by where the holes happened to fall. Both
+   endpoints are printed. If EITHER endpoint is a hole there is no percentage at
+   all — a hole is not a zero and it is not the nearest neighbour. */
+const idxLast=v=>{for(let i=v.length-1;i>=0;i--)if(v[i]!=null)return i;return -1};
+const kpiCard=(title,val,chip,v,color,stamps,sub)=>
+ `<div class="kpi"><small>${title}</small><b class="${fit(val)}">${val}${chip}</b>${spark(v,color)}<div class="stamps">${stamps}</div><div class="sub">${sub}</div></div>`;
+function priceCard(title,s,color,noun){
+ const v=s.v,t=s.t,iNow=v.length-1,vNow=v[iNow],vThen=v[0];
+ const iShow=vNow!=null?iNow:idxLast(v);
+ let chip;
+ if(vThen==null)chip='<span class="nochg">no observation 24h ago</span>';
+ else if(vNow==null)chip='<span class="nochg">no observation in the current hour</span>';
+ else if(!vThen)chip='<span class="nochg">no % — the value 24h ago was zero</span>';
+ else{const p=(vNow-vThen)/vThen*100;chip=`<span class="chg ${p>0?'up':p<0?'down':'flat'}">${p>0?'+':''}${p.toFixed(1)}%</span>`}
+ const stamps=`now&nbsp;&nbsp;&nbsp;&nbsp;${iShow<0?'—':stamp(t[iShow])}${(vNow==null&&iShow>=0)?' · last observed':''}`
+  +`<br>24h ago ${stamp(t[0])}${vThen==null?' · hole':''}`;
+ const obs=v.filter(x=>x!=null).length;
+ return kpiCard(title,iShow<0?'—':money2(v[iShow],S.denom),chip,v,color,stamps,
+  `hourly buckets · ${obs} of ${v.length} hours had ${noun} · % = now vs 24 h ago`)}
 async function kpis(){const p=base();const m=await J('/api/multi?'+qs({collection:p.collection,traits:p.traits,denom:S.denom,transform:'ABS',interval:'1h',range:'24h',metrics:'floor_ask,collection_bid,volume,sales_count'}));
- const last=v=>{for(let i=v.length-1;i>=0;i--)if(v[i]!=null)return v[i];return null};const first=v=>{for(const x of v)if(x!=null)return x;return null};
  const sum=v=>v.reduce((a,x)=>a+(x||0),0);const n=v=>v.filter(x=>x!=null).length;
- const card=(t,val,c,v,sub)=>`<div class="kpi"><small>${t}</small><b>${val}${c}</b>${spark(v,'#19C95A')}<div class="sub">${sub}</div></div>`;
- $('#kpis').innerHTML=card('lowest ask now',money2(last(m.floor_ask.v),S.denom),chg(first(m.floor_ask.v),last(m.floor_ask.v)),m.floor_ask.v,`24h · ${n(m.floor_ask.v)} of 24 hours had a listing · % = last vs first observed hour`)
-  +card('collection offer now',money2(last(m.collection_bid.v),S.denom),chg(first(m.collection_bid.v),last(m.collection_bid.v)),m.collection_bid.v,`24h · ${n(m.collection_bid.v)} of 24 hours had an offer · % = last vs first observed hour`)
-  +card('volume 24h',compact(sum(m.volume.v)),'',m.volume.v,`${fmt(sum(m.sales_count.v),0)} sales · hourly bars`)
-  +card('sales 24h',fmt(sum(m.sales_count.v),0),'',m.sales_count.v,`hourly bars · ${n(m.sales_count.v)} of 24 hours had a sale`)}
+ const vol=m.volume.v,sc=m.sales_count.v,t=m.volume.t;
+ const volHoles=vol.length-n(vol),scHoles=sc.length-n(sc);
+ const win=`window ${stamp(t[0])}<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ ${stamp(t[t.length-1])}`;
+ // A sum over a 24 h window that contains holes is a sum over the hours we WATCHED.
+ // Say how many that was rather than letting a gap read as a quiet market.
+ const partial=h=>h?`<br>⚠ ${h} hour(s) not observed — this total covers the ${24-h} we watched`:'';
+ $('#kpis').innerHTML=priceCard('lowest ask now',m.floor_ask,C.ask,'a listing')
+  +priceCard('collection offer now',m.collection_bid,C.coll,'an offer')
+  +kpiCard('volume 24h',money2(sum(vol),S.denom),'',vol,C.sale,win,`${fmt(sum(sc),0)} sales · hourly buckets · ${n(vol)} of ${vol.length} hours observed${partial(volHoles)}`)
+  +kpiCard('sales 24h',fmt(sum(sc),0),'',sc,C.sale,win,`hourly buckets · ${n(sc)} of ${sc.length} hours observed${partial(scHoles)}`)}
 
 /* ---------- panels ---------- */
 async function status(){const s=await J('/api/status');S.tz=s.display_timezone||S.tz;
@@ -190,19 +330,36 @@ async function status(){const s=await J('/api/status');S.tz=s.display_timezone||
  $('#t-gaps').textContent=`${s.gaps.open} · ${s.gaps.awaiting_backfill}`;$('#t-disk').textContent=bytes(s.landing_bytes);
  $('#t-rate-usd').textContent=s.ethusd.rate?'$'+fmt(s.ethusd.rate,0):'—';$('#t-rate-usd').title=s.ethusd.rate?`${s.ethusd.provider} · ${clock(s.ethusd.at)}`:'no priced event yet';
  $('#tz').textContent=S.tz;$('#tzlabel').textContent=S.tz.replace('America/','').replace('_',' ');$('#asof').textContent='as of '+clock(s.now)+(s.normalizer.error?' · normalizer ERROR':'')}
+// Markers on below ~120 observed points, off above (DESIGN §5.4) — non-negotiable in
+// a book this thin: 8 listings in a window must draw 8 visible marks, not an empty pane.
+const mode=v=>v.filter(x=>x!=null).length<120?'lines+markers':'lines';
 async function prices(){if(!window.Plotly)return;const m=await J('/api/multi?'+qs({...base(),metrics:'floor_ask,collection_bid,top_item_bid'}));
- const tr=[['floor_ask','lowest ask','#FF8A65'],['collection_bid','collection offer','#19C95A'],['top_item_bid','top item bid','#7CC4FF']].map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:'lines+markers',line:{color:c,width:2.2},marker:{size:5},connectgaps:false,hovertemplate:hov()}));
- Plotly.react('p-prices',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:'#8A9891'}}}},CFG);$('#b-prices').textContent=basis(m.floor_ask.basis)}
+ const tr=[['floor_ask','lowest ask',C.ask],['collection_bid','collection offer',C.coll],['top_item_bid','top item bid',C.bid]]
+  .map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:mode(m[k].v),line:{color:c,width:2.2},marker:{size:5},
+   connectgaps:false,customdata:meta(m[k]),hovertemplate:hov()+'%{customdata}<extra></extra>'}));
+ draw('p-prices',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}}});
+ $('#b-prices').textContent=basis(m.floor_ask.basis)+'\n'
+  +['floor_ask','collection_bid'].map(k=>`— ${m[k].basis.label}\n  `+bookBasis(m[k]).split('\n').join('\n  ')).join('\n')}
 async function imm(){if(!window.Plotly)return;const s=await J('/api/series?'+qs({...base(),metric:'immediacy_cost'}));
- const tr=[{x:s.t.map(plotT),y:scale(s.v),name:'spread',mode:'lines+markers',line:{color:'#FFD166',width:2.2},marker:{size:5},connectgaps:false,hovertemplate:hov()},
-  {x:s.t.map(plotT),y:(s.pct_of_ask||[]).map(v=>v==null?null:v*100),name:'% of ask',yaxis:'y2',mode:'lines',line:{color:'#8A9891',dash:'dot',width:1.5},connectgaps:false,hovertemplate:'%{y:.1f}%'}];
- Plotly.react('p-imm',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:'#8A9891'}}},yaxis2:{overlaying:'y',side:'right',title:{text:'% of ask',font:{color:'#8A9891'}},gridcolor:'rgba(0,0,0,0)',tickfont:{color:'#8A9891'}}},CFG);
- $('#b-imm').textContent=basis(s.basis)+(s.basis.undefined_buckets?`\n${s.basis.undefined_buckets} interval(s) undefined: no collection offer or no listing observed — shown as holes, never filled.`:'')}
+ const tr=[{x:s.t.map(plotT),y:scale(s.v),name:'spread',mode:mode(s.v),line:{color:C.spread,width:2.2},marker:{size:5},
+   connectgaps:false,customdata:meta(s),hovertemplate:hov()+'%{customdata}<extra></extra>'},
+  {x:s.t.map(plotT),y:(s.pct_of_ask||[]).map(v=>v==null?null:v*100),name:'% of ask',yaxis:'y2',mode:'lines',line:{color:C.ink2,dash:'dash',width:1.5},connectgaps:false,hovertemplate:'%{y:.1f}%<extra></extra>'}];
+ draw('p-imm',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}},
+  yaxis2:{overlaying:'y',side:'right',fixedrange:true,title:{text:'% of ask',font:{color:C.muted}},gridcolor:'rgba(0,0,0,0)',tickfont:{color:C.tick}}});
+ $('#b-imm').textContent=basis(s.basis)+'\n'+bookBasis(s)
+  +(s.basis.undefined_buckets?`\n${s.basis.undefined_buckets} interval(s) undefined: no collection offer or no listing observed — shown as holes, never filled.`:'')}
 async function act(){if(!window.Plotly)return;const m=await J('/api/multi?'+qs({...base(),transform:'ABS',metrics:'bid_count,cancel_count,listing_count,sales_count'}));
- const tr=[['bid_count','bids','#7CC4FF'],['cancel_count','cancels','#FF6B6B'],['listing_count','listings','#FF8A65'],['sales_count','sales','#19C95A']].map(([k,n,c])=>({x:m[k].t.map(plotT),y:m[k].v,name:n,type:'bar',marker:{color:c,line:{width:0}},hovertemplate:'%{y:,d}'}));
- Plotly.react('p-act',tr,{...L(),barmode:'stack',bargap:.25,shapes:gapShapes()},CFG);$('#b-act').textContent='counts per interval\n'+basis(m.bid_count.basis).split('\n')[1]}
+ const tr=[['bid_count','bids',C.bid],['cancel_count','cancels',C.cancel],['listing_count','listings',C.ask],['sales_count','sales',C.sale]]
+  .map(([k,n,c])=>({x:m[k].t.map(plotT),y:m[k].v,name:n,type:'bar',marker:{color:c,line:{width:0}},hovertemplate:'%{y:,d}<extra></extra>'}));
+ draw('p-act',tr,{...L(),barmode:'stack',bargap:.25,shapes:gapShapes()});
+ $('#b-act').textContent='counts per interval\n'+basis(m.bid_count.basis).split('\n')[1]}
+// Event-mix bars encode a QUANTITY, not a role, so they wear neutral ink rather than
+// any role hue (DESIGN §5.4). This panel is also why no role colour may be reused as
+// a "generic bar": a green bar here used to be indistinguishable from a collection offer.
 async function mix(){if(!window.Plotly)return;const p=base();const m=await J('/api/mix?'+qs({collection:p.collection,range:p.range}));
- Plotly.react('p-mix',[{x:m.map(r=>r.n),y:m.map(r=>String(r.event_type).replace('item_','')),type:'bar',orientation:'h',marker:{color:'#19C95A'},text:m.map(r=>fmt(r.n,0)),textposition:'outside',textfont:{color:'#B7C4BC'}}],{...L(),margin:{l:110,r:50,t:4,b:24},xaxis:{...L().xaxis,showgrid:false,showticklabels:false}},CFG)}
+ Plotly.react('p-mix',[{x:m.map(r=>r.n),y:m.map(r=>String(r.event_type).replace('item_','')),type:'bar',orientation:'h',
+  marker:{color:C.ink2,line:{width:0}},text:m.map(r=>fmt(r.n,0)),textposition:'outside',textfont:{color:C.ink2},hovertemplate:'%{y}: %{x:,d}<extra></extra>'}],
+  {...L(),dragmode:false,margin:{l:110,r:50,t:4,b:24},xaxis:{...L().xaxis,showspikes:false,showgrid:false,showticklabels:false,fixedrange:true},yaxis:{...L().yaxis,fixedrange:true}},CFG)}
 async function book(){const p=base();const b=await J('/api/book?'+qs({collection:p.collection,traits:p.traits,limit:7}));const d=S.denom==='USD'?'price_usd':'price_eth';
  const row=(r,c)=>`<tr><td class="${c}">${r.token_id?'#'+esc(r.token_id):'collection'}</td><td class="num ${c}">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td>${age(r.valid_at)}</td></tr>`;
  const sec=(t,rows,c)=>`<h2 style="margin-top:8px">${t}<em>${rows.length}</em></h2>`+(rows.length?`<table><tr><th>item</th><th class="num">${S.denom}</th><th>maker</th><th>placed</th></tr>${rows.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`);
@@ -249,9 +406,11 @@ function seg(id,key,cb){$('#'+id).querySelectorAll('button').forEach(b=>b.addEve
 function layout(){const h=document.querySelector('header').offsetHeight,c=document.querySelector('.controls').offsetHeight;document.documentElement.style.setProperty('--hdr',h+'px');document.documentElement.style.setProperty('--top',(h+c)+'px')}
 window.addEventListener('resize',layout);
 async function init(){layout();
- if(!window.Plotly){document.querySelectorAll('.plot').forEach(el=>el.innerHTML='<div class="empty">charts need Plotly from cdn.plot.ly — this computer could not reach it. Tables and cards still work.</div>')}const meta=await J('/api/meta');$('#collection').innerHTML=meta.watchlist.map(s=>`<option>${esc(s)}</option>`).join('');
- $('#interval').innerHTML=meta.intervals.map(i=>`<option ${i==='5m'?'selected':''}>${i}</option>`).join('');
- ['collection','interval','range'].forEach(id=>$('#'+id).addEventListener('change',all));seg('denom','denom',all);seg('transform','transform',all);$('#refresh').addEventListener('click',()=>{traits();all()});
+ if(!window.Plotly){document.querySelectorAll('.plot').forEach(el=>el.innerHTML='<div class="empty">charts need Plotly from cdn.plot.ly — this computer could not reach it. Tables, KPI cards, sparklines and range chips still work.</div>')}
+ allChips();                       // chips are plain DOM: they render with or without the chart library
+ const meta_=await J('/api/meta');$('#collection').innerHTML=meta_.watchlist.map(s=>`<option>${esc(s)}</option>`).join('');
+ $('#interval').innerHTML=meta_.intervals.map(i=>`<option ${i==='5m'?'selected':''}>${i}</option>`).join('');
+ ['collection','interval','range'].forEach(id=>$('#'+id).addEventListener('change',()=>{S.sel={};allChips();all()}));seg('denom','denom',all);seg('transform','transform',all);$('#refresh').addEventListener('click',()=>{traits();all()});
  await traits();await all();setInterval(all,10000);setInterval(traits,30000)}
 init();
 </script></body></html>
