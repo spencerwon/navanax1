@@ -42,7 +42,7 @@ WHAT IT CHECKS, cheapest and most structural first
   6. tools/buglog.py --check is clean.
   7. ruff check src tests tools (SKIPPED with a warning if ruff is absent --
      the Mac may not have it; CI runs it as a hard failure).
-  8. tests/selftest.py and tests/validator_probe.py are green.
+  8. Every test suite CI runs is green (tests/selftest.py; more if ci.yml names them).
 
 Standard library only. `push.command` runs this, and a launcher must never
 depend on a package the Operator might not have installed -- which is also why
@@ -626,7 +626,11 @@ def collect(branch_arg: str | None, allow_tester: bool) -> dict:
         )
 
     # --- 8. the test suites ---------------------------------------------
-    for rel_test in ("tests/selftest.py", "tests/validator_probe.py"):
+    # One suite, because a suite CI does not run is how BUG-20260909-055 happened:
+    # tests/validator_probe.py sat here broken and unexecuted until it was absorbed
+    # into selftest.py. `test_every_test_file_is_executed_by_something` inside that
+    # suite is what keeps a second orphan from appearing; this list follows ci.yml.
+    for rel_test in _ci_test_suites(ROOT):
         path = ROOT / rel_test
         if not path.exists():
             report.add(
@@ -682,6 +686,24 @@ def render_summary(summary: dict) -> str:
     if len(summary["files"]) > 60:
         lines.append(f"    ... and {len(summary['files']) - 60} more")
     return "\n".join(lines)
+
+
+def _ci_test_suites(root) -> list[str]:
+    """Test suites CI actually invokes by name, read from the workflow.
+
+    Falls back to tests/selftest.py when the workflow cannot be read -- a gate
+    that silently checks nothing would be worse than one that checks the suite
+    every branch has.
+    """
+    ci = root / ".github" / "workflows" / "ci.yml"
+    found: list[str] = []
+    try:
+        for m in re.finditer(r"python3?\s+(tests/[\w./-]+\.py)", ci.read_text()):
+            if m.group(1) not in found:
+                found.append(m.group(1))
+    except OSError:
+        pass
+    return found or ["tests/selftest.py"]
 
 
 def main(argv=None) -> int:
