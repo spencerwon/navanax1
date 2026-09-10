@@ -141,6 +141,40 @@ Bid lifetimes still *counts* censoring rather than modelling it, so the percenti
 
 `wash_filter` is always `raw` and the response says so: no wash-trade filter exists yet, and the page must not imply one.
 
+### 4d. `survival` — how long an order stands, estimated instead of counted (PR-8)
+
+`MetricEngine.bid_lifetimes` **counts** censoring; `MetricEngine.survival` **models** it. The panel on the page reads the second one. Both still exist: `bid_lifetimes` is the naive comparison and is not on screen.
+
+**The call.** `survival(collection, start, end, as_of, kind='item_received_bid', traits=None, maker=None, price_band=None)`, served at `/api/survival`; the drill list is `survival_drill(...)` at `/api/survival_drill?lo=&hi=`. Both take the same filters, so a drill list is always the same population as the bar that opened it.
+
+**`as_of` is mandatory, and it is the rule that makes the estimator correct.** `order_lives.exit_reason` is stored **as of the fold** (§3.3), not as of the question. A life folded at 14:00 says `cancelled` even when the question is "what did the book look like at 11:00". Reading it straight would mark an order as ended an hour before it was — the estimator would learn the future. So:
+
+- **ended** ⇔ `exit_reason` is one of the four causes **and** `t_term ≤ as_of`;
+- everything else placed at or before `as_of` is **censored at `as_of`**, with duration `as_of − t_place`;
+- a life placed *after* `as_of` did not exist yet — excluded, counted as `placed_after_as_of_n`;
+- a life whose terminator could not be placed in time (`unknown`) is **neither**: calling it censored would say it stood when we know it did not, and calling it ended at `as_of` would invent a time. Excluded, counted as `unknown_terminator_n`.
+
+**The estimator** (quant §3.2 — library-free, four recurrences, `1.96` the only constant):
+
+| quantity | formula | note |
+|---|---|---|
+| survival | `Ŝ(t) = Π_{tᵢ≤t} (1 − dᵢ/nᵢ)` | Kaplan–Meier. Censored lives stay in `nᵢ` up to their censoring time and never enter `dᵢ` |
+| Greenwood | `v(t) = Σ dᵢ/(nᵢ(nᵢ−dᵢ))`, `Var[Ŝ] = Ŝ²v` | **diagnostic only** — see the band below |
+| band (log-log) | `σ = √v/|ln Ŝ|`, `[Ŝ^exp(+1.96σ), Ŝ^exp(−1.96σ)]` | not `Ŝ ± 1.96·SE`, which leaves [0,1] in the tails. Returned as `null`, never clamped, where it is undefined (`Ŝ = 1`, `Ŝ = 0`, `nᵢ = dᵢ`) |
+| competing risks | `F̂_c(t) = Σ_{tᵢ≤t} Ŝ(t_{i−1})·dᵢᶜ/nᵢ` | Aalen–Johansen, causes `cancelled · invalidated · filled · expired`. **Not `1 − KM` per cause**, which censors the competitors and overstates every cause. `Σ_c F̂_c(t) = 1 − Ŝ(t)` exactly, at every `t`, and that identity is a test |
+| RMST | `Σ Ŝ(t_{i−1})·(min(tᵢ,τ*) − t_{i−1})` | reported **with** `P(not ended by τ*) = Ŝ(τ*)`. A τ* past the largest observed duration is **refused**, not extrapolated by extending the last step flat |
+| residual | `Ŝ(t+L)/Ŝ(t)` | reported only where both ends are inside the data |
+
+**The band on screen is a maker-episode cluster bootstrap, not Greenwood** (factcheck D-W5). Greenwood assumes independent observations; 42,601 quotes from 3 makers are not, and an order-level band would be roughly `√(n/n_eff)` — about 15× — too narrow. The bootstrap resamples **episodes** (ASM-022): same maker, same scope (`scope_kind`, `token_id`), consecutive quotes less than ε apart. `B`, the seed and the number of clusters resampled travel with the band; the seed makes it reproducible, so the band on the page is the band in the test. Where Greenwood and the bootstrap disagree, **Greenwood is the one that is wrong on this data**.
+
+**`n` is not one number and reporting one is the failure mode** (quant §3.3). The header prints all of them, always: `n = <ended> ended · <censored> still standing (censored) · n_eff = <clusters>`, plus ε and the minimum. **The binding minimum is 30 maker-episode CLUSTERS, not 30 orders.** Below it the response's `mode` is `strip`: `percentiles` is `None` with the reason, the page draws **every observation as one dot** and no curve, and the sub-header reads `strip, no curve (n_eff = N < 30)`. Percentiles from many observations of few independent agents are precise about the agents and silent about the market. On this collection today `n_eff` is 3 at the maker level and possibly 1 — so strip mode is the correct answer, not a failure.
+
+**The panel** (design §4.1) is three coupled pieces plus a list: the KM step curve (`line.shape:'hv'` — survival *is* a step function) with the bootstrap band as a 12 %-opacity fill, on a **log** x-axis; a **stacked** exit-reason histogram over log-spaced duration bins, because *"cancelled after 4 s"* and *"filled after 4 s"* are opposite facts and one curve cannot carry both; and a placement-time mini-map on its **own wall-clock axis**, dragged to brush a window that both of the above are recomputed over. The brush snaps to whole placement buckets, so a brushed window is always a window the data was actually counted over. Clicking a histogram bar opens the drill list under the card.
+
+**The drill list** carries **both clocks** deliberately: `observed_at − valid_at` is our stream lag, and *if a bid's whole life is shorter than our lag we never had a chance at it* — a fact about strategy feasibility, not about the market, and invisible unless both are on the row. `distance_to_floor_eth` is the bid minus the **lowest standing ask at the instant of placement**, read off the same sweep line the floor chart uses; it is `null` — never estimated, never carried forward from the last known floor — when no ask was standing then.
+
+**What has to be said before the number is computed** (factcheck D-W4), and the response carries it as `basis.direction_warning`: the median may move in **either** direction from the old estimator's, because that one was biased short by dropped censoring and long by an unbounded join. A large change is the expected consequence of two known defects. It is not a discovery, and **a shorter median is not evidence of a bug in the new code**.
+
 ## 4a. Traits and the screener (`rest.py`, `traits.py`, `metrics.screener`)
 
 **Loading traits costs REST reads; the design spends as few as possible.** OpenSea's per-token endpoint would cost one read per token — 9,212 reads for Argonauts, three days of the measured 120/hour budget. Instead:
@@ -297,9 +331,25 @@ The `:root` block in `src/navanax/ui/index.html` is the whole palette, and it is
 |---|---|---|
 | **@chrome** | `--bg` `--bg-2` `--surface` `--surface-2` `--border` `--border-2` `--text` `--text-2` `--muted` `--faint` `--verde` `--verde-2` `--verde-dim` `--verde-glow` `--grid` `--hover-bg` `--hover-border` | brand, surfaces, ink, chart furniture. **Austin FC Verde is UI chrome only** — active state, focus ring, primary button, links, pills. Never a data series. |
 | **@status** | `--bad` `#FF6B6B` · `--warn` `#FFB84D` | reserved state colours (failure, warning). Never a data series. |
-| **@data** | `--ask` `#FF8A65` · `--bid` `#7CC4FF` · `--coll` `#33E7C6` · `--trait-offer` `#C792EA` · `--sale` `#FFFFFF` · `--spread` `#FFD166` · `--cancel` `#E24E9B` · `--gap-fill` `rgba(255,107,107,.10)` | hue = event role. Every mark on every chart reads one of these. |
+| **@data** | all eleven, below | hue = event role. Every mark on every chart reads one of these. |
 
-Role assignments: ask/listing orange · item bid blue · collection offer green-cyan · trait offer purple · sale/fill **pure white** · cancel magenta · spread yellow · ingestion gap red at 10 %. Event-mix bars are neutral `--text-2`, because that panel's bars encode a *quantity*, not a role.
+The eleven `@data` tokens, with the hexes that are in `:root` **now** — `test_docs_palette_table_matches_the_root_block` parses this table and the `:root` block and fails the build if they disagree, because a stale hex in the only table a reader consults is worse than no table (this row said `--trait-offer` `#C792EA` for a day after PR-6 re-picked it):
+
+| token | hex | role |
+|---|---|---|
+| `--ask` | `#FF8A65` | ask / listing — orange |
+| `--bid` | `#7CC4FF` | item bid — blue; also the survival curve |
+| `--coll` | `#33E7C6` | collection offer — green-cyan |
+| `--trait-offer` | `#B266FF` | trait offer — purple (re-picked in PR-6) |
+| `--sale` | `#FFFFFF` | sale / fill — pure white, the loudest mark on the page |
+| `--spread` | `#FFD166` | immediacy cost — yellow |
+| `--cancel` | `#E24E9B` | cancel — magenta |
+| `--invalidated` | `#007711` | exit: `order_invalidate` (PR-8) |
+| `--expired` | `#5544FF` | exit: expiry, derived (PR-8) |
+| `--censored` | `#EEAA00` | still standing at `as_of` — not an exit (PR-8) |
+| `--gap-fill` | `rgba(255,107,107,.10)` | ingestion gap shading |
+
+Event-mix bars are neutral `--text-2`, because that panel's bars encode a *quantity*, not a role.
 
 Two hexes were chosen by measurement rather than by eye, using the OKLab ΔE (×100) and Machado CVD simulation in the dataviz validator, against the `--surface` `#141B17` ground:
 
@@ -308,7 +358,17 @@ Two hexes were chosen by measurement rather than by eye, using the OKLab ΔE (×
 
 - **`--trait-offer` `#B266FF` (re-picked in PR-6).** The old `#C792EA` was ΔE **5.0** from `--bid` under deuteranopia *and* **14.6** under normal vision — below the validator's 15.0 hard floor, so it was a pair a full-colour reader could not reliably separate either. It was recorded rather than fixed because no chart drew it; PR-6 is the chart that draws it, twice (the bid leg's legend swatch, and slot 3 of the §3.2 ramp), so it is re-picked. Worst of protan/deutan: **15.8** from `--bid`, **15.4** from `--cancel`, **27.7** from `--ask`, **25.7** from `--coll`; contrast **5.20 : 1**. At OKLCH L 0.665 / C 0.221 it is the first mark on the page **inside** the validator's dark-mode lightness band.
 
-One measured problem is still recorded rather than fixed: every other mark on the page sits **above** that lightness band, because the Operator chose bright marks on a near-black ground. Two checks in `validate_palette.js` therefore still FAIL on the full data palette by design — the lightness band, and the chroma floor, which `--sale` `#FFFFFF` fails because pure white has zero chroma and is deliberately the loudest mark on the page. What PR-6 *did* fix is the two checks that were failing for a real reason: CVD separation and the normal-vision floor both passed after the re-pick and failed before it.
+- **`--invalidated` `#007711` · `--expired` `#5544FF` · `--censored` `#EEAA00` (PR-8).** DESIGN §4.1b assigns the exit stack to `--bad` / `--warn` / `--faint`; two of those are `@status` and one is `@chrome`, and the rule above forbids a reserved state colour as a data series, so the three missing exits get `@data` tokens. **PR-8's first draft of these three was chosen by eye and failed the validator hard** — `#F0A202` / `#7E8F87` / `#5C7C8A` measured worst-CVD **2.6** and worst-normal **7.7**, two greys no reader could separate. Re-picked and re-measured on the scope that actually governs, which is *co-occurrence*, not the token list:
+
+| scope | worst CVD (protan/deutan) | worst normal | contrast |
+|---|---|---|---|
+| **A — the five-colour exit stack** (`--cancel`, `--sale`, `--invalidated`, `--expired`, `--censored`) | **16.8** `--expired`↔`--cancel` (tritan 9.1) | **27.1** `--censored`↔`--sale` | all ≥ 3:1 |
+| **B — the whole survival panel** (A + `--bid`, the curve above the stack) | **16.2** `--bid`↔`--cancel` (tritan 9.1) | **23.3** `--bid`↔`--sale` | all ≥ 3:1 |
+| C — all ten hex `@data` tokens at once | 6.4 `--censored`↔`--ask` | 10.3 `--censored`↔`--spread` | all ≥ 3:1 |
+
+  Both governing scopes clear the ≥ 11 target, against a floor of 6. **Scope C is the wrong scope and is recorded so nobody re-derives it as a defect:** `--ask` and `--spread` are price lines on the Prices and Immediacy panels, `--censored` is a histogram stack on the survival panel, and no rendered surface puts them together. Scope C's ceiling is set by pre-existing tokens in any case — with *no* new amber at all it is 7.1 (`--expired`↔`--trait-offer`) / 15.1 (`--coll`↔`--bid`). The stack also carries a **2 px `--surface` separator between segments**, which is the secondary encoding the validator requires wherever a pair sits near a floor, and which the mark specs want on stacked fills regardless.
+
+One measured problem is still recorded rather than fixed: most marks on the page sit **above** the dark-mode lightness band, because the Operator chose bright marks on a near-black ground. Two checks in `validate_palette.js` therefore still FAIL on the full data palette by design — the **lightness band** (`--ask` 0.755, `--bid` 0.796, `--coll` 0.834, `--spread` 0.88, `--sale` 1.0, `--censored` 0.782, all above the 0.67 ceiling) and the **chroma floor**, which only `--sale` `#FFFFFF` fails, because pure white has zero chroma and is deliberately the loudest mark on the page. `--invalidated` and `--expired` are *inside* the band; an in-band amber for `--censored` was searched for and found (`#BD8A00`, L 0.60) and **rejected**, because it costs 5.5 points of CVD separation (16.8 → 11.3) to buy one token's lightness harmony. What PR-6 and PR-8 *did* fix is the checks that were failing for a real reason: **CVD separation and the normal-vision floor pass on scopes A and B, and failed before each re-pick** (`--trait-offer` at 5.0/14.6 before PR-6; the exit trio at 2.6/7.7 before this table).
 
 **The multi-trait categorical ramp (§4b.5) adds no new tokens.** Colour on that one panel encodes trait identity rather than event role — the single documented exception to §5.4 — and it reuses four hues the palette already carries: `--bid` · `--coll` · `--trait-offer` · `--cancel`, in that fixed order, never cycled. No event-role series but the combined ask is on the panel, the sub-title says *"colour = trait; asks only"*, and each swatch sits beside its trait's own name. Measured: all **ten** pairs on that panel (the combined `--ask` against each of the four, and the four against each other) are ≥ **11.4** worst-case ΔE across protan/deutan, against a target of 8; the tightest is `--bid` / `--coll` at 11.4, and the normal-vision worst is 15.1. *DESIGN §3.2's suggested ramp — violet `#C792EA` · cyan `#4DD0E1` · pink `#FF8FB1` · tan `#D6BA73` — was measured and rejected: `--ask` / tan is ΔE **3.8**, violet / cyan **6.1** and cyan / pink **7.6**, all below the floor, and it would have added four more hues to an eight-slot palette to get there.*
 

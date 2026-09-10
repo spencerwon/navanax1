@@ -186,12 +186,75 @@ class Dashboard:
     def api_makers(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
         with self.lock:
-            return self.engine.makers(self._slug(q), s, e)
+            return self.engine.makers(self._slug(q), s, e, limit=min(100, int(q.get("limit", "10"))))
 
     def api_lifetimes(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
         with self.lock:
             return self.engine.bid_lifetimes(self._slug(q), s, e)
+
+    # -- PR-8 -----------------------------------------------------------------
+    def _survival_args(self, q: dict[str, str]) -> dict[str, Any]:
+        """The filter row of the bid-lifetime panel, parsed once for both endpoints.
+
+        `as_of` is EXPLICIT and defaults to the end of the window, never to
+        "now": `order_lives.exit_reason` is stored as of the fold, and the
+        estimator has to be told which instant the question is about or it will
+        answer with hindsight (metrics.survival docstring).
+        """
+        s, e = self._window(q)
+        # a mini-map brush overrides the window for the survival panel only
+        if q.get("from") or q.get("to"):
+            fs, ts = iso_to_ts(q.get("from")), iso_to_ts(q.get("to"))
+            if fs is not None:
+                s = fs
+            if ts is not None:
+                e = ts
+        as_of = q.get("as_of")
+        as_of_ts = iso_to_ts(as_of) if as_of else None
+        if as_of and as_of_ts is None:
+            raise ValueError(f"as_of must be an ISO timestamp; got {as_of!r}")
+        band: tuple[float | None, float | None] | None = None
+        if q.get("price_band"):
+            parts = q["price_band"].split(":")
+            if len(parts) != 2:
+                raise ValueError("price_band must be 'min:max' in ETH, either side may be empty")
+            try:
+                band = (float(parts[0]) if parts[0] else None, float(parts[1]) if parts[1] else None)
+            except ValueError as exc:
+                raise ValueError(f"price_band is not numeric: {q['price_band']!r}") from exc
+        makers = [m for m in (q.get("maker") or "").split(",") if m]
+        return {"collection": self._slug(q), "start": s, "end": e,
+                "as_of": as_of_ts if as_of_ts is not None else e,
+                "kind": q.get("kind", "item_received_bid"),
+                "traits": parse_trait_filter(q.get("traits")),
+                "maker": makers or None, "price_band": band}
+
+    def api_survival(self, q: dict[str, str]) -> dict[str, Any]:
+        """Queries under the lock; the bootstrap OUTSIDE it (BUG-20260910-064).
+
+        `survival_prepare` is every part that touches sqlite. The cluster
+        bootstrap that follows is B x n arithmetic over a list already in
+        memory -- seconds of it on a real corpus -- and holding the writer lock
+        across that blocks every other panel and the background normalizer.
+        """
+        a = self._survival_args(q)
+        with self.lock:
+            prep = self.engine.survival_prepare(**a)
+        return self.engine.survival(**a, prepared=prep)
+
+    def api_survival_drill(self, q: dict[str, str]) -> dict[str, Any]:
+        a = self._survival_args(q)
+        try:
+            lo, hi = float(q.get("lo", "")), float(q.get("hi", ""))
+        except ValueError as exc:
+            raise ValueError("survival_drill needs numeric lo and hi (seconds)") from exc
+        if not (hi > lo >= 0):
+            raise ValueError(f"survival_drill needs 0 <= lo < hi; got lo={lo} hi={hi}")
+        return_page = int(q.get("page", "0"))
+        with self.lock:
+            return self.engine.survival_drill(bin_lo=lo, bin_hi=hi, page=return_page,
+                                              page_size=min(200, int(q.get("size", "50"))), **a)
 
     def api_mix(self, q: dict[str, str]) -> list[dict[str, Any]]:
         s, e = self._window(q)
@@ -341,6 +404,8 @@ def make_handler(dash: Dashboard):
         "/api/tape": dash.api_tape,
         "/api/makers": dash.api_makers,
         "/api/lifetimes": dash.api_lifetimes,
+        "/api/survival": dash.api_survival,
+        "/api/survival_drill": dash.api_survival_drill,
         "/api/mix": dash.api_mix,
         "/api/gaps": lambda q: dash.api_gaps(),
         "/api/traits": dash.api_traits,

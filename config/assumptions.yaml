@@ -74,3 +74,55 @@ assumptions:
       union over item bids and trait offers is a different metric and is not
       substituted here.
     applies_to: [floor_ask, collection_bid, immediacy_cost, market_kpi]
+
+  - id: ASM-022
+    name: survival_episode_clustering_and_bootstrap
+    layer: analysis
+    decided: 2026-09-10
+    decided_by: quant-research under tech-lead PR-8; epsilon and B are the quant's, unreviewed by the Operator
+    owner: quant-research
+    review: 2026-10-15
+    code: src/navanax/metrics.py::episode_ids, src/navanax/metrics.py::cluster_bootstrap, src/navanax/metrics.py::survival
+    value:
+      episode_gap_seconds: 60.0          # epsilon: same maker + same scope, quotes < eps apart = ONE episode
+      episode_scope: [scope_kind, token_id]   # a bot working two tokens is two episodes
+      no_maker: one_shared_cluster       # a life with no maker joins ONE cluster, never its own
+      bootstrap_b: 1000                  # replicates; the band is 2.5/97.5 of the replicate distribution
+      bootstrap_seed: 20260910           # deterministic: the band on the page is the band in the test
+      bootstrap_work_cap: 2000000        # B x n resampled observations before B is cut, and the cut is REPORTED
+      bootstrap_unit: maker_episode      # never the order: an order-level bootstrap is ~sqrt(n/n_eff) too narrow
+      min_clusters_for_survival_percentiles: 30
+      band_on_screen: cluster_bootstrap  # Greenwood travels as a diagnostic and is never the drawn band
+      censoring: administrative_at_as_of # exit_reason is stored as of the FOLD and re-read against as_of
+      unknown_terminator: excluded_and_counted
+      rmst_beyond_data: refused          # tau* past the largest observed duration returns null, never a flat tail
+    rationale: >
+      Every number here is a judgement, and epsilon is the weakest of them.
+      (1) EPSILON = 60 s has not been measured. The only evidence we have is a
+      40-minute window in which the median bid life was ~9 s, so a maker that is
+      actively quoting requotes well inside a minute and a full-minute gap on one
+      scope reads as a stop and a restart. The honest statement is that the
+      inter-quote gap DISTRIBUTION has never been plotted; when it is, this
+      number should be re-derived from the trough between the requote mode and
+      the session mode, and until then n_eff carries whatever error epsilon has.
+      Too small an epsilon splits one bot into many clusters and narrows the band
+      -- the flattering direction -- which is why the review date is short.
+      (2) B = 1000 is the conventional replicate count for a percentile
+      bootstrap; the work cap exists because 42,601 lives x 1000 replicates is
+      4e7 resampled observations inside a 10-second dashboard refresh, and a cut
+      that is not reported is a band that quietly means something else.
+      (3) The bootstrap resamples MAKER-EPISODES rather than orders because
+      orders inside one bot episode are not independent; the quant estimates an
+      order-level band would be ~sqrt(n / n_eff) -- about 15x on this data -- too
+      narrow (quant §3.2, factcheck D-W5). Greenwood assumes the same
+      independence and is kept only as a diagnostic.
+      (4) THIRTY CLUSTERS, not thirty orders, is the binding minimum: percentiles
+      from many observations of few independent agents are precise about the
+      agents and silent about the market (quant §3.3). At the maker level this
+      collection currently has n_eff = 3, possibly 1 if the three makers are one
+      entity, so the panel will be in strip mode on real data and that is the
+      correct answer, not a failure.
+      (5) A life whose maker we do not know joins ONE shared cluster instead of
+      its own. Both choices are defensible; this one widens the band, and
+      widening is the direction that cannot manufacture an edge.
+    applies_to: [survival, survival_drill, bid_lifetime_panel]

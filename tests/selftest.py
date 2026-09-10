@@ -2250,7 +2250,9 @@ def test_dashboard_serves_localhost_only(tmp: Path) -> None:
         for path in ("/api/meta", "/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD",
                      "/api/multi?collection=argonauts&interval=1h&range=YTD", "/api/book?collection=argonauts",
                      "/api/tape?collection=argonauts", "/api/makers?collection=argonauts&range=YTD",
-                     "/api/lifetimes?collection=argonauts&range=YTD", "/api/mix?range=YTD", "/api/gaps", "/api/audit"):
+                     "/api/lifetimes?collection=argonauts&range=YTD", "/api/mix?range=YTD", "/api/gaps", "/api/audit",
+                     "/api/survival?collection=argonauts&range=YTD",
+                     "/api/survival_drill?collection=argonauts&range=YTD&lo=0&hi=10"):
             st, body = get(path)
             check(f"dashboard: {path.split('?')[0]} -> 200 JSON", st == 200 and body[:1] in (b"{", b"["),
                   f"{st} {body[:100]}")
@@ -2271,6 +2273,18 @@ def test_dashboard_serves_localhost_only(tmp: Path) -> None:
         check("dashboard: asking a flow metric for a standing book is a 400 with the reason, "
               "not a number computed from a book that does not exist",
               st == 400 and b"no standing-book variant" in body, f"{st} {body[:160]}")
+        # PR-8: the survival endpoints refuse a malformed request rather than
+        # guessing a bin or a price band, and the refusal says which field.
+        st, body = get("/api/survival_drill?collection=argonauts&range=YTD&lo=10&hi=5")
+        check("dashboard: /api/survival_drill refuses an inverted bin with a 400 and the reason",
+              st == 400 and b"lo < hi" in body, f"{st} {body[:120]}")
+        st, body = get("/api/survival?collection=argonauts&range=YTD&price_band=cheap")
+        check("dashboard: /api/survival refuses a price band it cannot parse, rather than ignoring it "
+              "-- a silently dropped filter is a wrong answer that looks right",
+              st == 400 and b"price_band" in body, f"{st} {body[:120]}")
+        st, body = get("/api/survival?collection=argonauts&range=YTD&as_of=yesterday")
+        check("dashboard: /api/survival refuses an unparseable as_of instead of defaulting to now",
+              st == 400 and b"as_of" in body, f"{st} {body[:120]}")
         st, body = get("/")
         check("dashboard: serves the page", st == 200 and b"navanax" in body.lower())
         st, _ = get("/../pyproject.toml")
@@ -3379,6 +3393,22 @@ def test_ui_palette_delta_e_figures_match_the_measurements() -> None:
     check("ui/palette: --trait-offer is no longer #C792EA -- it was ΔE 5.0 from --bid under "
           "deuteranopia and 14.6 under NORMAL vision, and PR-6 is the panel that finally draws it",
           tok_hex != "#C792EA" and tok_hex == "#B266FF", tok_hex)
+
+    # PR-8's exit stack. Same discipline again: these are the hexes the validator was
+    # actually run on (dataviz scripts/validate_palette.js, --mode dark --surface
+    # #141B17 --pairs all), and the run is recorded in the :root comment and docs/08
+    # §4b.1. The first draft -- #F0A202 / #7E8F87 / #5C7C8A -- was chosen by eye and
+    # measured worst-CVD 2.6 / worst-normal 7.7, so this pins the measured set rather
+    # than the shape of a comment: swapping a hex without re-running the validator
+    # fails here.
+    exits = {n: re.search(rf"--{n}\s*:\s*(#[0-9A-Fa-f]{{6}})", html).group(1).upper()
+             for n in ("invalidated", "expired", "censored")}
+    check("ui/palette: the PR-8 exit roles are the MEASURED hexes -- #007711 / #5544FF / #EEAA00, "
+          "worst-CVD 16.8 and worst-normal 27.1 on the five-colour stack",
+          exits == {"invalidated": "#007711", "expired": "#5544FF", "censored": "#EEAA00"}, str(exits))
+    check("ui/palette: the eyeballed first draft (#F0A202 / #7E8F87 / #5C7C8A, worst-CVD 2.6) is "
+          "gone from the tokens and survives only as the recorded measurement that condemned it",
+          not any(h in {"#F0A202", "#7E8F87", "#5C7C8A"} for h in exits.values()), str(exits))
 
 
 # ===========================================================================
@@ -5695,6 +5725,723 @@ def test_merge_leg_maxima_reports_a_tie_as_every_leg_that_holds_it(tmp: Path) ->
           b["median"][1] == 0.50 and b["winning_leg"][1] == "collection+item", str(b["winning_leg"]))
     check("trait chart: ...and each tied leg still carries its OWN n; the tie is not a merge",
           (b["n_item"][1], b["n_collection"][1], b["n_trait_offer_cover"][1]) == (1, 1, 1), str(b))
+    n.close()
+
+
+AS_OF = "2026-09-09T10:02:00Z"          # the fold time every survival fixture below asks about
+
+
+def _survival_fixture(tmp: Path, name: str):
+    """The six-life fixture the KM numbers below are hand-computed from.
+
+    Placed so that, AT `AS_OF` = 10:02:00, the six durations are exactly
+    10, 20, 30, 40, 50, 60 seconds with one of each exit and ONE censored:
+
+        0xa  cancelled   at +10s      0xd  still standing, placed 10:01:20 -> censored at 40s
+        0xb  cancelled   at +20s      0xe  invalidated at +50s
+        0xc  filled      at +30s      0xf  expires     at +60s (derived, no event row)
+
+    Six makers, six tokens, so n_eff = 6 and every life is its own episode.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+    n, put = _survival_store(tmp, name)
+    seq = 0
+
+    def at(raw, when, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, when, seq, **over)
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xa", token_id="1", maker="0xm1", price_eth=0.5, **NO_EXP)
+    at(REAL_CANCEL, "2026-09-09T10:00:10Z", order_hash="0xa", token_id="1")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xb", token_id="2", maker="0xm2", price_eth=0.5, **NO_EXP)
+    at(REAL_CANCEL, "2026-09-09T10:00:20Z", order_hash="0xb", token_id="2")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xc", token_id="3", maker="0xm3", price_eth=0.5, **NO_EXP)
+    at(REAL_SALE, "2026-09-09T10:00:30Z", order_hash="0xc", token_id="3")
+    at(REAL_BID, "2026-09-09T10:01:20Z", order_hash="0xd", token_id="4", maker="0xm4", price_eth=0.5, **NO_EXP)
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xe", token_id="5", maker="0xm5", price_eth=0.5, **NO_EXP)
+    at(REAL_INVALIDATE, "2026-09-09T10:00:50Z", order_hash="0xe", token_id="5")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xf", token_id="6", maker="0xm6", price_eth=0.5,
+       expiration_at="2026-09-09T10:01:00Z", expiration_ts=iso_to_ts("2026-09-09T10:01:00Z"))
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    return n
+
+
+def _survival_store(tmp: Path, name: str):
+    return _lives_store(tmp, name)
+
+
+def _survival_engine(n):
+    from navanax.metrics import MetricEngine, load_intervals
+    return MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def test_survival_kaplan_meier_matches_a_hand_computed_fixture(tmp: Path) -> None:
+    """PR-8, quant §3.2. Every number here was computed by hand before the code ran.
+
+    Kaplan-Meier over six lives, one of them right-censored:
+
+        t=10  n=6 d=1  S = 5/6                = 0.833333
+        t=20  n=5 d=1  S = 5/6 * 4/5 = 4/6    = 0.666667
+        t=30  n=4 d=1  S = 4/6 * 3/4 = 3/6    = 0.500000
+        t=40             (0xd is CENSORED here: it leaves the risk set, contributes
+                          no death, and the curve does not step)
+        t=50  n=2 d=1  S = 1/2 * 1/2          = 0.250000
+        t=60  n=1 d=1  S = 0.25 * 0/1         = 0.000000
+
+    Greenwood at t=30:  v = 1/(6*5) + 1/(5*4) + 1/(4*3) = 1/30 + 1/20 + 1/12 = 1/6
+      sigma = sqrt(1/6) / |ln 0.5| = 0.4082483 / 0.6931472 = 0.5889778
+      CI95  = [0.5^exp(+1.96*sigma), 0.5^exp(-1.96*sigma)] = [0.110943, 0.803713]
+
+    Aalen-Johansen, four causes:
+      F_cancelled(60)  = 1*(1/6) + (5/6)*(1/5)            = 1/6 + 1/6 = 0.333333
+      F_filled(60)     = (4/6)*(1/4)                      = 0.166667
+      F_invalidated(60)= (3/6)*(1/2)                      = 0.250000
+      F_expired(60)    = (1/4)*(1/1)                      = 0.250000
+      SUM = 1.000000 = 1 - S(60).   1 - KM per cause would NOT sum to this.
+
+    RMST(tau*=45) = 1*10 + (5/6)*10 + (4/6)*10 + (1/2)*15 = 10 + 8.33333 + 6.66667 + 7.5 = 32.5
+      with P(not ended by 45) = S(45) = 0.5 printed beside it.
+    Residual: S(50 | age 30) = S(50)/S(30) = 0.25/0.5 = 0.5.
+
+    Every assertion fails today for the same reason: `MetricEngine.survival` does
+    not exist, and `bid_lifetimes` -- the only estimator there was -- drops the
+    censored life entirely and has no notion of a cause.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n = _survival_fixture(tmp, "km.sqlite")
+    eng = _survival_engine(n)
+    r = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF),
+                     tau=45.0, residual_ages=[30.0], residual_horizons=[20.0])
+    km = r["km"]
+    want_t = [0.0, 10.0, 20.0, 30.0, 50.0, 60.0]
+    want_s = [1.0, 5 / 6, 4 / 6, 3 / 6, 0.25, 0.0]
+    check("survival (KM): the curve steps at the five DEATH times and not at the censoring",
+          km["t"] == want_t, f"{km['t']}")
+    check("survival (KM): S(t) matches the hand computation at every step, censored life included",
+          all(abs(a - b) < 1e-12 for a, b in zip(km["s"], want_s, strict=True)), f"{km['s']}")
+    check("survival (KM): the censored life stays in the RISK SET until it is censored -- "
+          "n at t=30 is 4, which is the whole point (bid_lifetimes drops it and reports 5 ended)",
+          km["n_at_risk"] == [6, 6, 5, 4, 2, 1], f"{km['n_at_risk']}")
+    check("survival: n counts orders, censored_n counts the ones still standing at as_of",
+          (r["n"], r["ended_n"], r["censored_n"]) == (6, 5, 1), str((r["n"], r["ended_n"], r["censored_n"])))
+
+    i30 = km["t"].index(30.0)
+    check("survival (Greenwood, log-log): the band at t=30 is the hand-computed [0.110943, 0.803713] "
+          "-- NOT S +/- 1.96 SE, which leaves [0,1] in the tails",
+          abs(km["greenwood_lower"][i30] - 0.110943) < 5e-6
+          and abs(km["greenwood_upper"][i30] - 0.803713) < 5e-6,
+          f"{km['greenwood_lower'][i30]}, {km['greenwood_upper'][i30]}")
+    contained = [(t, lo, s, hi) for t, lo, s, hi in
+                 zip(km["t"], km["greenwood_lower"], km["s"], km["greenwood_upper"], strict=True)
+                 if lo is not None and not (lo <= s <= hi)]
+    check("survival (Greenwood): the band CONTAINS S at every t where it is defined",
+          not contained, str(contained))
+    check("survival (Greenwood): the band is null -- never clamped -- where it is undefined "
+          "(S=1 at t=0 has no log, and n=d at t=60 makes the variance infinite)",
+          km["greenwood_lower"][-1] is None and km["greenwood_upper"][-1] is None,
+          f"{km['greenwood_lower']}")
+
+    bad = [(t, tot, 1 - s) for t, s, tot in
+           zip(km["t"], km["s"], [sum(r["cif"][c][i] for c in r["causes"]) for i in range(len(km["t"]))],
+               strict=True) if abs(tot - (1 - s)) > 1e-12]
+    check("survival (Aalen-Johansen): the CIFs sum to 1 - S(t) at EVERY t -- the identity that "
+          "1 - KM per cause does not have, and the reason each cause is not overstated",
+          not bad, str(bad))
+    last = len(km["t"]) - 1
+    check("survival (AJ): each cause's incidence is the hand-computed value at t=60",
+          all(abs(r["cif"][c][last] - w) < 1e-12 for c, w in
+              (("cancelled", 1 / 3), ("filled", 1 / 6), ("invalidated", 0.25), ("expired", 0.25))),
+          str({c: r["cif"][c][last] for c in r["causes"]}))
+
+    check("survival (RMST): the area under the step curve to tau*=45 is 32.5 s",
+          abs(r["rmst"]["rmst_s"] - 32.5) < 1e-9, str(r["rmst"]))
+    check("survival (RMST): ...and P(not ended by tau*) = S(45) = 0.5 travels WITH it -- "
+          "an RMST without it is half a number (quant §3.2)",
+          abs(r["rmst"]["p_alive_at_tau"] - 0.5) < 1e-12, str(r["rmst"]))
+    res = next(x for x in r["residual"] if x["age_s"] == 30.0 and x["horizon_s"] == 20.0)
+    check("survival (residual): S(t+L | age=t) = S(50)/S(30) = 0.5",
+          abs(res["p_still_standing"] - 0.5) < 1e-12, str(res))
+    far = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF),
+                       tau=10_000.0)
+    check("survival (RMST): a tau* beyond the largest observed duration is REFUSED, not "
+          "extrapolated by extending the last step flat (docs/06 §4.3: holes are never filled)",
+          far["rmst"]["rmst_s"] is None and "not extrapolated" in (far["rmst"]["note"] or ""),
+          str(far["rmst"]))
+    n.close()
+
+
+def test_survival_censors_a_life_that_ended_after_as_of(tmp: Path) -> None:
+    """`exit_reason` is stored AS OF THE FOLD. The estimator must re-read it against
+    the `as_of` it was asked about, or it learns the future.
+
+    One bid placed at 10:00:00 and cancelled at 10:01:40. Folded at 10:02:00 the
+    row says `cancelled`. Asked "what did this look like at 10:00:50", the life
+    must be CENSORED at 50 s -- not ended at 100 s, which is a termination that
+    had not happened yet.
+
+    Fails today: nothing takes an `as_of` at all. `bid_lifetimes` reads
+    `exit_reason` straight off the row.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "asof.sqlite")
+    put(REAL_BID, "2026-09-09T10:00:00Z", 1, order_hash="0xz", token_id="1", maker="0xm1", **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:01:40Z", 2, order_hash="0xz", token_id="1")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    check("survival (as_of): the stored fold really does say `cancelled` -- this is the trap",
+          n.conn.execute("SELECT exit_reason FROM order_lives WHERE order_hash='0xz'").fetchone()[0]
+          == "cancelled")
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+    early = eng.survival("argonauts", s0, e0, iso_to_ts("2026-09-09T10:00:50Z"))
+    check("survival (as_of): a life with t_term > as_of is CENSORED at as_of, not ended",
+          (early["ended_n"], early["censored_n"], early["ended_after_as_of_n"]) == (0, 1, 1), str(early))
+    check("survival (as_of): ...and its duration is as_of - t_place = 50 s, so the curve never steps",
+          early["km"]["t"] == [0.0] and early["km"]["s"] == [1.0]
+          and early["strip"][0]["duration_s"] == 50.0, str(early["km"]))
+    late = eng.survival("argonauts", s0, e0, e0)
+    check("survival (as_of): asked at 10:02:00 the SAME row is an exit at 100 s",
+          (late["ended_n"], late["censored_n"]) == (1, 0) and late["km"]["t"] == [0.0, 100.0],
+          str(late["km"]))
+    with_unknown = n.conn.execute("SELECT COUNT(*) FROM order_lives WHERE exit_reason='unknown'").fetchone()[0]
+    check("survival (as_of): the fixture has no untimed terminator, and the estimator still "
+          "reports the count rather than leaving the caller to assume zero",
+          with_unknown == 0 and late["unknown_terminator_n"] == 0)
+    n.close()
+
+
+def test_survival_n_eff_is_maker_episodes_not_orders(tmp: Path) -> None:
+    """n_eff = maker-episode clusters (quant §2.1, §3.3). One maker requoting the
+    same token three times inside epsilon is ONE observation of independence, not
+    three, and the band has to be built from that count.
+
+    Six lives, six orders. Three of them are 0xbot requoting token 1 at 10 s
+    intervals (epsilon = 60 s), so n_eff = 4: one bot episode plus three
+    one-order episodes. Fails today: there is no episode concept anywhere.
+    """
+    from navanax.metrics import EPISODE_GAP_SECONDS, episode_ids
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "eff.sqlite")
+    seq = 0
+
+    def at(raw, when, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, when, seq, **over)
+    for i, when in enumerate(("2026-09-09T10:00:00Z", "2026-09-09T10:00:10Z", "2026-09-09T10:00:20Z")):
+        at(REAL_BID, when, order_hash=f"0xq{i}", token_id="1", maker="0xbot", **NO_EXP)
+    for i, m in enumerate(("0xp", "0xq", "0xr")):
+        at(REAL_BID, "2026-09-09T10:00:00Z", order_hash=f"0xs{i}", token_id=str(i + 2), maker=m, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    r = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF))
+    check("survival (n_eff): one maker requoting one token inside epsilon collapses to ONE cluster, "
+          "so n_eff (4) < n (6) -- the band is built from 4, not 6",
+          (r["n"], r["n_eff"]) == (6, 4), str((r["n"], r["n_eff"])))
+    check("survival (n_eff): epsilon is reported with the number it produced",
+          r["episode_gap_s"] == EPISODE_GAP_SECONDS and r["min_clusters"] == 30, str(r["episode_gap_s"]))
+    spread = episode_ids([{"maker": "0xbot", "scope_kind": "item", "token_id": "1", "t_place": 0.0},
+                          {"maker": "0xbot", "scope_kind": "item", "token_id": "1",
+                           "t_place": EPISODE_GAP_SECONDS + 1.0}])
+    check("survival (n_eff): the same maker on the same token a full epsilon later is a NEW episode "
+          "-- a stop and a restart, not one continuous quote",
+          spread[0] != spread[1], str(spread))
+    same = episode_ids([{"maker": None, "scope_kind": "item", "token_id": "1", "t_place": 0.0},
+                        {"maker": None, "scope_kind": "item", "token_id": "9", "t_place": 5000.0}])
+    check("survival (n_eff): lives with NO maker share one cluster -- the conservative direction, "
+          "because inventing independence we cannot see narrows the band",
+          same[0] == same[1], str(same))
+    n.close()
+
+
+def test_survival_below_the_cluster_minimum_refuses_percentiles_and_strips(tmp: Path) -> None:
+    """REQ-F-19 as quant §3.3 sharpens it: the binding minimum is 30 maker-episode
+    CLUSTERS, not 30 orders. Below it the panel draws every observation and the
+    estimator refuses every percentile -- refuses, does not flag (docs/00:199).
+
+    Fails today: `bid_lifetimes` guards on the ORDER count, so 38,286 quotes from
+    3 makers would sail past a 30-order threshold and print percentiles about
+    three machines as if they were about the market.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n = _survival_fixture(tmp, "strip.sqlite")
+    eng = _survival_engine(n)
+    r = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF))
+    check("survival (min n): at n_eff = 6 < 30 the mode is `strip`, not `curve`",
+          r["mode"] == "strip" and r["n_eff"] == 6, str((r["mode"], r["n_eff"])))
+    check("survival (min n): percentiles are None -- all three, because a median is a percentile too",
+          r["percentiles"] is None and r["percentiles_withheld"] is True, str(r["percentiles"]))
+    check("survival (min n): the refusal says WHY, in clusters, so the page can print the reason "
+          "instead of a blank",
+          "n_eff = 6" in r["percentiles_withheld_reason"] and "30" in r["percentiles_withheld_reason"],
+          r["percentiles_withheld_reason"])
+    strip = r["strip"]
+    check("survival (min n): `strip` carries EVERY observation, one row per life, with its exit",
+          strip is not None and len(strip) == 6
+          and sorted(x["duration_s"] for x in strip) == [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+          str(strip and [x["duration_s"] for x in strip]))
+    check("survival (min n): the censored life is labelled `censored` on the strip, never `cancelled` "
+          "-- it has not exited",
+          sorted(x["exit_reason"] for x in strip)
+          == ["cancelled", "cancelled", "censored", "expired", "filled", "invalidated"],
+          str(sorted(x["exit_reason"] for x in strip)))
+    n.close()
+
+
+def test_survival_cluster_bootstrap_is_deterministic_and_wider_than_greenwood(tmp: Path) -> None:
+    """The band the panel draws is a maker-episode cluster bootstrap (factcheck D-W5),
+    and it is reproducible: `random.Random(seed)` and nothing else.
+
+    Fails today for the obvious reason and for a second one worth stating: the
+    design proposal specified a Greenwood band, and Greenwood assumes independent
+    observations. On a book quoted by three bots it is roughly sqrt(n/n_eff) too
+    narrow, so shipping it would put false precision on the front page.
+    """
+    from navanax.metrics import cluster_bootstrap, km_curve
+    from navanax.normalize import iso_to_ts
+
+    n = _survival_fixture(tmp, "boot.sqlite")
+    eng = _survival_engine(n)
+    args = ("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF))
+    a = eng.survival(*args, bootstrap_b=200)
+    b = eng.survival(*args, bootstrap_b=200)
+    check("survival (bootstrap): two runs at the same seed give the SAME band, to the bit",
+          a["band"]["s_lower"] == b["band"]["s_lower"] and a["band"]["s_upper"] == b["band"]["s_upper"],
+          str(a["band"]["s_lower"])[:120])
+    c = eng.survival(*args, bootstrap_b=200, seed=1)
+    check("survival (bootstrap): a different seed gives a different band -- the seed is real, "
+          "not decoration",
+          c["band"]["s_lower"] != a["band"]["s_lower"], str(c["band"]["s_lower"])[:120])
+    check("survival (bootstrap): the band, its B and its seed are reported together",
+          a["band"]["b_used"] == 200 and a["band"]["seed"] == 20260910
+          and a["band"]["b_requested"] == 200, str({k: a["band"][k] for k in ("b_used", "seed", "b_requested")}))
+    check("survival (bootstrap): a CIF band is produced per cause on the same grid",
+          all(len(a["band"]["cif_lower"][cz]) == len(a["band"]["grid"]) for cz in a["causes"]),
+          str([len(a["band"]["cif_lower"][cz]) for cz in a["causes"]]))
+
+    # the property that makes the cluster bootstrap the right band: on data where
+    # every life belongs to ONE maker-episode, resampling clusters cannot vary at
+    # all, and a band of width zero is the honest answer to "how independent is this?"
+    obs = [(float(i + 1), True, "cancelled") for i in range(40)]
+    one = cluster_bootstrap({"one-episode": obs}, [10.0, 20.0], b=50, seed=7)
+    check("survival (bootstrap): 40 orders inside ONE maker-episode resample to a band of width "
+          "zero -- 40 quotes from one bot are one observation of independence, and an "
+          "order-level bootstrap would have manufactured a tight, confident band instead",
+          one["s_lower"] == one["s_upper"], str((one["s_lower"], one["s_upper"])))
+    gw = km_curve(obs)
+    check("survival (bootstrap): ...while Greenwood on the same 40 orders reports a band with "
+          "real width, which is exactly the false precision D-W5 warns about",
+          gw["greenwood_lower"][5] is not None and gw["greenwood_upper"][5] - gw["greenwood_lower"][5] > 0.05,
+          str((gw["greenwood_lower"][5], gw["greenwood_upper"][5])))
+
+    # The property that actually matters, and the one D-W5's "~15x too narrow"
+    # estimate is about: when each cluster has its OWN characteristic lifetime --
+    # the bot case, many quotes from few behaviours -- the cluster band must be
+    # materially WIDER than both Greenwood and an order-level bootstrap. On
+    # homogeneous clusters all three agree, which is why asserting only the
+    # degenerate case above would not have caught a bootstrap that resamples the
+    # wrong unit.
+    import random as _rnd
+
+    from navanax.metrics import survival_grid
+    rng = _rnd.Random(11)
+    het: list[tuple[float, bool, str | None]] = []
+    hby: dict[str, list[tuple[float, bool, str | None]]] = {}
+    for cl in range(20):
+        scale = rng.uniform(2, 40)               # this cluster's own behaviour
+        for _ in range(40):
+            o = (round(rng.expovariate(1 / scale) + 0.5, 3), True, "cancelled")
+            het.append(o)
+            hby.setdefault(f"c{cl}", []).append(o)
+    hkm = km_curve(het)
+    hg = survival_grid(hkm["t"])
+    i = len(hg) // 2
+    j = hkm["t"].index(hg[i])
+    gw_w = hkm["greenwood_upper"][j] - hkm["greenwood_lower"][j]
+    hb = cluster_bootstrap(hby, hg, b=150, seed=5)
+    cl_w = hb["s_upper"][i] - hb["s_lower"][i]
+    ob = cluster_bootstrap({f"o{k}": [o] for k, o in enumerate(het)}, hg, b=150, seed=5)
+    ob_w = ob["s_upper"][i] - ob["s_lower"][i]
+    check("survival (bootstrap): with 800 orders from 20 clusters that each quote differently, the "
+          "MAKER-EPISODE band is materially wider than Greenwood -- resampling orders instead "
+          "would have shipped a band a bot's repetition made look precise (D-W5)",
+          cl_w > 2 * gw_w and cl_w > 2 * ob_w,
+          f"cluster {cl_w:.4f} vs greenwood {gw_w:.4f} vs order-level {ob_w:.4f}")
+    n.close()
+
+
+def test_survival_filters_compose(tmp: Path) -> None:
+    """trait AND maker AND price band -- an intersection, not three separate views.
+
+    Four lives over three tokens. Each filter alone selects three of them; all
+    three together select exactly one. If any pair were OR-ed, or one were
+    ignored, the combined count would not be 1. Fails today: no such call exists.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "filters.sqlite")
+    for tid, pr in (("1", "Unclaimed"), ("2", "Unclaimed"), ("3", "Claimed")):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", tid, "Print", pr))
+    rows = (("0xf1", "1", "0xA", 0.50), ("0xf2", "2", "0xA", 1.50),
+            ("0xf3", "1", "0xB", 0.50), ("0xf4", "3", "0xA", 0.50))
+    for i, (h, tid, mk, pr) in enumerate(rows):
+        put(REAL_BID, "2026-09-09T10:00:00Z", i + 1, order_hash=h, token_id=tid, maker=mk,
+            price_eth=pr, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+
+    def nn(**kw):
+        return eng.survival("argonauts", s0, e0, e0, **kw)["n"]
+    check("survival (filters): unfiltered is all four lives", nn() == 4, str(nn()))
+    check("survival (filters): the trait clause alone selects the three lives on Unclaimed tokens",
+          nn(traits={"Print": ["Unclaimed"]}) == 3, str(nn(traits={"Print": ["Unclaimed"]})))
+    check("survival (filters): the maker clause alone selects 0xA's three lives",
+          nn(maker="0xA") == 3, str(nn(maker="0xA")))
+    check("survival (filters): the price band alone selects the three lives at 0.50",
+          nn(price_band=(0.1, 1.0)) == 3, str(nn(price_band=(0.1, 1.0))))
+    check("survival (filters): trait AND maker AND band is the INTERSECTION -- one life, not three "
+          "and not seven",
+          nn(traits={"Print": ["Unclaimed"]}, maker="0xA", price_band=(0.1, 1.0)) == 1,
+          str(nn(traits={"Print": ["Unclaimed"]}, maker="0xA", price_band=(0.1, 1.0))))
+    check("survival (filters): a filter that selects nothing returns n = 0 with the curve at 1, "
+          "never an empty response the page has to guess about",
+          eng.survival("argonauts", s0, e0, e0, maker="0xNOBODY")["n"] == 0)
+    n.close()
+
+
+def test_survival_drill_carries_both_clocks_and_the_distance_to_floor(tmp: Path) -> None:
+    """The drill list (design §4.3). Both timestamps ride along deliberately:
+    `observed_at - valid_at` is our stream lag, and a bid whose whole life is
+    shorter than the lag was never reachable -- a fact about strategy feasibility
+    that is invisible unless both clocks are on the row.
+
+    Fails today: there is no drill endpoint and no distance-to-floor anywhere.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "drill.sqlite")
+    n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                   ("argonauts", "1", "Argo #1", "2026-09-09T00:00:00Z"))
+    n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", "1", "Print", "Unclaimed"))
+    put(DOC_LISTING, "2026-09-09T09:59:00Z", 1, order_hash="0xask", token_id="1", price_eth=1.20, **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:00:10Z", 6, order_hash="0xask", token_id="1")
+    put(REAL_BID, "2026-09-09T10:00:00Z", 2, order_hash="0xb1", token_id="1", maker="0xm1", price_eth=0.90,
+        observed_at="2026-09-09T10:00:02.500000Z",
+        observed_ts=iso_to_ts("2026-09-09T10:00:02.500000Z"), **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:00:06Z", 3, order_hash="0xb1", token_id="1")
+    # a bid placed after the only ask was cancelled: no floor was KNOWN, so the distance is a HOLE
+    put(REAL_BID, "2026-09-09T10:00:20Z", 4, order_hash="0xb2", token_id="9", maker="0xm2", price_eth=0.10, **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:00:25Z", 5, order_hash="0xb2", token_id="9")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+    d = eng.survival_drill("argonauts", s0, e0, e0, 4.0, 8.0)
+    check("survival (drill): the bin holds both five-second-ish lives, with a maker count for the header",
+          d["total"] == 2 and d["makers"] == 2, str({k: d[k] for k in ("total", "makers")}))
+    row = next(r for r in d["rows"] if r["order_hash"] == "0xb1")
+    check("survival (drill): BOTH clocks are on the row, and the stream lag is the difference",
+          row["placed_at_valid"].startswith("2026-09-09T10:00:00")
+          and row["placed_at_observed"].startswith("2026-09-09T10:00:02.5")
+          and abs(row["stream_lag_s"] - 2.5) < 1e-6, str(row))
+    check("survival (drill): distance to floor is bid - the COLLECTION-wide standing ask at the "
+          "instant of placement (0.90 - 1.20 = -0.30), not the ask at some other time",
+          abs(row["floor_ask_at_placement_eth"] - 1.20) < 1e-9
+          and abs(row["distance_to_floor_eth"] + 0.30) < 1e-9, str(row))
+    check("survival (drill): the exit reason, the lifetime and the traits are on the row",
+          row["exit_reason"] == "cancelled" and abs(row["lifetime_s"] - 6.0) < 1e-9
+          and row["traits"] == {"Print": "Unclaimed"}, str(row))
+    hole = next(r for r in d["rows"] if r["order_hash"] == "0xb2")
+    check("survival (drill): with no ask standing at that instant the distance is None -- never "
+          "the last floor seen, never estimated (docs/06 §4.3)",
+          hole["floor_ask_at_placement_eth"] is None and hole["distance_to_floor_eth"] is None, str(hole))
+    check("survival (drill): the floor basis says which floor it is, so `-0.30` cannot be read as "
+          "a distance to the ask on THAT token",
+          "STANDING ask at the instant of placement" in d["floor_basis"], d["floor_basis"])
+    empty = eng.survival_drill("argonauts", s0, e0, e0, 1000.0, 2000.0)
+    check("survival (drill): a bin with nothing in it is an empty list with its counts, not an error",
+          empty["total"] == 0 and empty["rows"] == [], str(empty))
+    n.close()
+
+
+def test_survival_constants_cannot_drift_from_assumptions_yaml() -> None:
+    """Same device as ASM-021's: the register is the artifact a reviewer trusts, so
+    it must not be able to disagree with the code it describes. epsilon, B, the
+    seed and the cluster minimum are all judgements two reasonable people could
+    argue about, which is the test for "assumption" (docs/06 §4.1)."""
+    import yaml
+
+    from navanax.metrics import (
+        EPISODE_GAP_SECONDS,
+        MIN_CLUSTERS_FOR_SURVIVAL,
+        SURVIVAL_BOOTSTRAP_B,
+        SURVIVAL_BOOTSTRAP_SEED,
+        SURVIVAL_BOOTSTRAP_WORK_CAP,
+    )
+    doc = yaml.safe_load((ROOT / "config" / "assumptions.yaml").read_text())
+    asm = next((a for a in (doc.get("assumptions") or []) if a.get("id") == "ASM-022"), {})
+    check("assumptions: ASM-022 exists and names its layer, owner, rationale and code",
+          all(asm.get(k) for k in ("layer", "owner", "rationale", "code", "value")), str(sorted(asm)))
+    v = asm.get("value") or {}
+    check("assumptions: ASM-022's epsilon IS metrics.EPISODE_GAP_SECONDS",
+          v.get("episode_gap_seconds") == EPISODE_GAP_SECONDS,
+          f"{v.get('episode_gap_seconds')} vs {EPISODE_GAP_SECONDS}")
+    check("assumptions: ASM-022's B, seed, work cap and cluster minimum ARE the ones the code uses",
+          (v.get("bootstrap_b"), v.get("bootstrap_seed"), v.get("bootstrap_work_cap"),
+           v.get("min_clusters_for_survival_percentiles"))
+          == (SURVIVAL_BOOTSTRAP_B, SURVIVAL_BOOTSTRAP_SEED, SURVIVAL_BOOTSTRAP_WORK_CAP,
+              MIN_CLUSTERS_FOR_SURVIVAL), str(v))
+    check("assumptions: ASM-022 does NOT restate min_n_for_percentiles -- one threshold, one "
+          "statement of it, or the register grows two answers to one question",
+          "min_n_for_percentiles" not in v, str(sorted(v)))
+
+
+def test_ui_survival_panel_is_the_shape_the_design_specifies() -> None:
+    """DESIGN §4.1-4.3, as corrected by factcheck D-W4/D-W5/D-W6. The four-cell
+    table (n / p10 / median / p90) is gone; the panel is a step curve with a
+    cluster-bootstrap band, an exit-reason histogram, a placement-time mini-map
+    that brushes, and a drill list.
+
+    Fails today: `#life` renders a four-cell table off `/api/lifetimes`.
+    """
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    check("ui/survival: the four-cell lifetime table is gone",
+          "/api/lifetimes" not in html and "no bid→cancel pairs in window" not in html)
+    check("ui/survival: the panel reads /api/survival and /api/survival_drill",
+          "/api/survival?" in html and "/api/survival_drill?" in html)
+    # B4. Scoped to the ONE trace the reader sees, not to "the file contains 'hv'
+    # somewhere". The band's two invisible edge traces are also 'hv'; before this
+    # was scoped, switching the visible curve to a straight interpolation between
+    # event times -- which is the actual lie DESIGN §4.1a forbids -- left the
+    # assertion green on the band's shapes alone.
+    curve = html.split("name:'still standing'", 1)[1].split("}", 1)[0] if "name:'still standing'" in html else ""
+    check("ui/survival: the VISIBLE curve trace is a step (its own line.shape is 'hv'), so switching "
+          "it to a straight interpolation fails here even though the band traces are still 'hv'",
+          "shape:'hv'" in curve and "shape:'spline'" not in html, f"line of the curve trace: {curve[:90]!r}")
+    check("ui/survival: the band is drawn as a fill, and it is the CLUSTER BOOTSTRAP band, "
+          "not Greenwood (D-W5)",
+          "tonexty" in html and "band.s_lower" in html and "greenwood" not in html.split("<script>")[1])
+    check("ui/survival: the x-axis is logarithmic BY DEFAULT -- lifetimes span 1 s to hours",
+          "SURV.log?'log':'linear'" in html and "log:true" in html)
+    check("ui/survival: exit reasons are a STACKED histogram per duration bin",
+          "barmode:'stack'" in html and "by_reason" in html)
+    check("ui/survival: the mini-map is a separate wall-clock strip that BRUSHES the window, and "
+          "the brush snaps to whole placement buckets rather than doing local->UTC arithmetic",
+          "s-mini" in html and "placements" in html and "SURV.from=P.t[i]" in html
+          and "type:'date'" in html)
+    check("ui/survival: clicking a histogram bin opens the drill list under the card",
+          "plotly_click" in html and "survDrill" in html)
+    check("ui/survival: the drill row carries both clocks, the exit reason, maker, price, token, "
+          "traits and the distance to floor",
+          all(k in html for k in ("placed_at_valid", "placed_at_observed", "exit_reason",
+                                  "distance_to_floor_eth", "stream_lag_s")))
+    head = (html.split("$('#s-head').textContent=", 1)[1].split("function survBasis", 1)[0]
+            if "$('#s-head').textContent=" in html else "")
+    check("ui/survival: the HEADER TEMPLATE prints all three counts -- ended, still standing "
+          "(censored) and n_eff -- so deleting n_eff from that one string fails here rather than "
+          "being vouched for by the word appearing in a basis line further down",
+          "${fmt(r.ended_n,0)} ended" in head and "still standing (censored)" in head
+          and "n_eff = ${fmt(r.n_eff,0)}" in head, f"header template: {head[:150]!r}")
+    check("ui/survival: below the cluster minimum the page says `strip, no curve` and draws every "
+          "observation instead",
+          "strip, no curve" in html and "mode==='strip'" in html)
+    check("ui/survival: the filter row carries trait chips, maker, price band and the window",
+          all(k in html for k in ("s-maker", "s-band", "traitSpec()", "/api/makers")))
+    check("ui/survival: the direction warning travels from the estimator's basis onto the page, so "
+          "a shorter median cannot be read as a bug in the new code (D-W4)",
+          "basis.direction_warning" in html and "left_truncation_note" in html)
+
+
+def test_docs_palette_table_matches_the_root_block() -> None:
+    """Tech-lead gate on PR-8, B1/B3. `docs/08 §4b.1` carries the only table a reader
+    consults for "what colour is that mark", and for a day after PR-6 it said
+    `--trait-offer` `#C792EA` while `:root` said `#B266FF`. Nothing compared them.
+
+    This parses BOTH -- the markdown table and the `@data` slice of `:root` -- and
+    fails on any disagreement in either direction, including a token added to one
+    and not the other. A stale hex in the documentation is worse than no hex,
+    because it retires the question.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    doc = (ROOT / "docs" / "08_DASHBOARD.md").read_text()
+    root_body = html.split(":root{", 1)[1].split("}", 1)[0]
+    data_block = root_body.split("/* @data", 1)[1].split("/* @end-tokens", 1)[0]
+    # `--name:#hex;` and the one rgba token, from the CSS
+    css = {m.group(1): m.group(2).upper()
+           for m in re.finditer(r"--([a-z0-9-]+)\s*:\s*(#[0-9A-Fa-f]{6}|rgba\([^)]*\))\s*;", data_block)}
+    # `| `--name` | `#hex` |` from the markdown table
+    md = {m.group(1): m.group(2).upper()
+          for m in re.finditer(r"\|\s*`--([a-z0-9-]+)`\s*\|\s*`(#[0-9A-Fa-f]{6}|rgba\([^)]*\))`\s*\|", doc)}
+    check("docs/08: the @data table lists every token :root defines, and no others",
+          set(md) == set(css), f"docs-only {sorted(set(md) - set(css))} · css-only {sorted(set(css) - set(md))}")
+    wrong = {k: (md.get(k), v) for k, v in css.items() if md.get(k) != v}
+    check("docs/08: every hex in the table IS the hex in :root (a stale doc hex cannot ship)",
+          not wrong, "; ".join(f"--{k}: docs {a}, css {b}" for k, (a, b) in wrong.items()))
+    check("docs/08: the table carries all eleven @data tokens, the three PR-8 exits included",
+          len(css) == 11 and {"invalidated", "expired", "censored"} <= set(css), f"{sorted(css)}")
+    # The measured figures the tech-lead required recorded, in both places.
+    check("docs/08: the measured CVD/normal figures for the exit stack are recorded, not asserted",
+          "16.8" in doc and "27.1" in doc and "16.2" in doc and "23.3" in doc)
+    check("ui/palette: ...and the same measurements are in the :root comment beside the hexes",
+          all(x in data_block for x in ("16.8", "27.1", "16.2", "23.3", "validate_palette.js")))
+    check("docs/08: the failed FIRST draft is recorded too -- a palette that was chosen by eye and "
+          "measured at 2.6 is the evidence that the second one was measured at all",
+          "2.6" in doc and "7.7" in doc and "#F0A202" in data_block)
+    check("ui/survival: stacked segments carry a 2px --surface separator (dataviz mark specs, and "
+          "the secondary encoding a near-floor pair requires)",
+          "line:{width:2,color:C.surface}" in html and "surface:tok('--surface')" in html)
+
+
+def test_survival_drill_episode_is_a_real_cluster_id(tmp: Path) -> None:
+    """N2. `survival_drill` shipped `episode: None` on every row: the id was assigned
+    in `survival()` after `_survival_rows` returned, so the drill -- which calls
+    `_survival_rows` directly -- never got one. A field that is always null beside a
+    header that reports `n_eff` in exactly those units is worse than no field.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "episode.sqlite")
+    seq = 0
+
+    def at(raw, when, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, when, seq, **over)
+    # one maker requoting token 1 three times inside epsilon -> ONE episode
+    for i, when in enumerate(("2026-09-09T10:00:00Z", "2026-09-09T10:00:10Z", "2026-09-09T10:00:20Z")):
+        at(REAL_BID, when, order_hash=f"0xe{i}", token_id="1", maker="0xbot", **NO_EXP)
+        at(REAL_CANCEL, "2026-09-09T10:00:30Z", order_hash=f"0xe{i}", token_id="1")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xother", token_id="2", maker="0xp", **NO_EXP)
+    at(REAL_CANCEL, "2026-09-09T10:00:30Z", order_hash="0xother", token_id="2")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+    d = eng.survival_drill("argonauts", s0, e0, e0, 0.0, 100.0)
+    eps = [r["episode"] for r in d["rows"]]
+    check("survival (drill): every row carries an episode id -- none of them None",
+          len(eps) == 4 and all(e for e in eps), str(eps))
+    bot = {r["episode"] for r in d["rows"] if r["maker"] == "0xbot"}
+    check("survival (drill): the bot's three requotes share ONE episode id, and the other maker's "
+          "life has a different one -- the id is the real cluster, not a per-row placeholder",
+          len(bot) == 1 and len(set(eps)) == 2, str(sorted(set(eps))))
+    r = eng.survival("argonauts", s0, e0, e0)
+    check("survival (drill): the distinct episode ids on the drill ARE the n_eff in the header -- "
+          "the two numbers cannot drift because they come from one assignment",
+          r["n_eff"] == len(set(eps)) == 2, f"n_eff {r['n_eff']} vs drill {sorted(set(eps))}")
+    n.close()
+
+
+def test_survival_response_stays_small_at_forty_thousand_lives(tmp: Path) -> None:
+    """BUG-20260910-064. The response carried seven arrays one entry per distinct
+    event time. At 40,000 lives that measured **2.29 MB** of JSON for a panel about
+    1,100 px wide -- BUG-063's shape one module over, and on the panel that will
+    have the most rows behind it of anything on the page.
+
+    The curve is now thinned onto its own log-spaced grid for TRANSPORT ONLY:
+    every retained point is an actual point of the estimate (indices are selected,
+    never averaged), t = 0 and the final step are always kept, and the percentiles,
+    RMST, residuals and bootstrap are all computed from the FULL curve before the
+    thinning runs.
+
+    The fixture writes `order_lives` rows directly rather than folding 80,000
+    events, because what is under test is the response, not the normalizer.
+    """
+    import json
+    import time as _time
+
+    import navanax.metrics as _M
+    from navanax.metrics import SURVIVAL_GRID_MAX, downsample_km, km_curve
+
+    n, _put = _lives_store(tmp, "big.sqlite")
+    cols = ("order_hash", "collection", "event_type", "scope_kind", "token_id", "maker", "quantity",
+            "price_eth", "price_usd", "t_place", "t_place_observed", "t_term", "exit_reason",
+            "exit_source", "exit_event_type", "expiration_ts", "placement_seen", "revalidated",
+            "terminations_seen", "criteria_n", "criteria_numeric_n", "method_version")
+    rng = __import__("random").Random(1)
+    t0 = 1_757_000_000.0
+    rows = []
+    for i in range(40_000):
+        tp = t0 + i * 0.5
+        d = round(rng.expovariate(1 / 9.0) + 0.4, 3)
+        ended = rng.random() < 0.93
+        rows.append((f"0x{i:06x}", "argonauts", "item_received_bid", "item", str(i % 900),
+                     f"0xm{i % 40:02d}", 1, 0.5, 900.0, tp, tp, (tp + d) if ended else None,
+                     "cancelled" if ended else "censored", "observed" if ended else None,
+                     None, None, 1, 0, 1 if ended else 0, None, None, 1))
+    n.conn.executemany(f"INSERT INTO order_lives ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", rows)
+    n.conn.commit()
+    eng = _survival_engine(n)
+    began = _time.time()
+    r = eng.survival("argonauts", t0 - 10, t0 + 40_000, t0 + 40_000, bootstrap_b=2)
+    took = _time.time() - began
+    body = json.dumps(r, default=str)
+    check("survival (size): the response at 40,000 lives is under 1 MB",
+          len(body) < 1_000_000, f"{len(body)} bytes")
+    check("survival (size): ...because the curve is thinned onto its grid -- a few hundred points "
+          "standing for tens of thousands of event times, and the response says both numbers",
+          r["km"]["downsampled"] is True and r["km"]["points"] <= 2 * SURVIVAL_GRID_MAX + 2
+          and r["km"]["event_times"] > 10_000
+          and len(r["km"]["s"]) == len(r["km"]["t"]) == r["km"]["points"],
+          str({k: r["km"][k] for k in ("points", "event_times", "downsampled")}))
+    check("survival (size): the CIFs are thinned onto the SAME points, so the response cannot "
+          "carry a curve and an incidence on two different grids",
+          all(len(r["cif"][c]) == r["km"]["points"] for c in r["causes"]),
+          str([len(r["cif"][c]) for c in r["causes"]]))
+    check("survival (size): the thinning is index SELECTION, not interpolation -- the last step is "
+          "kept, so S still ends where the estimate ends",
+          r["km"]["s"][-1] == min(r["km"]["s"]) and r["km"]["t"][0] == 0.0 and r["km"]["s"][0] == 1.0,
+          f"first {r['km']['s'][:2]} last {r['km']['s'][-1]}")
+    check("survival (size): percentiles come from the FULL curve, not the thinned one -- the median "
+          "is not on the transport grid",
+          r["percentiles"] is not None and r["percentiles"]["median_s"] not in r["km"]["t"][1:],
+          str(r["percentiles"]))
+    check("survival (size): and it stays inside a few seconds at that size",
+          took < 5.0, f"{took:.2f}s")
+
+    # the identity still holds on every point that survives the thinning
+    bad = [i for i, s in enumerate(r["km"]["s"])
+           if abs(sum(r["cif"][c][i] for c in r["causes"]) - (1 - s)) > 1e-9]
+    check("survival (size): SUM_c F_c = 1 - S still holds EXACTLY at every retained point",
+          not bad, str(bad[:5]))
+
+    # the untrimmed shape, to keep the defect visible (BUG-063's discipline)
+    full = km_curve([(round(rng.expovariate(1 / 9.0) + 0.4, 4), True, "cancelled") for _ in range(5_000)])
+    check("survival (size): downsample_km is a no-op below the cap, so a small panel is never thinned",
+          downsample_km(km_curve([(1.0, True, "cancelled"), (2.0, False, None)]))["downsampled"] is False
+          and downsample_km(full)["downsampled"] is True, str(len(full["t"])))
+
+    # the bootstrap work cap: reported, never silent. Exercised with the cap
+    # temporarily lowered, because triggering it at its real value costs the
+    # 2,000,000 resampled observations it exists to bound.
+    cap = _M.SURVIVAL_BOOTSTRAP_WORK_CAP
+    try:
+        _M.SURVIVAL_BOOTSTRAP_WORK_CAP = 100
+        small = _survival_fixture(tmp, "cap.sqlite")
+        e2 = _survival_engine(small)
+        from navanax.normalize import iso_to_ts
+        c = e2.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF),
+                        iso_to_ts(AS_OF), bootstrap_b=1000)
+        check("survival (size): a bootstrap cut by the work cap SAYS SO, with both B values and the "
+              "direction of the error -- a cut that is not reported is a band that quietly means "
+              "something else",
+              c["band"]["b_used"] < c["band"]["b_requested"] == 1000
+              and "cut from 1000" in (c["band"]["note"] or "")
+              and "wider-tailed" in (c["band"]["note"] or ""), str(c["band"].get("note")))
+        small.close()
+    finally:
+        _M.SURVIVAL_BOOTSTRAP_WORK_CAP = cap
     n.close()
 
 

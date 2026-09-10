@@ -2189,3 +2189,69 @@ bugs:
     asserts the count and the detail length are DIFFERENT numbers on a fixture
     that exceeds the cap -- which is the only way to tell the two apart.
   pr: null
+
+- id: BUG-20260910-064
+  summary: "`/api/survival` returned one array entry per distinct event time on SEVEN arrays -- 2.29 MB of JSON at 40,000 lives for a panel ~1,100 px wide -- and held the dashboard's writer lock across the cluster bootstrap"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T10:20:00-05:00"
+  resolved_at: "2026-09-10T11:40:00-05:00"
+  detected_by: "tech-lead, gate on PR-8 (N1)"
+  detection_channel: tech-lead
+  branch: quant-research
+  locations:
+  - {file: src/navanax/metrics.py, line: 1
+    }
+  - {file: src/navanax/dashboard.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: "None on any number. Presentation and availability: the survival panel is the one with the most rows behind it, and on the Operator's Mac a multi-megabyte response is a page that stalls rather than a page that tells the truth harder. The lock half is worse than the size half -- the bootstrap is seconds of pure arithmetic, and holding the analytical store's writer lock across it blocks every other panel AND the background normalizer, so the whole page stops refreshing while one card computes a band."
+  root_cause: >-
+    Two separate omissions with the same cause: the response was assembled from
+    the estimator's working arrays without asking what a 1,100 px panel can draw,
+    and the endpoint wrapped the whole call in `with self.lock` without asking
+    which part of it touches sqlite. It is BUG-063's shape (an uncapped detail
+    list) one module over, and it was written after BUG-063 was fixed.
+  resolution: "`metrics.downsample_km()` thins t / S / both Greenwood bounds / n_at_risk / d / every CIF onto the curve's own log-spaced grid (2 x SURVIVAL_GRID_MAX = 400 points) for TRANSPORT ONLY -- indices are SELECTED, never averaged, t=0 and the final step are always kept, and percentiles, RMST, residual survival and the bootstrap are all computed from the FULL curve first, so no estimate is read off the thinned one. Measured on a 40,000-life synthetic: 2,289,345 -> 88,017 bytes, 17,985 -> 384 points, and `km.points` / `km.event_times` / `km.downsampled` travel in the response so the thinning is visible rather than implied. Separately, `MetricEngine.survival_prepare()` is now every part of the call that touches the connection; `api_survival` holds the lock across that and drops it before the bootstrap."
+  regression_test: tests/selftest.py::test_survival_response_stays_small_at_forty_thousand_lives
+  monitor_gap: "Every survival fixture had six lives, so seven arrays of six entries weighed nothing and no test looked at the response as an OBJECT WITH A SIZE. The new test builds its 40,000 rows directly in `order_lives` -- what is under test is the response, not the normalizer -- and asserts bytes, point count, that the CIFs are on the same points as the curve, that the identity SUM_c F_c = 1 - S still holds at every retained point, and that the median is not on the transport grid."
+  pr: 8
+
+- id: BUG-20260910-065
+  summary: "`bid_lifetimes` has no `as_of`: it reads `exit_reason` and `t_term` straight off `order_lives`, which stores them AS OF THE FOLD, so a window ending before the last fold is answered with terminations that had not happened yet, and its censored lives are censored at the fold rather than at the window end -- one sample, two horizons"
+  severity: S3
+  priority: P3
+  error_class: TMP
+  status: open
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-09T18:40:00-05:00"
+  detected_by: "quant-research, while implementing PR-8's estimator; raised by the tech-lead as N3"
+  detection_channel: quant-research
+  branch: quant-research
+  locations:
+  - {file: src/navanax/metrics.py, line: 1}
+  requirement: REQ-F-19
+  data_impact: "None observed, and the reason is worth stating rather than assuming: every range the page can ask for -- trailing 1h..30d and anchored HTD/DTD/MTD/YTD -- ends at NOW, and the fold is also now, so the two horizons coincide on every request the UI makes. The defect is reachable only by a caller that asks about a window ending in the past, which today is nothing. If one ever does, the numbers will be wrong in the flattering direction: terminations from after the window shorten the sample and hindsight makes the book look more decisive than it was."
+  root_cause: >-
+    `order_lives` is a fold-time snapshot by design (docs/08 §3.3) and
+    `bid_lifetimes` predates any notion of asking it a question about a past
+    instant. The estimator has no parameter that could carry one.
+  settling_note: >-
+    NOT fixed here, deliberately. PR-8 adds `survival()`, which takes an explicit
+    `as_of` and re-reads every `exit_reason` against it, and the page now draws
+    that instead -- `bid_lifetimes` is off screen and is kept only as the naive
+    comparison the PR description contrasts against. Routing it through
+    `_survival_rows` would change the numbers in the one place a reviewer goes to
+    check how much PR-8 moved the median, which is the opposite of what a
+    comparison baseline is for. The settling options, for whoever picks this up:
+    (a) give `bid_lifetimes` an `as_of` defaulting to `end` -- one parameter, but
+    it silently changes a published number; (b) delete it once PR-8 has been run
+    over the real corpus and the comparison has been made, which is the tech-lead's
+    to schedule; (c) leave it and rely on the `censoring` string, which now says
+    all of this out loud in the response itself. Recommendation is (b), after the
+    corpus run.
+  monitor_gap: "Nothing compares an estimator's horizon against the window it was asked about. Until this is settled the only guard is the `censoring` string in the response, which names this id."
+  pr: 8
+

@@ -37,6 +37,52 @@
    against each of the four ramp slots, and the four against each other -- is >= 11.4. */
   --ask:#FF8A65; --bid:#7CC4FF; --coll:#33E7C6; --trait-offer:#B266FF; --sale:#FFFFFF;
   --spread:#FFD166; --cancel:#E24E9B; --gap-fill:rgba(255,107,107,.10);
+/* PR-8 exit roles. DESIGN §4.1b asked for --bad / --warn / --faint here; those are
+   @status and @chrome tokens and this block's whole rule is that a reserved state
+   colour is never a data series, so the three missing exits get data tokens of
+   their own. `cancelled` reuses --cancel and `filled` reuses --sale (white, the
+   rare and interesting bar) because those roles are already exactly what those
+   tokens mean.
+
+   MEASURED, not chosen by eye. Run: the dataviz skill's scripts/validate_palette.js,
+   `--mode dark --surface #141B17 --pairs all` (OKLab ΔE x100, Machado-Oliveira-
+   Fernandes severity-1.0 CVD sim, worst of protan/deutan). The first draft of these
+   three (#F0A202 / #7E8F87 / #5C7C8A) was run and FAILED hard: worst CVD 2.6, worst
+   normal 7.7 -- two greys a full-colour reader could not separate, let alone a
+   deuteranope. These are the tech-lead's replacements, re-run here:
+
+     scope A, the five-colour exit STACK (--cancel, --sale, and these three)
+       worst CVD    16.8   --expired      vs --cancel    (protan; tritan 9.1)
+       worst normal 27.1   --censored     vs --sale      (normal)
+       contrast     all 5 >= 3:1                                        PASS
+     scope B, the whole survival panel (scope A + --bid, the curve above the stack)
+       worst CVD    16.2   --bid          vs --cancel    (deutan; tritan 9.1)
+       worst normal 23.3   --bid          vs --sale      (normal)       PASS
+     the pairs inside the stack, worst of protan/deutan / normal
+       --invalidated vs --cancel   17.8 / 38.1      --invalidated vs --sale   ~ (both PASS)
+       --expired     vs --cancel   16.8 / 30.4      --expired     vs --bid    27.7 / 31.4
+       --censored    vs --sale     26.2 / 27.1      --invalidated vs --coll   34.6 / 35.1
+
+   Two checks still FAIL on the palette as a whole and both are pre-existing and
+   deliberate, not new: the LIGHTNESS BAND (the Operator chose bright marks on a
+   near-black ground -- --ask 0.755, --bid 0.796, --coll 0.834, --spread 0.88,
+   --sale 1.0 and --censored 0.782 all sit above the dark band's 0.67 ceiling) and
+   the CHROMA FLOOR, which only --sale fails, because pure white has zero chroma
+   and is deliberately the loudest mark on the page (D-W3). An in-band amber was
+   searched for and found (#BD8A00, L 0.60): it costs 5.5 points of CVD separation
+   (16.8 -> 11.3) to buy one token's lightness harmony, so it was rejected.
+   All three new tokens clear the chroma floor; two of the three are inside the
+   lightness band, which is two more than the rest of the data palette manages.
+
+   A run over all ten hex @data tokens at once reports worst CVD 6.4 and worst
+   normal 10.3 -- the pairs are --censored vs --ask and --censored vs --spread,
+   and neither pair ever shares a panel (--ask and --spread are price lines on the
+   Prices and Immediacy panels; --censored is a histogram stack on the survival
+   panel). The co-occurrence scopes A and B are the ones that govern, and they
+   pass. The stack additionally carries a 2px --surface separator between segments,
+   which is the secondary encoding the skill requires wherever a pair is near a
+   floor. */
+  --invalidated:#007711; --expired:#5544FF; --censored:#EEAA00;
 /* @end-tokens — non-colour design tokens below this line. */
   --r:14px; --r-s:9px;
   color-scheme: dark;
@@ -103,7 +149,17 @@ main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:16px 24p
 .kpi .nochg{font-size:11px;font-weight:600;margin-left:8px;vertical-align:4px;color:var(--warn)}
 .kpi svg{display:block;width:100%;height:44px;margin-top:6px}.kpi .sub{color:var(--faint);font-size:11px;margin-top:2px;line-height:1.5}
 .kpi .stamps{color:var(--text-2);font-size:11px;margin-top:3px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
-.plot{width:100%;height:300px}.plot.tall{height:360px}.plot.short{height:200px}
+.plot{width:100%;height:300px}.plot.tall{height:360px}.plot.short{height:200px}.plot.mini{height:80px}
+/* the survival panel's own sub-bar (DESIGN §4.3) */
+.survbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 4px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.survbar label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+.survbar select{font-size:12px;padding:4px 8px}
+.survbar .win{color:var(--text-2);font-size:11.5px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.survbar .ro{color:var(--faint);font-size:11.5px}
+.swatch{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+#s-drill{margin-top:10px;border-top:1px solid var(--border);padding-top:10px}
+#s-drill .dh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:12.5px;margin-bottom:6px}
+#s-drill .scroll{overflow:auto;max-height:420px}
 table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}
 th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
 th{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:10.5px;letter-spacing:.06em;position:sticky;top:0;background:var(--surface)}
@@ -172,7 +228,15 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
  <div class="card c8"><h2><span id="h-prices">Prices</span><em id="h-prices-sub">lowest ask · highest collection offer · highest item bid, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="tlg" id="tlegend"></div><div class="basis" id="b-prices"></div></div>
  <div class="card c4"><h2>Live book<em>standing orders</em></h2><div id="book"></div></div>
  <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer · holes = no bid or no ask</em><span class="chips" data-plot="p-imm"></span></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
- <div class="card c4"><h2>How long a bid stands<em>placed → cancelled</em></h2><div id="life"></div><h2 style="margin-top:16px">Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
+ <div class="card c4"><h2>Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
+ <div class="card c12"><h2>How long a bid stands<em id="s-sub">Kaplan–Meier · right-censored at as_of · competing risks · maker-episode cluster band</em></h2>
+  <div class="survbar" id="s-bar"></div>
+  <div class="basis" id="s-head"></div>
+  <div id="s-curve" class="plot"></div>
+  <div id="s-hist" class="plot short"></div>
+  <div id="s-mini" class="plot mini"></div>
+  <div id="s-drill"></div>
+  <div class="basis" id="b-surv"></div></div>
  <div class="card c12"><h2>Tokens<em>every token matching the filters · click a column to sort</em></h2><div id="screener"></div></div>
  <div class="card c8"><h2>Activity<em>per interval</em><span class="chips" data-plot="p-act"></span></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
  <div class="card c4"><h2>Who is making this market<em>events by wallet, this window</em></h2><div id="makers"></div></div>
@@ -189,6 +253,7 @@ const CSS=getComputedStyle(document.documentElement);
 const tok=n=>CSS.getPropertyValue(n).trim();
 const C={ask:tok('--ask'),bid:tok('--bid'),coll:tok('--coll'),trait:tok('--trait-offer'),sale:tok('--sale'),
  spread:tok('--spread'),cancel:tok('--cancel'),gap:tok('--gap-fill'),
+ invalidated:tok('--invalidated'),expired:tok('--expired'),censored:tok('--censored'),surface:tok('--surface'),
  grid:tok('--grid'),axis:tok('--border'),spike:tok('--border-2'),tick:tok('--muted'),muted:tok('--muted'),
  faint:tok('--faint'),warn:tok('--warn'),bg:tok('--bg'),
  ink:tok('--text'),ink2:tok('--text-2'),hoverBg:tok('--hover-bg'),hoverBd:tok('--hover-border')};
@@ -216,6 +281,11 @@ const money2=(v,den)=>v==null?'—':den==='USD'?'$'+(+v).toLocaleString(undefine
 // compact() is deliberately gone: the Operator's rule is USD to the cent EVERYWHERE,
 // aggregates included. A long total shrinks the type (.sm/.xs); it is never abbreviated.
 const short=a=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
+// A duration, DESIGN §5.1: seconds under a minute, then m/h, never a bare float of seconds.
+const dur=s=>s==null?'—':s<1?(+s).toFixed(2)+' s':s<60?(+s).toFixed(s<10?1:0)+' s':s<3600?Math.floor(s/60)+'m '+Math.round(s%60)+'s':Math.floor(s/3600)+'h '+Math.round(s%3600/60)+'m';
+// A token's hex at an opacity, so a fill can be the line's own colour without a
+// second literal. Reads the token, never a hardcoded value (the palette test).
+const rgba=(hex,a)=>{const h=(hex||'').trim().replace('#','');const f=h.length===3?h.split('').map(c=>c+c).join(''):h;const v=parseInt(f,16);return isNaN(v)?'rgba(0,0,0,0)':`rgba(${(v>>16)&255},${(v>>8)&255},${v&255},${a})`};
 const fit=s=>s.length>18?'xs':s.length>13?'sm':'';
 const bytes=b=>b<1e6?(b/1e3).toFixed(0)+' KB':b<1e9?(b/1e6).toFixed(1)+' MB':(b/1e9).toFixed(2)+' GB';
 
@@ -524,8 +594,165 @@ async function tape(){const p=base();const t=await J('/api/tape?'+qs({collection
  $('#tape').innerHTML=t.length?`<table><tr><th>when</th><th>item</th><th class="num">${S.denom}</th><th>seller</th><th>buyer</th></tr>${t.map(r=>`<tr><td>${clock(r.valid_at)}</td><td>#${esc(r.token_id||'?')}</td><td class="num">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td class="mono">${esc(short(r.taker))}</td></tr>`).join('')}</table>`:`<div class="empty">no sales in the store yet — a thin market can go hours between them</div>`}
 async function makers(){const p=base();const m=await J('/api/makers?'+qs({collection:p.collection,range:p.range}));const T=m.total_events_with_maker||1;
  $('#makers').innerHTML=m.top.length?`<table><tr><th>wallet</th><th class="num">events</th><th class="num">share</th><th class="num">bids</th><th class="num">cancels</th></tr>${m.top.map(r=>`<tr><td class="mono">${esc(short(r.maker))}</td><td class="num">${fmt(r.events,0)}</td><td class="num">${(100*r.events/T).toFixed(1)}%</td><td class="num">${fmt(r.bids,0)}</td><td class="num">${fmt(r.cancels,0)}</td></tr>`).join('')}</table><div class="basis">of ${fmt(T,0)} events with a wallet in this window</div>`:'<div class="empty">nothing in window</div>'}
-async function life(){const p=base();const l=await J('/api/lifetimes?'+qs({collection:p.collection,range:p.range}));
- $('#life').innerHTML=l.n?`<table><tr><th class="num">n</th><th class="num">p10</th><th class="num">median</th><th class="num">p90</th></tr><tr><td class="num">${fmt(l.n,0)}</td><td class="num">${fmt(l.p10_s,0)} s</td><td class="num"><b>${fmt(l.median_s,0)} s</b></td><td class="num">${fmt(l.p90_s,0)} s</td></tr></table><div class="basis">${l.percentiles_reliable?'':'⚠ n < '+l.min_n_for_percentiles+': percentiles not reliable (REQ-F-19)'}</div>`:'<div class="empty">no bid→cancel pairs in window</div>'}
+/* ---------- PR-8: "how long a bid stands", rebuilt (DESIGN §4, quant §3) --------
+   Three coupled pieces on the panel and one slide-down list:
+     (a) the Kaplan-Meier step curve with the MAKER-EPISODE CLUSTER BOOTSTRAP band
+         (not Greenwood — factcheck D-W5: Greenwood assumes independent
+         observations and quotes from three bots are not);
+     (b) an exit-reason STACKED histogram per log-spaced duration bin — "cancelled
+         after 4 s" and "filled after 4 s" are opposite facts and one curve cannot
+         carry both;
+     (c) a placement-time mini-map on its OWN wall-clock axis, dragged to brush a
+         window that both of the above are then recomputed over.
+   Click a histogram bin for the drill list. Every estimate here is computed in
+   metrics.survival(); this file draws it and contains no arithmetic of its own.  */
+const SURV={kind:'item_received_bid',mk:'',band:'',from:null,to:null,bin:null,log:true};
+const BANDS=[['','any price'],[':0.05','< 0.05 Ξ'],['0.05:0.25','0.05 – 0.25 Ξ'],['0.25:1','0.25 – 1 Ξ'],['1:5','1 – 5 Ξ'],['5:','≥ 5 Ξ']];
+const KINDS=[['item_received_bid','item bids'],['collection_offer','collection offers'],['trait_offer','trait offers']];
+const exitColor=k=>({cancelled:C.cancel,invalidated:C.invalidated,filled:C.sale,expired:C.expired,censored:C.censored}[k]||C.muted);
+const survQ=()=>{const p=base();const q={collection:p.collection,range:p.range,traits:p.traits,kind:SURV.kind};
+ if(SURV.mk)q.maker=SURV.mk; if(SURV.band)q.price_band=SURV.band;
+ if(SURV.from){q.from=SURV.from;q.to=SURV.to} return q};
+function survBar(){
+ const chips=Object.entries(S.traits).flatMap(([t,vs])=>vs.map(v=>`<span class="pill">${esc(t)}: ${esc(v)}</span>`)).join('');
+ const mk=S.survMakers||[];
+ $('#s-bar').innerHTML=
+   `<label>kind</label><select id="s-kind">${KINDS.map(([v,l])=>`<option value="${v}" ${v===SURV.kind?'selected':''}>${l}</option>`).join('')}</select>`
+  +`<label>maker</label><select id="s-maker"><option value="">all makers</option>${mk.map(({maker:mkr,events:ev})=>`<option value="${esc(mkr)}" ${mkr===SURV.mk?'selected':''}>${esc(short(mkr))} · ${fmt(ev,0)} ev</option>`).join('')}</select>`
+  +`<label>price band</label><select id="s-band">${BANDS.map(([v,l])=>`<option value="${v}" ${v===SURV.band?'selected':''}>${l}</option>`).join('')}</select>`
+  +`<label>traits</label>${chips||'<span class="ro">none — set them in the sidebar</span>'}`
+  +`<span class="win">window: ${SURV.from?clock(SURV.from)+' → '+clock(SURV.to)+' '+S.tz:'the global range (drag the strip below to brush one)'}</span>`
+  +(SURV.from?`<button id="s-clearwin">clear window</button>`:'');
+ $('#s-kind').addEventListener('change',e=>{SURV.kind=e.target.value;SURV.bin=null;surv()});
+ $('#s-maker').addEventListener('change',e=>{SURV.mk=e.target.value;SURV.bin=null;surv()});
+ $('#s-band').addEventListener('change',e=>{SURV.band=e.target.value;SURV.bin=null;surv()});
+ const cw=$('#s-clearwin');if(cw)cw.addEventListener('click',()=>{SURV.from=SURV.to=null;SURV.bin=null;surv()})}
+function survHead(r){
+ const pcts=r.percentiles?`p10 ${dur(r.percentiles.p10_s)} · median ${dur(r.percentiles.median_s)} · p90 ${dur(r.percentiles.p90_s)}`
+   :`percentiles WITHHELD — ${esc(r.percentiles_withheld_reason||'')}`;
+ const rm=r.rmst.rmst_s!=null?`RMST(${dur(r.rmst.tau_s)}) = ${dur(r.rmst.rmst_s)} · P(not ended by τ*) = ${(100*r.rmst.p_alive_at_tau).toFixed(1)}%`
+   :`RMST — ${esc(r.rmst.note||'no data')}`;
+ const res=(r.residual||[]).filter(x=>x.p_still_standing!=null)
+   .map(x=>`age ${dur(x.age_s)} → +${dur(x.horizon_s)}: ${(100*x.p_still_standing).toFixed(1)}%`).join(' · ');
+ $('#s-head').textContent=
+   `n = ${fmt(r.ended_n,0)} ended · ${fmt(r.censored_n,0)} still standing (censored) · n_eff = ${fmt(r.n_eff,0)} maker-episode clusters (ε = ${dur(r.episode_gap_s)}, min ${r.min_clusters})\n`
+  +`${pcts}\n${rm}${res?'\nresidual survival — '+res:''}`}
+function survBasis(r){
+ const out=[];
+ out.push(`as of ${clock(r.basis.as_of)} ${S.tz} · window ${clock(r.basis.window.start)} → ${clock(r.basis.window.end)} · kind ${esc(r.kind)}`);
+ out.push(`estimator: ${r.basis.estimator}`);
+ out.push(`censoring: ${r.basis.censoring}`);
+ if(r.unknown_terminator_n)out.push(`${fmt(r.unknown_terminator_n,0)} life/lives had a terminator we could not place in time — excluded from the risk set and counted, never called censored`);
+ if(r.placed_after_as_of_n)out.push(`${fmt(r.placed_after_as_of_n,0)} placed after as_of — not yet in existence at the instant asked about`);
+ if(r.ended_after_as_of_n)out.push(`${fmt(r.ended_after_as_of_n,0)} ended AFTER as_of — read as censored here, because exit_reason is stored as of the fold`);
+ if(r.orphan_rate!=null)out.push(`orphan terminations ${fmt(r.orphan_terminations,0)} of ${fmt(r.terminations_in_window,0)} (${(100*r.orphan_rate).toFixed(1)}%) — placements we never saw`);
+ if(r.band.b_used)out.push(`band: cluster bootstrap over ${fmt(r.band.clusters_resampled,0)} maker-episodes, B = ${fmt(r.band.b_used,0)}, seed ${r.band.seed}`);
+ if(r.band.note)out.push('⚠ '+r.band.note);
+ if(r.band.withheld_reason)out.push('⚠ band withheld — '+r.band.withheld_reason);
+ if(r.basis.as_of_beyond_record)out.push(`⚠ as_of is past the last event in the store (${clock(r.basis.record_ends_at)}) — everything after it reads as still standing because we stopped listening, not because it stood`);
+ out.push('⚠ '+r.basis.left_truncation_note);
+ out.push('⚠ '+r.basis.direction_warning);
+ if(SURV.log)out.push('the log x-axis cannot draw t = 0, so the flat run before the first exit is drawn from half the first exit time; it is a drawing artefact, not an observation');
+ $('#b-surv').textContent=out.join('\n')}
+async function surv(){
+ const q=survQ();
+ if(!S.survMakers){try{S.survMakers=(await J('/api/makers?'+qs({collection:q.collection,range:q.range,limit:20}))).top}catch(e){S.survMakers=[]}}
+ const r=await J('/api/survival?'+qs(q));S.surv=r;
+ survBar();survHead(r);survBasis(r);
+ if(!window.Plotly)return;
+ const strip=r.mode==='strip';
+ $('#s-sub').textContent=strip
+  ? `strip, no curve (n_eff = ${r.n_eff} < ${r.min_clusters}) — every observation, no percentiles`
+  : 'Kaplan–Meier · right-censored at as_of · competing risks · maker-episode cluster band';
+ const xax={...L().xaxis,type:SURV.log?'log':'linear',fixedrange:true,showspikes:false,title:{text:'lifetime (s, log)',font:{color:C.tick,size:10}}};
+ // (a) curve or strip -----------------------------------------------------
+ let traces=[],lay;
+ if(strip){
+  const rows=r.strip||[],by={};
+  rows.forEach((x,i)=>{(by[x.exit_reason]=by[x.exit_reason]||[]).push([x.duration_s,((i%9)/9)-0.5,x])});
+  traces=Object.entries(by).map(([k,pts])=>({x:pts.map(p=>p[0]),y:pts.map(p=>p[1]),mode:'markers',type:'scatter',name:k,
+    marker:{color:exitColor(k),size:8,opacity:.85,line:{width:0}},
+    customdata:pts.map(p=>[short(p[2].maker),p[2].token_id||'—',dur(p[2].duration_s)]),
+    hovertemplate:'%{customdata[2]} · %{fullData.name}<br>maker %{customdata[0]} · token %{customdata[1]}<extra></extra>'}));
+  lay={...L(),dragmode:false,margin:{l:56,r:56,t:8,b:34},xaxis:xax,
+    yaxis:{...L().yaxis,range:[-1,1],showticklabels:false,showgrid:false,zeroline:false,fixedrange:true}};
+ }else{
+  const t=r.km.t.slice(),s=r.km.s.map(v=>100*v);
+  if(SURV.log&&t.length>1&&t[0]===0)t[0]=t[1]/2;
+  const g=r.band.grid||[],lo=r.band.s_lower||[],hi=r.band.s_upper||[];
+  if(g.length&&lo.some(v=>v!=null)){
+   traces.push({x:g,y:lo.map(v=>v==null?null:100*v),mode:'lines',type:'scatter',line:{width:0,shape:'hv'},showlegend:false,hoverinfo:'skip',connectgaps:false});
+   traces.push({x:g,y:hi.map(v=>v==null?null:100*v),mode:'lines',type:'scatter',line:{width:0,shape:'hv'},fill:'tonexty',fillcolor:rgba(C.bid,.12),name:'95% cluster-bootstrap band',hoverinfo:'skip',connectgaps:false});}
+  traces.push({x:t,y:s,mode:'lines',type:'scatter',name:'still standing',line:{color:C.bid,width:2,shape:'hv'},connectgaps:false,
+    customdata:r.km.n_at_risk.map((n,i)=>[n,r.km.d[i]]),
+    hovertemplate:'%{y:.1f}% still standing at %{x:,.3~f}s  (at risk %{customdata[0]}, exits %{customdata[1]})<extra></extra>'});
+  if(r.percentiles){const pk=[['p10',r.percentiles.p10_s,90],['median',r.percentiles.median_s,50],['p90',r.percentiles.p90_s,10]].filter(x=>x[1]!=null);
+   traces.push({x:pk.map(x=>x[1]),y:pk.map(x=>x[2]),mode:'markers+text',type:'scatter',name:'percentiles',
+     text:pk.map(x=>x[0]+' '+dur(x[1])),textposition:'top right',textfont:{color:C.ink2,size:10},
+     marker:{color:C.sale,size:7,symbol:'circle-open',line:{width:1.5}},hoverinfo:'skip'});}
+  lay={...L(),dragmode:false,margin:{l:56,r:56,t:8,b:34},xaxis:xax,
+    yaxis:{...L().yaxis,range:[0,100],ticksuffix:'%',fixedrange:true,title:{text:'still standing',font:{color:C.tick,size:10}}}};
+ }
+ Plotly.react('s-curve',traces,lay,CFG);
+ // (b) exit-reason histogram ---------------------------------------------
+ const bins=(r.histogram.bins||[]);
+ const hx=bins.map(b=>Math.sqrt(b.lo*b.hi)),hw=bins.map(b=>Math.log10(b.hi)-Math.log10(b.lo));
+ const ht=(r.histogram.reasons||[]).map(k=>({x:hx,y:bins.map(b=>b.by_reason[k]||0),width:hw,type:'bar',name:k,
+   marker:{color:exitColor(k),line:{width:2,color:C.surface}},   // 2px --surface separator between stacked segments (dataviz marks-and-anatomy)
+   customdata:bins.map(b=>dur(b.lo)+' – '+dur(b.hi)),
+   hovertemplate:'%{customdata}: %{y:,d} %{fullData.name}<extra></extra>'}));
+ Plotly.react('s-hist',ht,{...L(),barmode:'stack',dragmode:false,margin:{l:56,r:56,t:4,b:34},
+   xaxis:{...xax,title:{text:'lifetime bin — click a bar for the orders in it',font:{color:C.tick,size:10}}},
+   yaxis:{...L().yaxis,fixedrange:true,title:{text:'orders',font:{color:C.tick,size:10}}},
+   legend:{orientation:'h',y:1.25,x:0,font:{color:C.ink}}},CFG);
+ const hel=document.getElementById('s-hist');
+ if(hel&&hel.on&&!hel._survBound){hel._survBound=true;
+  hel.on('plotly_click',ev=>{const i=ev&&ev.points&&ev.points[0]?ev.points[0].pointIndex:null;
+   const b=i==null?null:(S.surv.histogram.bins||[])[i];if(b)survDrill(b)})}
+ // (c) placement-time mini-map, its OWN wall-clock axis, drag to brush -----
+ const pl=r.placements||{t:[],n:[]},locals=pl.t.map(plotT);
+ Plotly.react('s-mini',[{x:locals,y:pl.n,type:'bar',marker:{color:C.coll,line:{width:0}},
+   hovertemplate:'%{x}: %{y:,d} placed<extra></extra>'}],
+  {...L(),dragmode:'select',selectdirection:'h',margin:{l:56,r:56,t:4,b:26},
+   xaxis:{...L().xaxis,type:'date',fixedrange:false,showspikes:false,title:{text:'placed at (drag to brush)',font:{color:C.tick,size:10}}},
+   yaxis:{...L().yaxis,fixedrange:true,showgrid:false}},CFG);
+ const mel=document.getElementById('s-mini');
+ if(mel&&mel.on&&!mel._survBound){mel._survBound=true;
+  mel.on('plotly_selected',ev=>{
+   if(!ev||!ev.range||!ev.range.x)return;
+   // Snap to whole placement buckets: the bucket ISO strings are the exact UTC
+   // instants the API bucketed on, so no local->UTC arithmetic is needed and the
+   // brushed window is always a window the data was actually counted over.
+   const P=S.surv.placements,lo=ev.range.x[0],hi=ev.range.x[1],ls=P.t.map(plotT);
+   let i=ls.findIndex(x=>x>=lo);if(i<0)i=0;
+   let j=ls.length-1;while(j>i&&ls[j]>hi)j--;
+   SURV.from=P.t[i];SURV.to=new Date(Date.parse(P.t[j])+P.step_s*1000).toISOString();
+   SURV.bin=null;surv()});
+  mel.on('plotly_deselect',()=>{SURV.from=SURV.to=null;surv()})}
+ if(SURV.bin)survDrill(SURV.bin);else $('#s-drill').innerHTML=''}
+async function survDrill(bin){
+ SURV.bin=bin;
+ const d=await J('/api/survival_drill?'+qs({...survQ(),lo:bin.lo,hi:bin.hi,size:50}));
+ const den=S.denom;
+ const row=x=>`<tr><td>#${esc(x.token_id||'—')}</td>`
+  +`<td>${Object.entries(x.traits||{}).map(([k,v])=>`<span class="pill">${esc(k)}: ${esc(v)}</span>`).join('')||'<span class="ro">—</span>'}</td>`
+  +`<td class="num"><b>${money2(den==='USD'?x.price_usd:x.price_eth,den)}</b></td>`
+  +`<td class="num">${money2(den==='USD'?x.price_eth:x.price_usd,den==='USD'?'ETH':'USD')}</td>`
+  +`<td class="mono">${esc(short(x.maker))}</td>`
+  +`<td>${clock(x.placed_at_valid)}</td>`
+  +`<td>${clock(x.placed_at_observed)}<span class="ro"> (+${fmt(x.stream_lag_s,2)}s)</span></td>`
+  +`<td>${x.still_standing?'<span class="ro">still standing</span>':clock(x.ended_at)}</td>`
+  +`<td class="num">${dur(x.lifetime_s)}</td>`
+  +`<td><span class="swatch" style="background:${exitColor(x.exit_reason)}"></span>${esc(x.exit_reason)}</td>`
+  +`<td class="num">${x.distance_to_floor_eth==null?'<span class="ro">— no floor known</span>':money2(x.distance_to_floor_eth,'ETH')}</td>`
+  +`<td class="mono ro">${esc(short(x.order_hash))}</td></tr>`;
+ $('#s-drill').innerHTML=
+   `<div class="dh"><b>bin ${dur(d.bin.lo)} – ${dur(d.bin.hi)}</b><span>${fmt(d.total,0)} orders · ${fmt(d.makers,0)} makers</span>`
+  +`<button id="s-drill-x">close</button></div>`
+  +(d.total?`<div class="scroll"><table><thead><tr><th>token</th><th>traits</th><th class="num">${den}</th><th class="num">${den==='USD'?'ETH':'USD'}</th><th>maker</th><th>placed (valid)</th><th>placed (observed)</th><th>ended</th><th class="num">lifetime</th><th>exit</th><th class="num">vs floor</th><th>hash</th></tr></thead><tbody>${d.rows.map(row).join('')}</tbody></table></div>`
+   :'<div class="empty">no orders in this bin under the current filters</div>')
+  +`<div class="basis">${esc(d.floor_basis)} · both clocks are shown: observed − valid is our stream lag, and a bid whose whole life is shorter than the lag was never reachable · showing ${fmt(d.rows.length,0)} of ${fmt(d.total,0)}</div>`;
+ const x=$('#s-drill-x');if(x)x.addEventListener('click',()=>{SURV.bin=null;$('#s-drill').innerHTML=''})}
 async function gapsAudit(){gaps=await J('/api/gaps');const a=await J('/api/audit');
  $('#gaps').innerHTML=gaps.length?`<table><tr><th>started</th><th>ended</th><th>reason</th><th>lost for good</th></tr>${gaps.slice(-10).reverse().map(g=>`<tr><td>${clock(g.started_at)}</td><td>${g.ended_at?clock(g.ended_at):'<span class=note>open</span>'}</td><td title="${esc(g.reason)}">${esc((g.reason||'').slice(0,48))}</td><td>${esc((g.irrecoverable_classes||[]).map(c=>c.replace('item_','')).join(', ')||'—')}</td></tr>`).join('')}</table>`:'<div class="empty">no gaps recorded</div>';
  $('#audit').innerHTML=(a.failures.length?a.failures.map(f=>`<div class="fail">${esc(f)}</div>`).join(''):'<div class="ok">clean</div>')+a.notes.map(n=>`<div class="note">${esc(n)}</div>`).join('')+`<div class="basis">${a.mode} · ${clock(a.at)}</div>`}
@@ -557,7 +784,7 @@ async function screener(){const p=base();const r=await J('/api/screener?'+qs({co
  const pv=$('#pg-prev'),nx=$('#pg-next');if(pv)pv.addEventListener('click',()=>{S.page--;screener()});if(nx)nx.addEventListener('click',()=>{S.page++;screener()})}
 
 /* ---------- orchestration ---------- */
-async function all(){try{await status();await gapsAudit();await Promise.all([kpis(),prices(),imm(),act(),mix(),book(),tape(),makers(),life(),screener()])}catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
+async function all(){try{await status();await gapsAudit();await Promise.all([kpis(),prices(),imm(),act(),mix(),book(),tape(),makers(),surv(),screener()])}catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
 function seg(id,key,cb){$('#'+id).querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{$('#'+id).querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');S[key]=b.dataset.v;cb()}))}
 function layout(){const h=document.querySelector('header').offsetHeight,c=document.querySelector('.controls').offsetHeight;document.documentElement.style.setProperty('--hdr',h+'px');document.documentElement.style.setProperty('--top',(h+c)+'px')}
 window.addEventListener('resize',layout);

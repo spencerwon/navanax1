@@ -679,9 +679,67 @@ directly, so an unknown interval reached the page as a bare **500**
 which the handler maps to **400** — REQ-N-09, an interval not in
 `intervals.yaml` is refused, not improvised.
 
+### Round 19 — the tech-lead blocks PR-8 (survival estimator + bid-lifetime panel)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-064 | S2 | P1 | fixed | `/api/survival` shipped one array entry per event time on seven arrays — **2.29 MB** at 40,000 lives — and held the dashboard's writer lock across the cluster bootstrap |
+| BUG-20260910-065 | S3 | P3 | **open** | `bid_lifetimes` has no `as_of`: it reads terminations as of the **fold**, so a window ending in the past is answered with hindsight and its censored lives sit on a different horizon from its ended ones |
+
+**064 is BUG-063's shape, one module over, written after 063 was fixed.** An
+uncapped list became an untrimmed set of arrays. The curve is now thinned onto its
+own log-spaced grid **for transport only** — indices are *selected*, never
+averaged; `t = 0` and the final step are always kept; and the percentiles, RMST,
+residual survivals and the bootstrap are all computed from the **full** curve
+before the thinning runs, so no estimate is ever read off the thinned one.
+Measured on a 40,000-life synthetic: **2,289,345 → 88,017 bytes**, 17,985 → 384
+points. `km.points`, `km.event_times` and `km.downsampled` travel in the response,
+because a reduction nobody can see is a reduction nobody can check.
+
+The lock half is the worse half and had no size at all: the bootstrap is `B × n`
+arithmetic over a list already in memory, and holding the analytical store's
+writer lock across seconds of it stops every other panel *and* the background
+normalizer. `survival_prepare()` is now exactly the part that touches sqlite; the
+endpoint holds the lock across that and drops it before the bootstrap.
+
+> **Every survival fixture had six lives**, so seven arrays of six entries weighed
+> nothing and no test ever looked at the response as an object with a size. The
+> same blind spot produced 063. A panel's fixture has to be big enough for its
+> failure mode to exist.
+
+**065 is left open on purpose, with a settling note in the ledger.** It is not
+reachable from the page — every range the UI can ask for ends at *now*, which is
+also the fold — and PR-8's `survival()` takes an explicit `as_of` and is what the
+page now draws. `bid_lifetimes` is off screen and kept only as the naive
+comparison the PR description contrasts against; changing its numbers now would
+alter the one baseline a reviewer uses to judge how far PR-8 moved the median.
+The recommendation recorded is to delete it once PR-8 has been run over the real
+corpus and that comparison has been made. Until then the defect is stated in the
+response itself: `bid_lifetimes`' own `censoring` string names this id and says
+what the number is not.
+
+Also in this round, no ledger id — three findings that were wrong-before-shipping
+rather than defects in shipped code. **The PR-8 exit palette was chosen by eye and
+failed the validator hard**: `#F0A202` / `#7E8F87` / `#5C7C8A` measured worst-CVD
+**2.6** and worst-normal **7.7** on the five-colour exit stack — two greys no
+reader could separate. Re-picked to `#007711` / `#5544FF` / `#EEAA00` and
+re-measured at **16.8 / 27.1** (§4b.1 carries the table and the scopes). **The
+`@data` row in docs/08 still said `--trait-offer` `#C792EA`** a day after PR-6
+re-picked it, and nothing compared the table to `:root`;
+`test_docs_palette_table_matches_the_root_block` now parses both and fails on any
+disagreement in either direction. And **two UI assertions were passing on the
+wrong string** — the step-shape check was satisfied by the band's invisible edge
+traces, so switching the visible curve to a straight interpolation left it green;
+both are now scoped to the exact trace and the exact header template, and each was
+proven by mutation.
+
 ### Still open
 
-**None.** All 63 logged bugs are fixed.
+| ID | Sev | Pri | Summary | Why it is open |
+|---|---|---|---|---|
+| BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
+
+64 of 65 logged bugs are fixed.
 
 ### The lesson
 

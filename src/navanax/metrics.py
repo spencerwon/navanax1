@@ -744,6 +744,344 @@ def time_weighted_quantile(pairs: list[tuple[float, float]], p: float) -> float 
 
 
 # ---------------------------------------------------------------------------
+# survival: Kaplan-Meier with right-censoring, Aalen-Johansen competing risks,
+# and a maker-episode cluster bootstrap (quant §3.2, tech-lead PR-8)
+#
+# Library-free on purpose. The whole estimator is four recurrences and a
+# resampling loop; a dependency on lifelines/scipy would put the one number the
+# Operator is going to quote behind a version pin nobody in this project reads.
+# 1.96 is the only constant, exactly as the quant's §3.2 says.
+#
+# The four registry entries these read live in `config/assumptions.yaml` as
+# ASM-022, and `test_survival_constants_cannot_drift_from_assumptions_yaml`
+# pins the two copies together (the same device ASM-021 uses for
+# `min_n_for_percentiles`: the register is what a reviewer trusts, so it must
+# not be able to disagree with the code).
+# ---------------------------------------------------------------------------
+
+# The four ways an order leaves the book. `censored` and `unknown` are NOT
+# causes: the first is "still standing as far as we know", the second is a
+# terminator we could not place in time (docs/08 §3.3).
+SURVIVAL_CAUSES = ("cancelled", "invalidated", "filled", "expired")
+
+# epsilon: the gap that ends a quoting EPISODE (ASM-022). Two quotes from one
+# maker on one scope less than this apart are the same episode.
+EPISODE_GAP_SECONDS = 60.0
+
+# Cluster-bootstrap replicates, and the seed that makes the band reproducible.
+SURVIVAL_BOOTSTRAP_B = 1000
+SURVIVAL_BOOTSTRAP_SEED = 20260910
+
+# The binding minimum (quant §3.3): 30 maker-episode CLUSTERS, not 30 orders.
+MIN_CLUSTERS_FOR_SURVIVAL = 30
+
+# B x observations before the bootstrap is cut down. 42,601 quotes x 1000
+# replicates is ~4e7 resampled observations inside a 10-second dashboard
+# refresh; the cut is reported, never silent.
+SURVIVAL_BOOTSTRAP_WORK_CAP = 2_000_000
+
+# How many points the band's fixed time grid may have. A band evaluated at
+# every distinct event time of a 38k-life sample is 38k x B work and a
+# multi-megabyte response.
+SURVIVAL_GRID_MAX = 200
+
+# The only constant in the estimator (quant §3.2).
+Z95 = 1.96
+
+
+def episode_ids(lives: list[dict[str, Any]], eps: float = EPISODE_GAP_SECONDS) -> list[str]:
+    """One maker-episode id per life: the cluster the bootstrap resamples.
+
+    An EPISODE is *the same maker, the same scope, consecutive quotes less than
+    `eps` apart* (quant §2.1). Scope is `(scope_kind, token_id)`: a bot
+    requoting one token is one episode, the same bot working a different token
+    is another, and a collection offer has no token so every collection offer
+    from that maker in one run is one episode.
+
+    Why this matters more than any other number here: 42,601 quotes from 3
+    makers are not 42,601 independent observations, and an order-level bootstrap
+    would produce a band about sqrt(n / n_eff) -- roughly 15x -- too narrow
+    (quant §3.2, factcheck D-W5). `n_eff` is the count of these ids.
+
+    **A life with no maker joins ONE shared cluster, not its own.** That is the
+    conservative direction: more clusters means a narrower band, and inventing
+    independence we cannot see is exactly the flattering failure the project's
+    fifth rule is about. The count is reported as `unclustered_no_maker_n`.
+    """
+    order = sorted(
+        range(len(lives)),
+        key=lambda i: (str(lives[i].get("maker") or ""), str(lives[i].get("scope_kind") or ""),
+                       str(lives[i].get("token_id") or ""), float(lives[i].get("t_place") or 0.0)))
+    out = [""] * len(lives)
+    prev_key: tuple[Any, ...] | None = None
+    prev_t: float | None = None
+    run = 0
+    for i in order:
+        r = lives[i]
+        if not r.get("maker"):
+            out[i] = "no-maker|shared"
+            continue
+        key = (r.get("maker"), r.get("scope_kind"), r.get("token_id"))
+        t = float(r.get("t_place") or 0.0)
+        if key != prev_key or prev_t is None or (t - prev_t) >= eps:
+            run += 1
+        out[i] = f"{key[0]}|{key[1]}|{key[2]}|{run}"
+        prev_key, prev_t = key, t
+    return out
+
+
+def km_curve(obs: list[tuple[float, bool, str | None]],
+             causes: tuple[str, ...] = SURVIVAL_CAUSES) -> dict[str, Any]:
+    """Kaplan-Meier + Greenwood + Aalen-Johansen from `[(duration, ended, cause)]`.
+
+    Distinct event times t_1 < ... < t_k. At t_i: `n_i` = at risk just before
+    (every observation with duration >= t_i, so an observation censored at
+    exactly t_i is still at risk there), `d_i` = all-cause exits, `d_i^c` =
+    exits from cause c. Censoring contributes to `n_i` and never to `d_i`.
+
+        S(t)   = PROD_{t_i <= t} (1 - d_i / n_i)
+        v(t)   = SUM_{t_i <= t} d_i / (n_i (n_i - d_i))          Greenwood
+        Var[S] = S(t)^2 v(t)
+        sigma  = sqrt(v(t)) / |ln S(t)|
+        CI95   = [ S^exp(+1.96 sigma), S^exp(-1.96 sigma) ]      log-log
+        F_c(t) = SUM_{t_i <= t} S(t_{i-1}) d_i^c / n_i           Aalen-Johansen
+
+    The band is **log-log, not S +/- 1.96 SE**: a linear band leaves [0, 1] in
+    the tails, and on a curve that reaches 0.02 the tail is the whole story
+    (quant §3.2). It is returned as `null` -- never clamped -- where it is
+    undefined: at S = 1 (ln S = 0), at S = 0, and at any t_i where n_i = d_i
+    (Greenwood's denominator vanishes and the variance is infinite from there
+    on). A clamped band would draw a confident line where there is no estimate.
+
+    **The Greenwood band assumes independent observations, which quotes from
+    three bots are not.** It travels here as a diagnostic; the band the panel
+    draws is the cluster bootstrap. Where they disagree, Greenwood is the one
+    that is wrong on this data (factcheck D-W5).
+
+    SUM_c F_c(t) = 1 - S(t) exactly, at every t, and that is a test, not a
+    hope: S(t_{i-1}) - S(t_i) = S(t_{i-1}) d_i / n_i telescopes to 1 - S(t).
+    1 - KM per cause does NOT have this property and overstates each cause.
+
+    The curve starts at (0, 1) so a step plot has somewhere to start.
+    """
+    durs = sorted(d for d, _e, _c in obs)
+    n = len(durs)
+    t_out: list[float] = [0.0]
+    s_out: list[float] = [1.0]
+    lo_out: list[float | None] = [1.0]
+    hi_out: list[float | None] = [1.0]
+    risk_out: list[int] = [n]
+    d_out: list[int] = [0]
+    cif: dict[str, list[float]] = {c: [0.0] for c in causes}
+    if n == 0:
+        return {"t": t_out, "s": s_out, "greenwood_lower": lo_out, "greenwood_upper": hi_out,
+                "n_at_risk": risk_out, "d": d_out, "cif": cif, "n": 0, "events": 0}
+    ended: dict[float, int] = {}
+    by_cause: dict[float, dict[str, int]] = {}
+    for d, e, c in obs:
+        if not e:
+            continue
+        ended[d] = ended.get(d, 0) + 1
+        if c in causes:
+            by_cause.setdefault(d, {})[c] = by_cause.setdefault(d, {}).get(c, 0) + 1
+    s = 1.0
+    v = 0.0
+    v_infinite = False
+    run = {c: 0.0 for c in causes}
+    for ti in sorted(ended):
+        n_i = n - bisect.bisect_left(durs, ti)
+        if n_i <= 0:                       # unreachable: an event time has at least itself at risk
+            continue
+        d_i = ended[ti]
+        s_prev = s
+        for c, dc in (by_cause.get(ti) or {}).items():
+            run[c] += s_prev * dc / n_i
+        s = s_prev * (1.0 - d_i / n_i)
+        if n_i > d_i and not v_infinite:
+            v += d_i / (n_i * (n_i - d_i))
+        else:
+            v_infinite = True
+        if v_infinite or s <= 0.0 or s >= 1.0:
+            lo: float | None = None
+            hi: float | None = None
+        else:
+            sigma = math.sqrt(v) / abs(math.log(s))
+            lo = s ** math.exp(Z95 * sigma)
+            hi = s ** math.exp(-Z95 * sigma)
+        t_out.append(float(ti))
+        s_out.append(s)
+        lo_out.append(lo)
+        hi_out.append(hi)
+        risk_out.append(n_i)
+        d_out.append(d_i)
+        for c in causes:
+            cif[c].append(run[c])
+    return {"t": t_out, "s": s_out, "greenwood_lower": lo_out, "greenwood_upper": hi_out,
+            "n_at_risk": risk_out, "d": d_out, "cif": cif,
+            "n": n, "events": sum(ended.values())}
+
+
+def step_at(t_grid: list[float], values: list[float | None], t: float) -> float | None:
+    """The value of a right-continuous step function at `t`: the last point at or before it."""
+    if not t_grid:
+        return None
+    i = bisect.bisect_right(t_grid, t) - 1
+    return values[i] if i >= 0 else None
+
+
+def rmst(t_grid: list[float], s: list[float], tau: float) -> float:
+    """RMST(tau) = INT_0^tau S(u) du = SUM_i S(t_{i-1}) (min(t_i, tau) - t_{i-1}).
+
+    The area under a step function, which is a sum of rectangles and nothing
+    more. The caller is responsible for not asking past the data: `survival()`
+    refuses a tau beyond the largest observed duration rather than extending the
+    last step flat, because that is imputing (docs/06 §4.3).
+    """
+    total = 0.0
+    prev_t, prev_s = 0.0, 1.0
+    for ti, si in zip(t_grid, s, strict=True):
+        if ti <= 0.0:
+            prev_s = si
+            continue
+        hi = min(ti, tau)
+        if hi > prev_t:
+            total += prev_s * (hi - prev_t)
+        prev_t, prev_s = hi, si
+        if ti >= tau:
+            break
+    if prev_t < tau:
+        total += prev_s * (tau - prev_t)
+    return total
+
+
+def _quantile(sorted_values: list[float], p: float) -> float | None:
+    """The p-quantile of a sorted list, with NO minimum-n refusal.
+
+    Deliberately not `pct()`. `pct()` refuses below `MIN_N_FOR_PERCENTILES`
+    because its input is a sample of OBSERVATIONS and REQ-F-19 is about
+    quoting an unreliable percentile of the market. This one's input is a list
+    of B bootstrap REPLICATES; B is a compute budget we chose, not evidence,
+    and letting a large B satisfy an observation-count guard would launder the
+    small-n problem into a tight band. The guard that applies to a bootstrap
+    band is `n_eff >= MIN_CLUSTERS_FOR_SURVIVAL`, and it is applied by the
+    caller, on clusters.
+    """
+    n = len(sorted_values)
+    if n == 0:
+        return None
+    return sorted_values[min(n - 1, max(0, int(p * n)))]
+
+
+def survival_grid(t_events: list[float], max_points: int = SURVIVAL_GRID_MAX) -> list[float]:
+    """A fixed time grid for the bootstrap band: every event time, or a log-spaced
+    subset of them when there are too many. Log-spaced because lifetimes span
+    seconds to hours and the panel's x-axis is logarithmic (design §4.1a)."""
+    pts = sorted({t for t in t_events if t > 0})
+    if len(pts) <= max_points:
+        return pts
+    lo, hi = math.log(pts[0]), math.log(pts[-1])
+    want = [math.exp(lo + (hi - lo) * i / (max_points - 1)) for i in range(max_points)]
+    out: list[float] = []
+    for w in want:
+        i = min(len(pts) - 1, bisect.bisect_left(pts, w))
+        if not out or pts[i] != out[-1]:
+            out.append(pts[i])
+    return out
+
+
+def downsample_km(km: dict[str, Any], max_points: int = 2 * SURVIVAL_GRID_MAX,
+                  causes: tuple[str, ...] = SURVIVAL_CAUSES) -> dict[str, Any]:
+    """The curve thinned onto its own grid for TRANSPORT, never for computation.
+
+    A 40,000-life sample has ~40,000 distinct event times, and the response
+    carries seven arrays of that length (t, S, the two Greenwood bounds,
+    n_at_risk, d, and one CIF per cause) -- about 6 MB of JSON for a panel
+    1,100 px wide (BUG-20260910-064). The points are thinned log-spaced, which
+    is the axis the panel draws on, so what is dropped is invisible.
+
+    **Every retained point is an ACTUAL point of the estimate, not an
+    interpolation**: this selects indices, it never averages or resamples. t = 0
+    and the final step are always kept, so `S` still ends where it ends and
+    `SUM_c F_c = 1 - S` still holds exactly at every point that survives.
+
+    Percentiles, RMST, the residual survivals and the bootstrap are all computed
+    from the FULL curve before this runs -- thinning the curve and then reading a
+    median off it would snap the median to a grid point.
+    """
+    t = km["t"]
+    if len(t) <= max_points:
+        return {**km, "points": len(t), "event_times": len(t) - 1, "downsampled": False}
+    keep = [0]
+    for g in survival_grid(t, max_points):
+        i = bisect.bisect_left(t, g)
+        if i < len(t) and i != keep[-1]:
+            keep.append(i)
+    if keep[-1] != len(t) - 1:
+        keep.append(len(t) - 1)
+    pick = lambda arr: [arr[i] for i in keep]      # noqa: E731 - one expression, used seven times
+    return {**km,
+            "t": pick(t), "s": pick(km["s"]),
+            "greenwood_lower": pick(km["greenwood_lower"]), "greenwood_upper": pick(km["greenwood_upper"]),
+            "n_at_risk": pick(km["n_at_risk"]), "d": pick(km["d"]),
+            "cif": {c: pick(km["cif"][c]) for c in causes},
+            "points": len(keep), "event_times": len(t) - 1, "downsampled": True}
+
+
+def cluster_bootstrap(obs_by_cluster: dict[str, list[tuple[float, bool, str | None]]],
+                      grid: list[float], *, b: int = SURVIVAL_BOOTSTRAP_B,
+                      seed: int = SURVIVAL_BOOTSTRAP_SEED,
+                      causes: tuple[str, ...] = SURVIVAL_CAUSES) -> dict[str, Any]:
+    """2.5/97.5 percentile bands for S and every CIF, resampling MAKER-EPISODES.
+
+    Resample the clusters with replacement (as many as there are), pool their
+    observations, refit KM/AJ, and read the band off the replicate
+    distribution on a fixed grid. Resampling individual ORDERS would be the
+    wrong bootstrap: orders inside one bot episode are not independent, and the
+    band would come out roughly sqrt(n / n_eff) too narrow (quant §3.2).
+
+    Deterministic: `random.Random(seed)` and nothing else, so the band on the
+    page is the band in the test and a re-run cannot quietly move it.
+    """
+    import random
+
+    keys = list(obs_by_cluster)
+    if not keys or not grid or b <= 0:
+        return {"s_lower": [None] * len(grid), "s_upper": [None] * len(grid),
+                "cif_lower": {c: [None] * len(grid) for c in causes},
+                "cif_upper": {c: [None] * len(grid) for c in causes},
+                "b_used": 0, "seed": seed}
+    rng = random.Random(seed)
+    k = len(keys)
+    s_draws: list[list[float]] = [[] for _ in grid]
+    c_draws: dict[str, list[list[float]]] = {c: [[] for _ in grid] for c in causes}
+    for _ in range(b):
+        sample: list[tuple[float, bool, str | None]] = []
+        for _ in range(k):
+            sample.extend(obs_by_cluster[keys[rng.randrange(k)]])
+        cur = km_curve(sample, causes)
+        for gi, g in enumerate(grid):
+            i = bisect.bisect_right(cur["t"], g) - 1
+            s_draws[gi].append(cur["s"][i] if i >= 0 else 1.0)
+            for c in causes:
+                c_draws[c][gi].append(cur["cif"][c][i] if i >= 0 else 0.0)
+    def band(draws: list[list[float]]) -> tuple[list[float | None], list[float | None]]:
+        lo: list[float | None] = []
+        hi: list[float | None] = []
+        for col in draws:
+            col.sort()
+            lo.append(_quantile(col, 0.025))
+            hi.append(_quantile(col, 0.975))
+        return lo, hi
+    s_lo, s_hi = band(s_draws)
+    cif_lo: dict[str, list[float | None]] = {}
+    cif_hi: dict[str, list[float | None]] = {}
+    for c in causes:
+        cif_lo[c], cif_hi[c] = band(c_draws[c])
+    return {"s_lower": s_lo, "s_upper": s_hi, "cif_lower": cif_lo, "cif_upper": cif_hi,
+            "b_used": b, "seed": seed, "clusters_resampled": k}
+
+
+# ---------------------------------------------------------------------------
 # the engine
 # ---------------------------------------------------------------------------
 class MetricEngine:
@@ -1685,7 +2023,434 @@ class MetricEngine:
                 "terminations_in_window": terms, "orphan_terminations": orphans,
                 "orphan_rate": (orphans / terms) if terms else None,
                 "censoring": "counted, not modelled -- percentiles are biased short by "
-                             "the censored lives (PR-8 replaces this with Kaplan-Meier)"}
+                             "the censored lives (PR-8 replaces this with Kaplan-Meier). "
+                             "AND THIS ESTIMATOR HAS NO as_of: it reads exit_reason and t_term "
+                             "straight off order_lives, which stores them AS OF THE FOLD, so a "
+                             "window that ends before the last fold is answered with terminations "
+                             "that had not happened yet, and its censored lives are censored at "
+                             "the fold rather than at the window end -- one sample, two horizons "
+                             "(BUG-20260910-065). Not reachable from the page today, where every "
+                             "range ends at now; use survival(), which takes an explicit as_of."}
+
+    # -- PR-8: the survival estimator -------------------------------------------
+    def _survival_rows(self, collection: str, start: float, end: float, as_of: float,
+                       kind: str, traits: dict[str, list[str]] | None,
+                       maker: str | list[str] | None,
+                       price_band: tuple[float | None, float | None] | None,
+                       ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """The lives in the window, with the **as_of censoring rule** applied.
+
+        This is the one rule that makes the estimator correct and it is easy to
+        get wrong: `order_lives.exit_reason` is stored **as of the fold**, not as
+        of the question. A life folded at 14:00 says `cancelled` even when the
+        question is "what did the book look like at 11:00", and reading it
+        straight would mark an order as ended an hour before it was -- the
+        estimator would learn the future. So:
+
+            ended  <=>  exit_reason is one of the four CAUSES
+                        AND t_term is not null AND t_term <= as_of
+            everything else that was placed at or before as_of is CENSORED at
+            as_of, with duration `as_of - t_place`.
+
+        Two populations are excluded, and both are counted rather than dropped
+        quietly: a life placed after `as_of` (it did not exist yet) and a life
+        whose terminator could not be placed in time (`unknown` -- docs/08 §3.3).
+        Calling `unknown` censored would say the order stood when we know it did
+        not; calling it ended at `as_of` would invent a time. It is neither, and
+        it is counted.
+        """
+        where = ["ol.collection = ?", "ol.event_type = ?", "ol.placement_seen = 1",
+                 "ol.t_place IS NOT NULL", "ol.t_place >= ?", "ol.t_place < ?"]
+        args: list[Any] = [collection, kind, start, end]
+        if traits:
+            tf, targs = token_filter_sql(collection, traits, alias="ol")
+            where.append(tf[len(" AND "):])
+            args.extend(targs)
+        makers = [maker] if isinstance(maker, str) else list(maker or [])
+        if makers:
+            where.append(f"ol.maker IN ({','.join('?' * len(makers))})")
+            args.extend(makers)
+        if price_band:
+            lo, hi = price_band
+            if lo is not None:
+                where.append("ol.price_eth >= ?")
+                args.append(float(lo))
+            if hi is not None:
+                where.append("ol.price_eth <= ?")
+                args.append(float(hi))
+            where.append("ol.price_eth IS NOT NULL")
+        cols = ("order_hash", "token_id", "maker", "scope_kind", "price_eth", "price_usd",
+                "quantity", "t_place", "t_place_observed", "t_term", "exit_reason",
+                "exit_source", "expiration_ts")
+        cur = self.conn.execute(
+            f"SELECT {','.join('ol.' + c for c in cols)} FROM order_lives ol "
+            f"WHERE {' AND '.join(where)} ORDER BY ol.t_place", args)
+        rows: list[dict[str, Any]] = []
+        counts = {"selected": 0, "placed_after_as_of": 0, "unknown_terminator": 0,
+                  "ended": 0, "censored": 0, "ended_after_as_of": 0}
+        for r in cur:
+            d = dict(zip(cols, r, strict=True))
+            counts["selected"] += 1
+            if d["t_place"] > as_of:
+                counts["placed_after_as_of"] += 1
+                continue
+            if d["exit_reason"] == "unknown":
+                counts["unknown_terminator"] += 1
+                continue
+            reason = d["exit_reason"]
+            t_term = d["t_term"]
+            if reason in SURVIVAL_CAUSES and t_term is not None and t_term <= as_of:
+                d["ended"] = True
+                d["cause"] = reason
+                d["duration_s"] = float(t_term - d["t_place"])
+                counts["ended"] += 1
+            else:
+                if reason in SURVIVAL_CAUSES and t_term is not None and t_term > as_of:
+                    counts["ended_after_as_of"] += 1
+                d["ended"] = False
+                d["cause"] = None
+                d["duration_s"] = float(as_of - d["t_place"])
+                d["censored_at"] = as_of
+                counts["censored"] += 1
+            rows.append(d)
+        # N2: the episode id is assigned HERE, not in survival(), so every caller
+        # of this method gets it. `survival_drill` shipped a row with
+        # `episode: None` because it never went through survival()'s assignment
+        # -- a field on the drill list that was always null, beside a header that
+        # reports n_eff in those same units.
+        for r_, cid in zip(rows, episode_ids(rows, EPISODE_GAP_SECONDS), strict=True):
+            r_["episode"] = cid
+        return rows, counts
+
+    def survival_prepare(self, collection: str, start: float, end: float, as_of: float,
+                         kind: str = "item_received_bid", traits: dict[str, list[str]] | None = None,
+                         maker: str | list[str] | None = None,
+                         price_band: tuple[float | None, float | None] | None = None,
+                         ) -> dict[str, Any]:
+        """Every part of `survival()` that touches the sqlite connection, and nothing else.
+
+        Split out so the dashboard can hold its writer lock across the QUERIES
+        and drop it before the bootstrap (BUG-20260910-064). B x n resampled
+        observations is arithmetic on a list that is already in memory; holding
+        the connection lock for seconds of it blocks every other panel on the
+        page and the background normalizer behind it.
+        """
+        if as_of <= 0:
+            raise ValueError("survival() needs an explicit as_of (exit_reason is stored as of the fold)")
+        rows, counts = self._survival_rows(collection, start, end, as_of, kind, traits, maker, price_band)
+        terms, orphans = self.conn.execute(
+            """SELECT COUNT(*), SUM(placement_seen = 0) FROM order_lives
+               WHERE collection = ? AND exit_source = 'observed' AND t_term IS NOT NULL
+                 AND t_term >= ? AND t_term < ?""", (collection, start, min(end, as_of))).fetchone()
+        record_end = self.conn.execute(
+            "SELECT MAX(valid_ts) FROM events WHERE collection = ?", (collection,)).fetchone()[0]
+        return {"rows": rows, "counts": counts, "terminations_in_window": terms,
+                "orphan_terminations": orphans or 0, "record_end": record_end}
+
+    def survival(self, collection: str, start: float, end: float, as_of: float,
+                 kind: str = "item_received_bid", traits: dict[str, list[str]] | None = None,
+                 maker: str | list[str] | None = None,
+                 price_band: tuple[float | None, float | None] | None = None,
+                 *, prepared: dict[str, Any] | None = None, tau: float | None = None,
+                 residual_ages: list[float] | None = None,
+                 residual_horizons: list[float] | None = None,
+                 bootstrap_b: int | None = None, seed: int = SURVIVAL_BOOTSTRAP_SEED,
+                 bins: int = 12) -> dict[str, Any]:
+        """How long an order stands, estimated properly: KM + competing risks + a cluster band.
+
+        Everything the panel in design §4 draws, computed once here (the page
+        contains no calculations of its own -- docs/06 §3). Replaces
+        `bid_lifetimes`, which counted censored lives instead of modelling them.
+
+        Returns, all of it with its counts (project rule 4):
+
+        * `km`        -- the step curve: `t`, `s`, the Greenwood log-log band as
+                         a diagnostic, `n_at_risk` and `d` per step.
+        * `cif`       -- Aalen-Johansen cumulative incidence per cause. NOT
+                         1 - KM per cause, which overstates every cause by
+                         censoring the competitors (quant §3.2).
+        * `band`      -- the maker-episode cluster bootstrap on a fixed grid.
+                         This is the band the panel draws.
+        * `rmst`      -- restricted mean standing time at `tau`, with
+                         `p_alive_at_tau` = S(tau) beside it, because an RMST
+                         without the probability of not ending is half a number.
+        * `residual`  -- S(t + L | age = t) for a few (age, horizon) pairs.
+        * `n`, `n_eff`, `censored_n`, `orphan_*`, and the excluded counts.
+        * `percentiles` -- p10/median/p90 of the KM curve, or **None** below
+                         `MIN_CLUSTERS_FOR_SURVIVAL` maker-episode clusters,
+                         with the reason. Note the guard is on CLUSTERS, not
+                         orders: percentiles from many observations of few
+                         independent agents are precise about the agents and
+                         silent about the market (quant §3.3).
+        * `mode`      -- `'curve'` or `'strip'`. Below the cluster minimum the
+                         panel draws every observation as a dot and no curve;
+                         `strip` carries those observations.
+
+        **Direction of the change from the old estimator is unknown, and that is
+        written here before the number is computed** (factcheck D-W4). The old
+        `bid_lifetimes` was biased short by dropping censoring and long by an
+        unbounded join; the net sign of two defects pulling opposite ways is not
+        predictable. A large move is the expected consequence of two known
+        defects. It is not a discovery, and if the median comes out *shorter*
+        that is not evidence of a bug in this code.
+        """
+        if as_of <= 0:
+            raise ValueError("survival() needs an explicit as_of (exit_reason is stored as of the fold)")
+        prep = prepared if prepared is not None else self.survival_prepare(
+            collection, start, end, as_of, kind, traits, maker, price_band)
+        rows, counts = prep["rows"], prep["counts"]
+        obs = [(r["duration_s"], r["ended"], r["cause"]) for r in rows]
+        by_cluster: dict[str, list[tuple[float, bool, str | None]]] = {}
+        for r in rows:
+            by_cluster.setdefault(r["episode"], []).append((r["duration_s"], r["ended"], r["cause"]))
+        n = len(rows)
+        n_eff = len(by_cluster)
+        km = km_curve(obs)
+        max_dur = max((r["duration_s"] for r in rows), default=0.0)
+
+        # tau: never past the data. Extending the last step flat to a tau nobody
+        # observed is imputation, and holes are never filled (docs/06 §4.3).
+        tau_used = float(tau) if tau is not None else float(max_dur)
+        tau_note = None
+        if tau is not None and tau_used > max_dur:
+            tau_note = (f"tau* = {tau_used:g}s is beyond the largest observed duration "
+                        f"({max_dur:g}s); RMST is not extrapolated")
+        rmst_v = None if (tau_note or n == 0) else rmst(km["t"], km["s"], tau_used)
+        p_alive = None if (tau_note or n == 0) else step_at(km["t"], km["s"], tau_used)
+
+        # percentiles of the KM curve: the first t at which S drops to or below q.
+        def km_quantile(q: float) -> float | None:
+            target = 1.0 - q
+            for ti, si in zip(km["t"], km["s"], strict=True):
+                if si <= target + 1e-12:
+                    return float(ti)
+            return None                       # the curve never got that low: not reached
+        enough = n_eff >= MIN_CLUSTERS_FOR_SURVIVAL
+        withheld_reason = None if enough else (
+            f"n_eff = {n_eff} maker-episode cluster(s) < {MIN_CLUSTERS_FOR_SURVIVAL} "
+            f"(REQ-F-19, ASM-022): percentiles from many observations of few independent "
+            f"agents are precise about the agents and silent about the market")
+        percentiles = ({"p10_s": km_quantile(0.10), "median_s": km_quantile(0.50),
+                        "p90_s": km_quantile(0.90)} if enough else None)
+
+        # residual survival S(t + L | age = t), only where BOTH ends are inside the data.
+        ages = residual_ages if residual_ages is not None else [0.0, max_dur * 0.25, max_dur * 0.5]
+        horizons = residual_horizons if residual_horizons is not None else [max_dur * 0.25, max_dur * 0.5]
+        residual = []
+        for a in ages:
+            s_a = step_at(km["t"], km["s"], a)
+            for h in horizons:
+                s_ah = step_at(km["t"], km["s"], a + h)
+                inside = (a + h) <= max_dur and s_a is not None and s_a > 0
+                residual.append({
+                    "age_s": float(a), "horizon_s": float(h),
+                    "s_at_age": s_a, "s_at_age_plus_horizon": s_ah if inside else None,
+                    "p_still_standing": (s_ah / s_a) if (inside and s_ah is not None) else None,
+                    "beyond_data": not inside})
+
+        # the cluster bootstrap band, on a fixed grid
+        grid = survival_grid(km["t"])
+        b_req = SURVIVAL_BOOTSTRAP_B if bootstrap_b is None else int(bootstrap_b)
+        b_used, b_note = b_req, None
+        if n and b_req * n > SURVIVAL_BOOTSTRAP_WORK_CAP:
+            b_used = max(50, SURVIVAL_BOOTSTRAP_WORK_CAP // n)
+            b_note = (f"B cut from {b_req} to {b_used}: B x n = {b_req * n} exceeds the "
+                      f"{SURVIVAL_BOOTSTRAP_WORK_CAP} resampled-observation cap (ASM-022). "
+                      f"The band is wider-tailed at low B, not narrower -- it is noisier, not tighter.")
+        band = cluster_bootstrap(by_cluster, grid, b=b_used if n_eff > 1 else 0, seed=seed)
+        band["b_requested"] = b_req
+        band["note"] = b_note
+        if n_eff <= 1:
+            band["withheld_reason"] = (f"n_eff = {n_eff}: a bootstrap over one cluster resamples "
+                                       f"the same cluster every time and produces a band of width zero, "
+                                       f"which would read as certainty")
+
+        # exit-reason histogram over log-spaced duration bins (design §4.1b)
+        hist = self._duration_histogram(rows, bins)
+        # placement-time mini-map (design §4.1c)
+        mini = self._placement_minimap(rows, start, min(end, as_of))
+
+        terms, orphans = prep["terminations_in_window"], prep["orphan_terminations"]
+        record_end = prep["record_end"]
+        # thinned for TRANSPORT only -- everything above was computed on the full curve
+        thin = downsample_km(km)
+        return {
+            "kind": kind, "collection": collection,
+            "mode": "curve" if enough else "strip",
+            "km": {k: thin[k] for k in ("t", "s", "greenwood_lower", "greenwood_upper", "n_at_risk", "d")}
+                  | {"points": thin["points"], "event_times": thin["event_times"],
+                     "downsampled": thin["downsampled"]},
+            "cif": thin["cif"], "causes": list(SURVIVAL_CAUSES),
+            "band": {"grid": grid, **band},
+            "rmst": {"tau_s": tau_used, "rmst_s": rmst_v, "p_alive_at_tau": p_alive, "note": tau_note},
+            "residual": residual,
+            "percentiles": percentiles, "percentiles_withheld": not enough,
+            "percentiles_withheld_reason": withheld_reason,
+            "n": n, "n_eff": n_eff, "min_clusters": MIN_CLUSTERS_FOR_SURVIVAL,
+            "episode_gap_s": EPISODE_GAP_SECONDS,
+            "ended_n": counts["ended"], "censored_n": counts["censored"],
+            "unknown_terminator_n": counts["unknown_terminator"],
+            "placed_after_as_of_n": counts["placed_after_as_of"],
+            "ended_after_as_of_n": counts["ended_after_as_of"],
+            "unclustered_no_maker_n": sum(1 for r in rows if not r.get("maker")),
+            "terminations_in_window": terms, "orphan_terminations": orphans,
+            "orphan_rate": (orphans / terms) if terms else None,
+            "histogram": hist, "placements": mini,
+            "strip": ([{"duration_s": r["duration_s"], "ended": r["ended"],
+                        "exit_reason": r["exit_reason"] if r["ended"] else "censored",
+                        "maker": r["maker"], "token_id": r["token_id"],
+                        "price_eth": r["price_eth"], "price_usd": r["price_usd"],
+                        "order_hash": r["order_hash"], "episode": r["episode"],
+                        "t_place": datetime.fromtimestamp(r["t_place"], tz=timezone.utc).isoformat()}
+                       for r in rows] if not enough else None),
+            "basis": {
+                "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat(),
+                "window": {"start": datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
+                           "end": datetime.fromtimestamp(end, tz=timezone.utc).isoformat()},
+                "record_ends_at": (datetime.fromtimestamp(record_end, tz=timezone.utc).isoformat()
+                                   if record_end else None),
+                "as_of_beyond_record": bool(record_end and as_of > record_end),
+                "traits": traits or {}, "maker": maker, "price_band": price_band,
+                "estimator": "Kaplan-Meier, Greenwood log-log band (diagnostic), Aalen-Johansen "
+                             "cumulative incidence, maker-episode cluster bootstrap band",
+                "censoring": "administrative at as_of; exit_reason is stored as of the FOLD and is "
+                             "re-read against as_of, so a life terminated after as_of is censored",
+                "left_truncated": True,
+                "left_truncation_note": "only orders whose PLACEMENT we witnessed enter the risk set; "
+                                        "orphaned terminations are counted, never imputed",
+                "direction_warning": "the median may move in EITHER direction from the old estimator: "
+                                     "it was biased short by dropped censoring and long by an unbounded "
+                                     "join. A large change is the expected consequence of two known "
+                                     "defects, not a discovery (factcheck D-W4).",
+                "wash_filter": "raw"},
+        }
+
+    @staticmethod
+    def _duration_histogram(rows: list[dict[str, Any]], bins: int) -> dict[str, Any]:
+        """Counts per LOG-spaced duration bin, stacked by exit reason (design §4.1b).
+
+        Log-spaced because lifetimes run from a second to hours; linear bins put
+        99% of a bot-quoted book in the first bar. A censored life is its own
+        stack colour -- it has not exited, and calling it `cancelled` would be
+        the exact error the estimator exists to fix.
+        """
+        durs = [r["duration_s"] for r in rows if r["duration_s"] > 0]
+        if not durs:
+            return {"edges": [], "bins": [], "reasons": [*SURVIVAL_CAUSES, "censored"],
+                    "zero_duration_n": sum(1 for r in rows if r["duration_s"] <= 0)}
+        lo, hi = min(durs), max(durs)
+        if hi <= lo:
+            hi = lo * 2 if lo > 0 else 1.0
+        ll, lh = math.log(lo), math.log(hi)
+        edges = [math.exp(ll + (lh - ll) * i / bins) for i in range(bins + 1)]
+        edges[-1] = hi * (1 + 1e-9)
+        reasons = [*SURVIVAL_CAUSES, "censored"]
+        cells = [{"lo": edges[i], "hi": edges[i + 1], "total": 0,
+                  "by_reason": dict.fromkeys(reasons, 0)} for i in range(bins)]
+        for r in rows:
+            d = r["duration_s"]
+            if d <= 0:
+                continue
+            i = min(bins - 1, max(0, bisect.bisect_right(edges, d) - 1))
+            key = r["exit_reason"] if r["ended"] else "censored"
+            cells[i]["total"] += 1
+            cells[i]["by_reason"][key] = cells[i]["by_reason"].get(key, 0) + 1
+        return {"edges": edges, "bins": cells, "reasons": reasons,
+                "zero_duration_n": sum(1 for r in rows if r["duration_s"] <= 0)}
+
+    @staticmethod
+    def _placement_minimap(rows: list[dict[str, Any]], start: float, end: float,
+                           max_bars: int = 240) -> dict[str, Any]:
+        """Orders PLACED per wall-clock bucket -- the brush strip (design §4.1c).
+
+        A separate x-axis from the curve on purpose: one is a duration, the
+        other is a time of day, and putting them on one axis is how a panel
+        starts lying about which is which.
+        """
+        span = max(1.0, end - start)
+        step = max(60.0, span / max_bars)
+        nb = max(1, int(math.ceil(span / step)))
+        counts = [0] * nb
+        for r in rows:
+            i = min(nb - 1, max(0, int((r["t_place"] - start) // step)))
+            counts[i] += 1
+        return {"step_s": step,
+                "t": [datetime.fromtimestamp(start + i * step, tz=timezone.utc).isoformat()
+                      for i in range(nb)],
+                "n": counts, "total": sum(counts)}
+
+    def survival_drill(self, collection: str, start: float, end: float, as_of: float,
+                       bin_lo: float, bin_hi: float, kind: str = "item_received_bid",
+                       traits: dict[str, list[str]] | None = None,
+                       maker: str | list[str] | None = None,
+                       price_band: tuple[float | None, float | None] | None = None,
+                       page: int = 0, page_size: int = 50) -> dict[str, Any]:
+        """Every life whose duration falls in `[bin_lo, bin_hi)`, as the drill list.
+
+        Both timestamps ride along deliberately (design §4.3): `observed_at -
+        valid_at` is our stream lag, and *if a bid's whole life is shorter than
+        our lag we never had a chance at it*. That is a fact about strategy
+        feasibility, not about the market, and it is invisible unless both
+        clocks are on the row.
+
+        `distance_to_floor_eth` is `price - lowest STANDING ask at the instant of
+        placement`, read off the same sweep line the floor chart uses. It is
+        `None` -- never estimated, never carried forward from the last known
+        floor -- when no ask was standing at that instant. A hole is a hole
+        (docs/06 §4.3).
+        """
+        rows, _counts = self._survival_rows(collection, start, end, as_of, kind, traits, maker, price_band)
+        sel = [r for r in rows if bin_lo <= r["duration_s"] < bin_hi]
+        sel.sort(key=lambda r: r["t_place"])
+        total = len(sel)
+        makers_n = len({r["maker"] for r in sel if r["maker"]})
+        page = max(0, int(page))
+        window = sel[page * page_size:(page + 1) * page_size]
+        # the standing floor at placement, from the same sweep the floor chart uses
+        floor_segs = _extremum_segments(
+            self._standing_live("ask", collection, "ETH", start, max(as_of, start + 1e-9), None), True)
+        seg_starts = [s[0] for s in floor_segs]
+
+        def floor_at(t: float) -> float | None:
+            i = bisect.bisect_right(seg_starts, t) - 1
+            if i < 0:
+                return None
+            t0, t1, v = floor_segs[i]
+            return v if t0 <= t < t1 else None
+        tok_traits: dict[str, dict[str, str]] = {}
+        ids = [r["token_id"] for r in window if r["token_id"]]
+        if ids:
+            for tid, tt, val in self.conn.execute(
+                    f"SELECT token_id, trait_type, value FROM traits WHERE collection = ? "
+                    f"AND token_id IN ({','.join('?' * len(ids))})", (collection, *ids)):
+                tok_traits.setdefault(tid, {})[tt] = val
+        out = []
+        for r in window:
+            fl = floor_at(r["t_place"])
+            out.append({
+                "order_hash": r["order_hash"], "token_id": r["token_id"],
+                "traits": tok_traits.get(r["token_id"] or "", {}),
+                "maker": r["maker"], "price_eth": r["price_eth"], "price_usd": r["price_usd"],
+                "quantity": r["quantity"],
+                "placed_at_valid": datetime.fromtimestamp(r["t_place"], tz=timezone.utc).isoformat(),
+                "placed_at_observed": (datetime.fromtimestamp(r["t_place_observed"], tz=timezone.utc).isoformat()
+                                       if r["t_place_observed"] else None),
+                "stream_lag_s": ((r["t_place_observed"] - r["t_place"])
+                                 if r["t_place_observed"] else None),
+                "ended_at": (datetime.fromtimestamp(r["t_term"], tz=timezone.utc).isoformat()
+                             if r["ended"] else None),
+                "still_standing": not r["ended"],
+                "lifetime_s": r["duration_s"],
+                "exit_reason": r["exit_reason"] if r["ended"] else "censored",
+                "exit_source": r["exit_source"] if r["ended"] else None,
+                "floor_ask_at_placement_eth": fl,
+                "distance_to_floor_eth": (r["price_eth"] - fl) if (fl is not None and r["price_eth"] is not None) else None,
+                "episode": r.get("episode"),
+            })
+        return {"bin": {"lo": bin_lo, "hi": bin_hi}, "total": total, "makers": makers_n,
+                "page": page, "page_size": page_size, "rows": out,
+                "floor_basis": "lowest STANDING ask at the instant of placement; null where no ask "
+                               "was standing -- never the last floor seen"}
 
     def criteria_coverage(self, collection: str) -> dict[str, Any]:
         """Every distinct (trait_type, value) in `order_criteria` should exist in `traits`.
