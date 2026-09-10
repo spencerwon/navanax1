@@ -3913,10 +3913,66 @@ def test_every_test_file_is_executed_by_something() -> None:
     check("this suite is the one CI actually runs, by name", f"tests/{me}" in ci)
     # The known_defect harness is only honest if it can tell an open bug from a
     # fixed one; a mis-read status would silently downgrade a real failure.
-    check("known_defect reads the ledger correctly: a fixed bug and an open one are distinguished",
-          _bug_status("BUG-20260909-055") == "fixed" and _bug_status("BUG-20260909-056") == "open"
-          and _bug_status("NOT-A-BUG-ID") is None,   # not BUG-shaped: buglog.py --check scans this file
-          f"{_bug_status('BUG-20260909-055')} / {_bug_status('BUG-20260909-056')}")
+    ledger = (ROOT / "docs" / "logs" / "bugs.yaml").read_text()
+    open_ids = [m for m in re.findall(r"^- id: (BUG-\d{8}-\d{3})(.*?)(?=^- id: |\Z)",
+                                      ledger, re.M | re.S) if "\n  status: open" in m[1]]
+    check("known_defect reads the ledger correctly: a fixed bug reads fixed, an id that is "
+          "not in the ledger reads None, and every bug the ledger calls open reads open",
+          _bug_status("BUG-20260909-055") == "fixed"
+          and _bug_status("NOT-A-BUG-ID") is None   # not BUG-shaped: buglog.py --check scans this file
+          and all(_bug_status(i) == "open" for i, _ in open_ids),
+          f"fixed={_bug_status('BUG-20260909-055')} open={[i for i, _ in open_ids]}")
+
+
+def test_stale_order_lives_are_refolded_on_open(tmp: Path) -> None:
+    """BUG-20260909-056's repair path.
+
+    Fixing the fold does not fix rows already folded: `sync()` refreshes only
+    the hashes a pass touches, so an order nobody names again keeps the verdict
+    the old rule gave it. `order_lives` is derived from `events` -- which this
+    fix does not change -- so the repair is a re-fold of that table alone, and
+    `method_version` is what says a row needs one.
+    """
+    from navanax.normalize import ORDER_LIVES_METHOD, Normalizer, iso_to_ts, refresh_order_lives
+
+    check("the fold's method version was bumped when its rules changed, so a stored "
+          "row says which rules made it", ORDER_LIVES_METHOD >= 2, str(ORDER_LIVES_METHOD))
+
+    n, put = _lives_store(tmp, "stale-lives.sqlite")
+    # An expiry far in the future, so "standing again" is not confused with
+    # "expired since": the fold infers expiry only from an expiration ALREADY past.
+    far = {"expiration_at": "2099-01-01T00:00:00Z",
+           "expiration_ts": iso_to_ts("2099-01-01T00:00:00Z")}
+    put(DOC_LISTING, "2026-09-09T10:00:00Z", 1, order_hash="S", **far)
+    put(REAL_INVALIDATE, "2026-09-09T10:01:00Z", 2, order_hash="S")
+    put(REAL_INVALIDATE, "2026-09-09T10:01:00Z", 3, order_hash="S",
+        event_type="order_revalidate")
+    refresh_order_lives(n.conn)
+    # Forge the state a store folded before the fix is in: dead, stamped method 1.
+    n.conn.execute("UPDATE order_lives SET exit_reason='invalidated', t_term=?, "
+                   "exit_source='observed', exit_event_type='order_invalidate', "
+                   "method_version=1 WHERE order_hash='S'",
+                   (iso_to_ts("2026-09-09T10:01:00Z"),))
+    n.conn.commit()
+    path = n.db_path
+    n.close()
+
+    n2 = Normalizer(tmp / "empty-lz", path)
+    row = n2.conn.execute("SELECT exit_reason, t_term, method_version FROM order_lives "
+                          "WHERE order_hash='S'").fetchone()
+    check("a life folded by an older method is re-folded when the store is opened -- "
+          "the order the same-instant tie killed is standing again",
+          row[0] == "censored" and row[1] is None and row[2] == ORDER_LIVES_METHOD, str(row))
+    check("the re-fold is driven by `events`, which it does not change",
+          n2.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 3)
+    n2.close()
+
+    n3 = Normalizer(tmp / "empty-lz", path)
+    check("opening a store already at the current method re-folds nothing and changes "
+          "nothing -- the repair is idempotent",
+          n3.conn.execute("SELECT exit_reason, method_version FROM order_lives "
+                          "WHERE order_hash='S'").fetchone() == ("censored", ORDER_LIVES_METHOD))
+    n3.close()
 
 
 def test_token_id_item_type_by_item_type() -> None:

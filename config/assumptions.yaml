@@ -16,6 +16,13 @@ assumptions:
     decided: 2026-09-09
     decided_by: Spencer (Operator), via the trait-book brief; implemented by data-engineer
     owner: data-engineer
+    tie_decided: 2026-09-10
+    tie_decided_by: >
+      Spencer (Operator), ruling on BUG-20260909-056: the register is right and
+      the code was wrong. `revalidate_same_instant: reopens` stands as written;
+      normalize.py's fold was changed from `>` to `>=` to match it. The rule
+      text is unchanged -- what is new is that a human has now ruled on the tie
+      rather than it standing as the author's tie-break.
     review: 2026-12-01
     code: src/navanax/metrics.py::standing_sql
     value:
@@ -36,4 +43,9 @@ assumptions:
       screen, not a wrong trade. Same-instant revalidate is a tie-break with
       no observed instance yet; it was chosen to keep the predicate a single
       >= comparison and is listed so it can be revisited when one appears.
+      Revisited 2026-09-10 without a live instance: the implementation was found
+      to disagree with this register (BUG-20260909-056) and the Operator ruled
+      for the register. A same-instant pair means a balance that dipped and was
+      restored inside one tick of stream resolution, which is a standing order,
+      and the error direction of the alternative is understated liquidity.
     applies_to: [live_book, screener, trait_book]

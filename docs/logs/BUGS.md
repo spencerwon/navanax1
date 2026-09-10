@@ -490,7 +490,7 @@ and for which collection; other collections must be re-verified.
 | ID | Sev | Pri | Status | Summary |
 |---|---|---|---|---|
 | BUG-20260909-055 | S3 | P1 | fixed | `tests/validator_probe.py` could not import and was never executed — a file that looked like coverage and was neither run nor runnable |
-| BUG-20260909-056 | S1 | P2 | **open** | `order_lives` kills an order whose invalidate and revalidate share a `valid_ts`; ASM-020 registers that tie as *reopening* it |
+| BUG-20260909-056 | S1 | P2 | fixed | `order_lives` kills an order whose invalidate and revalidate share a `valid_ts`; ASM-020 registers that tie as *reopening* it |
 | BUG-20260909-057 | S1 | P1 | fixed | `token_id` is taken from Seaport itemType 4/5 *criteria* items, so a collection offer with root `"0"` becomes a bid on token `0` |
 | BUG-20260909-058 | S3 | P2 | fixed | `import-traits --generated` accepts any epoch: `0` stamps `traits_at` at 1970, a millisecond timestamp at the year 58680 |
 
@@ -552,13 +552,29 @@ in-place `UPDATE`. `token_id` is derived; the frames are in the landing zone;
 re-deriving is the pattern the codebase already has, and the landing zone is
 byte-identical across the whole operation (asserted).
 
+**056 was a modelling decision, and the Operator made it** on 2026-09-10: the
+register is right and the code was wrong. An `order_invalidate` and an
+`order_revalidate` carrying the same `valid_ts` **reopen** the order, as ASM-020
+`revalidate_same_instant: reopens` always said. `_fold_one_life._superseded`
+went from `rt > r[4]` to `rt >= r[4]`; the register's rule text is unchanged and
+gained `tie_decided` / `tie_decided_by`, so it now records that a human ruled on
+the tie rather than that it was always so. The other six rules were re-checked
+and left alone — a cancel or a sale at the same instant is still final.
+
+The correction can only *add* orders to the standing book, never remove one, so
+liquidity that was understated is restored. Lives already folded do need a
+re-fold, and nobody has to remember to run it: `ORDER_LIVES_METHOD` is now 2 and
+`Normalizer` re-folds every life from `events` on open when it finds a row
+stamped lower. That rebuild reads `events` only — no landing-zone read, no REST
+read, nothing edited in place.
+
 ### Still open
 
-**One.** BUG-20260909-056, filed 2026-09-10 by `validator` against `pr7`, with a
-regression test already in `tests/selftest.py`. It is a modelling decision —
-whether an invalidate and a revalidate at the same `valid_ts` leave the order
-standing — and belongs to the Operator, not to whoever touches the code next.
-The other 57 logged bugs are fixed.
+**None.** All 58 logged bugs are fixed. BUG-20260909-056, -057 and -058, the
+three the validator filed against `pr7` on 2026-09-10, were closed the same day
+on `fix/BUG-20260909-057`; the self-test ends with 0 known defects, which is the
+state the `known_defect` harness is designed to make impossible to fake in
+either direction.
 
 ### The lesson
 

@@ -177,7 +177,11 @@ SCOPE_KIND_OF = {"item_listed": "item", "item_received_bid": "item",
                  "item_received_offer": "item", "collection_offer": "collection",
                  "trait_offer": "trait"}
 # Bump when the fold below changes, so a stored row says which rules made it.
-ORDER_LIVES_METHOD = 1
+#   1 -- to 2026-09-10. A revalidate superseded an invalidate only if STRICTLY
+#        later, so a same-valid_ts tie killed the order (BUG-20260909-056).
+#   2 -- ASM-020 `revalidate_same_instant: reopens`: the tie reopens it. A row
+#        stamped 1 was folded under the old rule; re-fold to correct it.
+ORDER_LIVES_METHOD = 2
 
 
 def iso_to_ts(s: str | None) -> float | None:
@@ -522,8 +526,11 @@ def _fold_one_life(hash_: str, rows: list[tuple], now_ts: float | None = None) -
 
       * ONE life per hash. Two cancels on one order are one termination, not
         two -- `bid_lifetimes` used to cross-product them (BUG-049).
-      * An `order_invalidate` with a LATER `order_revalidate` is not a
-        termination: the order re-opened (BUG-050a).
+      * An `order_invalidate` with an `order_revalidate` AT OR AFTER it is not
+        a termination: the order re-opened (BUG-050a). The tie is `>=`, not
+        `>` -- ASM-020 `revalidate_same_instant: reopens`, ruled on by Spencer
+        2026-09-10 (BUG-20260909-056). Only `order_invalidate` is reopenable;
+        `item_cancelled` and `item_sold` stay final at any instant.
       * A terminator whose `valid_ts` is NULL cannot be placed in time. It does
         NOT leave the order standing forever, and it is not dropped: the life
         is `unknown` and counted (BUG-050c).
@@ -550,13 +557,26 @@ def _fold_one_life(hash_: str, rows: list[tuple], now_ts: float | None = None) -
              else (places[0] if places else None))
     t_place = place[4] if place is not None else None
 
-    # A revalidate strictly after an invalidate re-opens the order, so that
+    # A revalidate AT OR AFTER an invalidate re-opens the order, so that
     # invalidate is not a termination.
+    #
+    # `>=`, not `>`: ASM-020 `revalidate_same_instant: reopens`. The two events
+    # can share a valid_ts -- the stream carries second-or-better resolution and
+    # a balance that dips and is restored inside one tick is one instant to us,
+    # not two. This was `>` until 2026-09-10 (BUG-20260909-056), which recorded
+    # such an order exit_reason='invalidated' and dropped it out of the standing
+    # book: liquidity understated, in the direction that makes a floor look
+    # thinner than it is. Spencer ruled on the tie on 2026-09-10: the register
+    # is right, the code was wrong.
+    #
+    # This loosening is for order_invalidate ALONE. `item_cancelled` and
+    # `item_sold` are terminal on chain and stay final at the same instant --
+    # they are not in this predicate and must not be added to it.
     reval_ts = [r[4] for r in revals if r[4] is not None]
 
     def _superseded(r: tuple) -> bool:
         return (r[3] == "order_invalidate" and r[4] is not None
-                and any(rt > r[4] for rt in reval_ts))
+                and any(rt >= r[4] for rt in reval_ts))
 
     candidates = [r for r in terms
                   if r[4] is not None and (t_place is None or r[4] >= t_place)
@@ -657,6 +677,22 @@ class Normalizer:
                     "SELECT EXISTS(SELECT 1 FROM events WHERE order_hash IS NOT NULL)").fetchone()[0]):
             log.info("order_lives is empty on a populated store: building it once")
             log.info("order_lives built: %d orders", refresh_order_lives(self.conn))
+        # A store folded by an earlier METHOD carries rows the current rules
+        # would not produce -- BUG-20260909-056 left a same-instant
+        # invalidate/revalidate pair recorded as a dead order. order_lives is
+        # derived from `events`, which this fix does not change, so the repair
+        # is a full re-fold of the lives table alone: no landing-zone read, no
+        # REST read, nothing edited in place. It is idempotent, so a store
+        # already at the current method does nothing.
+        stale = self.conn.execute(
+            "SELECT COUNT(*) FROM order_lives WHERE method_version < ?",
+            (ORDER_LIVES_METHOD,)).fetchone()[0]
+        if stale:
+            log.warning("order_lives: %d row(s) were folded by an older method than %d "
+                        "(BUG-20260909-056: a same-instant revalidate used to kill the "
+                        "order). Re-folding every life from `events`; the landing zone "
+                        "is not read and not touched.", stale, ORDER_LIVES_METHOD)
+            log.warning("order_lives re-folded: %d orders", refresh_order_lives(self.conn))
 
     # -- manifest-driven file discovery ------------------------------------
     def _files(self) -> list[dict[str, Any]]:
