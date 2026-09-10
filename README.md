@@ -29,7 +29,18 @@ python -m navanax.cli audit-token-ids   # read-only: did any stored row take its
                                         # token_id from a Seaport criteria item?
                                         # (BUG-20260909-057; expected answer 0)
 python3 tests/selftest.py       # stdlib-only self-test, no dependencies needed
+python3 tools/pushgate.py       # is this branch allowed to go to the remote? (never pushes)
 ```
+
+**Sending a branch to GitHub (macOS):** double-click `push.command`. It re-runs
+every check first — clean tree, nothing forbidden tracked, sign-offs from
+`tech-lead`, `pm` and `validator` bound to this exact commit, secrets, the bug
+ledger, lint, the test suites — prints what would be pushed, and pushes only
+after you type `PUSH`. It never merges, never touches `main`, and never uses
+`--force`; opening and approving the pull request stays yours. `pull.command`
+brings this Mac up to date, fast-forward only. See
+[`docs/04_ENVIRONMENTS.md` §4.2](docs/04_ENVIRONMENTS.md#42-getting-a-branch-to-the-remote)
+for why the push is a click and not something an agent does.
 
 **Running unattended (macOS):** double-click `autostart-install.command` and the recorder, dashboard and daily trait job start at login and restart themselves after a crash — see [`docs/04_ENVIRONMENTS.md` §8](docs/04_ENVIRONMENTS.md#8-running-unattended) for what it installs, where the logs go, the exit-code contract, and the sleep caveat launchd cannot fix.
 
