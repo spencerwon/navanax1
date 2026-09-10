@@ -25,6 +25,9 @@ Other commands:
 ```bash
 python -m navanax.cli status    # ingestion health, gaps, onboarding progress
 python -m navanax.cli verify    # re-verify landing-zone checksums (S0a on mismatch)
+python -m navanax.cli audit-token-ids   # read-only: did any stored row take its
+                                        # token_id from a Seaport criteria item?
+                                        # (BUG-20260909-057; expected answer 0)
 python3 tests/selftest.py       # stdlib-only self-test, no dependencies needed
 ```
 

@@ -202,6 +202,48 @@ def _f(x: Any) -> float | None:
         return None
 
 
+# Seaport's ItemType enum (SIP-5 / Seaport 1.x `ItemType`):
+#
+#   0 NATIVE                   4 ERC721_WITH_CRITERIA
+#   1 ERC20                    5 ERC1155_WITH_CRITERIA
+#   2 ERC721
+#   3 ERC1155
+#
+# On 2 and 3, `identifierOrCriteria` IS the token id. On 4 and 5 it is a MERKLE
+# ROOT over a SET of token ids -- and by Seaport's own convention a root of 0
+# means "any token in the collection". Reading it as a token id turned a
+# collection offer into a bid on token "0" and a trait offer into a bid on a
+# token numbered by its root (BUG-20260909-057).
+ITEM_TYPES_WITH_TOKEN_ID = frozenset({2, 3})
+ITEM_TYPES_WITH_CRITERIA = frozenset({4, 5})
+
+
+def _item_type(entry: dict[str, Any]) -> int | None:
+    """Seaport itemType as an int, or None if it is absent or not a number.
+
+    JSON has sent it as both `4` and `"4"`. None means "unknown", and an
+    unknown item type never yields a token id: guessing here is how a Merkle
+    root becomes a token id.
+    """
+    try:
+        return int(entry.get("itemType"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _identifier(entry: dict[str, Any]) -> str | None:
+    """`identifierOrCriteria` as a string, or None if genuinely absent.
+
+    NOT a truthiness test. Token id 0 exists and Seaport sends it as the STRING
+    "0", which is truthy, while an integer 0 is not -- so a truthiness guard is
+    wrong in both directions.
+    """
+    v = entry.get("identifierOrCriteria")
+    if v is None or v == "":
+        return None
+    return str(v)
+
+
 def _token_id_from(payload: dict[str, Any]) -> tuple[str | None, str | None]:
     """(contract, token_id). The stream puts these in more than one place."""
     item = payload.get("item") or {}
@@ -212,14 +254,29 @@ def _token_id_from(payload: dict[str, Any]) -> tuple[str | None, str | None]:
     if token is None:
         # item_received_bid puts the id in the Seaport consideration, not nft_id
         params = (payload.get("protocol_data") or {}).get("parameters") or {}
+        criteria_contract: str | None = None
         for side in ("consideration", "offer"):
             for entry in params.get(side) or []:
-                if entry.get("itemType") in (2, 3, 4, 5) and entry.get("identifierOrCriteria"):
-                    token = str(entry["identifierOrCriteria"])
-                    contract = contract or entry.get("token")
-                    break
+                if not isinstance(entry, dict):
+                    continue
+                it = _item_type(entry)
+                if it in ITEM_TYPES_WITH_CRITERIA:
+                    # The COLLECTION address is still sound here; the identifier
+                    # is not. Take the one and never the other.
+                    criteria_contract = criteria_contract or entry.get("token")
+                    continue
+                if it not in ITEM_TYPES_WITH_TOKEN_ID:
+                    continue
+                ident = _identifier(entry)
+                if ident is None:
+                    continue
+                token = ident
+                contract = contract or entry.get("token")
+                break
             if token:
                 break
+        if contract is None:
+            contract = criteria_contract
     if contract is None:
         acc = payload.get("asset_contract_criteria") or {}
         contract = acc.get("address")
@@ -778,3 +835,126 @@ class Normalizer:
 
     def close(self) -> None:
         self.conn.close()
+
+
+# -- the BUG-20260909-057 audit ---------------------------------------------
+def _criteria_token_id_legacy(p: dict[str, Any]) -> tuple[str, str | None, str | None] | None:
+    """What the PRE-FIX `_token_id_from` would have taken out of protocol_data.
+
+    Returns (source, identifier, contract) where source is "criteria" (itemType
+    4/5 -- a Merkle root, the bug) or "token" (itemType 2/3 -- legitimate), or
+    None if the old code would not have reached protocol_data at all.
+
+    This is a deliberate copy of the defective loop, kept so the audit can tell
+    a row that was folded WRONG from one that was folded right. It is only ever
+    read from; nothing in this module writes anything anywhere.
+    """
+    item = p.get("item") or {}
+    if len((item.get("nft_id") or "").split("/")) >= 3:
+        return None                      # nft_id carried the id; the loop never ran
+    params = (p.get("protocol_data") or {}).get("parameters") or {}
+    for side in ("consideration", "offer"):
+        for entry in params.get(side) or []:
+            if not isinstance(entry, dict):
+                continue
+            it = _item_type(entry)
+            ident = _identifier(entry)
+            # The old guard was truthiness on the raw value, so an integer 0 was
+            # skipped and the string "0" was not. Reproduce it exactly.
+            if it in (2, 3, 4, 5) and entry.get("identifierOrCriteria"):
+                kind = "criteria" if it in ITEM_TYPES_WITH_CRITERIA else "token"
+                return kind, ident, entry.get("token")
+    return None
+
+
+def audit_criteria_token_ids(landing_root: str | Path, *, examples: int = 5) -> dict[str, Any]:
+    """READ-ONLY sweep of the landing zone for BUG-20260909-057.
+
+    Answers the question the bug could not: do real OpenSea frames carry
+    `protocol_data` on `collection_offer` / `trait_offer` at all, and if so did
+    the pre-fix parser take a Merkle root as a token id on any recorded frame?
+
+    Opens every landing file for reading and nothing else. It never writes,
+    renames, or deletes -- the record is append-only (docs/07 §4) -- and it does
+    not touch the analytical store either; the caller cross-references.
+
+    Returns per-event-type counts plus `affected`, the (run, seq) keys of frames
+    whose folded `token_id` came from a criteria item.
+    """
+    root = Path(landing_root)
+    by_type: dict[str, dict[str, int]] = {}
+    affected: list[dict[str, Any]] = []
+    affected_keys: list[tuple[str | None, int | None]] = []
+    affected_total = 0
+    KEY_CAP = 100_000       # the expected answer is 0; this only bounds a disaster
+    files_read = files_unreadable = frames = 0
+
+    names: list[str] = []
+    mdir = root / "_manifest"
+    if mdir.exists():
+        for mp in sorted(mdir.glob("*.json")):
+            try:
+                data = json.loads(mp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            names.extend(f["filename"] for f in data.get("files", []) if f.get("filename"))
+    if not names:       # a landing zone whose manifest is missing is still auditable
+        names = [str(p.relative_to(root)) for p in sorted(root.rglob("*"))
+                 if p.is_file() and "_manifest" not in p.parts]
+
+    for name in names:
+        path = root / name
+        if not path.exists():
+            continue
+        files_read += 1
+        try:
+            envelopes = list(read_file(path, tolerate_truncation=True))
+        except Exception:                 # noqa: BLE001 - one bad file must not stop an audit
+            files_unreadable += 1
+            continue
+        for env in envelopes:
+            if env.get("_topic") == "__control__":
+                continue
+            try:
+                raw = json.loads(env["raw"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if isinstance(raw, list) and len(raw) >= 5:
+                event, outer = raw[3], raw[4]
+            elif isinstance(raw, dict):
+                event, outer = raw.get("event"), raw.get("payload")
+            else:
+                continue
+            if not isinstance(event, str) or not isinstance(outer, dict):
+                continue
+            p = outer.get("payload") if isinstance(outer.get("payload"), dict) else outer
+            frames += 1
+            b = by_type.setdefault(event, {"frames": 0, "with_protocol_data": 0,
+                                           "with_criteria_item": 0, "token_id_from_criteria": 0})
+            b["frames"] += 1
+            pd = p.get("protocol_data") or {}
+            if pd:
+                b["with_protocol_data"] += 1
+            params = pd.get("parameters") or {}
+            if any(_item_type(e) in ITEM_TYPES_WITH_CRITERIA
+                   for side in ("consideration", "offer") for e in (params.get(side) or [])
+                   if isinstance(e, dict)):
+                b["with_criteria_item"] += 1
+            taken = _criteria_token_id_legacy(p)
+            if taken is not None and taken[0] == "criteria":
+                b["token_id_from_criteria"] += 1
+                affected_total += 1
+                if len(affected_keys) < KEY_CAP:
+                    affected_keys.append((env.get("_run"), env.get("_seq")))
+                if len(affected) < examples:
+                    affected.append({"run": env.get("_run"), "seq": env.get("_seq"),
+                                     "file": name, "event_type": event,
+                                     "token_id": taken[1], "contract": taken[2],
+                                     "order_hash": p.get("order_hash"),
+                                     "collection": (p.get("collection") or {}).get("slug")})
+
+    return {"files_read": files_read, "files_unreadable": files_unreadable,
+            "frames": frames, "by_event_type": by_type,
+            "affected": affected, "affected_total": affected_total,
+            "affected_keys": affected_keys,
+            "affected_keys_truncated": affected_total > len(affected_keys)}

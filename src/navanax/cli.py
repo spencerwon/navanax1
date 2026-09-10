@@ -22,7 +22,7 @@ import logging
 import os
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .codec import get_codec, verify_codec_roundtrip
@@ -337,6 +337,164 @@ def cmd_verify(args) -> int:
     return 1
 
 
+def cmd_audit_token_ids(args) -> int:
+    """READ-ONLY audit for BUG-20260909-057. Opens both stores and changes neither.
+
+    Exit 0: no stored row took its `token_id` from a Seaport criteria item.
+    Exit 1: at least one did -- the recipe to repair them is printed.
+    """
+    import sqlite3
+
+    from .normalize import audit_criteria_token_ids
+    root = Path(args.root)
+    cfg, _ = _config(root)
+    db = root / cfg["analytical"]["path"]
+    landing = root / cfg["landing"]["root"]
+
+    print("BUG-20260909-057 audit -- token_id taken from a Seaport criteria item")
+    print("read-only: this command opens the landing zone and the analytical store")
+    print("           for reading only. It writes, renames and deletes nothing.")
+    print()
+    print("Seaport itemType 4 and 5 are ERC721/ERC1155_WITH_CRITERIA. Their")
+    print("`identifierOrCriteria` is a MERKLE ROOT over a SET of token ids, not a")
+    print("token id -- and a root of 0 means \"any token in the collection\". A row")
+    print("that took its token_id from one is a collection-wide bid recorded")
+    print("against a single token: it stops counting as collection-wide in")
+    print("immediacy_cost (REQ-F-13a) and shows up as a phantom bid on that token.")
+    print()
+
+    # -- 1. the store, as it stands ----------------------------------------
+    store_rows: list[tuple] = []
+    if db.exists():
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            store_rows = conn.execute(
+                "SELECT event_type, COUNT(*), SUM(token_id IS NOT NULL) FROM events "
+                "GROUP BY event_type ORDER BY event_type").fetchall()
+            suspect = conn.execute(
+                "SELECT event_type, COUNT(*) FROM events WHERE token_id IS NOT NULL "
+                "AND event_type IN ('collection_offer','trait_offer') "
+                "GROUP BY event_type ORDER BY event_type").fetchall()
+            suspect_examples = conn.execute(
+                "SELECT run, seq, event_type, collection, token_id, order_hash FROM events "
+                "WHERE token_id IS NOT NULL AND event_type IN ('collection_offer','trait_offer') "
+                "ORDER BY seq LIMIT 10").fetchall()
+        finally:
+            conn.close()
+    else:
+        print(f"NOTE  no analytical store at {db} -- nothing has been folded yet.")
+        print()
+        suspect, suspect_examples = [], []
+
+    n_suspect = sum(n for _, n in suspect)
+    if store_rows:
+        print("ANALYTICAL STORE -- rows with a non-NULL token_id, by event type")
+        print(f"  {'event_type':<22}{'rows':>10}{'token_id set':>14}")
+        for et, rows, with_tid in store_rows:
+            print(f"  {et:<22}{rows:>10}{(with_tid or 0):>14}")
+        print()
+        print("  A collection_offer or trait_offer is an order over a SET of tokens.")
+        print("  Its token_id must be NULL. The expected count in that column for")
+        print("  those two rows is 0.")
+        print(f"  criteria-bearing offers carrying a token_id: {n_suspect}"
+              + ("  <-- NOT CLEAN" if n_suspect else "  (clean)"))
+        for r in suspect_examples:
+            print(f"    run={r[0]} seq={r[1]} {r[2]} {r[3]} token_id={r[4]!r} order={r[5]}")
+        print()
+
+    # -- 2. the record, which is what settles it ---------------------------
+    if getattr(args, "shallow", False):
+        print("--shallow: the landing-zone sweep was skipped, so this run cannot say")
+        print("where a token_id came from -- only that the two criteria-bearing offer")
+        print("types do or do not carry one. An item_received_bid folded from a")
+        print("criteria item looks identical to a legitimate one from here. Run without")
+        print("--shallow for the real answer.")
+        return 1 if n_suspect else 0
+
+    if not landing.exists():
+        print(f"no landing zone at {landing} -- cannot sweep the record.", file=sys.stderr)
+        return 2
+    print(f"LANDING ZONE SWEEP  {landing}")
+    a = audit_criteria_token_ids(landing)
+    print(f"  {a['files_read']} file(s) read, {a['frames']} event frame(s)"
+          + (f", {a['files_unreadable']} UNREADABLE" if a["files_unreadable"] else ""))
+    print()
+    print(f"  {'event_type':<22}{'frames':>9}{'protocol_data':>15}{'criteria item':>15}{'AT RISK':>10}")
+    for et in sorted(a["by_event_type"]):
+        b = a["by_event_type"][et]
+        print(f"  {et:<22}{b['frames']:>9}{b['with_protocol_data']:>15}"
+              f"{b['with_criteria_item']:>15}{b['token_id_from_criteria']:>10}")
+    print()
+    print("  `protocol_data` is how many frames of that type carry the Seaport order")
+    print("  at all -- the open question this audit exists to settle. If it is 0 for")
+    print("  collection_offer and trait_offer, OpenSea never sends it on an offer and")
+    print("  the defect could not have fired on anything recorded.")
+    print("  `AT RISK` is how many frames the PRE-FIX parser WOULD have folded with a")
+    print("  token_id taken from a criteria item. It is a property of the frame, not")
+    print("  of the store: a frame folded since the fix is at risk and still correct.")
+    print()
+
+    # -- 3. what is actually IN the store, frame by frame -------------------
+    corrupt: list[tuple] = []
+    checked = 0
+    if db.exists() and a["affected_keys"]:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            keys = a["affected_keys"]
+            for i in range(0, len(keys), 200):          # SQLite's parameter limit
+                chunk = keys[i:i + 200]
+                q = " OR ".join(["(run=? AND seq=?)"] * len(chunk))
+                flat = [v for k in chunk for v in k]
+                checked += len(chunk)
+                corrupt.extend(conn.execute(
+                    "SELECT run, seq, event_type, collection, token_id, order_hash FROM events "
+                    f"WHERE token_id IS NOT NULL AND ({q})", flat).fetchall())
+        finally:
+            conn.close()
+
+    at_risk = a["affected_total"]
+    print(f"RESULT: {at_risk} recorded frame(s) at risk;")
+    print(f"        {len(corrupt)} stored row(s) actually carry a token_id taken from a "
+          f"criteria item."
+          + ("  (the at-risk key list was truncated;"
+             " treat this as a lower bound)" if a["affected_keys_truncated"] else ""))
+    if not at_risk:
+        print("        No recorded frame could have hit the defect, so no stored row is")
+        print("        wrong and no re-fold is needed for this bug. The fix is a guard")
+        print("        against frames not yet received. Nothing to do.")
+        return 1 if n_suspect else 0
+    if not db.exists():
+        print(f"        There is no analytical store at {db} to check them against, so")
+        print("        this run cannot say whether anything was folded wrong. Fold first")
+        print("        (`navanax normalize`), then run this again.")
+        return 1
+    if not corrupt:
+        print("        Every at-risk frame was folded by a FIXED parser: no stored row is")
+        print("        wrong and no re-fold is needed. Re-run this after any fold done by")
+        print("        an older build.")
+        return 1 if n_suspect else 0
+
+    for r in corrupt[:10]:
+        print(f"    run={r[0]} seq={r[1]} {r[2]} {r[3]} token_id={r[4]!r} order={r[5]}")
+    if len(corrupt) > 10:
+        print(f"    ... and {len(corrupt) - 10} more")
+    print()
+    print("WHAT TO DO: token_id is DERIVED, so the record is intact and the repair is")
+    print("        a RE-FOLD, not an edit -- nothing here or in the repair path ever")
+    print("        UPDATEs a row or touches the landing zone. Stop the dashboard and")
+    print("        any ingest fold, then:")
+    print()
+    print("          python3 -c \"from navanax.normalize import Normalizer; \\")
+    print("            n=Normalizer('<landing-root>','<analytical.sqlite>'); \\")
+    print("            print(n.reset_for_refold()); print(n.sync()); n.close()\"")
+    print()
+    print("        That clears the derived tables (events, order_criteria, order_lives,")
+    print("        unparsed, watermarks -- not tokens/traits, which cost REST reads) and")
+    print("        re-reads every frame from the landing zone through the fixed parser.")
+    print("        Then run this audit again: the second number must be 0.")
+    return 1
+
+
 def cmd_normalize(args) -> int:
     """One pass of landing zone -> analytical store. The dashboard does this continuously."""
     from .normalize import Normalizer
@@ -430,7 +588,33 @@ def cmd_import_traits(args) -> int:
             print(f"no --generated given and {sp} has no `generated` epoch; refusing to guess when the "
                   f"traits were observed", file=sys.stderr)
             return 2
-    generated_at = datetime.fromtimestamp(generated, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    # BUG-20260909-058. The refusal above covers the ABSENCE of a timestamp. A
+    # present one still has to be plausible: `traits_at` is an OBSERVATION time,
+    # and a wrong one is a bitemporal lie no later read can detect (docs/05 TMP).
+    # 0 stamps 1970; an epoch pasted in MILLISECONDS stamps the year 58680 (or
+    # dies in the C library, depending on the platform).
+    floor = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    ceiling = datetime.now(timezone.utc) + timedelta(days=1)
+    try:
+        generated_dt = datetime.fromtimestamp(generated, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        print(f"--generated {generated:.0f} is not a usable epoch ({type(exc).__name__}: {exc}).\n"
+              f"  It must be epoch SECONDS between {floor.date()} and now + 1 day "
+              f"(a timestamp in milliseconds is 1000x too large).", file=sys.stderr)
+        return 2
+    if not (floor <= generated_dt <= ceiling):
+        why = ("that is in milliseconds, not seconds" if generated > 1e12
+               else "that is before this project existed" if generated_dt < floor
+               else "that is in the future")
+        print(f"--generated {generated:.0f} is {generated_dt.isoformat().replace('+00:00', 'Z')} -- "
+              f"{why}.\n"
+              f"  traits_at records WHEN THE TRAITS WERE OBSERVED; an implausible one "
+              f"silently corrupts every as-of query.\n"
+              f"  Refusing. Give epoch SECONDS between {floor.date()} and "
+              f"{ceiling.date()}, or drop --generated and let summary.json say.",
+              file=sys.stderr)
+        return 2
+    generated_at = generated_dt.isoformat().replace("+00:00", "Z")
     db = root / cfg["analytical"]["path"]
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = open_store(db)
@@ -488,6 +672,13 @@ def main(argv=None) -> int:
                         "(fast, but cannot detect a short decode)")
     v.set_defaults(fn=cmd_verify)
     sub.add_parser("normalize").set_defaults(fn=cmd_normalize)
+    at = sub.add_parser("audit-token-ids",
+                        help="read-only: did any stored row take its token_id from a "
+                             "Seaport criteria item? (BUG-20260909-057)")
+    at.add_argument("--shallow", action="store_true",
+                    help="analytical store only; skip the landing-zone sweep "
+                         "(fast, but cannot establish where a token_id came from)")
+    at.set_defaults(fn=cmd_audit_token_ids)
     t = sub.add_parser("traits")
     t.add_argument("--slug", default=None)
     t.add_argument("--limit", type=int, default=None, help="fetch traits for at most N tokens this run")

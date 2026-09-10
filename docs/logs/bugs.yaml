@@ -1832,9 +1832,10 @@ bugs:
   severity: S1
   priority: P1
   error_class: NRM
-  status: open
+  status: fixed
   logged_at: "2026-09-10T09:40:00-05:00"
   occurred_at: "2026-09-09T10:00:00-05:00"
+  resolved_at: "2026-09-10T12:10:00-05:00"
   detected_by: "validator, porting the last assertion of the superseded validator_probe.py::probe_parse_trait_criteria onto the merged parse_event"
   detection_channel: validator
   branch: pr7
@@ -1850,7 +1851,27 @@ bugs:
     means "any token in the collection". The truthiness guard
     (`and entry.get("identifierOrCriteria")`) does not help: "0" is a non-empty
     string.
-  resolution: null
+  resolution: >-
+    `_token_id_from` now reads `identifierOrCriteria` only from Seaport itemType
+    2 (ERC721) and 3 (ERC1155). Types 4 and 5 (*_WITH_CRITERIA) contribute the
+    item's `token` ADDRESS -- which is sound -- and never its identifier, which
+    is a Merkle root; every other itemType, and any itemType that is absent or
+    not a number, yields no token id at all rather than a guess. The truthiness
+    guard is gone: the identifier is taken when it is not None and not "", so the
+    string "0" and the integer 0 both mean token 0 on a real ERC-721, and a
+    criteria root of "0" is rejected on its item TYPE, not on its value.
+    Nothing in metrics.py changed -- the collection-wide predicate at line 361
+    was correct and was being fed a wrong row. For rows already folded the repair
+    is `Normalizer.reset_for_refold()` + `sync()`, NOT an in-place UPDATE:
+    token_id is derived, the landing zone holds the frames, and re-deriving is
+    the codebase's existing pattern (the same call refold_criteria() refuses in
+    favour of). Whether any stored row IS affected could not be established from
+    this machine -- the record lives on the Operator's Mac -- so the fix ships
+    with `navanax audit-token-ids`, a read-only sweep that opens the landing zone
+    and the analytical store, reports per event type how many frames carry
+    `protocol_data` at all and how many folded a token_id out of a criteria item,
+    prints examples, exits non-zero if any did, and prints the re-fold recipe.
+    The expected answer for collection_offer is 0.
   regression_test: tests/selftest.py::test_token_id_is_never_taken_from_a_criteria_item
   monitor_gap: "The real collection_offer and trait_offer fixtures carry no protocol_data, so no test could reach the branch -- the BUG-002 shape again, a fixture that cannot falsify the code. A sweep of the landing zone for offer frames that DO carry protocol_data is the first thing the fix should do, because it decides whether any stored row needs re-folding."
   pr: 7
@@ -1860,9 +1881,10 @@ bugs:
   severity: S3
   priority: P2
   error_class: TMP
-  status: open
+  status: fixed
   logged_at: "2026-09-10T09:50:00-05:00"
   occurred_at: "2026-09-09T16:00:00-05:00"
+  resolved_at: "2026-09-10T12:10:00-05:00"
   detected_by: "validator, porting validator_probe.py::probe_import_generated_zero onto the merged CLI"
   detection_channel: validator
   branch: pr7
@@ -1875,7 +1897,16 @@ bugs:
     The refusal covers ABSENCE of a timestamp, which is the case the author had
     in mind, and not implausibility of one that is present. 0.0 is not None,
     and neither is 1788808192000.
-  resolution: null
+  resolution: >-
+    `cmd_import_traits` now validates the timestamp it was GIVEN, not merely its
+    presence. The conversion is wrapped, so an epoch the C library cannot
+    represent is a refusal rather than an uncaught OverflowError/ValueError
+    traceback, and the result must fall inside [2020-01-01, now + 1 day]. Outside
+    it the command prints the timestamp it would have stamped, names the likely
+    mistake (milliseconds pasted where seconds were wanted, above 1e12), says
+    that traits_at is an observation time and an implausible one corrupts every
+    as-of query, and exits 2 without opening the store. The no-timestamp refusal
+    is unchanged.
   regression_test: tests/selftest.py::test_import_traits_cli_refuses_an_implausible_observation_time
   monitor_gap: "test_import_explorer_cache covers the no-timestamp path (exit 2) and the summary.json path, and never passes --generated at all. Nothing anywhere sanity-checks an observation time against a plausible window, which is the general form of this."
   pr: 7

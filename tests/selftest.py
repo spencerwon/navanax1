@@ -3919,5 +3919,319 @@ def test_every_test_file_is_executed_by_something() -> None:
           f"{_bug_status('BUG-20260909-055')} / {_bug_status('BUG-20260909-056')}")
 
 
+def test_token_id_item_type_by_item_type() -> None:
+    """BUG-20260909-057, the rule stated exhaustively rather than by example.
+
+    `test_token_id_is_never_taken_from_a_criteria_item` proves the two shapes
+    the validator reproduced. This one walks the whole Seaport ItemType enum,
+    because the defect was not "type 4 was mishandled" -- it was that the
+    accepted set was written once, by hand, and never checked against what each
+    type MEANS. It also pins the string-vs-int trap in both directions.
+    """
+    from navanax.normalize import parse_event
+
+    def token_id_for(item_type, identifier) -> str | None:
+        raw = ["1", None, "collection:argonauts", "item_received_bid", {
+            "event_type": "item_received_bid", "sent_at": "2026-09-09T10:19:24Z",
+            "payload": {"chain": "ethereum", "collection": {"slug": "argonauts"},
+                        "event_timestamp": "2026-09-09T10:19:23Z", "base_price": "1",
+                        "order_hash": "0xitemtype", "quantity": 1, "item": None,
+                        "payment_token": {"decimals": 18, "eth_price": "1",
+                                          "symbol": "WETH", "usd_price": "1"},
+                        "protocol_data": {"parameters": {"offer": [], "consideration": [
+                            {"itemType": item_type, "token": "0xabc",
+                             "identifierOrCriteria": identifier}]}}}}]
+        return parse_event(_env(1, raw, "2026-09-09T10:19:32Z"))["token_id"]
+
+    for it, meaning in ((0, "NATIVE"), (1, "ERC20")):
+        check(f"itemType {it} ({meaning}) names no NFT, so it yields no token_id",
+              token_id_for(it, "7531") is None, f"got {token_id_for(it, '7531')!r}")
+    for it, meaning in ((2, "ERC721"), (3, "ERC1155")):
+        check(f"itemType {it} ({meaning}): identifierOrCriteria IS the token id",
+              token_id_for(it, "7531") == "7531", f"got {token_id_for(it, '7531')!r}")
+    for it, meaning in ((4, "ERC721_WITH_CRITERIA"), (5, "ERC1155_WITH_CRITERIA")):
+        check(f"itemType {it} ({meaning}): identifierOrCriteria is a MERKLE ROOT and is "
+              f"never taken as a token id -- not the root 0 that means 'any token', "
+              f"and not a real root either",
+              token_id_for(it, "0") is None and token_id_for(it, "831572299943853139516") is None,
+              f"got {token_id_for(it, '0')!r} / {token_id_for(it, '831572299943853139516')!r}")
+    check("an itemType the enum does not define yields no token_id -- an unknown item "
+          "type is not a licence to guess",
+          token_id_for(9, "7531") is None and token_id_for(None, "7531") is None
+          and token_id_for("banana", "7531") is None)
+    check("itemType arriving as the STRING '4' is still a criteria item (JSON has sent both)",
+          token_id_for("4", "0") is None, f"got {token_id_for('4', '0')!r}")
+    check("itemType as the string '2' still yields its token id",
+          token_id_for("2", "7531") == "7531")
+    check("token id 0 on a real ERC-721 is a token id: the string '0' and the integer 0 "
+          "both become '0' (the old truthiness guard kept one and dropped the other)",
+          token_id_for(2, "0") == "0" and token_id_for(2, 0) == "0",
+          f"{token_id_for(2, '0')!r} / {token_id_for(2, 0)!r}")
+    check("a genuinely absent identifier yields no token_id",
+          token_id_for(2, None) is None and token_id_for(2, "") is None)
+
+
+def test_refold_repairs_a_criteria_sourced_token_id(tmp: Path) -> None:
+    """BUG-20260909-057's repair path, end to end.
+
+    `token_id` is DERIVED, so the fix for rows already folded is a re-fold from
+    the landing zone -- never an UPDATE in place. This folds a collection offer
+    through the DEFECTIVE parser (monkeypatched back in, so the bad rows are
+    produced by the real pipeline rather than typed into the store), then
+    re-folds through the fixed one and checks the row is corrected, the metrics
+    predicate that depends on it works again, and the record is untouched.
+    """
+    import hashlib
+
+    from navanax import normalize as nz
+    from navanax.normalize import Normalizer
+    from navanax.traits import ensure_schema
+
+    coll_offer_with_protocol_data = ["1", None, "collection:argonauts", "collection_offer", {
+        "event_type": "collection_offer", "sent_at": "2026-09-09T10:19:24Z",
+        "payload": {"chain": "ethereum", "collection": {"slug": "argonauts"},
+                    "event_timestamp": "2026-09-09T10:19:23.500000Z",
+                    "base_price": "348000000000000000", "quantity": 1, "item": None,
+                    "order_hash": "0xco11ec7i0n0ffer0000000000000000000000000",
+                    "payment_token": {"decimals": 18, "eth_price": "0.348",
+                                      "symbol": "WETH", "usd_price": "866.1"},
+                    "protocol_data": {"parameters": {
+                        "offer": [{"itemType": 1, "token": "0xc02a", "identifierOrCriteria": "0"}],
+                        "consideration": [{"itemType": 4, "token": "0x387c41b0",
+                                           "identifierOrCriteria": "0"}]}}}}]
+
+    clock = FakeClock(datetime(2026, 9, 9, 10, 19, 0, tzinfo=timezone.utc))
+    root = tmp / "lz-refold-057"
+    w = LandingZoneWriter(root, "run-057", codec=GzipCodec(), clock=clock.now,
+                          monotonic=clock.monotonic, flush_events=2, auto_flush=False)
+    for raw in (coll_offer_with_protocol_data, REAL_BID):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+        clock.advance(1)
+    w.flush()
+    w.close()
+
+    def digest() -> str:
+        h = hashlib.sha256()
+        for p in sorted(root.rglob("*")):
+            if p.is_file():
+                h.update(p.relative_to(root).as_posix().encode())
+                h.update(p.read_bytes())
+        return h.hexdigest()
+
+    before = digest()
+
+    def defective_token_id_from(payload):
+        """`_token_id_from` exactly as it stood before the fix."""
+        item = payload.get("item") or {}
+        parts = (item.get("nft_id") or "").split("/")
+        contract = parts[1] if len(parts) >= 2 else None
+        token = parts[2] if len(parts) >= 3 else None
+        if token is None:
+            params = (payload.get("protocol_data") or {}).get("parameters") or {}
+            for side in ("consideration", "offer"):
+                for entry in params.get(side) or []:
+                    if entry.get("itemType") in (2, 3, 4, 5) and entry.get("identifierOrCriteria"):
+                        token = str(entry["identifierOrCriteria"])
+                        contract = contract or entry.get("token")
+                        break
+                if token:
+                    break
+        if contract is None:
+            contract = (payload.get("asset_contract_criteria") or {}).get("address")
+        return contract, token
+
+    fixed = nz._token_id_from
+    nz._token_id_from = defective_token_id_from
+    try:
+        n = Normalizer(root, tmp / "refold057.sqlite")
+        ensure_schema(n.conn)
+        n.sync()
+    finally:
+        nz._token_id_from = fixed
+    bad = n.conn.execute("SELECT token_id FROM events WHERE event_type='collection_offer'").fetchone()
+    check("re-fold setup: the pre-fix parser really does record the collection offer against "
+          "token '0' -- the store this repair path exists for",
+          bad == ("0",), f"got {bad!r}")
+    check("re-fold setup: and metrics.py's collection-wide predicate "
+          "(token_id IS NULL AND event_type='collection_offer') therefore matches nothing",
+          n.conn.execute("SELECT COUNT(*) FROM events WHERE token_id IS NULL "
+                         "AND event_type='collection_offer'").fetchone()[0] == 0)
+
+    cleared = n.reset_for_refold()
+    stats = n.sync()
+    check("re-fold: reset_for_refold + sync re-reads the SAME frames from the record",
+          cleared["events"] == 2 and stats["rows_added"] == 2, f"{cleared} / {stats}")
+    check("re-fold: the corrupted token_id is CORRECTED -- the collection offer is "
+          "collection-wide again, with no row edited in place",
+          n.conn.execute("SELECT token_id FROM events WHERE event_type='collection_offer'"
+                         ).fetchone() == (None,))
+    check("re-fold: metrics.py's collection-wide predicate matches it once more",
+          n.conn.execute("SELECT COUNT(*) FROM events WHERE token_id IS NULL "
+                         "AND event_type='collection_offer'").fetchone()[0] == 1)
+    check("re-fold: the contract is still recovered from the criteria item -- the item's "
+          "`token` address is sound even though its identifier is not",
+          n.conn.execute("SELECT contract FROM events WHERE event_type='collection_offer'"
+                         ).fetchone() == ("0x387c41b0",))
+    check("re-fold: the item_received_bid alongside it is unchanged -- an itemType 2 "
+          "consideration still yields its token id",
+          n.conn.execute("SELECT token_id FROM events WHERE event_type='item_received_bid'"
+                         ).fetchone() == ("7531",))
+    check("re-fold: the landing zone is byte-identical across the whole repair "
+          "(docs/07 §4: the record is append-only and is never the thing repaired)",
+          digest() == before)
+    n.close()
+
+
+def test_audit_token_ids_command(tmp: Path) -> None:
+    """`navanax audit-token-ids` -- the read-only sweep the Operator runs on the Mac.
+
+    The real landing zone and analytical store are on his machine, so whether any
+    stored row is actually corrupt cannot be answered from here or from CI. This
+    checks the instrument itself: that it finds a criteria-sourced token_id where
+    one exists, exits non-zero, reports the `protocol_data` counts that settle
+    whether OpenSea sends the Seaport order on offer frames at all, and that it
+    writes nothing.
+    """
+    import hashlib
+    import io
+    from contextlib import redirect_stdout
+
+    from navanax.cli import main as cli_main
+    from navanax.normalize import audit_criteria_token_ids
+
+    def offer(event_type: str, item_type, criteria: str, order: str) -> list:
+        return ["1", None, "collection:argonauts", event_type, {
+            "event_type": event_type, "sent_at": "2026-09-09T10:19:24Z",
+            "payload": {"chain": "ethereum", "collection": {"slug": "argonauts"},
+                        "event_timestamp": "2026-09-09T10:19:23.500000Z",
+                        "base_price": "1", "quantity": 1, "item": None, "order_hash": order,
+                        "payment_token": {"decimals": 18, "eth_price": "1",
+                                          "symbol": "WETH", "usd_price": "1"},
+                        "protocol_data": {"parameters": {"offer": [], "consideration": [
+                            {"itemType": item_type, "token": "0x387c41b0",
+                             "identifierOrCriteria": criteria}]}}}}]
+
+    root = tmp / "audit057"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "base.yaml").write_text(
+        "environment: local\nanalytical:\n  path: data/an.sqlite\n"
+        "opstore:\n  path: data/ops.db\nlanding:\n  root: data/landing\n")
+    (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    lz = root / "data" / "landing"
+    clock = FakeClock(datetime(2026, 9, 9, 10, 19, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(lz, "run-audit", codec=GzipCodec(), clock=clock.now,
+                          monotonic=clock.monotonic, flush_events=2, auto_flush=False)
+    frames = [REAL_BID,                                          # nft_id-less, itemType 2: fine
+              REAL_COLL_OFFER,                                   # no protocol_data at all
+              offer("collection_offer", 4, "0", "0xbad1"),       # the root-0 case
+              offer("trait_offer", 5, "831572299943853139516", "0xbad2")]
+    for raw in frames:
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+        clock.advance(1)
+    w.flush()
+    w.close()
+
+    def digest() -> str:
+        h = hashlib.sha256()
+        for p in sorted(lz.rglob("*")):
+            if p.is_file():
+                h.update(p.relative_to(lz).as_posix().encode())
+                h.update(p.read_bytes())
+        return h.hexdigest()
+
+    before = digest()
+    a = audit_criteria_token_ids(lz)
+    check("audit: the sweep counts one criteria-sourced token_id per bad offer, and none "
+          "for the itemType 2 bid",
+          a["affected_total"] == 2
+          and a["by_event_type"]["collection_offer"]["token_id_from_criteria"] == 1
+          and a["by_event_type"]["trait_offer"]["token_id_from_criteria"] == 1
+          and a["by_event_type"]["item_received_bid"]["token_id_from_criteria"] == 0,
+          json.dumps(a["by_event_type"]))
+    check("audit: it reports how many frames carry protocol_data at all, per event type -- "
+          "the question the bug could not answer (1 of the 2 collection offers here)",
+          a["by_event_type"]["collection_offer"] == {
+              "frames": 2, "with_protocol_data": 1, "with_criteria_item": 1,
+              "token_id_from_criteria": 1}, json.dumps(a["by_event_type"]))
+    check("audit: an example carries enough to find the frame in the record",
+          a["affected"] and {"run", "seq", "file", "event_type", "token_id"} <= set(a["affected"][0]))
+
+    # Fold the record with the DEFECTIVE parser, which is the state the Operator's
+    # store is in if OpenSea ever sent one of these frames before today.
+    from navanax import normalize as nz
+    from navanax.normalize import Normalizer
+    from navanax.traits import ensure_schema
+    fixed_fn = nz._token_id_from
+
+    def defective(payload):
+        params = (payload.get("protocol_data") or {}).get("parameters") or {}
+        for side in ("consideration", "offer"):
+            for e in params.get(side) or []:
+                if e.get("itemType") in (2, 3, 4, 5) and e.get("identifierOrCriteria"):
+                    return e.get("token"), str(e["identifierOrCriteria"])
+        return fixed_fn(payload)
+
+    nz._token_id_from = defective
+    try:
+        n = Normalizer(lz, root / "data" / "an.sqlite")
+        ensure_schema(n.conn)
+        n.sync()
+        n.close()
+    finally:
+        nz._token_id_from = fixed_fn
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli_main(["--root", str(root), "audit-token-ids"])
+    out = buf.getvalue()
+    check("audit: the CLI exits NON-ZERO when stored rows really did fold a criteria root "
+          "into token_id -- a silent 0 here is what let the bug live",
+          rc == 1, f"rc={rc}")
+    check("audit: it separates frames AT RISK from rows actually wrong, and finds both here",
+          "2 recorded frame(s) at risk" in out and "2 stored row(s) actually carry" in out, out)
+    check("audit: the output says what the number means and what to do about it",
+          "MERKLE ROOT" in out and "reset_for_refold" in out and "read-only" in out)
+    check("audit: the audit does not touch one byte of the landing zone", digest() == before)
+
+    # And after the repair the same command says so, on the same store.
+    n = Normalizer(lz, root / "data" / "an.sqlite")
+    n.reset_for_refold()
+    n.sync()
+    n.close()
+    buf3 = io.StringIO()
+    with redirect_stdout(buf3):
+        rc3 = cli_main(["--root", str(root), "audit-token-ids"])
+    check("audit: after reset_for_refold + sync the audit exits 0 -- the re-fold is the "
+          "repair, and the audit is what proves it landed",
+          rc3 == 0 and "0 stored row(s) actually carry" in buf3.getvalue(),
+          f"rc={rc3}\n{buf3.getvalue()}")
+    check("audit: the landing zone is byte-identical across the audit AND the repair",
+          digest() == before)
+
+    empty = tmp / "audit057-clean"
+    (empty / "config").mkdir(parents=True)
+    (empty / "config" / "base.yaml").write_text(
+        "environment: local\nanalytical:\n  path: data/an.sqlite\n"
+        "opstore:\n  path: data/ops.db\nlanding:\n  root: data/landing\n")
+    (empty / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    lz2 = empty / "data" / "landing"
+    clock2 = FakeClock(datetime(2026, 9, 9, 10, 19, 0, tzinfo=timezone.utc))
+    w2 = LandingZoneWriter(lz2, "run-clean", codec=GzipCodec(), clock=clock2.now,
+                           monotonic=clock2.monotonic, flush_events=2, auto_flush=False)
+    for raw in (REAL_BID, REAL_COLL_OFFER):
+        w2.write(json.dumps(raw), topic="collection:argonauts",
+                 event_timestamp=raw[4]["payload"]["event_timestamp"])
+        clock2.advance(1)
+    w2.flush()
+    w2.close()
+    buf2 = io.StringIO()
+    with redirect_stdout(buf2):
+        rc2 = cli_main(["--root", str(empty), "audit-token-ids"])
+    check("audit: a clean record exits 0 and says so in words, not just a count",
+          rc2 == 0 and "RESULT: 0" in buf2.getvalue(), f"rc={rc2}")
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

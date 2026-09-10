@@ -491,8 +491,8 @@ and for which collection; other collections must be re-verified.
 |---|---|---|---|---|
 | BUG-20260909-055 | S3 | P1 | fixed | `tests/validator_probe.py` could not import and was never executed — a file that looked like coverage and was neither run nor runnable |
 | BUG-20260909-056 | S1 | P2 | **open** | `order_lives` kills an order whose invalidate and revalidate share a `valid_ts`; ASM-020 registers that tie as *reopening* it |
-| BUG-20260909-057 | S1 | P1 | **open** | `token_id` is taken from Seaport itemType 4/5 *criteria* items, so a collection offer with root `"0"` becomes a bid on token `0` |
-| BUG-20260909-058 | S3 | P2 | **open** | `import-traits --generated` accepts any epoch: `0` stamps `traits_at` at 1970, a millisecond timestamp at the year 58680 |
+| BUG-20260909-057 | S1 | P1 | fixed | `token_id` is taken from Seaport itemType 4/5 *criteria* items, so a collection offer with root `"0"` becomes a bid on token `0` |
+| BUG-20260909-058 | S3 | P2 | fixed | `import-traits --generated` accepts any epoch: `0` stamps `traits_at` at 1970, a millisecond timestamp at the year 58680 |
 
 **055 is the process one.** The probe file arrived on `main` in `aeb9ba9` (PR #5)
 written against a trait-criteria design that was never merged — per-event
@@ -526,12 +526,39 @@ written on different branches and nothing compared them — so nothing read
 `config/assumptions.yaml` at all. A registered assumption that no test asserts
 is a comment.
 
+### Round 15 — the two the data-engineer could fix (pr7)
+
+**057 and 058 are fixed** on `fix/BUG-20260909-057`. `_token_id_from` now reads
+`identifierOrCriteria` only from Seaport itemType 2 and 3; types 4 and 5
+contribute the item's `token` *address*, which is sound, and never its
+identifier, which is a Merkle root. An unknown or non-numeric itemType now
+yields no token id at all rather than a guess, and the truthiness guard is gone,
+so the string `"0"` and the integer `0` both mean token 0 on a real ERC-721
+while a criteria root of `"0"` is rejected on its item *type*.
+
+**Whether any stored row is actually wrong is still unknown, and cannot be
+settled from a build machine.** The record lives on the Operator's Mac. The
+captured fixtures carry no `protocol_data` on `collection_offer` /
+`trait_offer`, so nobody yet knows whether OpenSea sends the Seaport order on an
+offer frame at all. `navanax audit-token-ids` is the instrument that answers it:
+a read-only sweep that opens the landing zone and the analytical store, reports
+per event type how many frames carry `protocol_data` and how many would have
+folded a token id out of a criteria item, cross-references those frames against
+the rows actually stored, and prints the re-fold recipe if any are wrong. The
+expected answer for `collection_offer` is 0.
+
+The repair, if it is ever needed, is `reset_for_refold()` + `sync()` — never an
+in-place `UPDATE`. `token_id` is derived; the frames are in the landing zone;
+re-deriving is the pattern the codebase already has, and the landing zone is
+byte-identical across the whole operation (asserted).
+
 ### Still open
 
-**Three.** BUG-20260909-056, -057 and -058, all filed 2026-09-10 by `validator`
-against `pr7`, all with a regression test already in `tests/selftest.py` and all
-awaiting a fix from `data-engineer` (`docs/05_BUG_TAXONOMY.md` §5.1 routes `NRM`
-and `TMP` there). The other 55 logged bugs are fixed.
+**One.** BUG-20260909-056, filed 2026-09-10 by `validator` against `pr7`, with a
+regression test already in `tests/selftest.py`. It is a modelling decision —
+whether an invalidate and a revalidate at the same `valid_ts` leave the order
+standing — and belongs to the Operator, not to whoever touches the code next.
+The other 57 logged bugs are fixed.
 
 ### The lesson
 
