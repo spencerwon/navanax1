@@ -315,3 +315,22 @@ Double-click `autostart-uninstall.command`. It stops the three jobs (via `launch
 ### 8.9 Where this sits in §2's model
 
 These LaunchAgents run **PROD code against PROD data** on the Operator's machine. That is the one combination §2 permits to write to the historical record. Nothing here changes ingestion semantics: `--supervised` only affects output buffering and a banner line. A STAGE shadow run, when one exists, needs its own labels, its own landing root, and its own lock file — not a second copy of these plists.
+
+### 8.10 Viewing vs running
+
+Once the jobs above are installed, **the dashboard is already running** and the only thing left to do is look at it. That is `open-dashboard.command` (or the `Navanax Dashboard.webloc` bookmark, which is the same thing in one click from the Dock). It checks whether anything is listening on `127.0.0.1:8765`, opens the page if so, and otherwise says why not and points at `autostart-status.command`. It never starts a dashboard — and that is a correctness property, not tidiness. A second dashboard started by hand beside the background one gives two writers on one SQLite store, which is precisely how the analytical store was left `database disk image is malformed` on 2026-09-10 (BUG-20260910-067, §8.3). `dashboard.command` is the one file that does start a process, it exists only for a machine with no background job, and it refuses with exit 2 if one is already listening.
+
+### 8.11 Updating
+
+`update.command` is the deploy step, and the only one. On a clean `main` it fast-forwards (`git pull --ff-only`) and prints the commits that arrived, reinstalls the package **only** if `pyproject.toml` changed, re-renders the plists **only** if `tools/launchd.py` changed, then `bootout`s and `bootstrap`s the three jobs, waits five seconds, prints each job's state, and reads `/api/health` for `quick_check` and `store_writer` — because "the job is running" and "the store is readable" are different claims and the second is the one that goes wrong. It refuses, having changed nothing, on uncommitted edits (naming the files), on a checkout that is not on `main`, or when the pull would not be a fast-forward. It **never switches branches itself**: the live checkout is shared with whatever Claude session is working in it, which may have it parked on a review branch, so instead it prints one sentence — `the live checkout is on branch X; switch it to main` — for the Operator to send Claude. It touches nothing under `data/`; an update changes code, and code is the replaceable half.
+
+| Double-click | What it does | Starts anything? |
+|---|---|---|
+| `open-dashboard.command` | Opens `http://127.0.0.1:8765/` if the background dashboard is listening; explains why not if it is not | **No** |
+| `Navanax Dashboard.webloc` | The same URL as a Finder/Dock bookmark | **No** |
+| `update.command` | Pulls `main`, reinstalls/re-renders only if needed, restarts the three jobs, prints health | Restarts the jobs it already manages |
+| `autostart-install.command` | Installs and loads the three LaunchAgents (§8.2) | Yes — the three jobs |
+| `autostart-status.command` | Read-only state, logs and gap count (§8.8) | No |
+| `autostart-uninstall.command` | Stops the three jobs and deletes their plists (§8.8) | No |
+| `dashboard.command` | Runs a dashboard in a window, for a machine with no background job; refuses if one is listening | Yes — one process |
+| `rebuild-store.command` | Moves a malformed analytical store aside so it re-folds from the landing zone | No |

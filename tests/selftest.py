@@ -8548,5 +8548,379 @@ def test_degraded_reopen_probe_is_not_throttled_by_refresh_seconds(tmp: Path) ->
           "min(self.refresh, STORE_REOPEN_SECONDS)" in body
           and "self.norm is None" in body, body[:200])
 
+# ===========================================================================
+# The double-click files the Operator actually uses, RUN rather than read.
+#
+# There are exactly two he touches day to day, and the split between them is
+# the whole point: open-dashboard.command LOOKS and update.command DEPLOYS.
+# A second dashboard started by hand beside the background one is what
+# corrupted the analytical store on 2026-09-10 (BUG-20260910-067), so "the
+# viewer never starts anything" is a correctness property, not tidiness.
+#
+# These tests run the real scripts in a sandbox. Two names are rewritten in the
+# sandbox copy before it runs, and it matters that both are rewrites of the
+# real file rather than a re-implementation of it:
+#
+#   launchctl -> a name that is not on any PATH, so the "no launchctl here"
+#       branch runs on a Mac as well as on Linux. Without this, running the
+#       suite on the Operator's own machine would `bootout` his live recorder
+#       -- a test that stops production recording is worse than no test, and
+#       the hours it loses cannot be bought back (docs/04 §8.1).
+#
+#   8765 -> a port this test owns, so the assertions do not depend on whether
+#       the real dashboard happens to be up, and nothing here can reach it.
+# ===========================================================================
+
+_GIT_ID = ("-c", "user.email=selftest@navanax.local",
+           "-c", "user.name=Navanax Selftest",
+           "-c", "commit.gpgsign=false")
+
+
+def _git(cwd: Path, env: dict, *args: str):
+    import subprocess
+    return subprocess.run(["git", *_GIT_ID, *args], cwd=str(cwd), env=env,
+                          capture_output=True, text=True, timeout=180)
+
+
+def _fake_home_env(home: Path) -> dict:
+    """An environment whose HOME (and git config) is a throwaway directory.
+
+    update.command writes to `$HOME/Library/LaunchAgents` on the paths that get
+    that far, and git reads `$HOME/.gitconfig`. Both are redirected so a test
+    run cannot touch the real ones.
+    """
+    (home / ".config").mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(var, None)
+    return env
+
+
+def _sandbox_script(name: str, dest: Path, port: int) -> str:
+    """Copy the REAL .command file, rewriting `launchctl` and the port.
+
+    Returns the rewritten text. See the block comment above for why these two
+    substitutions exist; everything else -- every branch, every refusal, every
+    message -- is the shipped file's own.
+    """
+    text = (ROOT / name).read_text()
+    text = text.replace("launchctl", "launchctl-not-on-this-machine")
+    text = text.replace("8765", str(port))
+    dest.write_text(text)
+    dest.chmod(0o755)
+    return text
+
+
+def _init_repo(path: Path, env: dict) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    r = _git(path, env, "init", "-q", "-b", "main")
+    if r.returncode != 0:                          # git older than 2.28
+        _git(path, env, "init", "-q")
+        _git(path, env, "symbolic-ref", "HEAD", "refs/heads/main")
+
+
+def _update_sandbox(tmp: Path, name: str, port: int) -> tuple[Path, Path, dict]:
+    """A fake origin with two commits on main, and a clone of it at commit one.
+
+    The clone is what update.command runs in, so `git pull --ff-only` has a real
+    remote to fast-forward from. update.command is COMMITTED into the repo
+    rather than dropped beside it -- an untracked copy of the script would make
+    the working tree dirty and the script would (correctly) refuse every time.
+    """
+    base = tmp / name
+    home = base / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = _fake_home_env(home)
+
+    origin = base / "origin"
+    _init_repo(origin, env)
+    (origin / ".gitignore").write_text("data/\n")
+    (origin / "README.md").write_text("# Sandbox\n")
+    _sandbox_script("update.command", origin / "update.command", port)
+    _git(origin, env, "add", "-A")
+    _git(origin, env, "commit", "-q", "-m", "initial commit")
+
+    live = base / "live"
+    _git(base, env, "clone", "-q", str(origin), str(live))
+
+    # The commit the update will pull. It deliberately touches neither
+    # pyproject.toml nor tools/launchd.py, so the conditional steps stay off.
+    (origin / "README.md").write_text("# Sandbox\nthe line the update brings\n")
+    _git(origin, env, "add", "-A")
+    _git(origin, env, "commit", "-q", "-m", "feat(sandbox): the commit update.command pulls")
+    return live, origin, env
+
+
+def test_update_command_refuses_a_dirty_tree_and_a_branch_that_is_not_main(tmp: Path) -> None:
+    """Both refusals must fire before anything is pulled, and both must name
+    what is wrong specifically enough to act on.
+
+    The branch refusal is the load-bearing one. The live checkout is shared with
+    whatever Claude session is working in it, and that session may have it parked
+    on its own branch mid-review. A deploy script that "helpfully" switches to
+    main throws that work away silently, so this one refuses and hands the
+    Operator a sentence to send instead.
+    """
+    import subprocess
+
+    script = ROOT / "update.command"
+    check("update.command: exists and is executable",
+          script.exists() and os.access(script, os.X_OK))
+    text = script.read_text()
+    check("update.command: never switches, merges or resets the branch itself -- the only "
+          "git command that moves this checkout is a fast-forward pull",
+          "git checkout" not in text and "git switch" not in text
+          and "git merge" not in text and "git reset" not in text
+          and "--ff-only" in text)
+    check("update.command: guards launchctl, which does not exist off macOS",
+          "command -v launchctl" in text)
+
+    if shutil.which("git") is None:
+        check("update.command: refusals exercised", True, "skipped: no git on this machine")
+        return
+
+    live, _origin, env = _update_sandbox(tmp, "update-refuse", 1)
+
+    # 1. A dirty tree. A tracked file edited and not committed.
+    (live / "README.md").write_text("# Sandbox\nan edit the Operator made by hand\n")
+    r = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                       capture_output=True, text=True, timeout=180)
+    out = r.stdout + r.stderr
+    check("update: refuses a dirty working tree with exit 1 rather than pulling over "
+          "uncommitted edits",
+          r.returncode == 1 and "REFUSED" in out, f"rc={r.returncode} {out[-400:]}")
+    check("update: ...and NAMES the files, so the Operator can tell Claude what is in the way",
+          "README.md" in out and "not committed" in out, out[-400:])
+    check("update: ...and nothing was pulled -- the clone is still on the first commit",
+          _git(live, env, "log", "--oneline").stdout.count("\n") == 1,
+          _git(live, env, "log", "--oneline").stdout)
+
+    # 2. A branch that is not main, on a clean tree.
+    _git(live, env, "checkout", "-q", "--", "README.md")
+    _git(live, env, "checkout", "-q", "-b", "feat/explorer-panes")
+    r2 = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                        capture_output=True, text=True, timeout=180)
+    out2 = r2.stdout + r2.stderr
+    check("update: refuses a checkout that is not on main, with exit 1",
+          r2.returncode == 1 and "REFUSED" in out2, f"rc={r2.returncode} {out2[-400:]}")
+    check("update: ...printing the exact sentence to send Claude, with the real branch name "
+          "in it (Claude cannot fix a branch it has not been told the name of)",
+          "the live checkout is on branch feat/explorer-panes; switch it to main" in out2,
+          out2[-500:])
+    check("update: ...and it did NOT switch the branch itself",
+          _git(live, env, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+          == "feat/explorer-panes")
+
+
+def test_update_command_fast_forwards_prints_the_range_and_reads_health(tmp: Path) -> None:
+    """The happy path, end to end, against a fake origin and a fake dashboard.
+
+    Three things have to be true and are all easy to get wrong:
+      * the pull is a fast-forward and the Operator is shown WHICH commits
+        arrived -- "it updated" is not a reviewable statement;
+      * with no launchctl (any machine that is not a Mac) it says so and the
+        run still succeeds, because the code on disk really is updated;
+      * data/ is not read, written or moved. The record is the one thing in
+        this project that cannot be recreated.
+    """
+    import http.server
+    import json as _json
+    import subprocess
+    import threading
+
+    if shutil.which("git") is None:
+        check("update.command: fast-forward exercised", True, "skipped: no git on this machine")
+        return
+
+    body = _json.dumps({
+        "quick_check": {"ok": True, "result": "ok", "seconds": 0.4},
+        "store_writer": {"pid": 4242, "alive": True, "since": "2026-09-11T00:00:00Z"},
+        "unrelated": "ignored",
+    }).encode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                                    # noqa: N802
+            if self.path != "/api/health":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):                           # keep the suite quiet
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        live, _origin, env = _update_sandbox(tmp, "update-ff", port)
+
+        # The irreplaceable half of the project, in the sandbox. gitignored, so
+        # it does not make the tree dirty -- exactly as data/ is in the real one.
+        landing = live / "data" / "landing"
+        landing.mkdir(parents=True, exist_ok=True)
+        frame = landing / "2026-09-11T00.jsonl.zst"
+        frame.write_bytes(b"an irreplaceable frame")
+        before = (frame.read_bytes(), frame.stat().st_mtime_ns)
+
+        old = _git(live, env, "rev-parse", "--short", "HEAD").stdout.strip()
+        r = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                           capture_output=True, text=True, timeout=300)
+        out = r.stdout + r.stderr
+        new = _git(live, env, "rev-parse", "--short", "HEAD").stdout.strip()
+
+        check("update: on a clean main it fast-forwards and exits 0",
+              r.returncode == 0 and old != new, f"rc={r.returncode} {out[-500:]}")
+        check("update: ...and prints the OLD..NEW range and the commits in it, so the Operator "
+              "can see what he just deployed",
+              f"{old}..{new}" in out
+              and "feat(sandbox): the commit update.command pulls" in out, out[-700:])
+        check("update: with no launchctl it SAYS SO and still succeeds -- the code on disk is "
+              "updated either way, and a hard failure here would read as 'the update broke'",
+              "is not available on this machine" in out and "NOT restarted" in out,
+              out[-700:])
+        check("update: no shell error leaked from the missing launchctl",
+              "command not found" not in out, out[-400:])
+        check("update: reads /api/health and prints quick_check -- the store's own verdict, "
+              "which is a different claim from 'the job is running'",
+              "quick_check" in out and '"result": "ok"' in out, out[-600:])
+        check("update: ...and store_writer, which names the process holding the fold-writer "
+              "lock (BUG-20260910-067)",
+              "store_writer" in out and "4242" in out, out[-600:])
+        check("update: points the Operator at the viewer rather than at a dashboard he would "
+              "have to start himself",
+              "open-dashboard.command to view" in out, out[-400:])
+        check("update: pyproject.toml did not change in that commit, so it did not reinstall",
+              "pyproject.toml unchanged" in out, out[-600:])
+        check("update: tools/launchd.py did not change either, so no plist was re-rendered",
+              "Generator unchanged" in out, out[-600:])
+        check("update: the landing zone under data/ is byte-for-byte untouched, including its "
+              "mtime -- an update changes code, never the record",
+              frame.exists() and (frame.read_bytes(), frame.stat().st_mtime_ns) == before)
+
+        # The stub above answers with the field names update.command asks for. That
+        # proves the script reads them; it does not prove the dashboard still emits
+        # them. Rename either key in dashboard.py and the script would quietly print
+        # "(absent from /api/health)" on a real machine, which reads as "fine".
+        api = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+        script = (ROOT / "update.command").read_text()
+        for key in ("quick_check", "store_writer"):
+            check(f"update: /api/health really does carry `{key}` -- the script and the "
+                  f"endpoint name the same field",
+                  f'"{key}":' in api and f'"{key}"' in script)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_open_dashboard_command_looks_and_never_starts_a_dashboard(tmp: Path) -> None:
+    """The viewer. It answers one question -- is something listening on 8765 --
+    and either opens the page or explains why it cannot.
+
+    What it must never do is start a dashboard. On 2026-09-10 a hand-started
+    dashboard beside the background one gave two writers on one SQLite store and
+    left it `database disk image is malformed` (BUG-20260910-067). The fix in the
+    code binds before it opens the store; this is the fix in the Operator's
+    hands, and it only holds as long as this file stays a viewer.
+    """
+    import socket as _socket
+    import subprocess
+
+    real = ROOT / "open-dashboard.command"
+    check("open-dashboard.command: exists and is executable",
+          real.exists() and os.access(real, os.X_OK))
+    text = real.read_text()
+    check("open-dashboard.command: never starts a dashboard -- it does not invoke the CLI at "
+          "all, so there is no path through it that becomes a second writer (BUG-20260910-067)",
+          "navanax.cli dashboard" not in text and "navanax.cli" not in text)
+
+    sandbox = tmp / "opendash"
+    (sandbox / "bin").mkdir(parents=True, exist_ok=True)
+    opened = sandbox / "opened.txt"
+    stub = sandbox / "bin" / "open"
+    stub.write_text('#!/bin/bash\nprintf "%s\\n" "$1" >> "' + str(opened) + '"\n')
+    stub.chmod(0o755)
+
+    listener = _socket.socket()
+    listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    port = listener.getsockname()[1]
+
+    script = sandbox / "open-dashboard.command"
+    _sandbox_script("open-dashboard.command", script, port)
+    env = _fake_home_env(sandbox / "home")
+    env["PATH"] = f"{sandbox / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+
+    try:
+        r = subprocess.run(["bash", str(script)], input="\n", env=env,
+                           capture_output=True, text=True, timeout=120)
+        out = r.stdout + r.stderr
+        check("open-dashboard: with something listening it reports running and opens the page",
+              r.returncode == 0 and "is running" in out, f"rc={r.returncode} {out[-400:]}")
+        check("open-dashboard: ...handing the browser the loopback URL and nothing else",
+              opened.exists()
+              and opened.read_text().strip() == f"http://127.0.0.1:{port}/",
+              opened.read_text() if opened.exists() else "(open was never called)")
+    finally:
+        listener.close()
+
+    r2 = subprocess.run(["bash", str(script)], input="\n", env=env,
+                        capture_output=True, text=True, timeout=120)
+    out2 = r2.stdout + r2.stderr
+    check("open-dashboard: with nothing listening it says NOT running rather than starting one",
+          "NOT running" in out2, out2[-500:])
+    check("open-dashboard: ...and says in the window that it will not start one itself, so the "
+          "Operator does not go looking for a file that would",
+          "never starts a dashboard" in out2, out2[-500:])
+    check("open-dashboard: ...and did not open a browser at a page that is not there",
+          opened.read_text().count("\n") == 1, opened.read_text())
+
+
+def test_dashboard_webloc_is_a_plist_bookmark_to_the_loopback_dashboard() -> None:
+    """The Dock/Finder bookmark. A .webloc is a property list, and a malformed
+    one fails the way a bad plist always does -- silently, by doing nothing.
+    """
+    import plistlib
+
+    p = ROOT / "Navanax Dashboard.webloc"
+    check("webloc: exists", p.exists())
+    if not p.exists():
+        return
+    try:
+        data = plistlib.loads(p.read_bytes())
+        parsed = True
+    except Exception as exc:                      # noqa: BLE001 - the point is that it parses
+        data, parsed = {}, False
+        check("webloc: parses as a property list", False, f"{type(exc).__name__}: {exc}")
+    if parsed:
+        check("webloc: parses as a property list with a URL key",
+              isinstance(data, dict) and "URL" in data, repr(data)[:200])
+    check("webloc: points at the loopback dashboard on 8765 -- loopback, because the dashboard "
+          "serves this computer only (REQ-N-13)",
+          data.get("URL") == "http://127.0.0.1:8765/", repr(data.get("URL")))
+
+
+def test_readme_and_docs_name_the_files_the_operator_double_clicks() -> None:
+    """A launcher that exists and is documented nowhere is a launcher nobody
+    uses. BUG-20260909-003 was a README that had gone stale against the code.
+    """
+    readme = (ROOT / "README.md").read_text()
+    for name in ("open-dashboard.command", "update.command", "Navanax Dashboard.webloc"):
+        check(f"README names {name}", name in readme)
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    check("docs/04 §8 separates viewing from running, which is the distinction that keeps a "
+          "second dashboard from ever being started by hand",
+          "Viewing vs running" in doc and "open-dashboard.command" in doc)
+    check("docs/04 §8 documents the update step, including that it never switches branches",
+          "Updating" in doc and "update.command" in doc)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

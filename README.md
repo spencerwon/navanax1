@@ -28,6 +28,10 @@ python -m navanax.cli verify    # re-verify landing-zone checksums (S0a on misma
 python3 tests/selftest.py       # stdlib-only self-test, no dependencies needed
 ```
 
+**Viewing the dashboard:** double-click `open-dashboard.command` (or the `Navanax Dashboard.webloc` bookmark). Neither ever starts a dashboard — the background job does that; `dashboard.command` is only for a machine without the background job and refuses if one is already running.
+
+**Deploying merged code:** double-click `update.command`. It fast-forwards `main`, reinstalls only if `pyproject.toml` moved, restarts the three background jobs, and prints the dashboard's own health reading. It refuses — changing nothing — on uncommitted edits, on a checkout that is not on `main` (it prints a sentence to send Claude; it never switches branches itself), or when the pull would not be a fast-forward. It never touches `data/`.
+
 **Running unattended (macOS):** double-click `autostart-install.command` and the recorder, dashboard and daily trait job start at login and restart themselves after a crash — see [`docs/04_ENVIRONMENTS.md` §8](docs/04_ENVIRONMENTS.md#8-running-unattended) for what it installs, where the logs go, the exit-code contract, and the sleep caveat launchd cannot fix.
 
 ## The six things that shape every decision here
