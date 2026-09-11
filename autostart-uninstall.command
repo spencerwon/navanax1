@@ -13,6 +13,9 @@
 set -u
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 AGENTS="$HOME/Library/LaunchAgents"
+# Fallback only. The real list comes from tools/launchd.py below, plus whatever is
+# actually loaded -- a hardcoded list here could not stop a job it had never heard
+# of, and com.navanax.recorder-b is exactly that job.
 LABELS="com.navanax.recorder com.navanax.dashboard com.navanax.traits"
 
 echo "============================================================"
@@ -28,6 +31,28 @@ if [ "$OS" != "Darwin" ]; then
 fi
 
 DOMAIN="gui/$(id -u)"
+
+# Every label this generator knows, UNION everything of ours currently loaded.
+# Two sources because either alone leaves something behind: the generator does not
+# know a job from a future version, and `launchctl list` does not show a job whose
+# plist is installed but never loaded.
+PY=""
+for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+  command -v "$c" >/dev/null 2>&1 && { PY="$(command -v "$c")"; break; }
+done
+if [ -n "$PY" ]; then
+  KNOWN="$("$PY" tools/launchd.py all-labels 2>/dev/null | tr '\n' ' ')"
+  [ -n "${KNOWN// /}" ] && LABELS="$KNOWN"
+fi
+LOADED="$(launchctl list 2>/dev/null | awk '{print $3}' | grep '^com\.navanax\.' | tr '\n' ' ')"
+for L in $LOADED; do
+  case " $LABELS " in
+    *" $L "*) ;;
+    *) LABELS="$LABELS $L"; echo "  note: $L is loaded and is not one this version installs -- "
+       echo "        stopping and removing it too, because this is the uninstaller";;
+  esac
+done
+
 REMOVED=0
 for L in $LABELS; do
   WAS_LOADED=no

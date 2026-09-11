@@ -1767,3 +1767,1231 @@ bugs:
   regression_test: tests/selftest.py::test_list_pass_keeps_traits_it_is_given
   monitor_gap: "Nothing compares what an endpoint RETURNS with what the code KEEPS. The raw response bodies of the 47 list reads were not landed (REST responses go through the governor, not the landing zone), so the discarded field left no trace to audit. Worth a follow-up: land REST bodies too, or at least log the top-level keys of the first page of every new endpoint."
   pr: null
+
+- id: BUG-20260909-055
+  summary: "The trait-cache import silently overwrote: two cache entries resolving to one token id both wrote (second wins, `imported` counted twice), the list pass counted traits it never wrote and dropped a conflicting OpenSea value uncounted, reconciliation compared cache KEYS against rows written under `entry[\"id\"]`, and any float was accepted as the cache's generated time"
+  severity: S1
+  priority: P0
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-10T02:10:00-05:00"
+  occurred_at: "2026-09-09T16:00:00-05:00"
+  resolved_at: "2026-09-10T02:40:00-05:00"
+  detected_by: "tech-lead, reviewing the `navanax import-traits` PR (BUG-054's second half) before merge"
+  detection_channel: review
+  branch: feat/explorer-traits
+  locations:
+  - {file: src/navanax/traits.py, line: 527}
+  - {file: src/navanax/traits.py, line: 180}
+  - {file: src/navanax/cli.py, line: 400}
+  requirement: REQ-D-01
+  data_impact: >-
+    Not yet realised -- the import had not been run against the real Explorer
+    cache when the gate caught it. Had it been: a cache with two entries for one
+    token would have recorded the second entry's traits as fact with no trace
+    that a first ever disagreed, and `imported` would have over-reported the
+    gain. The list pass reported `traits_from_list` equal to the number of
+    entries CARRYING traits (for Argonauts, effectively the whole collection)
+    rather than the number written, so a re-run over an already-populated store
+    would have claimed thousands of writes it did not make. Reconciliation on a
+    cache keyed by anything but the bare token id would have reported every
+    token missing from both sides while the import itself was fine -- a false
+    alarm that trains the Operator to ignore the real one. Worst: a `generated`
+    epoch in milliseconds (the JavaScript default, and the Explorer tool is a
+    JS tool) crashed with a raw ValueError, and one in the future was written
+    into `traits_at` unchallenged, where nothing downstream can distinguish it
+    from a real observation.
+  root_cause: >-
+    Four instances of one habit: trusting an identifier or a number without
+    resolving it first. The cache key was treated as the token id in two places
+    and the entry's `id` in a third. `_store` returned None, so the only thing
+    the caller could count was its own intention. `datetime.fromtimestamp` was
+    handed a float nobody had bounded. Each was individually small and each was
+    in the write path of the only source of trait data the project has.
+  resolution: >-
+    `import_explorer_cache` resolves every entry to a token id in a first pass
+    that writes nothing, collapses duplicates, and refuses to write ANY row for
+    an id whose entries disagree -- reporting it as a disagreement, like the
+    store-vs-cache diff. Reconciliation sets are built from the resolved ids
+    before any insert. `_store` returns whether it wrote; the list pass counts
+    only writes, counts agreement separately, and reports a conflicting value
+    instead of dropping it. `--generated` and summary.json's `generated` must
+    fall in [2020-01-01, now + 1 h] or the run refuses before writing anything,
+    with a message that names milliseconds where the value looks like them. In
+    the same pass: malformed entries and non-scalar trait values are counted and
+    never coerced to a Python repr; the cache's sha256 goes into
+    `traits_source` and a `trait_imports` row; a token with no known contract no
+    longer burns a budgeted fallback slot; a stored contract differing from the
+    one being imported is reported rather than hidden by COALESCE; and the run
+    ends by printing coverage, criteria coverage and case near-misses.
+  regression_test: tests/selftest.py::test_import_duplicate_token_ids_are_never_a_silent_overwrite
+  monitor_gap: >-
+    The import's own test used a cache whose keys WERE the token ids, whose ids
+    were all distinct, and whose timestamp was a plausible second-epoch integer
+    -- so it could not falsify any of the four. The BUG-002 shape once more: a
+    fixture written from the same assumption as the code. The fixtures now carry
+    a cache keyed by `argonaut-4`, a repeated id, a non-object entry, a
+    non-scalar trait value, and a millisecond epoch.
+  pr: null
+
+- id: BUG-20260910-056
+  summary: "config/assumptions.yaml -- the assumptions registry docs/06 §4.4 requires -- was deleted by an unrelated change, and nothing noticed because no code reads it"
+  severity: S3
+  priority: P1
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-10T02:15:00-05:00"
+  occurred_at: "2026-09-10T02:12:00-05:00"
+  resolved_at: "2026-09-10T02:20:00-05:00"
+  detected_by: "tech-lead, gate on the trait-cache import PR"
+  detection_channel: review
+  branch: feat/explorer-traits
+  locations:
+  - {file: config/assumptions.yaml, line: 1}
+  requirement: REQ-N-09
+  data_impact: "None to any record. The registry is documentation of the system's opinions, not an input to a computation; ASM-020 (the standing-order definition) is implemented in metrics.py::standing_sql either way. The loss is auditability: the one file that lets the Operator read every judgement the code embodies without reading the code."
+  root_cause: "A file no code imports and no test asserts on is invisible to every gate the project has. It was removed in a change that had nothing to do with assumptions and the deletion passed all four gates green."
+  resolution: "Restored verbatim from the uploaded working copy, and a test now asserts the file exists, parses, and still carries ASM-020 with its layer, owner, rationale and the code it governs -- so the next deletion fails a gate instead of passing one."
+  regression_test: tests/selftest.py::test_config_assumptions_registry_exists
+  monitor_gap: "The gates check code, the bug ledger and secrets. Nothing checks that the configuration files the docs require still exist. This test is the narrow fix; the general one is a gate over config/ against docs/06 §4.4, which is worth doing when a second registry-style file appears."
+  pr: null
+
+- id: BUG-20260910-057
+  summary: "`immediacy_cost` was an INTERVAL EXTREMUM, not the standing-book quantity docs/01 §3.2 defines -- biased narrow, and able to render negative on the front page"
+  severity: S1
+  priority: P0
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T07:30:00-05:00"
+  occurred_at: "2026-09-09T08:00:00-05:00"
+  resolved_at: "2026-09-10T09:10:00-05:00"
+  detected_by: "quant-research (T2) and tech-lead (Q-V8/Q-W4), fact-checking the 2026-09-09 metric proposals against docs/01 §3.2"
+  detection_channel: review
+  branch: feat/standing-book-spread
+  locations:
+  - {file: src/navanax/metrics.py, line: 29}
+  - {file: src/navanax/metrics.py, line: 74}
+  - {file: docs/08_DASHBOARD.md, line: 109}
+  requirement: REQ-F-13a
+  data_impact: >-
+    No record is wrong; every stored event is untouched. The damage is entirely
+    in what was computed from them and charted. `_bucketed` aggregated MIN over
+    the ask leg and MAX over the bid leg WITHIN a bucket and subtracted the two,
+    so the number on the front page was the distance between the cheapest ask
+    seen at any point in the interval and the richest offer seen at any other
+    point -- two prices that need never have coexisted, and on this collection
+    usually did not. The bias has a known sign: the spread is too NARROW, and
+    the error grows with the interval, so the 1d bars were worse than the 5m
+    bars in exactly the way nobody would notice. Because the two legs are
+    unrelated in time it could also go NEGATIVE, which the KPI card would have
+    rendered as a free arbitrage -- and a negative immediacy cost on a screen
+    whose purpose is trade decisions is the fifth project rule's exact failure
+    shape. On the fixture that reproduces it the old path returns -0.10 and the
+    new one returns null with an alarm. Separately, `bid_lifetimes` returned
+    p10/median/p90 at ANY n with a `percentiles_reliable: false` flag beside
+    them, and `ui/index.html:215` rendered the numbers and appended the flag as
+    a string, which REQ-F-19 (docs/00:199) says the system SHALL make
+    impossible.
+  root_cause: >-
+    The metric was implemented from its NAME rather than from its definition.
+    docs/01 §3.2 says "what you pay to force time-to-clear to zero by hitting
+    the STANDING collection offer"; the code computed an interval extremum,
+    which is a different quantity that happens to coincide with it when the
+    interval is short and the book is deep. Neither condition holds here. The
+    deeper cause is that until PR-2 there was no relation that could answer
+    "what was resting at time tau", so a bucket aggregate was the only thing
+    available and it was written before `order_lives` existed. The percentile
+    half is the same habit at one remove: a flag next to a number was mistaken
+    for a refusal to produce the number.
+  resolution: >-
+    `immediacy_cost` is recomputed from `order_lives` as a standing-book spread.
+    `MetricEngine.standing_series(kind, ...)` sweeps placements and terminations
+    (a lazily-cleaned heap, O(events log events), never a per-bucket scan) to
+    produce the running extremum of the resting book as constant segments, and
+    reports per bucket the TIME-WEIGHTED median with [p10, p90], coverage =
+    seconds the leg stood / observable bucket seconds, and n = distinct orders
+    standing. `MetricEngine.standing_spread` intersects the ask and bid segment
+    lists so both legs are read at the SAME tau, and any bucket in which the
+    book crossed (ask < bid at any tau) is returned as null, counted in
+    `basis.negative_buckets` and logged once per collection/interval/denomination
+    rather than charted. Leg discipline per quant metric 1 -- the bid leg is a
+    COLLECTION offer, which applies to every token and is therefore a bid on
+    whichever token is at the floor; item bids and trait offers are per-token and
+    would mix populations. `floor_ask` and `collection_bid` take the same
+    standing treatment and default to it (Operator's decision, 2026-09-10:
+    floors are built from standing asks only, and a bucket with no live ask is a
+    hole). The old interval-extremum behaviour stays reachable as
+    `book='observed'`, is labelled in `basis.book`, and carries an
+    `observed_book_warning` saying what it is not. `/api/series` passes `book`
+    through. Percentiles: one `pct(values, p, min_n=MIN_N_FOR_PERCENTILES)`
+    helper that returns None below the minimum, applied to `bid_lifetimes` for
+    all three quantiles -- a median is a percentile too -- and to the [p10, p90]
+    band of every standing series. The standing MEDIAN is not suppressed: it is
+    the level of a continuously observed step function, a fact at n = 1, and
+    withholding it would blank the chart wherever the book is genuinely one
+    listing deep. Every standing response carries `left_truncated: true` with the
+    reason, because the reconstructed floor is an upper bound.
+  regression_test:
+  - tests/selftest.py::test_immediacy_cost_is_a_standing_book_spread
+  - tests/selftest.py::test_standing_series_is_time_weighted_over_the_bucket
+  - tests/selftest.py::test_percentiles_are_withheld_below_min_n
+  monitor_gap: >-
+    Every existing test asserted the metric against its own implementation. The
+    contract test checked "immediacy_cost = lowest ask - highest collection
+    offer, in the ONE interval with both" -- the extremum definition restated,
+    so it could not falsify it -- and the 5-minute case asserted that two legs in
+    different buckets produce UNDEFINED, which is the defect written down as
+    intended behaviour. No fixture ever placed an ask and a bid that were alive
+    at the same instant but seen in different buckets, and none ever crossed the
+    book, so nothing could produce the negative value. The general lesson is the
+    one this log keeps recording: a test written from the code cannot find a
+    requirement violation. The narrow fix is that every metric with a definition
+    in docs/01 §3 now needs a test written from that TEXT, not from the
+    function.
+  pr: null
+
+- id: BUG-20260910-058
+  summary: "sync() reported a landing file it could not decode as 'read' with zero rows -- a corpus fold on a machine without the zstd codec printed '115 files read, 0 rows added, ALL GATES GREEN'"
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-10T04:10:00-05:00"
+  occurred_at: "2026-09-10T03:55:00-05:00"
+  resolved_at: "2026-09-10T04:20:00-05:00"
+  detected_by: "orchestrator, running tools/gates.py --corpus in the device VM (Python 3.10, no zstandard): every file skipped with a WARNING log line and a green gate"
+  detection_channel: orchestrator
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 665}
+  - {file: tools/gates.py, line: 76}
+  requirement: REQ-N-07
+  data_impact: "None to stored data. A reader that could not decode the landing zone would fold NOTHING and report success -- an empty analytical store presented as a quiet market, and a gate that passes on zero evidence."
+  root_cause: >-
+    The per-file except logged and continued without counting; the stats a
+    caller sees had no failure field. Separately, the codec's tolerate_truncation
+    reads a corrupt file as an empty one, so a manifest-closed file yielding
+    fewer frames than its recorded last_seq went unnoticed.
+  resolution: "sync() stats carry files_failed, files_short and last_error; a closed file read short of its manifest last_seq is counted short. tools/gates.py fails the corpus gate on either. gates.command runs the fold on the Mac, where the codec is, and saves the report to data/logs/."
+  regression_test: tests/selftest.py::test_sync_counts_unreadable_files_instead_of_reporting_zero_rows
+  monitor_gap: "A log WARNING is not a signal a caller sees. The fifth rule applied to a gate: '0 rows, green' is a surprisingly clean result and should have been read as a bug by whoever ran it -- and it was, on the second look."
+  pr: 6
+
+- id: BUG-20260910-059
+  summary: "the trait chart's union bid leg drew the collection offer for a filter selecting ZERO tokens -- a confident bid line for a trait group with no members"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T09:20:00-05:00"
+  occurred_at: "2026-09-10T08:55:00-05:00"
+  resolved_at: "2026-09-10T09:30:00-05:00"
+  detected_by: "data-engineer, smoke-testing the PR-6 page against real PR-5 payloads on the filter case nobody draws on purpose: a clause with no matching token"
+  detection_channel: agent
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1142}
+  requirement: REQ-F-19
+  data_impact: "None to stored data. Presentation and metric output only: the panel reported a price as the trait group's highest standing bid when the group had no members."
+  root_cause: >-
+    The union bid leg maxes over three legs and only one of them is token-scoped.
+    A collection offer carries no token and S(F) is a subset of S(C) vacuously
+    when S(F) is empty, so with a filter matching no token the collection-offer
+    leg still stood and set the line. The ask legs went null on their own
+    because no tokens means no listings, which is exactly why the defect was
+    asymmetric and easy to miss: half the chart was already behaving.
+    It is reachable on EVERY filter today -- `traits` has 0 rows until the
+    Explorer import lands, so every filter has S(F) = {} -- which means this is
+    the first number the trait chart would have drawn on its first run.
+  resolution: >-
+    When the filter is non-empty and |S(F)| = 0 the bid series and `winning_leg`
+    are null in every bucket, `basis.empty_token_set` is true, and both the panel
+    notice and the basis line say so and name the likely cause (an unpopulated
+    `traits` table). The per-leg counts still report what WAS standing, so the
+    withholding is visible as a withholding rather than as an empty book.
+  regression_test: tests/selftest.py::test_trait_set_series_empty_and_set_is_null_never_zero
+  monitor_gap: >-
+    Every metric test asserted a filter that MATCHED something. No fixture ever
+    asked what a trait metric does when the trait set is empty -- which is the
+    state the store is actually in right now. The narrow fix is the property test
+    above; the general one is that a filtered metric needs a case where the
+    filter selects nothing, because that is not an edge case here, it is the
+    default until the traits table is filled.
+  pr: null
+
+- id: BUG-20260910-060
+  summary: "under a trait filter that selects zero tokens, `_bucketed` still counts collection offers and COVERing trait offers, so `bid_count` / `event_count` report bids on tokens the filter does not select"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T09:30:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  resolved_at: "2026-09-10T10:05:00-05:00"
+  detected_by: "data-engineer, while fixing BUG-20260910-059 -- the same shape one function away"
+  detection_channel: agent
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 728}
+  requirement: REQ-F-19
+  data_impact: "None to stored data. The Activity chart's `bids` bars, and any `bid_count` / `event_count` under a trait filter, include collection offers and COVERing trait offers even when the filter matches no token."
+  root_cause: >-
+    The filter clause in `_bucketed` is `((token_id IS NULL AND
+    event_type='collection_offer') OR (event_type='trait_offer' AND <COVERS>) OR
+    (<token matches every clause>))`. Each disjunct is right on its own, but
+    there is no `|S(F)| > 0` condition, and a bid on every token is not a bid on
+    any token of an empty set. While `traits` is empty this is 100% of the
+    filtered bid count.
+  resolution: >-
+    One predicate, `filter_narrows(spec)`, answers "does a trait filter actually
+    narrow this metric" in the two places that were about to disagree.
+    `_bucketed` returns {} when the filter narrows this metric AND |S(F)| = 0, so
+    no direct caller can get the leaked count. `series()` computes |S(F)| once and,
+    when it is 0 and the filter narrows, fills the grid with None instead of the
+    usual 0.0 for COUNT/SUM -- a 0 says "nothing happened to this trait group",
+    and the truth is that there is no trait group. Every response now carries
+    `basis.empty_token_set` and a note saying which case it is and to check
+    whether `traits` is populated; the page prints it under EVERY chart, not just
+    the trait panel. `collection_bid` is the deliberate carve-out and is
+    unchanged -- it is not narrowed by a trait filter (leg discipline, quant §1
+    metric 1) -- but its basis now says the number is collection-wide and is not
+    a statement about the filter. |S(F)| is counted over `tokens`, the same
+    universe `screener` and `trait_offer_verdicts` use, so an unpopulated token
+    list trips the guard too: if we know of no tokens we can say nothing about a
+    subset of them.
+  regression_test: tests/selftest.py::test_filtered_counts_are_null_when_the_filter_selects_no_token
+  monitor_gap: >-
+    Same gap as BUG-20260910-059: no test asked what a filtered COUNT does when
+    the filter selects nothing, and every filtered-metric fixture used a filter
+    that matched something. The general lesson is that a filtered metric needs a
+    case where the filter selects NOTHING -- which on this project is not an edge
+    case but the default until the traits table is filled. What still settles the
+    size of the error already shipped, on the Operator's store: SELECT
+    event_type, COUNT(*) FROM events WHERE collection='argonauts' AND event_type
+    IN ('collection_offer','trait_offer');
+  pr: null
+
+- id: BUG-20260910-061
+  summary: "the empty-token-set guard was applied to ONE of series()' four branches: the standing-book branches drew a line while the basis in the same response said every bucket was undefined"
+  severity: S1
+  priority: P0
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T10:05:00-05:00"
+  resolved_at: "2026-09-10T11:40:00-05:00"
+  detected_by: "tech-lead, reviewing PR-5/PR-6 (item B2) -- an incomplete fix to BUG-20260910-060, caught by reading the other three branches"
+  detection_channel: tech-lead
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1382}
+  - {file: src/navanax/metrics.py, line: 1178}
+  requirement: REQ-F-19
+  data_impact: "None to stored data. `floor_ask` and `immediacy_cost` on the STANDING book, and `trait_set_series`' ask line and single-clause floors, drew values under a filter whose response simultaneously declared every bucket undefined."
+  root_cause: >-
+    BUG-060's guard was written on the `_bucketed` branch, where the defect had
+    been found, rather than on the value the guard is about. `series()` has four
+    branches (standing spread, standing series, derived, _bucketed) and three
+    ignored it. The gap is only reachable when `tokens` and `traits` disagree,
+    which is why it was not obvious: `token_filter_sql` -- and so
+    `_standing_live`, and so every standing series -- resolves membership against
+    the `traits` table, while |S(F)| is counted over `tokens`. A populated
+    `traits` table with an empty token list is a real intermediate state of trait
+    onboarding, and in it the book matches the filter while |S(F)| = 0. The
+    comment in `trait_set_series` said "the ask legs go null on their own",
+    which was an unstated assumption that the two tables agree.
+  resolution: >-
+    One blanking pass in `series()` after every branch -- raw, parts, pct, and
+    the p10/p90/coverage/n arrays -- so a branch added later cannot miss it.
+    `parts` is blanked with the rest: `immediacy_cost` as a whole is undefined
+    there, and leaving its collection-wide bid leg populated invites subtracting
+    two legs of a metric just declared meaningless. `trait_set_series` blanks its
+    ask line via `_blank_standing`, and each single-clause floor on ITS OWN token
+    set rather than on the combined one -- a clause that does select tokens is a
+    real number and is exactly what the multi-clause panel exists to show when
+    the AND-set is empty. The metric-level carve-out is unchanged:
+    `collection_bid` has `narrows = False` and is never blanked. The note, the UI
+    notice and docs/08 §4a.1/§4a.2 now all say the universe is `tokens`.
+  regression_test: tests/selftest.py::test_empty_token_set_guard_holds_on_the_standing_branches_too
+  monitor_gap: >-
+    The BUG-060 regression test used a filter naming a trait value no token has,
+    so the standing series was null because there was no data -- the guard was
+    never what made it null and the test could not see the missing branches.
+    A guard needs a fixture in which the thing it guards against is actually
+    present. The lesson generalises past this bug: when two tables can disagree,
+    the test for a rule that spans them must make them disagree.
+  pr: null
+
+- id: BUG-20260910-062
+  summary: "trait_offer_verdicts re-queried the traits table once per (offer, criterion): 27,694 queries for 48 distinct pairs, 8.6 s at 200k lives"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T08:40:00-05:00"
+  resolved_at: "2026-09-10T11:20:00-05:00"
+  detected_by: "tech-lead, reviewing PR-5/PR-6 (item B1), profiling the trait panel at 200k lives with a filter selecting 500 of 9,000 tokens at 1h/24h"
+  detection_channel: tech-lead
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1668}
+  requirement: REQ-N-11
+  data_impact: "None. Cost only -- but the trait panel is the hero panel and it re-renders every 10 s, so an 8.6 s call is a dashboard that is always behind and a store that is always locked."
+  root_cause: >-
+    The reach of a criterion `(trait_type, value)` is a property of the trait
+    table, not of the offer that names it, and it was being looked up per offer.
+    The criteria rows were also fetched one query per offer. Both scale with
+    offers x criteria where the real work is the number of DISTINCT pairs.
+  resolution: >-
+    A per-call memo, `(trait_type, value) -> set(token_id)`, local to the call
+    so nothing is cached across a fold; and one grouped query for all criteria
+    rows in the window. The verdicts are unchanged, which the property tests
+    assert. On the 2,000-offer synthetic the call now issues fewer than 200
+    queries in total and runs in 0.03 s.
+  regression_test: tests/selftest.py::test_trait_offer_verdicts_query_count_is_o_distinct_pairs
+  monitor_gap: >-
+    Every existing fixture had a handful of offers, so the shape was invisible:
+    a query count that is quadratic in the fixture and linear in reality looks
+    identical at n = 5. The regression test asserts the QUERY COUNT with
+    sqlite3's trace callback rather than a wall-clock threshold -- the count is
+    the thing that was wrong, and a stopwatch on shared CI hardware is a flaky
+    test. Wall time is printed beside it with a generous ceiling.
+  pr: null
+
+- id: BUG-20260910-063
+  summary: "trait_offer_verdicts returned every PARTIAL offer as full detail -- 4.1 MB of JSON on the tech-lead's fixture"
+  severity: S2
+  priority: P2
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T08:40:00-05:00"
+  resolved_at: "2026-09-10T11:25:00-05:00"
+  detected_by: "tech-lead, reviewing PR-5/PR-6 (item F3)"
+  detection_channel: tech-lead
+  branch: pr-5-6-trait-chart
+  locations:
+  - {file: src/navanax/metrics.py, line: 1700}
+  requirement: REQ-F-19
+  data_impact: "None. Response size only: the page prints the first five and carried the rest for nobody."
+  root_cause: "The detail list was the count: `partial_n` was `len(partial)`, so there was nothing to cap without capping the answer."
+  resolution: >-
+    `partial_n` is counted separately from the detail list and is never capped;
+    `partial` is a SAMPLE of at most PARTIAL_DETAIL_CAP = 50, and the response
+    carries `partial_detail_cap` and `partial_truncated` so nobody reads the
+    sample as the population. Every entry still carries |S(F) n S(C)| and |S(F)|
+    -- the cap changes how many are shown, never what each one says.
+  regression_test: tests/selftest.py::test_partial_detail_is_capped_but_the_count_never_is
+  monitor_gap: >-
+    A cap that silently becomes the answer is the exact shape of BUG-047
+    (`requests_spent` counting the wrong thing) one module over, so the test
+    asserts the count and the detail length are DIFFERENT numbers on a fixture
+    that exceeds the cap -- which is the only way to tell the two apart.
+  pr: null
+
+- id: BUG-20260910-064
+  summary: "`/api/survival` returned one array entry per distinct event time on SEVEN arrays -- 2.29 MB of JSON at 40,000 lives for a panel ~1,100 px wide -- and held the dashboard's writer lock across the cluster bootstrap"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-10T10:20:00-05:00"
+  resolved_at: "2026-09-10T11:40:00-05:00"
+  detected_by: "tech-lead, gate on PR-8 (N1)"
+  detection_channel: tech-lead
+  branch: quant-research
+  locations:
+  - {file: src/navanax/metrics.py, line: 1
+    }
+  - {file: src/navanax/dashboard.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: "None on any number. Presentation and availability: the survival panel is the one with the most rows behind it, and on the Operator's Mac a multi-megabyte response is a page that stalls rather than a page that tells the truth harder. The lock half is worse than the size half -- the bootstrap is seconds of pure arithmetic, and holding the analytical store's writer lock across it blocks every other panel AND the background normalizer, so the whole page stops refreshing while one card computes a band."
+  root_cause: >-
+    Two separate omissions with the same cause: the response was assembled from
+    the estimator's working arrays without asking what a 1,100 px panel can draw,
+    and the endpoint wrapped the whole call in `with self.lock` without asking
+    which part of it touches sqlite. It is BUG-063's shape (an uncapped detail
+    list) one module over, and it was written after BUG-063 was fixed.
+  resolution: "`metrics.downsample_km()` thins t / S / both Greenwood bounds / n_at_risk / d / every CIF onto the curve's own log-spaced grid (2 x SURVIVAL_GRID_MAX = 400 points) for TRANSPORT ONLY -- indices are SELECTED, never averaged, t=0 and the final step are always kept, and percentiles, RMST, residual survival and the bootstrap are all computed from the FULL curve first, so no estimate is read off the thinned one. Measured on a 40,000-life synthetic: 2,289,345 -> 88,017 bytes, 17,985 -> 384 points, and `km.points` / `km.event_times` / `km.downsampled` travel in the response so the thinning is visible rather than implied. Separately, `MetricEngine.survival_prepare()` is now every part of the call that touches the connection; `api_survival` holds the lock across that and drops it before the bootstrap."
+  regression_test: tests/selftest.py::test_survival_response_stays_small_at_forty_thousand_lives
+  monitor_gap: "Every survival fixture had six lives, so seven arrays of six entries weighed nothing and no test looked at the response as an OBJECT WITH A SIZE. The new test builds its 40,000 rows directly in `order_lives` -- what is under test is the response, not the normalizer -- and asserts bytes, point count, that the CIFs are on the same points as the curve, that the identity SUM_c F_c = 1 - S still holds at every retained point, and that the median is not on the transport grid."
+  pr: 8
+
+- id: BUG-20260910-065
+  summary: "`bid_lifetimes` has no `as_of`: it reads `exit_reason` and `t_term` straight off `order_lives`, which stores them AS OF THE FOLD, so a window ending before the last fold is answered with terminations that had not happened yet, and its censored lives are censored at the fold rather than at the window end -- one sample, two horizons"
+  severity: S3
+  priority: P3
+  error_class: TMP
+  status: open
+  logged_at: "2026-09-10T11:05:00-05:00"
+  occurred_at: "2026-09-09T18:40:00-05:00"
+  detected_by: "quant-research, while implementing PR-8's estimator; raised by the tech-lead as N3"
+  detection_channel: quant-research
+  branch: quant-research
+  locations:
+  - {file: src/navanax/metrics.py, line: 1}
+  requirement: REQ-F-19
+  data_impact: "None observed, and the reason is worth stating rather than assuming: every range the page can ask for -- trailing 1h..30d and anchored HTD/DTD/MTD/YTD -- ends at NOW, and the fold is also now, so the two horizons coincide on every request the UI makes. The defect is reachable only by a caller that asks about a window ending in the past, which today is nothing. If one ever does, the numbers will be wrong in the flattering direction: terminations from after the window shorten the sample and hindsight makes the book look more decisive than it was."
+  root_cause: >-
+    `order_lives` is a fold-time snapshot by design (docs/08 §3.3) and
+    `bid_lifetimes` predates any notion of asking it a question about a past
+    instant. The estimator has no parameter that could carry one.
+  settling_note: >-
+    NOT fixed here, deliberately. PR-8 adds `survival()`, which takes an explicit
+    `as_of` and re-reads every `exit_reason` against it, and the page now draws
+    that instead -- `bid_lifetimes` is off screen and is kept only as the naive
+    comparison the PR description contrasts against. Routing it through
+    `_survival_rows` would change the numbers in the one place a reviewer goes to
+    check how much PR-8 moved the median, which is the opposite of what a
+    comparison baseline is for. The settling options, for whoever picks this up:
+    (a) give `bid_lifetimes` an `as_of` defaulting to `end` -- one parameter, but
+    it silently changes a published number; (b) delete it once PR-8 has been run
+    over the real corpus and the comparison has been made, which is the tech-lead's
+    to schedule; (c) leave it and rely on the `censoring` string, which now says
+    all of this out loud in the response itself. Recommendation is (b), after the
+    corpus run.
+  monitor_gap: "Nothing compares an estimator's horizon against the window it was asked about. Until this is settled the only guard is the `censoring` string in the response, which names this id."
+  pr: 8
+
+- id: BUG-20260910-066
+  summary: "The survival panel ran three server-supplied strings through `esc()` and then assigned them to `.textContent`, which never interprets markup -- so the withheld-percentiles reason rendered to the Operator as the literal characters `&lt;` where it says `n_eff = 0 maker-episode cluster(s) < 30`"
+  severity: S4
+  priority: P3
+  error_class: TMP
+  status: fixed
+  logged_at: "2026-09-10T15:05:00-05:00"
+  occurred_at: "2026-09-10T12:10:00-05:00"
+  resolved_at: "2026-09-10T15:20:00-05:00"
+  detected_by: "platform-engineer, PR-9, reading the Flow-view screenshot rather than the code"
+  detection_channel: platform-engineer
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-19
+  data_impact: "None on any number. Presentation only -- but on the one sentence that explains why a number is ABSENT. `percentiles_withheld_reason` is the string REQ-F-19 exists to make visible (`n_eff = 0 maker-episode cluster(s) < 30`), and it is the only string on the page that contains a `<`. So the single most important explanatory sentence on the survival panel was the single sentence that rendered as though the page were broken, which is the direction that costs trust in the numbers that ARE shown."
+  root_cause: >-
+    `esc()` is the page's HTML escaper and every other call site sends its result
+    into an `innerHTML` template, where escaping is the whole point. `#s-head` and
+    `#b-surv` are assigned with `.textContent`, which does not parse markup at all.
+    Escaping into `textContent` is therefore a double encoding, never a safety
+    measure, and nothing on the page distinguished the two sinks -- the escaping
+    property test in `test_ui_contract` deliberately scans `${...}` interpolations,
+    which is the innerHTML boundary, so a textContent target was outside what it
+    looks at and outside what it should look at.
+  resolution: "esc() removed from exactly three expressions, all of which feed `.textContent`: `percentiles_withheld_reason` and `rmst.note` in `survHead`, and `kind` in `survBasis`. Nothing that reaches `innerHTML` changed, and `test_ui_contract`'s escaping property test is untouched and still green. A comment above `survHead` names this id and says not to restore esc() on a textContent target, because the obvious 'fix' on re-reading is to add it back."
+  regression_test: tests/selftest.py::test_ui_escaping_matches_its_sink
+  monitor_gap: "The escaping test asserts the DANGEROUS direction (an unescaped third-party field reaching innerHTML) and had nothing to say about the harmless-but-wrong one (an escaped string reaching textContent). The new test asserts the pairing in both directions: every esc() call site is checked against the sink it feeds. It is a display-correctness test, and the reason it did not exist is that nobody had looked at the rendered page with a string in it that contained a metacharacter -- until an empty store made the withheld-percentiles branch the only branch that draws."
+  pr: 9
+
+- id: BUG-20260910-067
+  summary: "`dashboard.serve()` opened the analytical store and started the folding writer BEFORE binding 127.0.0.1:8765, so with a second dashboard already listening every launchd retry folded into `data/analytics.sqlite` and then died on 'Address already in use' -- two writers alternating on one SQLite store, 177 times in half an hour, until the 2.8 GB store became 'database disk image is malformed'"
+  severity: S3
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-10T20:15:00-05:00"
+  occurred_at: "2026-09-10T18:20:00-05:00"
+  resolved_at: "2026-09-10T21:40:00-05:00"
+  detected_by: "the Operator, from the dashboard failing to load; confirmed from data/logs/dashboard.log (177 restart banners) and `PRAGMA integrity_check`"
+  detection_channel: operator
+  branch: pr-10-writer-lock
+  locations:
+  - {file: src/navanax/dashboard.py, line: 1}
+  - {file: src/navanax/normalize.py, line: 1}
+  - {file: tools/launchd.py, line: 1}
+  requirement: REQ-N-07
+  data_impact: >-
+    S3 in consequence, S1-class in root cause. Nothing in the landing zone was
+    touched in any code path: the analytical store is DERIVED, and that is the
+    only reason 2.8 GB of corruption was survivable. The corrupt file was renamed
+    aside (never deleted, never edited) and the store was rebuilt from the landing
+    zone; every event, gap record and manifest entry came back, because the raw
+    frames are the record and the store is a fold of them. What was actually lost
+    was availability -- the dashboard was down and the Health page with it -- for
+    the length of the incident. The reason this is logged S3 rather than S4 is the
+    root cause, not the outcome: two writers on one store is silent while it is
+    happening. There was no error, no warning and no number anywhere on the page
+    that said a second process was folding; the first symptom was a store that
+    would not open. Had the same two writers been aimed at the landing zone rather
+    than at a derived file, this entry would be an S0a and the loss would be
+    permanent.
+  root_cause: >-
+    Ordering, and an unenforced rule. `serve()` constructed `Dashboard(...)` --
+    which opens the store and starts the normalizer thread that WRITES -- and only
+    then constructed the HTTP server that binds the port. So the bind, the one
+    check that would have refused a duplicate process, ran last, after the damage
+    was possible. Behind that, docs/07 §1's "one writer owns the read-write
+    connection, readers attach read-only" was a documented pattern with nothing
+    enforcing it: `Normalizer` took no lock and had no read-only mode, so any
+    number of processes could open the same store read-write. `ThrottleInterval:
+    10` on the dashboard plist then turned one conflict into 360 folds an hour.
+  resolution: >-
+    Three layers, in the order they take effect. (1) `serve()` binds the listening
+    socket FIRST and constructs `Dashboard` only after a successful bind, so a
+    process that cannot get its port exits without having opened the store at all;
+    `navanax dashboard` exits 2 on a bind failure and says the store was not
+    opened. (2) `Normalizer(..., writer=True)` -- the folding writer -- takes an
+    exclusive flock on `<store>.lock` next to the sqlite file for its lifetime; a
+    second folding writer is refused with `StoreWriterBusyError` naming the
+    holder's pid and the two ways out, and `close()` releases it. Readers pass
+    `writer=False`, which opens `mode=ro` (enforced by SQLite, not by intention),
+    takes no lock and refuses to sync/reset/refold. The flock errno rules are now
+    ONE set shared with `cli._single_instance`, so a filesystem that cannot lock
+    warns and proceeds instead of stopping the fold. The traits job is deliberately
+    outside the lock -- it writes tokens/traits and folds no events -- and instead
+    opens with an explicit `PRAGMA busy_timeout` so a concurrent fold makes it wait
+    rather than fail spuriously. (3) `ThrottleInterval: 30` on the dashboard plist,
+    so a port conflict cannot retry every 10 s. `/api/health` now reports
+    `store_writer` (pid, since) and a `PRAGMA quick_check` result cached for ten
+    minutes, so the next such fault is visible on Health before it is fatal.
+
+    SECOND ROUND (tech-lead B1/B2). All of the above prevents the store being
+    corrupted; none of it addressed what happens when it ALREADY IS, which was the
+    incident's actual end state. `sqlite3.connect()` is lazy and succeeds on a
+    corrupt file; the first `PRAGMA journal_mode=WAL` raises
+    `sqlite3.DatabaseError: database disk image is malformed` straight out of
+    `Dashboard.__init__`, which `cmd_dashboard` did not catch -- a raw traceback
+    and an UNDOCUMENTED exit 1, repeated by KeepAlive every 30 s, with the page
+    that explains the fault being the one thing the fault removed. (4) The
+    dashboard now comes up DEGRADED instead: `_open_store()` catches
+    `sqlite3.DatabaseError`, `serve()` binds and serves with `norm=None`,
+    `/api/health` answers 200 with a `degraded` block (fault, store, recipe) and
+    `quick_check.ok` false, `/api/meta` and `/api/gaps` still answer because they
+    read no analytical store, every other API route answers 503 with the reason
+    and the recipe rather than a 500 or a plausible-looking empty series, every
+    store-derived count is null rather than 0, and the page itself loads.
+    `StoreWriterBusyError` is deliberately not degraded around -- that is the
+    wrong process, not a broken store, and still exits 4. (5) `_loop` retries the
+    open every 60 s, so recovery is ONE step: `rebuild-store.command` renames the
+    store to `analytics.sqlite.corrupt-<date>` (a move, never a delete; it asks
+    the LOCK rather than the lock file before doing so, and names the holding pid
+    if it is held) and the running dashboard folds a fresh store within a minute
+    with no restart -- verified end to end against a deliberately malformed 0.4 MB
+    store: 503 -> rename -> 200 and `events` back to 3 in 35 s. (6)
+    `cmd_dashboard` catches `sqlite3.DatabaseError` anyway and maps it to a
+    documented `DASH_EXIT_STORE_MALFORMED = 5` with the recipe instead of a stack
+    trace. (7) tech-lead B2: `serve()`'s `except BaseException` path now closes
+    `norm` as well as the socket -- a failure after the store opened
+    (`make_handler`, `start()`, a Ctrl-C during the first fold) left the writer
+    lock held by an object nobody would ever close, so a retry inside the same
+    process was refused by its own stale lock.
+  regression_test:
+  - tests/selftest.py::test_dashboard_binds_before_it_opens_the_store
+  - tests/selftest.py::test_normalizer_writer_lock_is_one_writer_per_store
+  - tests/selftest.py::test_traits_writer_waits_and_takes_no_fold_lock
+  - tests/selftest.py::test_launchd_dashboard_cannot_retry_every_ten_seconds
+  - tests/selftest.py::test_health_names_the_store_writer_and_caches_quick_check
+  - tests/selftest.py::test_dashboard_serves_degraded_on_a_malformed_store
+  - tests/selftest.py::test_dashboard_picks_up_a_rebuilt_store_without_a_restart
+  - tests/selftest.py::test_cmd_dashboard_maps_an_unreadable_store_to_a_documented_exit_code
+  - tests/selftest.py::test_serve_releases_the_writer_lock_when_startup_fails_late
+  - tests/selftest.py::test_rebuild_store_command_moves_aside_and_refuses_a_live_writer
+  - tests/selftest.py::test_quick_check_reports_a_malformed_store_instead_of_raising
+  - tests/selftest.py::test_degraded_page_and_docs_carry_the_rebuild_recipe
+  monitor_gap: >-
+    Nothing looked at the analytical store's integrity, and nothing named the
+    process folding into it. `/api/health` reported the store's SIZE and the last
+    fold time but never asked whether the file was still readable, so corruption
+    was discovered by a crash loop rather than by a check -- and both new Health
+    fields exist because of that. The launchd log had the evidence all along (177
+    restart banners, each with a pid) and no check read it. More basically, the
+    suite had no test that started two of anything: every dashboard test built one
+    Dashboard, and one writer never contends with itself.
+
+    And -- the second round's version of the same gap -- no test had ever pointed
+    the dashboard at a store that was ALREADY broken. Every fixture built its
+    store by folding a fresh landing zone, so `Dashboard.__init__` was only ever
+    exercised on a healthy file, and the exit code that the real incident actually
+    produced (1, undocumented, with a traceback) was one no test had ever seen.
+    The fixture that closes it, `_garbage_store`, corrupts page 1 of a REAL
+    SQLite file, because the three ways to break a store fail differently and only
+    one of them is this bug: junk with a valid magic gives "file is not a
+    database", scribbled interior pages open fine and are caught by `quick_check`,
+    and a corrupted page 1 gives "database disk image is malformed" on the first
+    PRAGMA. Only the third reproduces the incident.
+  pr: 10
+
+- id: BUG-20260910-068
+  summary: "`/api/ledger` never used the index its own basis named: `dashboard._window` is unconditional, so every request carries a `valid_ts` range, and given that range SQLite skip-scanned the sort's index and then sorted the whole window into a TEMP B-TREE -- 106-459 ms per page (measured 864 ms at 200,000 rows) on five of the six sorts, at every page depth"
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T21:40:00-05:00"
+  occurred_at: "2026-09-10T19:30:00-05:00"
+  resolved_at: "2026-09-10T22:35:00-05:00"
+  detected_by: "tech-lead, gate on PR-9 (A1)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/metrics.py, line: 1}
+  - {file: src/navanax/normalize.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: >-
+    None on any number: every row returned was correct and the keyset never skipped
+    or repeated one. The damage is availability and, downstream of that, trust. The
+    ledger is the panel the design put a 4.1 M rows/day budget on, and it was the
+    one panel that could not survive its own volume -- a sort that takes half a
+    second per page at 200k rows takes ten at 4 M, which the Operator would read as
+    "the ledger is broken" and stop opening. Worse, `basis.index` NAMED the index on
+    every response, so the page was asserting a performance property that was false
+    and nothing compared the claim to the planner.
+  root_cause: >-
+    Two compounding mistakes, both invisible without EXPLAIN QUERY PLAN. First, the
+    query named no index at all and trusted the planner; with a range predicate on
+    `valid_ts` present in EVERY request (dashboard._window has no "no window" path),
+    the planner prefers `ix_events_coll_valid` and sorts. Second -- and this is the
+    one that survived the obvious fix -- adding `INDEXED BY` was NOT enough: SQLite
+    then skip-scanned the named index as `ANY(collection) AND ANY(maker) AND
+    valid_ts>?` in order to use the range term, and a skip-scan does not deliver
+    rows in the index's order, so the TEMP B-TREE stayed. The index was named, the
+    plan looked plausible, and the sort was still there.
+  resolution: >-
+    Three changes, and all three are needed. (1) `INDEXED BY <the sort's index>` on
+    `events`, following BUG-040's precedent -- a named index fails loudly if it ever
+    stops being usable rather than silently degrading. (2) The ORDER BY is now the
+    index's OWN column order: `(key, valid_ts, rowid)` for the five composite
+    indexes and `(key, rowid)` for the two that lead with a timestamp, with the
+    tuple stored per sort in `LEDGER_SORTS` so the ordering and the index cannot
+    drift; the cursor carries that same tuple, because a tiebreak that is not the
+    ordering's last column is not a tiebreak. (3) On the sorts whose index does not
+    lead with `valid_ts`, the window is written `+e.valid_ts >= ?` -- SQLite's
+    documented way to keep a term out of the index constraint -- which stops the
+    skip-scan. The trade is explicit and scoped: the window becomes a per-row filter
+    on those five sorts (right for a LIMITed page, wrong for a COUNT, so the count
+    query is built from the indexable form), and on the DEFAULT sort `valid_ts` the
+    range stays an index range because there the window IS the order. Measured on
+    200,000 rows: 864 ms -> 0.2 ms for page 1, 7-9 ms for a page 12,000 rows deep.
+    `basis.index_forced` and `basis.pagination` now state the tuple, and
+    `MetricEngine.ledger_query_plan()` exists so the claim is checkable.
+  regression_test: tests/selftest.py::test_ledger_page_uses_its_index_under_a_time_window
+  monitor_gap: >-
+    Nothing in this repo had ever read EXPLAIN QUERY PLAN. BUG-040 (a 29-second
+    query) was found by running the code on real data and noticing the wall clock;
+    the same defect one module over was invisible on a 12-row fixture, which is
+    every fixture the ledger tests use. The new test reads the planner's own output
+    for every sort x direction AND times a deep page over 200,000 rows, so both
+    halves -- the plan and the consequence -- are asserted rather than one standing
+    in for the other.
+  pr: 9
+
+- id: BUG-20260910-069
+  summary: "The `chart this selection` caption stated a CAPPED count as if it were exact, and counted rows without the price predicate the chart itself draws from -- so it named more rows than the chart could ever contain, in the one sentence whose job is to admit the picture is incomplete"
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-10T21:40:00-05:00"
+  occurred_at: "2026-09-10T18:20:00-05:00"
+  resolved_at: "2026-09-10T22:35:00-05:00"
+  detected_by: "tech-lead, gate on PR-9 (A2)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/metrics.py, line: 1}
+  - {file: src/navanax/ui/index.html, line: 1}
+  requirement: REQ-F-19
+  data_impact: >-
+    None on a plotted value; every point drawn was a real observation. The damage is
+    to the basis line, which is the project's whole answer to "how do I know this
+    chart is the truth". Two independent errors in one sentence: `charting the 5,000
+    most recent of 41,208` counted every matching row while the chart draws only
+    rows that have a price and a valid_ts, so the reader was told a larger
+    denominator than exists and would conclude the chart was more truncated than it
+    was; and above the 50,000-row count cap the same figure was the CAP, printed
+    without the "a floor, not a count" the neighbouring `count_note` has always
+    printed. A capped number rendered as exact, inside the sentence that exists to
+    say the picture is incomplete, is the flattering-direction failure the project's
+    fifth rule is about.
+  root_cause: >-
+    The count and the row query were written as two separate statements against the
+    same WHERE, and the price predicate was appended to only one of them. The
+    exactness flag was already computed (`matched_exact`) and simply not consulted
+    when the sentence was built -- the neighbouring `count_note` branches on exactly
+    that flag, four lines away.
+  resolution: "Both queries are built from one `drawable` predicate (`WHERE <filter> AND price_eth IS NOT NULL AND valid_ts IS NOT NULL`), so the caption counts what the chart draws by construction. The sentence branches on `matched_exact` the same way `count_note` does: exact gives `of 20`, capped gives `of more than 50,000 (a floor, not a count)`. `basis.matched_predicate` states the predicate on screen so a reader can see why the chart holds fewer rows than the table above it."
+  regression_test: tests/selftest.py::test_ledger_chart_caption_counts_what_it_draws
+  monitor_gap: "The existing test asserted that a cap_note EXISTS and contains the phrase `most recent`; it never checked the number in it against the rows the chart could draw, and every fixture was far below the count cap so the floor branch was unreachable. The new test uses a fixture where 20 of 50 rows carry a price -- so a count without the predicate gives a visibly wrong 50 -- and lowers the cap constant to reach the floor branch."
+  pr: 9
+
+- id: BUG-20260910-070
+  summary: "`tools/buglog.py --check` collected bug ids into a SET, so two entries under one id collapsed into one and the gate stayed green on a duplicate -- the one defect that makes every other entry unciteable"
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-10T21:40:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  resolved_at: "2026-09-10T22:35:00-05:00"
+  detected_by: "tech-lead, gate on PR-9 (C1)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: tools/buglog.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: >-
+    None on the record. The damage is to the ledger's only real property: a bug id
+    is a NAME, and this repo now cites ids from source comments, test docstrings,
+    PR descriptions and BUGS.md. Two entries under one id means every one of those
+    references is ambiguous, and the gate whose whole purpose is to keep the ledger
+    citable could not see it. This is not hypothetical: 059-061 are currently
+    allocated on two branches at once, and the second to merge would have produced
+    exactly this with a green gate.
+  root_cause: "`ledger_ids = {b['id'] for b in data['bugs']}` -- a set comprehension written for membership tests, which silently deduplicates. Every other check in the file then operated on the deduplicated set, so nothing downstream could notice either."
+  resolution: "Ids are collected into a LIST; duplicates are counted and each is named in the failure with how many times it appears and the instruction that the branch merging second renumbers. The set is still built, from the list, for the membership checks that legitimately want one."
+  regression_test: tests/selftest.py::test_buglog_check_fails_on_a_duplicate_bug_id
+  monitor_gap: "The gate had four checks and all four were about a single entry's contents (does its file exist, does its test exist, is it in BUGS.md). Nothing checked a property of the ledger AS A COLLECTION. The new test appends a real second entry under an existing id to a temporary copy and asserts the gate fails and names it -- and separately asserts the live ledger is clean, so the gate is not landing already red."
+  pr: 9
+
+- id: BUG-20260910-071
+  summary: "The degraded-store reopen probe ran on the FOLD tick, so `refresh_seconds` capped it: at the documented `refresh_seconds: 3600` a rebuilt store went unnoticed for up to an hour and `rebuild-store.command` silently stopped being a one-click fix"
+  severity: S2
+  priority: P2
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-09-10T22:50:00-05:00"
+  occurred_at: "2026-09-10T20:10:00-05:00"
+  resolved_at: "2026-09-10T22:55:00-05:00"
+  detected_by: "tech-lead, PR-9 round 2 (R2-5)"
+  detection_channel: tech-lead
+  branch: pr-9-views
+  locations:
+  - {file: src/navanax/dashboard.py, line: 1}
+  requirement: REQ-N-12
+  data_impact: >-
+    None on any stored row -- the landing zone is untouched and the analytical store
+    is derived. The damage is availability, and specifically the availability of the
+    recovery path: BUG-20260910-067's whole remedy is "the page stays up, Health
+    carries the rebuild recipe, and the running dashboard picks the rebuilt store up
+    on its next probe". On an hourly fold that last clause was false by up to a
+    factor of sixty. The Operator would move the corrupt file aside, watch a page
+    that still says DEGRADED, conclude the fix did not work, and restart -- which is
+    the second step the whole design was there to remove.
+  root_cause: >-
+    `_loop` waited `self.refresh` unconditionally and only THEN asked whether it was
+    degraded. `_retry_open`'s own `STORE_REOPEN_SECONDS` limit could therefore make
+    the probe less frequent than the fold, never more. The two settings answer
+    different questions -- `refresh` is how stale the market data may be,
+    `STORE_REOPEN_SECONDS` is how long the Operator waits after fixing the store --
+    and the loop had collapsed them into one.
+  resolution: "`_loop` computes its wait per tick: `min(self.refresh, STORE_REOPEN_SECONDS)` while `norm is None`, and the plain `refresh` once a store is open. At the shipped constant an hourly fold now recovers inside ~70 s instead of inside an hour, and a fast fold is unchanged."
+  regression_test: tests/selftest.py::test_degraded_reopen_probe_is_not_throttled_by_refresh_seconds
+  monitor_gap: >-
+    The existing recovery test called `dash._retry_open()` by hand, so it exercised
+    the probe and never the WAIT -- it would have stayed green at any refresh
+    interval. The new test drives the real `_loop` thread with `refresh_seconds:
+    3600` and a small `STORE_REOPEN_SECONDS` override, and additionally asserts the
+    property on the loop's source, because the behavioural half needs a real thread
+    and a real clock and would be the first thing deleted if it ever went flaky.
+  pr: 9
+
+
+- id: BUG-20260911-072
+  summary: "`probe_two_sockets` decided window membership from each socket's OWN first-sight time, so an event A saw before the common window and B was replayed inside it counted as a unique for B -- fake drops, pointing in the direction that flatters PR-10's case for a second stream"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-11T04:10:00-05:00"
+  occurred_at: "2026-09-10T23:40:00-05:00"
+  resolved_at: "2026-09-11T04:40:00-05:00"
+  detected_by: "tech-lead, PR-0.2 review"
+  detection_channel: tech-lead
+  branch: pr-0-probes
+  locations:
+  - {file: tools/probe_two_sockets.py, line: 208}
+  - {file: tools/probe_two_sockets.py, line: 251}
+  requirement: REQ-D-13
+  data_impact: >-
+    None on any stored row. The landing zone, ops.db and analytics.sqlite are not
+    opened by this probe and were not touched. The damage is to a NUMBER that was
+    about to be written into a document and quoted for months: the per-connection
+    unique count is the entire measured case for PR-10's redundant stream, and this
+    defect inflated it. The two sockets are opened five seconds apart by design, and
+    OpenSea replays recent events to a joining subscriber -- so on a real run the
+    bug fires every time B is replayed something A already had, and every one of
+    those became "an event a single socket dropped". A probe that miscounts in the
+    direction of the conclusion is worse than no probe, and this is the failure mode
+    docs/03 §1.2 names: not a crash, a confident plausible number.
+  root_cause: >-
+    `SocketTally.window_keys(t0, t1)` filtered `self.keys` -- first-sight times on
+    THAT socket only -- and `overlap_report` compared the two resulting sets
+    directly. Membership in the common window is not a per-socket property: an event
+    is in the window only if NEITHER socket had already seen it when the window
+    opened. `common_window`'s settle margin was there to handle exactly this replay
+    and could not, because it moves the window's edges and the comparison was still
+    being made on one socket's clock at a time. Separately, `verdict` reached its
+    "a single socket demonstrably drops events" branch from any non-empty union,
+    with no guard that the window existed or had length.
+  resolution: >-
+    New `window_sets(a, b, t0, t1)` computes both window sets, then drops every key
+    whose minimum first-sight ACROSS BOTH sockets is earlier than t0, and returns
+    the excluded set rather than discarding it; `overlap_report` uses it and reports
+    `n_excluded_pre_window` in the dict, the table and the verdict. `verdict` now
+    returns early unless the window exists AND has non-zero length AND the union is
+    non-empty, and the drop sentence carries its numerator and denominator beside
+    the percentage. Four other findings from the same review ride along: the
+    "never reconnects" property is now asserted by a counting connect factory
+    against a peer that closes early instead of by grepping the probe's own
+    docstring; Ctrl+C writes a measurement entry marked partial with the seconds it
+    ran, and the probe's on-screen strings and the launcher's exit-130 message say
+    so; `update.command` calls `launchctl bootstrap` once per job, captures the
+    output and branches on the status, and never prints an empty PROBLEM block; and
+    `_import_tool` sets `sys.dont_write_bytecode` and calls
+    `importlib.invalidate_caches()` so no stale .pyc can be graded.
+  regression_test:
+  - tests/selftest.py::test_probe_two_sockets_excludes_a_replay_of_an_event_seen_before_the_window
+  - tests/selftest.py::test_probe_two_sockets_verdict_refuses_to_claim_a_drop_from_an_empty_window
+  - tests/selftest.py::test_probe_two_sockets_never_reconnects_after_the_peer_closes
+  - tests/selftest.py::test_import_tool_loads_from_source_and_can_never_grade_stale_bytecode
+  - tests/selftest.py::test_update_command_bootstraps_each_job_once_and_prints_no_empty_problem_block
+  monitor_gap: >-
+    The suite DID have a test for the stagger -- it asserted that an event A saw
+    before B connected is not counted as a drop by B. It passed, because in that
+    fixture B never saw the event at all, so it was absent from B's set for the
+    trivial reason. The case that matters is the one where B DOES see it, late, as
+    a replay; nobody wrote it because the existing test read like it already covered
+    the ground. The new fixture has B observe the identical frame inside the window
+    and asserts only_b is 0 and the key is out of the union, with a mirror case
+    asserting a genuine in-window unique is still counted -- the fix must exclude
+    replays, not drops. Three of the four smaller findings have the same shape: a
+    property asserted against the text of a file (a docstring, one filename, one
+    data file) rather than against what the code does, which stays green for
+    whatever the text does not mention.
+  pr: 10
+
+- id: BUG-20260911-073
+  summary: >-
+    PR-10's dedup rule was "a duplicate is one copy per CONNECTION" -- the maximum over
+    connections of that connection's copy count. In the commonest redundant shape there is
+    (B drops, rejoins, and is replayed an event A already had) that is max(1, 2) = 2, and one
+    real event is recorded as two. Every count over it doubles, in the flattering direction
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-11T06:40:00-05:00"
+  occurred_at: "2026-09-11T04:30:00-05:00"
+  resolved_at: "2026-09-11T06:55:00-05:00"
+  detected_by: tech-lead, PR-10 review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/normalize.py
+      line: 839
+    - file: src/navanax/normalize.py
+      line: 340
+  requirement: REQ-D-07
+  data_impact: >-
+    None on any stored row -- the landing zone is untouched and the analytical store is
+    derived, so the remedy was a re-fold and not a repair. The damage was to every COUNT
+    the store would have produced the moment the redundant flag was turned on: a rejoin
+    replay is not an exotic case, it is what OpenSea does to a subscriber that rejoins, so
+    the doubling would have arrived on the first reconnect and looked exactly like a busier
+    market. `order_lives.terminations_seen` was the visible instance (finding 2): a keyable
+    row could inflate it, which directly contradicted the schema comment sitting next to it.
+    The flag shipped default-off and was never enabled on the Operator's machine, so no
+    recorded number was ever wrong.
+  root_cause: >-
+    The rule was chosen to preserve a single-connection behaviour that turned out not to
+    exist. The reasoning was: "if one socket delivers the same cancellation twice, that is
+    two deliveries and the old fold counted two, so taking the maximum keeps single-
+    connection semantics identical." The premise was inherited from a FIXTURE, not from the
+    code: `_lives_store.put` in the self-test clones one real frame, pins `valid_at` by
+    column override, and never recomputes the dedup key -- so its "two cancels on one order"
+    were two rows sharing one dedup key, and the assertion `terminations_seen == 2` was
+    reading an ambiguity rather than a rule. A max over connections then doubles whenever
+    the connections disagree about multiplicity, which is precisely what a replay produces.
+    The deeper failure is that the rule was UNPINNED: max, min and one-row-per-key all
+    passed every one of the 74 checks written for PR-10, so no test distinguished the rule
+    that shipped from the two rules that did not.
+  resolution: >-
+    `_dedupe_life_rows` now keeps ONE row per `dedup_key`, full stop, and returns a
+    `DedupOutcome` naming everything it discarded: `merged`, `undedupable`, per-connection
+    `deliveries`, and `disagreements` (keys at least two connections saw a DIFFERENT number
+    of times). `order_lives` gains `deliveries_a`, `deliveries_b` and
+    `multiplicity_disagreements` as additive columns, `ORDER_LIVES_METHOD` goes to 3, and
+    the sync stats and `/api/health.dedup` both carry the disagreement count with its
+    denominator. The monitor warns above `stream.redundant.monitor.multiplicity_disagreement_max`
+    (default 0, configuration per REQ-N-09). The cost is stated rather than hidden: one
+    genuine repeat delivery down ONE socket is now recorded as one event, which is an
+    UNDERCOUNT, which is the safe direction, and which is unavoidable because two rows
+    agreeing on every dedup field are what a duplicate IS. The self-test fixture was
+    corrected at the same time -- `put` recomputes the dedup key from the row as pinned --
+    so its two cancels are two genuinely distinct events and the existing
+    `terminations_seen == 2` assertion still holds, on rows that now mean what it says.
+  regression_test:
+    - tests/selftest.py::test_pr10_dedup_is_one_row_per_key_not_max_over_connections
+    - tests/selftest.py::test_pr10_terminations_seen_is_not_inflatable_by_a_keyable_row
+    - tests/selftest.py::test_pr10_monitor_warns_on_a_multiplicity_disagreement
+    - tests/selftest.py::test_pr10_two_distinct_events_across_connections_are_not_merged
+  monitor_gap: >-
+    Seventy-four checks and not one of them could tell the three candidate rules apart,
+    because every fixture used A x 1 / B x 1, where max, min and one-per-key all answer 1.
+    The new table drives A x 1 / B x 2, A x 2 / B x 1, A x 2 / B x 2 and A x 2 / B x 0 --
+    the last two separate one-per-key from BOTH of the others -- and the mutation runs
+    (max -> min, max -> one-per-key) now fail. The general lesson is the one the fixture
+    taught: a test whose inputs cannot distinguish the rule under test from its plausible
+    neighbours is not a test of that rule, and a fixture that builds two rows from one
+    frame will produce those inputs by accident.
+  pr: 10
+
+- id: BUG-20260911-074
+  summary: >-
+    A gap in connection A was annotated `covered_by: b` from B's landing-file intervals
+    alone. The writer only closes a file on a clean stop, so after a correlated outage --
+    both processes on one sleeping laptop -- B's manifest still said "open" across the
+    window and A's gap was marked covered while B's own register said B was blind for the
+    same minutes
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-11T06:40:00-05:00"
+  occurred_at: "2026-09-11T04:30:00-05:00"
+  resolved_at: "2026-09-11T06:55:00-05:00"
+  detected_by: tech-lead, PR-10 review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/redundancy.py
+      line: 243
+    - file: src/navanax/redundancy.py
+      line: 328
+  requirement: REQ-D-14
+  data_impact: >-
+    No row was changed: `annotate_gap` only ever writes `covered_by` over a NULL and the
+    gap keeps its start, its end, its classes and its open/closed state. The damage is to
+    what the gap MEANS to a reader. An annotation saying another connection was recording
+    through a window is the difference between "we were not watching" and "the other one
+    was", and the second is the single most dangerous claim this system can make, because
+    downstream it turns an absence of events into a quiet market. The flag shipped
+    default-off and no gap on the Operator's machine was ever annotated.
+  root_cause: >-
+    Coverage was read off the manifest's `opened_at` / `closed_at` per landing file, which
+    is an upper bound and not a claim. `LandingZoneWriter.close()` runs on a clean stop; it
+    does not run when the machine sleeps, when the process is killed, or when launchd
+    force-restarts it -- and those are the events that produce the gaps in the first place.
+    So the manifest's "still open" interval is widest exactly when the connection was least
+    able to record. The failure is correlated by construction: on one laptop, the outage
+    that blinds A blinds B, and each one's unclosed file then vouches for the other.
+    A second, smaller error rode along: a gap only PARTLY covered was annotated the same
+    way as one covered end to end, and every consumer of the register treats a gap as a unit.
+  resolution: >-
+    `effective_coverage` = `coverage_intervals` (had a file open) MINUS `blind_intervals`
+    (that connection's own rows in the shared gap register, with an unclosed gap running to
+    +inf). `annotate_gaps_covered_by` takes the landing ROOT rather than a precomputed
+    interval list, so a caller cannot forget the subtraction; it annotates only a CLOSED gap
+    that one merged covering interval contains END TO END (`covers_whole`); and it still
+    refuses to annotate a gap the same connection recorded. Intervals are compared as epoch
+    numbers rather than as ISO text, because the manifest and the register are written by
+    different code paths and nothing holds them to one string format.
+  regression_test:
+    - tests/selftest.py::test_pr10_correlated_outage_annotates_neither_connection
+    - tests/selftest.py::test_pr10_gap_in_a_stays_a_gap_annotated_covered_by_b
+  monitor_gap: >-
+    The original test staged B's landing file with a FakeClock and called `close()` on it,
+    so the file was closed, the interval was finite, and the whole failure mode was
+    staged out of existence. The replacement never calls `close()` -- it flushes and walks
+    away, which is what a sleeping laptop does -- and asserts from both sides at once that
+    NEITHER gap is annotated. The lesson is that a fixture which tidies up after itself
+    cannot test a code path whose trigger is not tidying up.
+  pr: 10
+
+- id: BUG-20260911-075
+  summary: >-
+    Every raw COUNT over `events` in metrics.py doubles under a second stream connection --
+    the series aggregates, the maker and wallet tables, the event mix, the ledger's total
+    and its chart. `events` is a faithful fold of two append-only landing zones by design,
+    so the doubling is in the query layer and not in the store
+  severity: S1
+  priority: P0
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-11T06:40:00-05:00"
+  occurred_at: "2026-09-11T04:30:00-05:00"
+  resolved_at: "2026-09-11T07:10:00-05:00"
+  detected_by: tech-lead, PR-10 review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/metrics.py
+      line: 1104
+    - file: src/navanax/metrics.py
+      line: 1123
+  requirement: REQ-N-05
+  data_impact: >-
+    None stored; every affected number is computed at request time. The exposure was the
+    whole analysis surface the moment the flag was turned on: a doubled event rate, a
+    doubled cancel count, a doubled maker ranking denominator and a doubled ledger total,
+    all of them plausible and none of them flagged. PR-10 shipped with a `dedup` block on
+    Health that said the doubling existed, which is not the same thing as not doubling: a
+    caveat on one tab does not stop a number being read off another.
+  root_cause: >-
+    PR-10 resolved duplicates inside `order_lives` -- correctly, because the lifecycle
+    queries carry `INDEXED BY` and SQLite will not accept that against a view (E-W4) -- and
+    then stopped. Everything that counts rows in `events` directly was left alone, on the
+    reasoning that Health would carry the caveat. The reasoning is the error: "documented
+    somewhere" is not a property of the number the Operator reads.
+  resolution: >-
+    `MetricEngine.multi_connection()` answers, in three index seeks against a new
+    `ix_events_conn` and cached for the life of a fold, whether the store holds rows from
+    more than one connection. `dedup_where(alias)` returns the EMPTY STRING when it does
+    not -- so on a single-connection store every SQL statement in metrics.py is
+    character-for-character what it was, and no query plan, no `INDEXED BY` and no ledger
+    cursor fingerprint moves -- and a one-row-per-dedup_key filter when it does. That
+    filter is appended at every counting, listing and aggregating site over `events`:
+    `_bucketed`, `live_book`, `tape`, `makers`, `event_mix`, the screener, the trait-offer
+    verdicts, `_ledger_where` (which the page, the count and the chart all share),
+    `wallets`, `counterparty_adjacency` and `wallet`. Every response that prints an n now
+    carries `dedup_applied` and `n_undedupable` in its basis, the second being the rows in
+    scope with no `event_timestamp`, which are counted per row because they cannot be
+    proved duplicates and are the only part of any n a second connection can still inflate.
+    The dashboard invalidates the cached answer after every fold.
+  regression_test:
+    - tests/selftest.py::test_pr10_metrics_never_double_count_under_two_connections
+    - tests/selftest.py::test_pr10_single_connection_metrics_are_byte_identical
+    - tests/selftest.py::test_pr10_metrics_count_undedupable_rows_per_row_and_say_so
+  monitor_gap: >-
+    PR-10 tested the fold and tested Health, and nothing tested a metric. The new
+    two-connection fixture folds the same three frames through two landing roots and
+    asserts a count of 3 rather than 6 on every route that prints one, with a mirror test
+    asserting that the single-connection query plan still names its index and still has no
+    TEMP B-TREE. A restored raw COUNT now fails under the two-connection fixture. The
+    general gap: a feature that changes what is IN a table needs a test on every consumer
+    of that table, not only on the writer.
+  pr: 10
+
+- id: BUG-20260911-076
+  summary: >-
+    `ORDER_LIVES_METHOD` was stamped on every `order_lives` row and READ by nothing, and the
+    only full re-fold fired when the table was EMPTY. An existing store therefore upgraded in
+    place into a mixture of method_version 2 and 3 rows: `sync()` refreshes only the orders a
+    pass touched, so every order with no further events kept the OLD rules' counts -- a doubled
+    `terminations_seen` -- permanently, with the redundant flag off and no signal anywhere
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-11T08:05:00-05:00"
+  occurred_at: "2026-09-11T07:00:00-05:00"
+  resolved_at: "2026-09-11T08:20:00-05:00"
+  detected_by: tech-lead, PR-10 re-review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/normalize.py
+      line: 1002
+    - file: src/navanax/normalize.py
+      line: 1135
+  requirement: REQ-D-07
+  data_impact: >-
+    Nothing stored was wrong at the moment it was written and the landing zone is untouched;
+    `order_lives` is DERIVED, so the remedy is a recomputation. The exposure is the UPGRADE:
+    the Operator's store already holds lives folded by method 2, and the fix for
+    BUG-20260911-073 would have corrected only the orders that happened to receive another
+    event. A bid cancelled yesterday and never touched again would have kept
+    `terminations_seen = 2` for one cancellation for as long as the store lived, and every
+    metric reading that column would have been reading a mixture of two rule sets with no
+    field, log line or count anywhere saying so. This is the same silent-wrongness shape as
+    073 arriving through the upgrade path instead of the fold.
+  root_cause: >-
+    The stamp was added for exactly this purpose -- "so a stored row says which rules made it"
+    -- and then nothing ever asked the question. The one full re-fold in the open path was
+    guarded on `COUNT(*) == 0`, which answers "has this table ever been built", not "was it
+    built by the rules this code implements". Those are different questions and only the
+    second one survives a rule change. The deeper error is a version stamp with no reader:
+    it looks like a migration mechanism and is a comment.
+  resolution: >-
+    `lives_method_state()` reports `{rows, min, max, null_rows, mixed, current}`, where mixed
+    means any row predates `ORDER_LIVES_METHOD` (a NULL stamp counts as older).
+    `refold_lives_if_stale()` re-folds EVERY row from `events` when it does, inside the
+    writer lock, logging the row count and the elapsed time, and returns `refolded: False`
+    without writing when the table is already current -- so this is not a re-fold on every
+    start. The folding writer calls it on open; a READ-ONLY opener must not and does not,
+    because a second writer on one SQLite store is BUG-20260910-067. A reader instead reports
+    it: `/api/health.lives_method` carries `mixed` with the min and max versions, Health's
+    top-level `status` goes to `warn`, and the payload names the fix in a sentence -- "Run
+    rebuild-store.command or restart the dashboard." MEASURED on a 200,000-life synthetic
+    fixture, the full re-fold takes 6.6-6.7 s against a 30 s budget, so the open path is the
+    right place for it and it does not need to move into the sync loop behind the bind.
+  regression_test:
+    - tests/selftest.py::test_order_lives_refolds_when_the_method_stamp_is_stale
+    - tests/selftest.py::test_order_lives_method_mixed_is_reported_on_health_as_warn
+    - tests/selftest.py::test_order_lives_refold_cost_at_200k_lives
+  monitor_gap: >-
+    Every PR-10 test built its store from scratch, so `order_lives` was always empty at open
+    and the emptiness guard always fired. Not one test upgraded an EXISTING store, which is
+    the only situation in which the defect exists. The new fixture writes a method-2 row whose
+    order receives no further events -- the case `sync()` can never reach -- and asserts the
+    count is corrected 2 -> 1 by the open, that a reader leaves it alone and flags it, and
+    that a second open re-folds nothing. The general lesson: a test suite that only ever
+    creates fresh stores cannot see any upgrade-path defect, and every schema or rule change
+    has one.
+  pr: 10
+
+- id: BUG-20260911-077
+  summary: >-
+    A `covered_by` annotation written while connection B was dead but had not yet recorded its
+    gap was PERMANENT -- `annotate_gap` guarded with `WHERE covered_by IS NULL`. B records its
+    downtime on the next START, not on its death, so the fold in that window annotates A's gap
+    "covered by b" on incomplete evidence and nothing could ever take the claim back
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-11T08:05:00-05:00"
+  occurred_at: "2026-09-11T07:00:00-05:00"
+  resolved_at: "2026-09-11T08:20:00-05:00"
+  detected_by: tech-lead, PR-10 re-review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/redundancy.py
+      line: 330
+    - file: src/navanax/opstore.py
+      line: 224
+  requirement: REQ-D-14
+  data_impact: >-
+    No gap was ever closed, shortened or removed -- that invariant held and still holds. The
+    damage is to what a gap MEANS. `covered_by` says another connection was recording through
+    this window, and downstream that is the difference between "we were not watching" and "the
+    other one was". BUG-20260911-074 fixed the correlated-outage case by subtracting B's own
+    recorded gaps from its coverage; this is the same failure through a narrower door, because
+    the subtraction can only use gaps that have been RECORDED, and a SIGKILLed process has
+    recorded nothing yet. The flag shipped default-off and no gap on the Operator's machine
+    was ever annotated.
+  root_cause: >-
+    `WHERE covered_by IS NULL` was written to enforce "an annotation never edits the gap", and
+    it enforced something stronger and wrong: that a DERIVED claim could not be corrected when
+    the evidence behind it changed. Coverage evidence arrives late by construction --
+    `record_downtime_gap` is called at the start of `run()`, so the interval a process was
+    dead is written only once it is alive again. Any fold inside that window is deciding on a
+    register that does not yet contain the fact that would change its mind.
+  resolution: >-
+    The ruling that unblocks it: `gap_register` lives in the OPERATIONAL store, which docs/07
+    §1 classifies as disposable, reconstructible bookkeeping and which `close_gap` already
+    updates in place. It is not the landing zone and not the bitemporal record, so correcting a
+    derived annotation there is allowed. The invariant that is NOT negotiable -- a gap is never
+    closed, shortened or removed by coverage logic -- is unchanged and is now asserted by
+    snapshotting the whole row before and after. `annotate_gap` takes `covered_by: str | None`
+    and writes only on a real change (`WHERE covered_by IS NOT ?`), so a steady state touches
+    nothing. `annotate_gaps_covered_by` recomputes effective coverage for every closed gap on
+    every fold and returns a `CoverageUpdate(marked, revoked)`; each transition is logged once
+    -- at INFO when set, at WARNING when revoked -- naming the gap id and why, and the
+    revocation line says the gap is UNCHANGED so nobody reads a revocation as the gap being
+    altered. `/api/health.dedup` carries `covered_by_n` and `covered_by_revoked_n`.
+  regression_test:
+    - tests/selftest.py::test_pr10_covered_by_is_revoked_when_the_evidence_changes
+    - tests/selftest.py::test_pr10_revocation_is_logged_once_per_transition
+    - tests/selftest.py::test_pr10_correlated_outage_annotates_neither_connection
+  monitor_gap: >-
+    The 074 fixture staged B's gap as ALREADY RECORDED, because that is the tidy way to write
+    it, and the whole defect lives in the interval before it is recorded. The new fixture
+    drives the sequence in time -- annotate, then B records its downtime, then fold again --
+    and asserts the annotation is taken back, that the fold after that changes nothing, and
+    that the gap row is byte-identical apart from `covered_by`. The general lesson is the one
+    074 also taught: a fixture that sets up the end state cannot test the race that reaches it.
+  pr: 10

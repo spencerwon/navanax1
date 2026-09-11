@@ -485,9 +485,599 @@ paths only for entries without them, and add `navanax import-traits` so the
 friend's cache loads with zero reads. Docstring now states what is verified
 and for which collection; other collections must be re-verified.
 
+### Round 14 — the gate on the trait-cache import
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260909-055 | S1 | P0 | fixed | The trait-cache import silently overwrote — duplicate ids, counts of writes that never happened, reconciliation on the wrong key, and any float accepted as the observation time |
+| BUG-20260910-056 | S3 | P1 | fixed | `config/assumptions.yaml`, the assumptions registry, was deleted by an unrelated change and no gate noticed |
+
+Four defects in one import path, all the same habit: trusting an identifier or a
+number without resolving it first. Two cache entries resolving to one token id
+both wrote, second wins, `imported` counting both — the cache's own internal
+contradiction becoming our record with no trace. The list pass counted
+`traits_from_list` for every entry that *carried* traits, including the ones
+`_store` refused to write, so the number reported was the response's size and
+not the store's gain; a conflicting OpenSea value was dropped uncounted in the
+same line. Reconciliation compared the cache's *keys* against rows written under
+`entry["id"]`. And `--generated` took any float: a millisecond epoch — which is
+what the JavaScript tool that produced the cache emits by default — crashed with
+a raw `ValueError`, and a future one was written straight into `traits_at`,
+where nothing downstream can tell it from a real observation.
+
+None of it had run against the real cache yet. The import's own fixture was
+written from the same assumptions as the code — keys that *were* the ids, all
+distinct, a plausible second-epoch integer — so it could not falsify any of the
+four. The BUG-002 shape for the fifth time.
+
+`config/assumptions.yaml` is the smaller finding with the more uncomfortable
+cause: a file no code imports and no test asserts on is invisible to every gate
+this project has, so deleting it passed all four green.
+
+### Round 15 — the gate on PR-3 (the standing-book spread)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-057 | S1 | P0 | fixed | `immediacy_cost` was an interval extremum, not the standing-book quantity docs/01 §3.2 defines — biased narrow, and able to render negative on the front page |
+
+The metric was built from its name rather than from its definition. docs/01 §3.2
+says *"what you pay to force time-to-clear to zero by hitting the **standing**
+collection offer"*. The code aggregated `MIN` over the ask leg and `MAX` over the
+bid leg **within a bucket** and subtracted them, so the number on the front page
+was the distance between the cheapest ask seen at some point in the interval and
+the richest offer seen at some other point — two prices that need never have
+coexisted, and on this collection usually did not.
+
+The bias has a known sign — too **narrow** — and it grows with the interval, so
+the 1-day bars were worse than the 5-minute bars in the way nobody would notice.
+And because the legs are unrelated in time it could go **negative**, which the
+KPI card would have rendered as a free arbitrage. On the fixture that reproduces
+it the old path returns **−0.10** and the new one returns **null with an alarm**.
+
+The fix is not a chart fix. `immediacy_cost`, `floor_ask` and `collection_bid`
+are now read off `order_lives` by a sweep line over placements and terminations,
+and reported per bucket as the **time-weighted median with [p10, p90]**, with
+`coverage` (seconds the legs stood ÷ observable bucket seconds) and `n` beside
+every point. Both legs are sampled at the same τ. The Operator's decision of
+2026-09-10 — *floors are built from standing asks only; a bucket with no live ask
+is a hole* — is what the default now implements; the old behaviour stays
+reachable as `book='observed'` and says in its own basis what it is not.
+
+Shipped with it: percentiles are **withheld** below `min_n_for_percentiles`
+rather than printed with a warning beside them (REQ-F-19, docs/00:199). All
+three of `bid_lifetimes`' quantiles go together — a median is a percentile too.
+The standing series' median does not, and the distinction is deliberate: it is
+the level of a continuously observed step function, a fact at n = 1, and
+withholding it would blank the chart wherever the book is genuinely one listing
+deep.
+
+Every existing test asserted the metric against its own implementation — the
+contract test restated the extremum definition, and the 5-minute case asserted
+that two legs in different buckets are UNDEFINED, which is the defect written
+down as intended behaviour. **A test written from the code cannot find a
+requirement violation.**
+
+### Round 16 — the gate that passed on zero evidence
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-058 | S1 | P0 | fixed | `sync()` reported an undecodable landing file as read-with-zero-rows; a corpus fold with no codec printed "115 files read, 0 rows, ALL GATES GREEN" |
+
+Found by the orchestrator running the new `tools/gates.py --corpus` in the
+device VM. Fix: failures and short files are counted in the sync stats and fail
+the gate; `gates.command` runs the fold on the Mac where the codec lives.
+
+### Round 17 — a bid line for a trait group with no members (PR-5)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-059 | S1 | P1 | fixed | the trait chart's union bid leg drew the collection offer for a filter selecting **zero** tokens — a confident bid line for a trait group with no members |
+| BUG-20260910-060 | S1 | P1 | fixed | the same shape in `_bucketed`: under a trait filter that selects zero tokens, `bid_count` / `event_count` still counted collection offers and COVERing trait offers |
+
+Found by the data engineer smoke-testing PR-6's page against real PR-5 payloads
+before opening the PR, on the filter case nobody draws on purpose: `Print: Nope`,
+a clause with no matching token.
+
+The ask lines went null on their own — no tokens, so no listings. The **bid** did
+not. A collection offer is not token-scoped and `S(F) ⊆ S(C)` is vacuously true
+when `S(F) = ∅`, so the panel drew **0.348 Ξ** as "the highest standing bid for
+this trait" for a trait group with **zero** members. Every leg count was correct;
+only the line was a lie, and it was a lie in the flattering direction — a bid
+with no ask above it reads as a trait nobody has listed and somebody wants.
+
+**It is reachable today on every filter.** `traits` has 0 rows in this working
+copy and on the Operator's machine until the Explorer import lands, so *every*
+filter has `S(F) = ∅`. The first thing the trait chart would have drawn, on its
+first run, is this number.
+
+Fixed in `trait_set_series`: when the filter is non-empty and `|S(F)| = 0`, the
+bid series and `winning_leg` are null in every bucket, `basis.empty_token_set` is
+true, and both the panel and the basis print *"this filter selects no token, so
+there is no trait group … if that is unexpected, check whether the `traits` table
+is populated at all."* The per-leg counts still report what **was** standing, so
+the withholding is visible as a withholding rather than as an empty book.
+
+**BUG-060 was the same defect one function away, and is fixed in the same pass.**
+`_bucketed`'s filter clause is `((token_id IS NULL AND event_type='collection_offer')
+OR (event_type='trait_offer' AND <COVERS>) OR (<token matches every clause>))`. Each
+disjunct is right on its own; the *set* of them had no `|S(F)| > 0` condition, so
+under a filter that selects no token the two token-less branches kept matching.
+Measured on the fixture, before the fix, in the bucket holding the book:
+
+| metric, filter selects 0 tokens | before | after |
+|---|---|---|
+| `bid_count` | **1.0** — the collection offer | `None` |
+| `event_count` | **1.0** | `None` |
+| `sales_count` · `cancel_count` · `listing_count` · `volume` | **0.0** | `None` |
+| `top_item_bid` · `floor_ask` · `immediacy_cost` | `None` (already) | `None`, now with a reason |
+| `basis.empty_token_set` | **absent** — nothing on the page could say why | `true` + a printed note |
+
+The `0.0` cases matter as much as the `1.0` ones: a zero says *"nothing happened
+to this trait group in this hour"*, and the truth is that there is no trait group.
+And while `traits` is empty **every** filter selects zero tokens, so the `1.0` was
+100 % of the filtered bid count — the Activity chart's *bids* bars under any trait
+filter were counting bids on tokens the filter does not select.
+
+The fix is one predicate, `filter_narrows(spec)`, used in the two places that were
+about to disagree: `_bucketed` returns nothing, and `series()` fills the grid with
+`None` rather than the usual `0.0` for COUNT/SUM. `collection_bid` is the
+deliberate carve-out and is unchanged — it is not narrowed by a trait filter (leg
+discipline, quant §1 metric 1) — but its basis now says the number is
+collection-wide and is not a statement about the filter. The note prints under
+**every** chart, not only the trait panel.
+
+### Round 18 — the tech-lead blocks PR-5/PR-6
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-061 | S1 | P0 | fixed | the empty-token-set guard was on **one** of `series()`' four branches; the standing-book branches drew a line while the basis in the same response said every bucket was undefined |
+| BUG-20260910-062 | S1 | P1 | fixed | `trait_offer_verdicts` re-queried `traits` once per (offer, criterion) — 27,694 queries for 48 distinct pairs, 8.6 s at 200k lives |
+| BUG-20260910-063 | S2 | P2 | fixed | every PARTIAL offer travelled as full detail — 4.1 MB of JSON |
+
+**061 is an incomplete fix to 060, and that is the interesting part.** The guard
+was written where the defect was *found* — the `_bucketed` branch — rather than
+around the value the guard is *about*. `series()` has four branches; three
+ignored it, so `floor_ask` and `immediacy_cost` on the standing book drew a line
+while `basis.empty_token_set_note`, in the same response, asserted that every
+bucket was undefined. **A basis that contradicts its own arrays is worse than no
+basis**, because the basis is the thing a reader falls back on.
+
+It is reachable only when `tokens` and `traits` disagree, which is why it was not
+obvious — and why the BUG-060 regression test could not see it. That test filtered
+on a trait value **no token has**, so the standing series was null for lack of
+data and the guard was never what made it null. The new fixture populates `traits`
+and leaves `tokens` empty — a real intermediate state of trait onboarding — so the
+book matches the filter while `|S(F)| = 0`. Before the fix, on that fixture:
+`floor_ask` **1.20 Ξ**, `immediacy_cost` **0.852 Ξ**, and the trait chart's ask
+line drawn, all with `empty_token_set: true` printed beside them.
+
+> **A guard needs a fixture in which the thing it guards against is actually
+> present.** When two tables can disagree, the test for a rule that spans them
+> must make them disagree.
+
+The same review corrected the note's wording (**F7**): it told the Operator to
+check the `traits` table, and the guard counts `tokens`. On the very fixture that
+exposed 061, `traits` was the populated half — so the note named the one table
+that was fine. It now says the universe is `tokens` and that both are filled by
+the same onboarding run.
+
+**062** is cost, not correctness: the reach of a criterion `(trait_type, value)`
+is a property of the trait table, not of the offer that names it. Memoised per
+call, plus one grouped query for the criteria rows: fewer than 200 queries and
+0.03 s on a 2,000-offer synthetic, against ~6,000 queries before. The regression
+test asserts the **query count** with `sqlite3`'s trace callback rather than a
+wall clock — the count is what was wrong, and a stopwatch on shared CI hardware is
+a flaky test.
+
+**063**: `partial_n` is now counted separately from the detail list and is never
+capped; `partial` is a sample of at most 50, flagged with `partial_truncated`. A
+cap that silently becomes the answer is BUG-047's shape one module over.
+
+Also in this round, no ledger id: `/api/trait_series` indexed the intervals dict
+directly, so an unknown interval reached the page as a bare **500**
+(`KeyError: '5min'`). It now refuses with a `ValueError` naming the valid ids,
+which the handler maps to **400** — REQ-N-09, an interval not in
+`intervals.yaml` is refused, not improvised.
+
+### Round 19 — the tech-lead blocks PR-8 (survival estimator + bid-lifetime panel)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-064 | S2 | P1 | fixed | `/api/survival` shipped one array entry per event time on seven arrays — **2.29 MB** at 40,000 lives — and held the dashboard's writer lock across the cluster bootstrap |
+| BUG-20260910-065 | S3 | P3 | **open** | `bid_lifetimes` has no `as_of`: it reads terminations as of the **fold**, so a window ending in the past is answered with hindsight and its censored lives sit on a different horizon from its ended ones |
+
+**064 is BUG-063's shape, one module over, written after 063 was fixed.** An
+uncapped list became an untrimmed set of arrays. The curve is now thinned onto its
+own log-spaced grid **for transport only** — indices are *selected*, never
+averaged; `t = 0` and the final step are always kept; and the percentiles, RMST,
+residual survivals and the bootstrap are all computed from the **full** curve
+before the thinning runs, so no estimate is ever read off the thinned one.
+Measured on a 40,000-life synthetic: **2,289,345 → 88,017 bytes**, 17,985 → 384
+points. `km.points`, `km.event_times` and `km.downsampled` travel in the response,
+because a reduction nobody can see is a reduction nobody can check.
+
+The lock half is the worse half and had no size at all: the bootstrap is `B × n`
+arithmetic over a list already in memory, and holding the analytical store's
+writer lock across seconds of it stops every other panel *and* the background
+normalizer. `survival_prepare()` is now exactly the part that touches sqlite; the
+endpoint holds the lock across that and drops it before the bootstrap.
+
+> **Every survival fixture had six lives**, so seven arrays of six entries weighed
+> nothing and no test ever looked at the response as an object with a size. The
+> same blind spot produced 063. A panel's fixture has to be big enough for its
+> failure mode to exist.
+
+**065 is left open on purpose, with a settling note in the ledger.** It is not
+reachable from the page — every range the UI can ask for ends at *now*, which is
+also the fold — and PR-8's `survival()` takes an explicit `as_of` and is what the
+page now draws. `bid_lifetimes` is off screen and kept only as the naive
+comparison the PR description contrasts against; changing its numbers now would
+alter the one baseline a reviewer uses to judge how far PR-8 moved the median.
+The recommendation recorded is to delete it once PR-8 has been run over the real
+corpus and that comparison has been made. Until then the defect is stated in the
+response itself: `bid_lifetimes`' own `censoring` string names this id and says
+what the number is not.
+
+Also in this round, no ledger id — three findings that were wrong-before-shipping
+rather than defects in shipped code. **The PR-8 exit palette was chosen by eye and
+failed the validator hard**: `#F0A202` / `#7E8F87` / `#5C7C8A` measured worst-CVD
+**2.6** and worst-normal **7.7** on the five-colour exit stack — two greys no
+reader could separate. Re-picked to `#007711` / `#5544FF` / `#EEAA00` and
+re-measured at **16.8 / 27.1** (§4b.1 carries the table and the scopes). **The
+`@data` row in docs/08 still said `--trait-offer` `#C792EA`** a day after PR-6
+re-picked it, and nothing compared the table to `:root`;
+`test_docs_palette_table_matches_the_root_block` now parses both and fails on any
+disagreement in either direction. And **two UI assertions were passing on the
+wrong string** — the step-shape check was satisfied by the band's invisible edge
+traces, so switching the visible curve to a straight interpolation left it green;
+both are now scoped to the exact trace and the exact header template, and each was
+proven by mutation.
+
+### Round 20 — PR-9 (view split): one defect found while moving the survival panel
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-066 | S4 | P3 | fixed | The survival panel escaped three server strings with `esc()` and then assigned them to `.textContent`, so the Operator was shown the literal characters `&lt;` where the withheld-percentiles reason says `n_eff = 0 ... < 30` |
+
+**Found by looking at the page, not at the code.** The PR-9 screenshot of the Flow
+view rendered *"percentiles WITHHELD — n_eff = 0 maker-episode cluster(s) `&lt;` 30
+(REQ-F-19)"*. `esc()` is the page's HTML escaper and every other call site sends its
+result to `innerHTML`, where escaping is the whole point. `#s-head` and `#b-surv` are
+set with **`.textContent`**, which never interprets markup — so escaping there was
+not a safety measure at all, it was a double encoding, and the one string on the
+page that contains a `<` is the one that explains why a number is missing. The
+sentence a reader most needs to trust was the sentence that looked broken.
+
+Nothing is unescaped as a result: the fix removes `esc()` **only** on the three
+`textContent` targets, and `test_ui_contract`'s escaping property test — which
+covers every `${…}` reaching `innerHTML` — is unchanged and still green. The code
+now carries a comment saying not to "restore" it.
+
+### Round 21 — PR-10: the production incident. Two writers on one derived store
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-067 | S3 | P0 | fixed | `serve()` opened the analytical store and started the folding writer **before** binding 127.0.0.1:8765, so with a second dashboard already listening every launchd retry folded into `data/analytics.sqlite` and then died on "Address already in use" — 177 times in half an hour, until the 2.8 GB store became `database disk image is malformed` |
+
+**What happened, in order.** A second dashboard was running on port 8765. The
+launchd job kept trying to start its own. Each retry did this:
+
+```
+Dashboard(...)          → opens data/analytics.sqlite read-write
+     └─ start()         → the normalizer thread folds new frames INTO it
+ThreadingHTTPServer(..) → OSError: [Errno 48] Address already in use
+     └─ process exits mid-fold; launchd waits ThrottleInterval (10 s); repeat
+```
+
+177 times. Two writers alternating on one SQLite file, one of them killed while
+writing, and the store ended unopenable.
+
+**Severity is S3; the root cause is S1-class, and the distinction is the point.**
+The consequence was availability — the dashboard was down and the Health page with
+it — because the analytical store is *derived*. The corrupt file was **renamed
+aside, never deleted and never edited**, and the store was rebuilt from the landing
+zone; every event came back, because the raw frames are the record and the store is
+a fold of them. **No landing-zone byte was touched in any code path.** What makes
+this worth a P0 is that it was *silent*: no error, no warning, and no number
+anywhere on the page said a second process was folding. The first symptom was a
+store that would not open. Point the same two writers at the landing zone instead
+of at a derived file and this entry is an S0a with permanent loss.
+
+**The fix is three layers, and the first one is just ordering.**
+
+1. **Bind first.** `serve()` binds the listening socket *before* it constructs
+   `Dashboard`. A process that cannot get its port now exits without having opened
+   the store at all — the doomed retry costs nothing, whatever else is in place.
+   `navanax dashboard` exits **2** on a bind failure and says the store was not
+   opened.
+2. **A writer lock.** `Normalizer(..., writer=True)` takes an exclusive `flock` on
+   `<store>.lock` for its lifetime; a second folding writer is refused with
+   `StoreWriterBusyError` naming the holder's pid and the two ways out, and
+   `close()` releases it. Readers pass `writer=False` — `mode=ro`, enforced by
+   SQLite rather than by intention, no lock, and `sync()` / `reset_for_refold()` /
+   `refold_criteria()` refuse. docs/07 §1's "one writer, readers attach read-only"
+   was a documented pattern with nothing behind it; it is now enforced. The
+   flock errno rules are **one** set shared with `cli._single_instance`, so a share
+   that cannot lock warns and proceeds instead of stopping the fold. The traits job
+   is deliberately *outside* the lock — it writes `tokens`/`traits` and folds no
+   events — and opens with an explicit `busy_timeout` so a concurrent fold makes it
+   wait rather than fail spuriously.
+3. **`ThrottleInterval: 30`** on the dashboard plist, so a port conflict cannot
+   retry every 10 s.
+
+**Second round — the tech-lead blocked the first fix, correctly.** Everything above
+prevents the store *becoming* corrupt. None of it addressed the incident's **end
+state**: with `analytics.sqlite` already malformed, `sqlite3.connect()` succeeds
+(it is lazy) and the first `PRAGMA journal_mode=WAL` raises
+`DatabaseError: database disk image is malformed` straight out of
+`Dashboard.__init__` — caught by nothing in `cmd_dashboard`, so: a raw traceback,
+an **undocumented exit 1**, and `KeepAlive` repeating that every 30 s. The page
+that explains the fault was the one thing the fault took away.
+
+So the dashboard now **degrades instead of dying**:
+
+| | while degraded |
+|---|---|
+| `/api/health` | **200**, with a `degraded` block (fault, store, recipe) and `quick_check.ok` false |
+| `/api/meta`, `/api/gaps` | **200** — neither reads the analytical store |
+| every other API route | **503** `{"error": "analytical store is malformed", "rebuild": …}` |
+| `/` | **200** — there has to be somewhere to read all of the above |
+| store-derived counts | `null`, never `0`. `0` is a claim about a store nobody could read |
+| the recorder | untouched, still landing frames |
+
+`_loop` retries the open every 60 s, so recovery is **one step**:
+`rebuild-store.command` renames the store to `analytics.sqlite.corrupt-<date>` —
+a move, never a delete — and the running dashboard folds a fresh one within a
+minute. It asks the **lock**, not the lock file, before moving anything, and names
+the holding pid if it is held: "is that pid still alive?" gives false refusals in
+both directions, and a false refusal here means the Operator cannot recover at all.
+Verified end to end against a deliberately malformed store: 503 → rename → 200 with
+`events` back, in 35 s, no restart. `cmd_dashboard` catches
+`sqlite3.DatabaseError` anyway and maps it to a documented
+`DASH_EXIT_STORE_MALFORMED = 5` with the recipe rather than a stack trace. And
+`serve()`'s `except BaseException` path now closes `norm` as well as the socket
+(**B2**) — a failure *after* the store opened left the writer lock held by an
+object nobody would ever close, so a retry in the same process was refused by its
+own stale lock.
+
+**Why nothing caught it.** Nothing looked at the analytical store's integrity, and
+nothing named the process folding into it. `/api/health` reported the store's *size*
+and the last fold time but never asked whether the file was still readable — so
+corruption was found by a crash loop instead of by a check. Both new Health fields
+(`store_writer`, and a `PRAGMA quick_check` cached for ten minutes because it reads
+every page of a 2.8 GB file) exist because of that. And the suite had no test that
+started **two** of anything: every dashboard test built one `Dashboard`, and one
+writer never contends with itself.
+
+The second round's version of the same gap: **no test had ever pointed the
+dashboard at a store that was already broken.** Every fixture built its store by
+folding a fresh landing zone, so `Dashboard.__init__` was only ever exercised on a
+healthy file, and the exit code the real incident produced was one no test had ever
+seen. The new fixture corrupts **page 1 of a real SQLite file**, because the three
+ways to break a store fail differently and only one of them is this bug: junk
+behind a valid magic gives *"file is not a database"*; scribbled interior pages
+open fine and are caught by `quick_check`; a corrupted page 1 gives *"database disk
+image is malformed"* on the first PRAGMA. Only the third reproduces the incident.
+
+### Round 21 — the tech-lead blocks PR-9 (view split, ledger, wallets, health)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260910-068 | S1 | P1 | fixed | `/api/ledger` never used the index its own basis named — with an unconditional time window the planner skip-scanned and then sorted the whole window into a TEMP B-TREE, 864 ms per page at 200,000 rows |
+| BUG-20260910-069 | S1 | P1 | fixed | The "chart this selection" caption stated a **capped** count as exact, and counted rows without the price predicate the chart draws from |
+| BUG-20260910-070 | S3 | P2 | fixed | `tools/buglog.py --check` collected bug ids into a **set**, so a duplicate id collapsed into one and the gate stayed green |
+| BUG-20260910-071 | S2 | P2 | fixed | The degraded-store reopen probe ran on the **fold** tick, so `refresh_seconds: 3600` meant a rebuilt store went unnoticed for up to an hour |
+
+**068 is BUG-040's shape with one extra turn, and the extra turn is the lesson.**
+The obvious fix — `INDEXED BY` — is not sufficient. SQLite then *skip-scans* the
+named index (`ANY(collection) AND ANY(maker) AND valid_ts>?`) in order to use the
+range term, and a skip-scan does not deliver rows in the index's order, so the
+TEMP B-TREE survives. The index was named, the plan read plausibly, and the sort
+was still there. Three things together fix it: the named index, an `ORDER BY` that
+is the index's own column order `(key, valid_ts, rowid)` with the cursor carrying
+that same tuple, and `+e.valid_ts` on the five sorts whose index does not lead
+with a timestamp — SQLite's documented way to keep a term out of the index
+constraint. The trade is deliberate and scoped: on those five the window becomes a
+per-row filter (right for a LIMITed page, wrong for a `COUNT`, so the count query
+is built from the indexable form), and on the **default** sort `valid_ts` the range
+stays an index range, because there the window *is* the order. 864 ms → 0.2 ms for
+page 1, 7–9 ms for a page 12,000 rows deep.
+
+**The lasting change is that this repo now reads `EXPLAIN QUERY PLAN` in a test.**
+BUG-040 was caught by a human noticing a 29-second wall clock on real data; the
+same defect one module over was invisible on a twelve-row fixture, which is every
+fixture the ledger tests had. `MetricEngine.ledger_query_plan()` exists so the
+claim in `basis.index` is checkable, and the test asserts both halves — the plan
+*and* the consequence at 200,000 rows — so neither can stand in for the other.
+
+**070 has a live cause, not a hypothetical one.** IDs **059–061 are allocated on
+two branches at once** — this one and `feat/push-steward`. Whichever merges second
+must renumber its three entries and update every reference to them (source
+comments, test docstrings, `BUGS.md`); the gate will now name the collision
+instead of silently keeping one of the two meanings. **068–071 carry the same
+risk** and the same rule: they were allocated on this branch while another was
+open, so if that branch reached 068+ too, whichever merges second renumbers.
+
+### Round 22 — the tech-lead blocks PR-0.2 (the two-socket probe) and the deploy scripts
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260911-072 | S1 | P1 | fixed | `probe_two_sockets` decided window membership from each socket's **own** first-sight time, so an event A saw before the window and B was **replayed** inside it counted as a unique for B — fake drops, inflating the measured case for PR-10 |
+
+**This is the flattering-number failure, in the one place it does the most damage.**
+The per-connection unique count is the *entire* measured justification for PR-10's
+redundant stream. The two sockets are opened five seconds apart by design and
+OpenSea replays recent events to a joining subscriber, so on any real run B is
+handed events A already had — and every one of those was being counted as "an event
+a single connection dropped". Nothing crashed. The number was plausible, and it
+pointed at the conclusion the PR wanted.
+
+`common_window`'s settle margin existed to handle exactly this and could not,
+because membership was still evaluated one socket's clock at a time. Membership in
+the common window is not a per-socket property: an event belongs to it only if
+**neither** socket had already seen it when the window opened. `window_sets()` now
+computes both window sets and then drops every key whose minimum first-sight
+**across both sockets** precedes `t0` — returning the dropped keys rather than
+discarding them, because how much the server replays after a join is itself a
+measurement, and it now appears in the table, the dict and the verdict as
+`n_excluded_pre_window`.
+
+`verdict()` could also reach "**a single socket demonstrably drops events**" from
+any non-empty union, with no guard that the window existed or had length. It now
+returns early unless the window exists, has non-zero length, *and* the union is
+non-empty, and the drop sentence carries its numerator and denominator beside the
+percentage rather than a bare `40.0%`.
+
+**Why nothing caught it.** The suite *did* have a stagger test, and it passed — but
+in its fixture B never saw the early event at all, so the key was absent from B's
+set for the trivial reason. The case that matters is the one where B **does** see
+it, late. The test read like it covered the ground, which is why nobody wrote the
+one that mattered.
+
+**Four smaller findings ride along, and three are the same shape:** a property
+asserted against the *text* of a file instead of against what the code does.
+"Never reconnects" was a grep of the probe's own docstring — now a counting connect
+factory against a peer that closes early, asserting exactly one connect per socket.
+"open-dashboard never starts anything" was one string (`navanax.cli`) — now a scan
+of every executed line for another `.command`, a file handed to a shell, or any
+launchctl verb but `print`. "update touches nothing under data/" was one file —
+now a snapshot of the whole subtree (paths, sizes, mtimes) plus a static scan that
+`data/` is never in a write position. The fourth is behavioural: `update.command`
+called `launchctl bootstrap` a second time just to capture the error text, which
+loaded the job twice on the failure path — BUG-20260910-067's two-writers shape —
+and printed the *second* call's message as the reason the first one failed. One
+call now, captured, branched on, and never an empty `PROBLEM` block. Ctrl+C on the
+probe writes its entry marked **partial** with the seconds it actually ran, instead
+of throwing the evidence away, and `_import_tool` can no longer grade a stale
+`.pyc`.
+
+### Round 23 — the tech-lead blocks PR-10 (the redundant stream)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260911-073 | S1 | P0 | fixed | The dedup rule was **max over connections**, which doubles on a B rejoin-replay: A × 1 / B × 2 → 2, and one real event is recorded as two |
+| BUG-20260911-074 | S1 | P0 | fixed | `covered_by` was derived from B's landing-file intervals alone, so a **correlated outage** annotated A's gap "covered by b" while B's own register said B was blind for the same minutes |
+| BUG-20260911-075 | S1 | P0 | fixed | Every raw `COUNT` over `events` in `metrics.py` doubles under a second connection — series, makers, wallets, event mix, ledger total and chart |
+
+**073 is the fifth project rule catching its own implementation.** "A duplicate is
+one copy per connection" sounds careful. It is the maximum, over connections, of
+that connection's copy count — and the commonest redundant shape there is is B
+dropping, rejoining, and being **replayed** an event A already had. `max(1, 2) = 2`.
+One cancellation becomes two, the cancel rate doubles, and the market looks busier
+than it is. A surprisingly good result is evidence of a bug.
+
+The premise came from a **fixture, not from the code**. `_lives_store.put` in the
+self-test clones one real frame, pins `valid_at` by column override, and never
+recomputed the dedup key — so its "two cancels on one order" were two rows sharing
+one key, and `terminations_seen == 2` was reading an ambiguity rather than asserting
+a rule. Worse: **max, min and one-row-per-key all passed every one of the 74 checks
+written for PR-10.** The rule that shipped was indistinguishable, under test, from
+the two rules that did not. The new table drives A × 1 / B × 2, A × 2 / B × 1,
+A × 2 / B × 2 and A × 2 / B × 0 — the last two separate one-per-key from *both*
+neighbours — and the fixture now recomputes its key so its two cancels are two
+genuinely distinct events.
+
+The rule is now **one row per dedup key**, and what that discards is written down
+rather than implied: `deliveries_a`, `deliveries_b` and `multiplicity_disagreements`
+on `order_lives`, the same counts in the sync stats and on `/api/health.dedup`, and
+a monitor that warns above a configured threshold. The cost is stated in the
+docstring: a genuine repeat delivery down **one** socket is now recorded as one
+event. That is an undercount, it is the safe direction, and it is unavoidable — two
+rows agreeing on every dedup field are what a duplicate *is*.
+
+**074 is "we were not watching" turning into "the other one was".** Coverage was
+read off `opened_at` / `closed_at` per landing file. But `close()` runs on a *clean*
+stop — not when the machine sleeps, not when the process is killed, not when launchd
+force-restarts it, which are the events that produce gaps in the first place. So the
+manifest's "still open" interval is widest exactly when the connection was least able
+to record, and on one laptop the outage that blinds A blinds B: each one's unclosed
+file vouches for the other. Coverage is now the manifest intervals **minus that
+connection's own rows in the gap register**, and only a *closed* gap contained end to
+end by one covering interval is annotated. The old test staged the failure out of
+existence by calling `close()`; the new one flushes and walks away, which is what a
+sleeping laptop does.
+
+**075 is a caveat mistaken for a fix.** PR-10 resolved duplicates inside
+`order_lives` — correctly, because the lifecycle queries carry `INDEXED BY` and
+SQLite will not accept that against a view — and then stopped, on the reasoning that
+the Health tab's `dedup` block carried the warning. A caveat on one tab does not stop
+a number being read off another. `MetricEngine.dedup_where()` now returns the **empty
+string** on a single-connection store, so every SQL statement is character-for-character
+what it was and no query plan moves, and a one-row-per-key filter otherwise — appended
+at every counting, listing and aggregating site over `events`. Every response that
+prints an `n` carries `dedup_applied` and `n_undedupable`.
+
+Two smaller findings rode along, both S3: `autostart-uninstall.command` and
+`autostart-status.command` carried hardcoded three-label lists, so neither could stop
+or even *show* a stranded `com.navanax.recorder-b`; and turning the flag back off left
+that job loaded and crash-looping on `EXIT_CONFIG` every ten seconds forever. All three
+launchers now take the label list from `tools/launchd.py`, the installer boots out and
+deletes jobs this configuration no longer wants (printing each one), and a
+`com.navanax.*` job this version cannot *name* is reported and left alone — it is
+likelier to belong to a newer version than to be rubbish.
+
+### Round 24 — the tech-lead blocks PR-10 again, on the upgrade path
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260911-076 | S1 | P0 | fixed | `ORDER_LIVES_METHOD` was written on every row and **read by nothing**; the full re-fold fired only when `order_lives` was empty, so an existing store upgraded into a mixture of method 2 and 3 rows |
+| BUG-20260911-077 | S1 | P0 | fixed | A `covered_by` written while B was dead but had **not yet recorded its gap** was permanent — `WHERE covered_by IS NULL` made a claim from incomplete evidence unretractable |
+
+**Both are upgrade-path defects, and neither is visible from a fresh store.** Every
+PR-10 test built its store from scratch, so `order_lives` was always empty at open
+and the emptiness guard always fired; and the 074 fixture staged B's gap as
+*already recorded*, which is the tidy way to write it and is exactly the state the
+race has not reached yet. A suite that only ever creates fresh stores cannot see an
+upgrade-path defect, and every schema or rule change has one.
+
+**076 is a version stamp with no reader.** `ORDER_LIVES_METHOD` was added "so a
+stored row says which rules made it" and nothing ever asked. The one full re-fold
+was guarded on `COUNT(*) == 0`, which answers *has this table ever been built* —
+not *was it built by the rules this code implements*. Those are different questions
+and only the second survives a rule change. So the fix for BUG-20260911-073 would
+have corrected only orders that happened to receive another event: `sync()`
+refreshes what a pass **touched**, and a bid cancelled yesterday is never touched
+again. It would have kept `terminations_seen = 2` for one cancellation for as long
+as the store lived, with the flag off and nothing anywhere saying the store was
+half one rule set and half another.
+
+The folding **writer** now re-folds every row on open when the stamp is stale, inside
+the writer lock, logging the count and the elapsed time — and writes nothing when the
+stamp is current, so this is not a re-fold on every start. A **reader** must not and
+does not: a second writer on one SQLite store is BUG-20260910-067. It reports instead
+— `/api/health.lives_method` carries `mixed` with the min and max versions, the
+top-level `status` goes to `warn`, and the payload names the fix in a sentence.
+**Measured: 6.6–6.7 s for a full re-fold of 200,000 lives**, against a 30 s budget,
+so the open path is the right place for it and it does not need to move behind the
+bind.
+
+**077 is 074 arriving through a narrower door.** 074 fixed the correlated outage by
+subtracting B's own recorded gaps from its coverage. But the subtraction can only
+use gaps that have been **recorded**, and `record_downtime_gap` runs at the start of
+`run()` — a process killed without warning writes nothing until it is alive again.
+For the seconds or hours in between, the register shows no gap for B and B's last
+landing file is still "open", so a fold annotates A's gap "covered by b", honestly,
+on the evidence it has. Then B restarts, records its downtime, and the claim is
+false — and `WHERE covered_by IS NULL` meant nothing could take it back.
+
+The ruling that unblocks it: `gap_register` lives in the **operational** store,
+which `docs/07 §1` calls disposable and reconstructible and which `close_gap` already
+updates in place. It is not the landing zone and not the bitemporal record, so
+correcting a derived annotation there is allowed. The invariant that is *not*
+negotiable — a gap is never closed, shortened or removed by coverage logic — is
+unchanged, and is now asserted by snapshotting the whole row before and after.
+Coverage is recomputed every fold in both directions, each transition logged once
+(INFO to set, WARNING to revoke) with the gap id and the reason, and the revocation
+line says the gap is **UNCHANGED** so nobody reads a revocation as the gap being
+altered. Health carries `covered_by_n` and `covered_by_revoked_since_start_n`.
+
 ### Still open
 
-**None.** All 54 logged bugs are fixed.
+| ID | Sev | Pri | Summary | Why it is open |
+|---|---|---|---|---|
+| BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
+
+76 of 77 logged bugs are fixed.
 
 ### The lesson
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1072,23 +1073,45 @@ def test_no_superseded_rate_limit_in_operator_text(tmp: Path) -> None:
     # test "scans every operator-facing file... so this class cannot recur
     # silently". It recurred silently in five files. Scan the whole repo, the
     # way tools/buglog.py already does for bug ids.
-    # Scan the files the repo actually CLAIMS -- i.e. tracked files. A
-    # generated artifact sitting in the working tree is output, not an
-    # assertion; a tracked one is an assertion. `tools/preflight_report.json`
-    # was both at once until it was untracked, which is why it is now
-    # gitignored: the report the documents get corrected FROM must not itself
-    # become a stale claim in the repo.
+    # Scan every file in the working tree that is not deliberately excluded --
+    # tracked AND untracked-but-not-ignored.
+    #
+    # Tech-lead re-review, 2026-09-10: the previous enumeration was plain
+    # `git ls-files`, i.e. TRACKED ONLY, on the theory that "a generated
+    # artifact in the working tree is output, not an assertion". That theory is
+    # false here and the failure mode is the same one BUG-014 already recurred
+    # under. At the time of this fix 39 of the repo's 78 files were tracked;
+    # every file this very PR touches -- src/navanax/metrics.py,
+    # src/navanax/dashboard.py, src/navanax/ui/index.html, config/assumptions.yaml,
+    # docs/08_DASHBOARD.md, four agent charters -- was untracked and therefore
+    # UNSCANNED. A file being new is not evidence that it makes no claim; it is
+    # the state every file passes through on the day it is written, which is
+    # exactly the day a falsified figure gets copied into it.
+    #
+    # `--exclude-standard` still honours .gitignore, so the genuinely generated
+    # artifacts stay out: `tools/preflight_report.json` is gitignored precisely
+    # so the report the documents get corrected FROM cannot itself become a
+    # stale claim in the repo. That exclusion is expressed once, in .gitignore,
+    # where the operator can see it -- not implicitly by whether someone has
+    # run `git add` yet.
     import subprocess
-    skip_dirs = {".git", "__pycache__", ".venv", "node_modules", "data"}
+    skip_dirs = {".git", "__pycache__", ".venv", "node_modules", "data", ".sync"}
+    binary_suffixes = {".xlsx", ".gz", ".zst", ".db", ".pyc", ".png", ".jpg", ".jpeg",
+                       ".gif", ".pdf", ".sqlite", ".zip", ".so", ".dylib"}
     try:
-        tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
-                                 text=True, timeout=30, check=True).stdout.split()
-        candidates = [ROOT / t for t in tracked]
+        listed = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+                                cwd=ROOT, capture_output=True, text=True,
+                                timeout=30, check=True).stdout.split()
+        candidates = [ROOT / t for t in listed]
     except (OSError, subprocess.SubprocessError):
-        candidates = sorted(ROOT.rglob("*"))
+        # No git binary, or ROOT is not a repository (a tarball of the source, a
+        # CI image without git). Walk the tree instead: an unscanned repo would
+        # PASS this test silently, which is the one outcome it must never have.
+        candidates = sorted(p for p in ROOT.rglob("*") if p.is_file())
     offenders = []
+    scanned: set[str] = set()
     for f in candidates:
-        if not f.is_file() or f.suffix.lower() in {".xlsx", ".gz", ".zst", ".db", ".pyc"}:
+        if not f.is_file() or f.suffix.lower() in binary_suffixes:
             continue
         if any(part in skip_dirs for part in f.relative_to(ROOT).parts):
             continue
@@ -1099,9 +1122,19 @@ def test_no_superseded_rate_limit_in_operator_text(tmp: Path) -> None:
             lines = f.read_text(encoding="utf-8").splitlines()
         except (UnicodeDecodeError, OSError):
             continue
+        scanned.add(name)
         for i, line in enumerate(lines, 1):
             if asserts.search(line) and not corrects.search(line):
                 offenders.append(f"{name}:{i}: {line.strip()[:70]}")
+    # The enumeration itself is the thing that regressed, so assert it directly:
+    # these four are operator-facing and were UNTRACKED when this was fixed. If
+    # the enumeration ever narrows back to `git ls-files` (tracked only), this
+    # fails loudly instead of the 600/hr scan passing over a shrunken corpus.
+    must_scan = ["src/navanax/metrics.py", "src/navanax/dashboard.py",
+                 "src/navanax/ui/index.html", "config/assumptions.yaml"]
+    unscanned = [m for m in must_scan if m not in scanned and (ROOT / m).is_file()]
+    check("BUG-014: the scan reaches UNTRACKED operator-facing files, not just tracked ones",
+          not unscanned, f"never opened -> {unscanned} (scanned {len(scanned)} files)")
     check("BUG-014: no operator-facing file still asserts the 600/hr figure",
           not offenders, "still present -> " + " | ".join(offenders))
 
@@ -1975,10 +2008,26 @@ def test_metric_engine_contract(tmp: Path) -> None:
           len(s["t"]) == 6 and s["basis"]["buckets"] == 6 and s["basis"]["undefined_buckets"] == 5, f"got {s['t']}")
     check("metrics: ...and % of ask alongside (REQ-F-13a: both percentage and absolute)",
           abs([p for p in s["pct_of_ask"] if p is not None][0] - (1.59 - 0.348) / 1.59) < 1e-9)
-    s5 = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h", now=now)
-    check("metrics: at 5m the offer and the listing fall in different buckets -> UNDEFINED, not filled",
+    s5 = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h",
+                    now=now, book="observed")
+    check("metrics (book='observed'): at 5m the offer and the listing fall in different buckets "
+          "-> UNDEFINED, not filled -- the OLD behaviour, still reachable and labelled",
           all(v is None for v in s5["raw"]) and s5["basis"]["undefined_buckets"] == len(s5["raw"]) and len(s5["raw"]) == 72,
           f"got {len(s5['raw'])}")
+    check("metrics (book='observed'): ...and the response warns that it is not the docs/01 §3.2 quantity",
+          "interval" in s5["basis"]["observed_book_warning"].lower()
+          and "BUG-20260910-057" in s5["basis"]["observed_book_warning"])
+    s5s = eng.series(metric="immediacy_cost", collection="argonauts", interval="5m", range_="6h", now=now)
+    # The correction BUG-20260910-057 exists for: the offer (valid at 10:19:23,
+    # expires 2026-09-10) and the listing (valid at 10:27:21, expires 2026-10-09)
+    # are both STANDING from 10:27:21 onward, so all seven 5m buckets from 10:25
+    # to 11:00 have a real spread. The interval-extremum version called every one
+    # of them undefined because the two legs were SEEN in different buckets.
+    defined5 = [v for v in s5s["raw"] if v is not None]
+    check("metrics (book='standing', the default): the two legs are both RESTING after 10:27 so the "
+          "spread is defined in every 5m bucket after it -- the extremum version saw none of them",
+          len(defined5) == 7 and all(abs(v - (1.59 - 0.348)) < 1e-9 for v in defined5)
+          and s5s["basis"]["book"] == "standing", f"got {defined5}")
     u = eng.series(metric="floor_ask", collection="argonauts", denomination="USD", interval="1h", range_="6h", now=now)
     check("metrics: USD denomination uses the event's own USD at its timestamp",
           [v for v in u["raw"] if v is not None] == [3959.5929] and u["raw"].count(None) == 5)
@@ -2012,9 +2061,145 @@ def test_metric_engine_contract(tmp: Path) -> None:
           and len(book["collection_offers"]) == 1,
           f"got bids={len(book['item_bids'])} asks={len(book['asks'])} coll={len(book['collection_offers'])}")
     lt = eng.bid_lifetimes("argonauts", 0, now.timestamp())
-    check("metrics: bid lifetime = cancel.valid_ts - bid.valid_ts, with its n",
-          lt["n"] == 1 and abs(lt["median_s"] - 22.49) < 0.01 and lt["percentiles_reliable"] is False, f"got {lt}")
+    # PR-3 / REQ-F-19: the duration is still cancel.valid_ts - bid.valid_ts and
+    # `n` still counts orders, but at n = 1 the percentiles are WITHHELD, not
+    # printed with a warning beside them (BUG-20260910-057, Q-V3). The duration
+    # itself is checked in test_percentiles_are_withheld_below_min_n, above n.
+    check("metrics: bid lifetime carries its n, and at n = 1 every percentile is withheld",
+          lt["n"] == 1 and lt["median_s"] is None and lt["p10_s"] is None and lt["p90_s"] is None
+          and lt["percentiles_reliable"] is False and lt["percentiles_withheld"] is True, f"got {lt}")
     n.close()
+
+
+def test_top_item_bid_declares_the_book_it_has(tmp: Path) -> None:
+    """Tech-lead re-review 2026-09-10, T3. `top_item_bid` carried no `book` key,
+    and three separate untruths followed from that one omission:
+
+      1. `series(book='standing')` was refused with the reason "it is a count or
+         flow metric, not a resting-book quantity". `top_item_bid` is a PRICE
+         metric and it does have a resting book -- STANDING_KINDS['item_bid'].
+         The real reason is leg discipline: an item bid is per-token, and the
+         union bid leg that would make it comparable is PR-5. A refusal that
+         misstates why is worse than no refusal, because it is the sentence the
+         next person reasons from.
+      2. The basis printed `book: "n/a (top_item_bid is a count/flow metric...)"`,
+         so the Prices panel told the Operator the wrong thing about a line it
+         was drawing.
+      3. `observed_book_warning` is gated on `"book" in spec`, so the one price
+         line on that panel that is ALWAYS an interval extremum was the only one
+         carrying no warning that it is one.
+
+    The DEFAULT does not change -- it stays `observed`. What changes is that the
+    refusal, the basis and the warning now say something true.
+    """
+    from navanax.metrics import (
+        METRICS,
+        STANDING_KINDS,
+        STANDING_NOT_OFFERED,
+        MetricEngine,
+        load_intervals,
+    )
+    from navanax.normalize import COLS, Normalizer, parse_event, refresh_order_lives
+
+    iv = load_intervals(ROOT / "config" / "intervals.yaml")
+    n = Normalizer(tmp / "tib-lz", tmp / "tib.sqlite")
+    for i, (raw, recv) in enumerate(((REAL_BID, "10:20:16"), (REAL_COLL_OFFER, "10:20:17"),
+                                     (DOC_LISTING, "10:30:01")), 1):
+        row = parse_event(_env(i, raw, f"2026-09-09T{recv}Z"))
+        row["file"] = "f"
+        n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})",
+                       tuple(row.get(c) for c in COLS))
+    n.conn.commit()
+    refresh_order_lives(n.conn)
+    eng = MetricEngine(n.conn, iv, "America/Chicago")
+    now = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+
+    spec = METRICS["top_item_bid"]
+    check("top_item_bid: the metric declares the standing-book kind it actually has, "
+          "and its default stays 'observed' (the Operator's leg discipline is unchanged)",
+          spec.get("book") == "item_bid" and spec["book"] in STANDING_KINDS
+          and spec.get("book_default") == "observed",
+          f"book={spec.get('book')!r} default={spec.get('book_default')!r}")
+
+    s = eng.series(metric="top_item_bid", collection="argonauts", interval="1h", range_="6h", now=now)
+    check("top_item_bid: the basis reads book 'observed' -- not the false 'n/a (count/flow...)'",
+          s["basis"]["book"] == "observed", f"got {s['basis']['book']!r}")
+    check("top_item_bid: ...and the observed-book warning is ATTACHED to the line that most needs it",
+          "observed_book_warning" in s["basis"]
+          and "BUG-20260910-057" in s["basis"]["observed_book_warning"]
+          and "top_item_bid" in s["basis"]["observed_book_warning"],
+          f"basis keys {sorted(s['basis'])}")
+    check("top_item_bid: the DEFAULT series is unchanged -- still the interval extremum, 0.88 ETH",
+          0.88 in s["raw"], f"got {s['raw']}")
+
+    try:
+        eng.series(metric="top_item_bid", collection="argonauts", interval="1h",
+                   range_="6h", now=now, book="standing")
+        refusal = ""
+    except ValueError as exc:
+        refusal = str(exc)
+    low = refusal.lower()
+    check("top_item_bid: book='standing' is STILL refused -- the union bid leg is PR-5", bool(refusal))
+    check("top_item_bid: ...and the refusal names the TRUE reason (per-token, PR-5), never 'count or flow'",
+          "per-token" in low and "pr-5" in low
+          and "count" not in low and "flow" not in low, refusal[:240])
+    check("top_item_bid: the reason the caller is handed is the one the module documents",
+          STANDING_NOT_OFFERED["top_item_bid"] in refusal)
+
+    # The primitive is reachable, which is what makes the refusal a routing
+    # decision rather than a missing capability.
+    st = eng.standing_series("item_bid", "argonauts", now.timestamp() - 6 * 3600,
+                             now.timestamp(), iv["intervals"]["1h"], "ETH", None, now)
+    check("top_item_bid: standing_series('item_bid', ...) still answers directly -- only the "
+          "metric default is withheld",
+          st["basis"]["book"] == "standing" and len(st["median"]) == 6, f"got {list(st['basis'])}")
+
+    # A count metric must keep the OTHER reason, unchanged: the two refusals are
+    # different facts and collapsing them is what caused this.
+    try:
+        eng.series(metric="sales_count", collection="argonauts", interval="1h",
+                   range_="6h", now=now, book="standing")
+        cnt = ""
+    except ValueError as exc:
+        cnt = str(exc)
+    check("counts keep the other refusal: a count metric really has no resting book",
+          "count or flow" in cnt.lower(), cnt[:160])
+    n.close()
+
+
+def test_min_n_for_percentiles_cannot_drift_from_assumptions_yaml() -> None:
+    """Tech-lead re-review 2026-09-10, item 3. `min_n_for_percentiles: 30` is written
+    twice -- once in config/assumptions.yaml (ASM-021, where the Operator and the
+    reviewer read it) and once as metrics.MIN_N_FOR_PERCENTILES (where it is
+    enforced). Nothing tied them together, so editing the assumption register
+    would have changed the documented threshold and not the code, and the register
+    is the artifact a reviewer trusts. REQ-N-09 says the threshold belongs in
+    config; until the MetricEngine constructor is allowed to take it, this
+    assertion is what keeps the two copies honest.
+    """
+    import yaml
+
+    from navanax.metrics import MIN_N_FOR_PERCENTILES
+
+    doc = yaml.safe_load((ROOT / "config" / "assumptions.yaml").read_text())
+    hits = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if "min_n_for_percentiles" in node:
+                hits.append(node["min_n_for_percentiles"])
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(doc)
+    check("assumptions: config/assumptions.yaml states min_n_for_percentiles exactly once",
+          len(hits) == 1, f"found {hits}")
+    check("assumptions: the stated threshold IS the one metrics.py enforces (ASM-021 cannot drift)",
+          bool(hits) and hits[0] == MIN_N_FOR_PERCENTILES,
+          f"assumptions.yaml says {hits} · metrics.MIN_N_FOR_PERCENTILES is {MIN_N_FOR_PERCENTILES}")
 
 
 def test_dashboard_serves_localhost_only(tmp: Path) -> None:
@@ -2066,13 +2251,41 @@ def test_dashboard_serves_localhost_only(tmp: Path) -> None:
         for path in ("/api/meta", "/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD",
                      "/api/multi?collection=argonauts&interval=1h&range=YTD", "/api/book?collection=argonauts",
                      "/api/tape?collection=argonauts", "/api/makers?collection=argonauts&range=YTD",
-                     "/api/lifetimes?collection=argonauts&range=YTD", "/api/mix?range=YTD", "/api/gaps", "/api/audit"):
+                     "/api/lifetimes?collection=argonauts&range=YTD", "/api/mix?range=YTD", "/api/gaps", "/api/audit",
+                     "/api/survival?collection=argonauts&range=YTD",
+                     "/api/survival_drill?collection=argonauts&range=YTD&lo=0&hi=10"):
             st, body = get(path)
             check(f"dashboard: {path.split('?')[0]} -> 200 JSON", st == 200 and body[:1] in (b"{", b"["),
                   f"{st} {body[:100]}")
         st, body = get("/api/series?metric=nope&collection=argonauts")
         check("dashboard: a bad request is a 400 with the reason, not a crash",
               st == 400 and b"unknown metric" in body)
+        # PR-3: `book` is a query param the engine owns the default for, and the
+        # response always says which book produced the number.
+        st, body = get("/api/series?metric=immediacy_cost&collection=argonauts&interval=1h&range=YTD")
+        check("dashboard: /api/series defaults immediacy_cost to the STANDING book",
+              st == 200 and json.loads(body)["basis"]["book"] == "standing", f"{st} {body[:160]}")
+        st, body = get("/api/series?metric=immediacy_cost&collection=argonauts&interval=1h&range=YTD&book=observed")
+        j = json.loads(body)
+        check("dashboard: ...and book=observed reaches the engine and is labelled as what it is",
+              st == 200 and j["basis"]["book"] == "observed"
+              and "BUG-20260910-057" in j["basis"]["observed_book_warning"], f"{st} {body[:160]}")
+        st, body = get("/api/series?metric=sales_count&collection=argonauts&interval=1h&range=YTD&book=standing")
+        check("dashboard: asking a flow metric for a standing book is a 400 with the reason, "
+              "not a number computed from a book that does not exist",
+              st == 400 and b"no standing-book variant" in body, f"{st} {body[:160]}")
+        # PR-8: the survival endpoints refuse a malformed request rather than
+        # guessing a bin or a price band, and the refusal says which field.
+        st, body = get("/api/survival_drill?collection=argonauts&range=YTD&lo=10&hi=5")
+        check("dashboard: /api/survival_drill refuses an inverted bin with a 400 and the reason",
+              st == 400 and b"lo < hi" in body, f"{st} {body[:120]}")
+        st, body = get("/api/survival?collection=argonauts&range=YTD&price_band=cheap")
+        check("dashboard: /api/survival refuses a price band it cannot parse, rather than ignoring it "
+              "-- a silently dropped filter is a wrong answer that looks right",
+              st == 400 and b"price_band" in body, f"{st} {body[:120]}")
+        st, body = get("/api/survival?collection=argonauts&range=YTD&as_of=yesterday")
+        check("dashboard: /api/survival refuses an unparseable as_of instead of defaulting to now",
+              st == 400 and b"as_of" in body, f"{st} {body[:120]}")
         st, body = get("/")
         check("dashboard: serves the page", st == 200 and b"navanax" in body.lower())
         st, _ = get("/../pyproject.toml")
@@ -2324,6 +2537,377 @@ def test_import_explorer_cache(tmp: Path) -> None:
     check("import CLI: with no timestamp source it refuses rather than stamping `now`", rc == 2)
 
 
+# ---------------------------------------------------------------------------
+# BUG-20260909-055 -- the silent-overwrite class in the trait-cache import.
+# One test per blocking finding, each of which FAILS on the code as it stood.
+# ---------------------------------------------------------------------------
+def _cache_root(tmp: Path, name: str) -> Path:
+    """A minimal --root a `navanax import-traits` run can be pointed at."""
+    root = tmp / name
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "base.yaml").write_text(
+        "environment: local\nanalytical:\n  path: data/an.sqlite\n"
+        "opstore:\n  path: data/ops.db\nlanding:\n  root: data/landing\n")
+    (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    return root
+
+
+def test_import_duplicate_token_ids_are_never_a_silent_overwrite(tmp: Path) -> None:
+    """B1. Two cache entries resolving to ONE token id used to be written twice --
+    the second silently overwriting the first, and `imported` counting both. A
+    repeated id whose traits DISAGREE is evidence about the cache, so it is a
+    disagreement and nothing is written for that token."""
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "7":     {"id": "7", "name": "Argonaut #7", "traits": {"Cloak": "Death"}},
+        "seven": {"id": "7", "name": "Argonaut #7", "traits": {"Cloak": "Clergy"}},
+        "8":     {"id": "8", "name": "Argonaut #8", "traits": {"Bones": "Bone"}},
+        "8-again": {"id": "8", "name": "Argonaut #8", "traits": {"Bones": "Bone"}},
+    }
+    conn = open_store(tmp / "dup.sqlite")
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    check("dup ids: four entries resolving to two tokens import ONE token, not four "
+          "(the repeated-but-identical id is collapsed, the contradictory one is refused)",
+          r["imported"] == 1 and r["duplicate_ids_same"] == 1 and r["duplicate_ids_conflicting"] == 1,
+          str({k: v for k, v in r.items() if k != "disagreements"}))
+    check("dup ids: the contradictory id is reported like an import disagreement, naming both cache keys",
+          len(r["duplicate_id_disagreements"]) == 1
+          and r["duplicate_id_disagreements"][0]["token_id"] == "7"
+          and sorted(r["duplicate_id_disagreements"][0]["keys"]) == ["7", "seven"],
+          str(r["duplicate_id_disagreements"]))
+    check("dup ids: NOTHING is written for the contradictory token -- no traits, no traits_at",
+          conn.execute("SELECT COUNT(*) FROM traits WHERE token_id='7'").fetchone()[0] == 0
+          and conn.execute("SELECT traits_at FROM tokens WHERE token_id='7'").fetchone() in (None, (None,)))
+    check("dup ids: the token whose duplicate agreed is written exactly once, from the first entry",
+          sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='8'")) == [("Bones", "Bone")])
+    conn.close()
+
+
+def test_list_pass_counts_only_the_traits_it_actually_wrote(tmp: Path) -> None:
+    """B2. `traits_from_list` counted every list entry that CARRIED traits, including
+    ones `_store(only_if_missing=True)` refused to write -- so the number reported
+    to the Operator was the cache's size, not the store's gain. Worse, an OpenSea
+    value that DISAGREED with what was already stored was dropped with no count
+    at all."""
+    import asyncio
+
+    from navanax.opstore import OperationalStore
+    from navanax.traits import TraitsJob, open_store
+
+    class Rest:
+        def __init__(self) -> None:
+            self.requests_made = 0
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.requests_made += 1
+            if path.endswith("/nfts") and "collection/" in path:
+                return 200, {"nfts": [
+                    # 1: already stored from metadata_url, and OpenSea DISAGREES
+                    {"identifier": "1", "contract": "0xc", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Clergy"}]},
+                    # 2: already stored, and OpenSea AGREES
+                    {"identifier": "2", "contract": "0xc", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Death"}]},
+                    # 3: nothing stored -- this is the only real write
+                    {"identifier": "3", "contract": "0xc", "metadata_url": None,
+                     "traits": [{"trait_type": "Cloak", "value": "Bone"}]}], "next": None}
+            return 404, {}
+
+    conn = open_store(tmp / "lpcount.sqlite")
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                 "VALUES ('argonauts','1','2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','metadata_url')")
+    conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at, traits_source) "
+                 "VALUES ('argonauts','2','2026-09-09T00:00:00Z','2026-09-09T01:00:00Z','metadata_url')")
+    conn.executemany("INSERT INTO traits VALUES ('argonauts',?,?,?)",
+                     [("1", "Cloak", "Death"), ("2", "Cloak", "Death")])
+    conn.commit()
+    job = TraitsJob(conn, Rest(), OperationalStore(tmp / "lpcount-ops.db"), slug="argonauts")
+    r1 = asyncio.run(job.list_tokens())
+    check("list count: `traits_from_list` counts WRITES only -- 1 of 3 entries, not 3",
+          r1["traits_from_list"] == 1, str(r1))
+    check("list count: an entry skipped because the store already agreed is counted separately",
+          r1["traits_skipped_same"] == 1, str(r1))
+    check("list count: an entry skipped whose value DISAGREES is counted and reported, never dropped silently",
+          r1["traits_skipped_conflict"] == 1
+          and r1["traits_disagreements"] == [{"token_id": "1", "trait_type": "Cloak",
+                                              "stored": ["Death"], "list": ["Clergy"]}], str(r1))
+    check("list count: the disagreeing token keeps its own observation (nothing overwritten)",
+          conn.execute("SELECT value FROM traits WHERE token_id='1'").fetchone()[0] == "Death"
+          and conn.execute("SELECT traits_source FROM tokens WHERE token_id='1'").fetchone()[0] == "metadata_url")
+    check("list count: `_store` reports whether it wrote, so a caller can count writes",
+          job._store("3", [("Cloak", "Bone")], "opensea_nft_list", None, only_if_missing=True) is False
+          and job._store("3", [("Cloak", "Bone")], "opensea_nft_list", None) is True)
+    conn.close()
+
+
+def test_import_reconciliation_uses_resolved_token_ids(tmp: Path) -> None:
+    """B3. `in_cache_not_in_table` / `in_table_not_in_cache` were built from the
+    cache's KEYS while every row was written under `entry["id"]`. A cache keyed by
+    anything but the bare token id therefore reported a total mismatch -- every
+    token 'missing' on both sides -- while the import itself was fine."""
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "argonaut-4": {"id": "4", "name": "Argonaut #4", "traits": {"Cloak": "Death"}},
+        "argonaut-5": {"id": "5", "name": "Argonaut #5", "traits": {"Cloak": "Clergy"}},
+    }
+    conn = open_store(tmp / "recon.sqlite")
+    for tid in ("4", "5", "6"):
+        conn.execute("INSERT INTO tokens (collection, token_id, listed_at) VALUES ('argonauts',?,'x')", (tid,))
+    conn.commit()
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    check("reconciliation: the sets are built from RESOLVED ids -- 0 cache ids missing from the table, "
+          "1 table id (6) missing from the cache",
+          r["in_cache_not_in_table"] == 0 and r["in_table_not_in_cache"] == 1, str(r))
+    check("reconciliation: the rows really were written under the resolved id, not the key",
+          conn.execute("SELECT COUNT(*) FROM traits WHERE token_id IN ('4','5')").fetchone()[0] == 2
+          and conn.execute("SELECT COUNT(*) FROM tokens WHERE token_id LIKE 'argonaut-%'").fetchone()[0] == 0)
+    conn.close()
+
+
+def test_import_cli_refuses_an_impossible_generated_timestamp(tmp: Path) -> None:
+    """B4. `--generated` (and summary.json's `generated`) took any float. A future
+    epoch was written straight into `traits_at` -- a bitemporal lie the store has
+    no way to detect later -- and a millisecond epoch, which is what every JS
+    tool emits, crashed with a raw `ValueError` out of `fromtimestamp`."""
+    from navanax.cli import main as cli_main
+    from navanax.traits import open_store
+
+    root = _cache_root(tmp, "ts-root")
+    d = tmp / "ts-explorer"
+    d.mkdir()
+    cache = {"1": {"id": "1", "name": "Argonaut #1", "traits": {"Cloak": "Death"}}}
+    (d / "tokens.json").write_text(json.dumps(cache))
+    args = ["--root", str(root), "import-traits", str(d / "tokens.json"), "--collection", "argonauts"]
+
+    def run(*extra) -> object:
+        try:
+            return cli_main(args + list(extra))
+        except SystemExit as exc:                     # argparse's own refusal is still a refusal
+            return int(exc.code or 0)
+        except Exception as exc:                      # noqa: BLE001 - a raw crash IS the finding
+            return f"crashed: {type(exc).__name__}: {exc}"
+
+    ms = 1788808192000                                 # milliseconds, the JS default
+    check("generated: a millisecond epoch is refused with a message, not a raw ValueError",
+          run("--generated", str(ms)) == 2, str(run("--generated", str(ms))))
+    future = datetime.now(timezone.utc).timestamp() + 86400
+    check("generated: a time in the FUTURE is refused -- traits_at must never claim to be tomorrow",
+          run("--generated", str(future)) == 2, str(run("--generated", str(future))))
+    check("generated: an epoch before 2020-01-01 is refused",
+          run("--generated", "0") == 2, str(run("--generated", "0")))
+    check("generated: a non-numeric value is refused with a message",
+          run("--generated", "yesterday") == 2, str(run("--generated", "yesterday")))
+    (d / "summary.json").write_text(json.dumps({"generated": ms}))
+    check("generated: the same bounds apply to summary.json's `generated`, not just --generated",
+          run() == 2, str(run()))
+    db = root / "data" / "an.sqlite"
+    check("generated: after every refusal the store holds NO token -- nothing was written",
+          not db.exists() or open_store(db).execute(
+              "SELECT COUNT(*) FROM tokens").fetchone()[0] == 0)
+    (d / "summary.json").write_text(json.dumps({"generated": 1788808192}))
+    check("generated: a plausible epoch still imports cleanly", run() == 0)
+
+
+def test_config_assumptions_registry_exists(tmp: Path) -> None:
+    """B5. `config/assumptions.yaml` is the assumptions registry docs/06 §4.4
+    requires -- the one file that lists every judgement the code embodies. It was
+    deleted by an unrelated change. Nothing referenced it, so nothing noticed."""
+    import yaml
+    p = ROOT / "config" / "assumptions.yaml"
+    check("assumptions: config/assumptions.yaml exists", p.exists(), str(p))
+    data = yaml.safe_load(p.read_text()) if p.exists() else {}
+    ids = {a.get("id") for a in (data.get("assumptions") or [])}
+    check("assumptions: it parses and still carries ASM-020 (the standing-order definition)",
+          "ASM-020" in ids, str(sorted(ids)))
+    check("assumptions: ...and ASM-021, the standing-book reporting rules PR-3 decided",
+          "ASM-021" in ids, str(sorted(ids)))
+    for aid in ("ASM-020", "ASM-021"):
+        asm = next((a for a in (data.get("assumptions") or []) if a.get("id") == aid), {})
+        check(f"assumptions: {aid} names its layer, owner, rationale and the code it governs",
+              all(asm.get(k) for k in ("layer", "owner", "rationale", "code", "value")), str(sorted(asm)))
+
+
+def test_import_malformed_entries_are_counted_never_stored(tmp: Path) -> None:
+    """A cache entry that is not an object, and a trait whose value is a list or an
+    object, are structure we cannot record. Storing `str(value)` would write the
+    Python repr `{'a': 1}` into `traits.value` as though it were a trait. They are
+    skipped and counted."""
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {
+        "1": {"id": "1", "traits": {"Cloak": "Death"}},
+        "2": ["not", "an", "object"],
+        "3": "neither is this",
+        "4": {"id": "4", "traits": {"Cloak": {"nested": "object"}, "Bones": ["a", "list"], "Relic": "Gold"}},
+        "5": {"id": "5", "traits": "a string, not a mapping"},
+    }
+    conn = open_store(tmp / "malformed.sqlite")
+    try:
+        r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen)
+    except Exception as exc:  # noqa: BLE001 - a crash on junk input IS the finding
+        r = {"crashed": f"{type(exc).__name__}: {exc}"}
+    check("malformed: junk entries and non-scalar trait values are counted, not crashed on",
+          r.get("malformed") == 5, str(r))
+    check("malformed: a non-scalar trait value NEVER reaches the store as a Python repr",
+          [v for (v,) in conn.execute("SELECT value FROM traits")
+           if v.startswith(("{", "[")) or "'" in v] == [])
+    check("malformed: the scalar traits alongside a malformed one are still imported",
+          sorted(conn.execute("SELECT trait_type, value FROM traits WHERE token_id='4'")) == [("Relic", "Gold")])
+    conn.close()
+
+
+def test_import_records_its_provenance(tmp: Path) -> None:
+    """Which file, of which bytes, with which digest, generated when -- recorded on
+    the row (`explorer_cache:<sha256[:12]>`) and in a `trait_imports` table. Without
+    it "this token's traits came from the Explorer cache" names no particular
+    cache, and two caches that disagree are indistinguishable after the fact."""
+    import hashlib
+
+    from navanax.traits import import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    cache = {"1": {"id": "1", "traits": {"Cloak": "Death"}}}
+    blob = json.dumps(cache).encode()
+    sha = hashlib.sha256(blob).hexdigest()
+    conn = open_store(tmp / "prov.sqlite")
+    r = import_explorer_cache(conn, cache, slug="argonauts", generated_at=gen,
+                              cache_file="/x/tokens.json", cache_bytes=len(blob), cache_sha256=sha)
+    check("provenance: traits_source names the exact cache file by digest",
+          conn.execute("SELECT traits_source FROM tokens WHERE token_id='1'").fetchone()[0]
+          == f"explorer_cache:{sha[:12]}", str(r.get("traits_source")))
+    row = conn.execute("SELECT cache_file, cache_bytes, cache_sha256, generated_at FROM trait_imports").fetchone()
+    check("provenance: a trait_imports row records file, bytes, digest and the cache's generated time",
+          row == ("/x/tokens.json", len(blob), sha, gen), str(row))
+    counts = json.loads(conn.execute("SELECT counts_json FROM trait_imports").fetchone()[0])
+    check("provenance: the row carries the run's counts, so a later reader can audit it without the cache",
+          counts.get("imported") == 1, str(counts))
+    check("provenance: with no digest given the source stays the plain `explorer_cache` (no fake precision)",
+          import_explorer_cache(conn, {"2": {"id": "2", "traits": {"Cloak": "Bone"}}},
+                                slug="argonauts", generated_at=gen)["traits_source"] == "explorer_cache")
+    conn.close()
+
+
+def test_unknown_contract_does_not_burn_a_fallback_slot(tmp: Path) -> None:
+    """`fallback_left -= 1` ran BEFORE the `if contract:` check, so a token whose
+    contract we do not know -- exactly what an imported cache leaves behind for a
+    slug with no entry in KNOWN_CONTRACTS -- spent a budgeted OpenSea slot on a
+    read that was never made, and a token that could have used it went without."""
+    import asyncio
+
+    from navanax.opstore import OperationalStore
+    from navanax.traits import TraitsJob, open_store
+
+    class Rest:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.requests_made = 0
+        async def get(self, path, params=None, *, priority=None, retries=3):
+            self.calls.append(path)
+            self.requests_made += 1
+            return 200, {"nft": {"traits": [{"trait_type": "Cloak", "value": "Death"}]}}
+
+    conn = open_store(tmp / "slot.sqlite")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) VALUES ('argonauts','1',NULL,'x')")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) VALUES ('argonauts','2','0xc','x')")
+    conn.commit()
+    rest = Rest()
+    job = TraitsJob(conn, rest, OperationalStore(tmp / "slot-ops.db"), slug="argonauts",
+                    opensea_fallback_budget=1)
+    res = asyncio.run(job.fetch_traits())
+    check("fallback slot: the contract-less token consumes no slot, so the one budgeted read goes to the token that can use it",
+          rest.calls == ["/chain/ethereum/contract/0xc/nfts/2"], str(rest.calls))
+    check("fallback slot: that token really got its traits; the contract-less one stays unresolved for the next run",
+          res["ok"] == 1 and conn.execute("SELECT traits_at FROM tokens WHERE token_id='1'").fetchone()[0] is None)
+    conn.close()
+
+
+def test_import_reports_a_contract_mismatch(tmp: Path) -> None:
+    """`COALESCE(contract, ?)` fills a blank and keeps what is there -- which is
+    right -- but it also HIDES the case where the list pass stored one contract and
+    KNOWN_CONTRACTS says another. One of the two is wrong, and a wrong contract
+    sends every fallback read to the wrong collection."""
+    from navanax.traits import KNOWN_CONTRACTS, import_explorer_cache, open_store
+
+    gen = "2026-09-08T18:29:52Z"
+    conn = open_store(tmp / "contract.sqlite")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) "
+                 "VALUES ('argonauts','1','0xdeadbeef','x')")
+    conn.execute("INSERT INTO tokens (collection, token_id, contract, listed_at) VALUES "
+                 "('argonauts','2',?,'x')", (KNOWN_CONTRACTS["argonauts"],))
+    conn.commit()
+    r = import_explorer_cache(conn, {"1": {"id": "1", "traits": {"Cloak": "Death"}},
+                                     "2": {"id": "2", "traits": {"Cloak": "Bone"}}},
+                              slug="argonauts", generated_at=gen)
+    check("contract: a stored contract that differs from the one being imported is reported, not swallowed by COALESCE",
+          r["contract_mismatches"] == 1
+          and r["contract_mismatch_examples"][0]["token_id"] == "1"
+          and r["contract_mismatch_examples"][0]["stored"] == "0xdeadbeef", str(r.get("contract_mismatch_examples")))
+    check("contract: the stored value is still not overwritten -- reporting is not deciding",
+          conn.execute("SELECT contract FROM tokens WHERE token_id='1'").fetchone()[0] == "0xdeadbeef")
+    conn.close()
+
+
+def test_post_import_coverage_and_case_near_misses(tmp: Path) -> None:
+    """After an import: how many tokens now have traits, which order criteria match
+    no trait value at all, and which trait types/values differ ONLY by case. Values
+    are stored verbatim precisely so a casing mismatch stays visible; the check is
+    what makes it visible instead of a silently empty filter."""
+    from navanax.traits import case_near_misses, criteria_trait_coverage, open_store, trait_coverage
+
+    conn = open_store(tmp / "cov.sqlite")
+    for tid in ("1", "2", "3"):
+        conn.execute("INSERT INTO tokens (collection, token_id, listed_at, traits_at) VALUES "
+                     "('argonauts',?,'x',?)", (tid, "2026-09-09T00:00:00Z" if tid != "3" else None))
+    conn.executemany("INSERT INTO traits VALUES ('argonauts',?,?,?)",
+                     [("1", "Cloak", "Death"), ("2", "cloak", "death")])
+    conn.commit()
+    cov = trait_coverage(conn, "argonauts")
+    check("coverage: 'N of M tokens now have traits' is exact and counts tokens, not trait rows",
+          (cov["with_traits"], cov["tokens"]) == (2, 3), str(cov))
+    nm = case_near_misses(conn, "argonauts")
+    check("near miss: 'Cloak' and 'cloak' are reported as one case-folded group",
+          nm["trait_type_near_misses"] == [{"casefolded": "cloak", "variants": ["Cloak", "cloak"]}], str(nm))
+    check("near miss: 'Death' and 'death' are reported too, with the type they sit under",
+          nm["value_near_misses"] == [{"trait_type": "cloak", "casefolded": "death",
+                                       "variants": ["Death", "death"]}] and nm["alert"] is True, str(nm))
+    check("coverage: with no order_criteria table the criteria check says so rather than reporting 0 missing",
+          criteria_trait_coverage(conn, "argonauts")["available"] is False)
+    conn.execute("CREATE TABLE events (run TEXT, seq INTEGER, collection TEXT)")
+    conn.execute("CREATE TABLE order_criteria (run TEXT, seq INTEGER, trait_type TEXT, value TEXT, kind TEXT)")
+    conn.execute("INSERT INTO events VALUES ('r',1,'argonauts')")
+    conn.executemany("INSERT INTO order_criteria VALUES ('r',1,?,?,'string')",
+                     [("Cloak", "Death"), ("Cloak", "Clergy")])
+    conn.commit()
+    cc = criteria_trait_coverage(conn, "argonauts")
+    check("coverage: a criterion with no matching trait value is counted and named",
+          cc["distinct_criteria"] == 2 and cc["missing"] == 1
+          and cc["missing_pairs"] == [{"trait_type": "Cloak", "value": "Clergy"}], str(cc))
+    conn.close()
+
+
+def test_import_traits_command_finds_its_cache_without_asking(tmp: Path) -> None:
+    """`import-traits.command` is a double-click: it asks for nothing, finds the
+    cache itself, and when it cannot, prints every path it looked at rather than a
+    bare failure."""
+    text = (ROOT / "import-traits.command").read_text() if (ROOT / "import-traits.command").exists() else ""
+    check("import-traits.command: exists and is executable",
+          (ROOT / "import-traits.command").exists() and os.access(ROOT / "import-traits.command", os.X_OK))
+    check("import-traits.command: never prompts for a path -- no `read -p` before the run",
+          "read -r -p \"Enter the path" not in text and "$1" not in text.split("# ---")[0], text[:0])
+    check("import-traits.command: looks in a cache/ folder and in whatever config records",
+          "cache/" in text and "explorer_cache_path" in text)
+    check("import-traits.command: prints where it looked when the cache is absent",
+          "looked in" in text.lower() or "looked for" in text.lower())
+    check("traits.command: says pass 2 finds nothing for Argonauts (metadata_url is NULL) "
+          "and that the list pass now carries traits",
+          "metadata_url is NULL" in (ROOT / "traits.command").read_text()
+          and "opensea_nft_list" in (ROOT / "traits.command").read_text())
+
+
 def test_trait_filtered_metrics(tmp: Path) -> None:
     """Under a trait filter: item bids on matching tokens count, collection offers
     count (they bid on every token), trait offers do NOT (criteria unknown), and
@@ -2355,9 +2939,20 @@ def test_trait_filtered_metrics(tmp: Path) -> None:
     f = {"Background": ["Blue"]}
     check("trait metrics: filtered to a matching trait -> item bid + collection offer, trait offer excluded = 2",
           last(eng.series(metric="bid_count", collection="argonauts", interval="1h", range_="6h", now=now, traits=f)) == 2.0)
+    # BUG-20260910-060. This check used to read "filtered to a trait no token has
+    # -> only the collection offer = 1 (F2)" and it PASSED, because it was the
+    # defect written down as intended behaviour: a collection offer bids on every
+    # token, but a bid on every token is not a bid on any token of an EMPTY set.
+    # The check now asserts the rule instead of the implementation, and the
+    # dedicated property test is
+    # test_filtered_counts_are_null_when_the_filter_selects_no_token.
     none = {"Background": ["Red"]}
-    check("trait metrics: filtered to a trait no token has -> only the collection offer = 1 (F2)",
-          last(eng.series(metric="bid_count", collection="argonauts", interval="1h", range_="6h", now=now, traits=none)) == 1.0)
+    s_none = eng.series(metric="bid_count", collection="argonauts", interval="1h",
+                        range_="6h", now=now, traits=none)
+    check("trait metrics: filtered to a trait NO token has -> undefined on every bucket, not "
+          "the collection-offer count and not 0 (BUG-20260910-060; this check used to assert 1.0)",
+          all(v is None for v in s_none["raw"]) and s_none["basis"]["empty_token_set"] is True,
+          str(s_none["raw"]))
     s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h", range_="6h", now=now, traits=f)
     check("trait metrics: the derived spread under a filter declares its legs (F3)",
           "legs" in s["basis"] and "trait-filtered" in s["basis"]["legs"]["floor_ask"]
@@ -2533,7 +3128,9 @@ def test_ui_contract() -> None:
           "appearance:none" in html and "select option{background:" in html)
     check("ui: every timestamp goes through the display timezone from /api/status (BUG-042)",
           "display_timezone" in html and "timeZone:S.tz" in html and "plotT(" in html)
-    check("ui: hover cards have an explicit high-contrast background and font", "hoverlabel:{bgcolor:'#1A231E'" in html and "namelength:-1" in html)
+    check("ui: hover cards have an explicit high-contrast background and font (BUG-043)",
+          "hoverlabel:{bgcolor:C.hoverBg,bordercolor:C.hoverBd" in html and "namelength:-1" in html
+          and "--hover-bg:" in html and "--hover-border:" in html)
     check("ui: USD is shown to the cent", "minimumFractionDigits:2,maximumFractionDigits:2" in html)
     check("ui: Austin FC Verde is the accent; the old blue accent is gone", "#00B140" in html and "#58a6ff" not in html.lower())
     check("ui: trait filters and the screener are wired to the trait endpoints",
@@ -2569,6 +3166,250 @@ def test_ui_contract() -> None:
           all(c in html.split("const esc=")[1].split("\n")[0] for c in ("&amp;", "&lt;", "&gt;", "&quot;", "&#39;")))
     check("ui: the basis line prints the bucket alignment and, under a filter, which leg is filtered",
           "bucket_alignment" in html and "b.legs" in html)
+
+    # -----------------------------------------------------------------------
+    # PR-7 -- chart interaction and the palette split.
+    #
+    # The defect this pins (factcheck D-V3) is not "two tokens share a hex". It is
+    # that ONE hex, #19C95A, was simultaneously the brand accent AND four unrelated
+    # data roles, so a green mark on the page could be a collection offer, a sale,
+    # an event-mix bar, a sparkline, or a piece of chrome. The assertions below are
+    # the PROPERTY, not a list of the four call sites: any future literal, and any
+    # future token reuse, fails here.
+    # -----------------------------------------------------------------------
+    root_body = html.split(":root{", 1)[1].split("}", 1)[0]
+    outside_root = html.replace(root_body, "", 1)
+
+    def _tokens(block: str) -> dict[str, str]:
+        return {m.group(1): m.group(2).upper()
+                for m in re.finditer(r"--([a-z0-9-]+)\s*:\s*(#[0-9A-Fa-f]{3,8})\s*;", block)}
+
+    def _slice(start: str, end: str) -> dict[str, str]:
+        seg = root_body.split(start, 1)
+        return _tokens(seg[1].split(end, 1)[0]) if len(seg) > 1 else {}
+
+    chrome = _slice("/* @chrome", "/* @status")
+    status = _slice("/* @status", "/* @data")
+    data = _slice("/* @data", "/* @end-tokens")
+    check("ui/palette: the :root block declares @chrome / @status / @data classes",
+          bool(chrome) and bool(status) and bool(data),
+          f"chrome={len(chrome)} status={len(status)} data={len(data)}")
+
+    dupes = [f"{a}={b} both {h}" for h, names in
+             {h: [n for n, v in data.items() if v == h] for h in set(data.values())}.items()
+             if len(names) > 1 for a, b in [(names[0], names[1])]]
+    check("ui/palette: no two DATA-role tokens share a hex (a mark's colour names its role)",
+          not dupes, "; ".join(dupes))
+
+    reserved = {**chrome, **status}
+    collisions = [f"--{n} {h} == --{m}" for n, h in data.items()
+                  for m, v in reserved.items() if v == h]
+    check("ui/palette: no DATA-role token equals a chrome or status token (D-V3: verde is chrome only)",
+          not collisions, "; ".join(collisions))
+    check("ui/palette: --coll is off #19C95A and --sale is pure white, not --text (D-V3, D-W3)",
+          data.get("coll") not in (None, chrome.get("verde-2"), chrome.get("verde"))
+          and data.get("sale") == "#FFFFFF" and data.get("sale") != chrome.get("text"),
+          f"--coll={data.get('coll')} --sale={data.get('sale')} --text={chrome.get('text')}")
+    check("ui/palette: the roles DESIGN §5.4 names all exist as tokens",
+          all(k in data for k in ("ask", "bid", "coll", "trait-offer", "sale", "spread", "cancel")),
+          f"have {sorted(data)}")
+
+    # No chart literal may bypass the tokens. Two halves: a data hex must not appear
+    # anywhere outside :root, and the whole <script> block must carry no colour
+    # literal at all -- every mark reads its hex back out of :root via getComputedStyle,
+    # so the CSS and Plotly can never drift apart.
+    leaked = sorted({h for h in data.values()
+                     if re.search(re.escape(h), outside_root, re.IGNORECASE)})
+    check("ui/palette: no data-role hex appears outside the :root block (the four #19C95A literals are gone)",
+          not leaked, ", ".join(leaked))
+    script = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    script_hex = sorted(set(re.findall(r"#[0-9A-Fa-f]{6}(?![0-9A-Za-z_-])", script)))
+    check("ui/palette: the chart script contains NO colour literal -- every mark reads a token",
+          not script_hex and "getComputedStyle(document.documentElement)" in script,
+          ", ".join(script_hex))
+
+    # Interaction. Note what is deliberately NOT asserted: nothing here claims to have
+    # fixed wheel-zoom. scrollZoom was already false by default and was never enabled
+    # (D-W1); it is written explicitly only so a future Plotly default cannot turn it on.
+    #
+    # Everything below reads a PARSED object, never the raw file. Tech-lead re-review,
+    # 2026-09-10: the modebar/scrollZoom assertions used to be `"displayModeBar:false"
+    # in html`, and the block comment above `const L=()` at index.html:201-202 contains
+    # both of those exact strings while explaining the decision. So the test was
+    # satisfied by the PROSE and would have stayed green with `displayModeBar:true` in
+    # the code -- it asserted that the rule is documented, not that it is in force.
+    # `_obj()` brace-matches the real object, so only the code can satisfy it.
+    def _obj(src: str, opener: str) -> str:
+        """Body of the `{...}` that follows `opener`, by brace matching."""
+        i = src.index(opener) + len(opener)
+        depth, j = 1, i
+        while depth and j < len(src):
+            depth += (src[j] == "{") - (src[j] == "}")
+            j += 1
+        return src[i:j - 1]
+
+    def _flags(body: str) -> dict[str, str]:
+        """Top-level `key:value` pairs of a flat JS object literal, values verbatim."""
+        return {m.group(1): m.group(2).strip()
+                for m in re.finditer(r"([A-Za-z_$][\w$]*)\s*:\s*([^,{}]+)", body)}
+
+    cfg = _flags(_obj(html, "const CFG={"))
+    check("ui/charts: the modebar is gone -- asserted on the PARSED CFG, not the doc-comment",
+          cfg.get("displayModeBar") == "false", f"CFG.displayModeBar={cfg.get('displayModeBar')!r}")
+    check("ui/charts: scrollZoom is pinned false in CFG so a future Plotly default cannot enable it (D-W1)",
+          cfg.get("scrollZoom") == "false", f"CFG.scrollZoom={cfg.get('scrollZoom')!r}")
+    check("ui/charts: no modebar button list is configured -- the bar is gone, not curated",
+          "modeBarButtonsToRemove" not in html)
+    # The shared layout L() is the one place both axes are configured; read its two
+    # axis literals rather than grepping the whole file, so a per-panel override
+    # (the event-mix panel legitimately locks x -- it is a horizontal bar chart, not
+    # a time axis, and nothing brushes it) cannot mask a regression in the default.
+    layout = html.split("const L=()=>(", 1)[1].split("const CFG=", 1)[0]
+
+    lx, ly = _obj(layout, "xaxis:{"), _obj(layout, "yaxis:{")
+    check("ui/charts: the shared layout LOCKS y so a drag can never rescale price",
+          "fixedrange:true" in ly, ly[:120])
+    check("ui/charts: the shared layout leaves x FREE -- shift-drag time selection needs it (D-W2)",
+          "fixedrange:false" in lx and "dragmode:'select'" in layout, lx[:120])
+    check("ui/charts: our own range chips replace the toolbar, and a reset chip proves a selection",
+          "const RANGES=['1h','6h','24h','7d','30d']" in html
+          and "plotly_selected" in html and "data-reset" in html)
+    check("ui/charts: the hover header carries the bucket time in the display timezone",
+          "hoverformat:'%b %d, %H:%M:%S '+zone()" in html and "timeZoneName:'short'" in html)
+    check("ui/charts: hover rows carry coverage and n where the API supplies them",
+          "s.coverage[i]" in html and "%{customdata}" in html)
+
+    # Numbers and the KPI rule the Operator set on 2026-09-10.
+    check("ui/kpi: USD aggregates are to the cent -- compact()/abbreviated totals are gone",
+          "compact=" not in html and "notation:'compact'" not in html
+          and "money2(sum(vol),S.denom)" in html)
+    check("ui/kpi: the delta is now vs the value 24 HOURS AGO, with both timestamps printed",
+          "iNow=v.length-1" in html and "vThen=v[0]" in html
+          and "24h ago ${stamp(t[0])}" in html and "% = now vs 24 h ago" in html)
+    check("ui/kpi: a hole at either endpoint prints its reason instead of a percentage",
+          "no observation 24h ago" in html and "no observation in the current hour" in html)
+    check("ui/basis: the standing-book basis is rendered -- book, coverage, crossed-book alarm",
+          "book: ${b.book}" in html and "coverage: median" in html and "CROSSED standing book" in html)
+    check("ui/basis: a withheld percentile band is printed, never silently dropped",
+          "p10–p90 withheld (n<${minN})" in html)
+    check("ui/basis: a filter that selects NO token says so under EVERY chart, not only the "
+          "trait panel — the Activity bars go null under it too (BUG-20260910-060)",
+          "b.empty_token_set?" in html and "b.empty_token_set_note" in html)
+
+
+def test_ui_range_chips_name_an_anchored_range() -> None:
+    """Tech-lead re-review 2026-09-10, S4. The <select> offers nine ranges; the chip
+    row offers five. The other four -- HTD, DTD, MTD, YTD -- are ANCHORED: "today"
+    is 3 hours long at 03:00 and 23 at 23:00, so there is no fixed-width chip they
+    could match, and `r===cur` lit none of them.
+
+    Nothing lit is not neutral. Five chips, none highlighted, is what the row also
+    looks like the instant before a range is chosen, so the panel silently stopped
+    saying what window it was drawing exactly when the window was the least
+    obvious one. The repair is to NAME the range in the row rather than to invent
+    four more chips of invisible width: the row must always answer "what am I
+    looking at", and for an anchored range only a name can.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+
+    def _obj(src: str, opener: str) -> str:
+        i = src.index(opener) + len(opener)
+        depth, j = 1, i
+        while depth and j < len(src):
+            depth += (src[j] == "{") - (src[j] == "}")
+            j += 1
+        return src[i:j - 1]
+
+    # The premise, read off the page itself rather than assumed: the four anchored
+    # ranges really are offered by the <select> and really are absent from RANGES.
+    chip_ranges = re.search(r"const RANGES=\[([^\]]*)\]", html).group(1).replace("'", "").split(",")
+    sel = html.split('<select id="range">', 1)[1].split("</select>", 1)[0]
+    options = dict(re.findall(r'<option value="([^"]+)"[^>]*>([^<]+)</option>', sel))
+    anchored = [r for r in options if r not in chip_ranges]
+    check("ui/chips: the range <select> offers four anchored ranges that no chip can match",
+          sorted(anchored) == ["DTD", "HTD", "MTD", "YTD"],
+          f"select={sorted(options)} chips={chip_ranges}")
+
+    body = _obj(html, "function chipsFor(id){")
+    check("ui/chips: a chip lights ONLY on an exact match, so an anchored range lights nothing "
+          "-- no chip is allowed to stand in for 'today'",
+          "class=\"${r===cur?'on':''}\"" in body, body[:200])
+    check("ui/chips: ...and when the range is anchored the row prints its NAME instead, "
+          "so an unlit row is never the only thing the panel says",
+          "isChipRange(cur)?''" in body and 'class="rname"' in body
+          and "esc(rangeName())" in body, body[:400])
+    check("ui/chips: the name comes from the <select>'s own option text, so the two can never "
+          "disagree about what 'MTD' is called",
+          "const rangeName=()=>{const s=$('#range'),o=s.options[s.selectedIndex]" in html)
+    check("ui/chips: the label is muted, not another accent competing with the lit chip",
+          re.search(r"\.chips \.rname\{[^}]*color:var\(--muted\)", html) is not None)
+    # Split defensively: if the label is missing the check above has already
+    # failed, and a crash here would abort the whole suite instead of reporting.
+    tail = body.split('class="rname"', 1)[1].split("</span>", 1)[0] if 'class="rname"' in body else "<button"
+    check("ui/chips: it is a label, not a button -- clicking it must not set a range",
+          "<button" not in tail, tail[:120])
+
+
+def test_ui_palette_delta_e_figures_match_the_measurements() -> None:
+    """Tech-lead re-review 2026-09-10, S4 (second). The :root comment reported the
+    --coll separations as "vs --bid 11.4 · vs --ask 11.4 · vs --verde-2 12.3". The
+    tech-lead's own run of the validator gives 12.3 against --ask, 11.4 against
+    --bid and 13.6 against --verde-2 -- the ask and verde figures were wrong and
+    the ask/bid pair had been transposed onto one number.
+
+    This pins the REVIEWER'S MEASUREMENTS, not a recomputation: the figures come
+    from the dataviz validator (OKLab dE x100, Machado CVD sim, worst of
+    normal/protan/deutan) which is not vendored here, so re-deriving them in the
+    suite would be pinning a second implementation rather than the measurement.
+    What this makes impossible is the comment drifting away from the numbers
+    somebody actually ran -- the palette block is the only place a future reader
+    is told how far apart these hues are, and a wrong number there is worse than
+    no number, because it retires the question.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    measured = {"--ask": "12.3", "--bid": "11.4", "--verde-2": "13.6"}
+    line = next((ln for ln in html.splitlines() if "--coll" in ln and "vs --" in ln), "")
+    stated = dict(re.findall(r"vs (--[a-z0-9-]+) (\d+\.\d)", line))
+    check("ui/palette: the comment reports --coll against all three neighbours it names",
+          set(stated) == set(measured), f"stated {stated} on line: {line.strip()[:110]}")
+    wrong = {k: (stated.get(k), v) for k, v in measured.items() if stated.get(k) != v}
+    check("ui/palette: every stated ΔE is the tech-lead's measured figure (2026-09-10)",
+          not wrong, "; ".join(f"{k}: comment says {a}, measured {b}" for k, (a, b) in wrong.items()))
+
+    # PR-6 re-picks --trait-offer. Same discipline, same reason: these are the figures
+    # the dataviz validator actually printed (worst of protan/deutan, OKLab dE x100,
+    # measured on --surface #141B17), and the comment is the only place a future reader
+    # is told how far apart these hues are.
+    to_measured = {"--bid": "15.8", "--cancel": "15.4", "--ask": "27.7", "--coll": "25.7"}
+    to_line = next((ln for ln in html.splitlines() if "--trait-offer vs --" in ln), "")
+    to_stated = dict(re.findall(r"vs (--[a-z0-9-]+) (\d+\.\d)", to_line))
+    check("ui/palette: the comment reports --trait-offer against every hue it shares a panel with",
+          set(to_stated) == set(to_measured), f"stated {to_stated} on line: {to_line.strip()[:120]}")
+    to_wrong = {k: (to_stated.get(k), v) for k, v in to_measured.items() if to_stated.get(k) != v}
+    check("ui/palette: every stated --trait-offer ΔE is the validator's measured figure (PR-6)",
+          not to_wrong, "; ".join(f"{k}: comment says {a}, measured {b}" for k, (a, b) in to_wrong.items()))
+    tok_hex = re.search(r"--trait-offer\s*:\s*(#[0-9A-Fa-f]{6})", html).group(1).upper()
+    check("ui/palette: --trait-offer is no longer #C792EA -- it was ΔE 5.0 from --bid under "
+          "deuteranopia and 14.6 under NORMAL vision, and PR-6 is the panel that finally draws it",
+          tok_hex != "#C792EA" and tok_hex == "#B266FF", tok_hex)
+
+    # PR-8's exit stack. Same discipline again: these are the hexes the validator was
+    # actually run on (dataviz scripts/validate_palette.js, --mode dark --surface
+    # #141B17 --pairs all), and the run is recorded in the :root comment and docs/08
+    # §4b.1. The first draft -- #F0A202 / #7E8F87 / #5C7C8A -- was chosen by eye and
+    # measured worst-CVD 2.6 / worst-normal 7.7, so this pins the measured set rather
+    # than the shape of a comment: swapping a hex without re-running the validator
+    # fails here.
+    exits = {n: re.search(rf"--{n}\s*:\s*(#[0-9A-Fa-f]{{6}})", html).group(1).upper()
+             for n in ("invalidated", "expired", "censored")}
+    check("ui/palette: the PR-8 exit roles are the MEASURED hexes -- #007711 / #5544FF / #EEAA00, "
+          "worst-CVD 16.8 and worst-normal 27.1 on the five-colour stack",
+          exits == {"invalidated": "#007711", "expired": "#5544FF", "censored": "#EEAA00"}, str(exits))
+    check("ui/palette: the eyeballed first draft (#F0A202 / #7E8F87 / #5C7C8A, worst-CVD 2.6) is "
+          "gone from the tokens and survives only as the recorded measurement that condemned it",
+          not any(h in {"#F0A202", "#7E8F87", "#5C7C8A"} for h in exits.values()), str(exits))
 
 
 # ===========================================================================
@@ -3005,7 +3846,7 @@ def test_environments_doc_documents_unattended_running() -> None:
 def _lives_store(tmp: Path, name: str):
     """A store with the traits schema and a `put(frame, time, seq, **overrides)`
     that pins valid_ts to the time given, so a lifecycle can be laid out exactly."""
-    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.normalize import COLS, Normalizer, dedup_key, iso_to_ts, parse_event
     from navanax.traits import ensure_schema
 
     n = Normalizer(tmp / "empty-lz", tmp / name)
@@ -3016,6 +3857,15 @@ def _lives_store(tmp: Path, name: str):
         rr["file"] = "f"
         rr["valid_at"], rr["valid_ts"] = recv, iso_to_ts(recv)
         rr.update(over)
+        # The dedup key must be recomputed from the row AS PINNED, not from the
+        # frame the row was cloned out of (tech-lead PR-10 re-review, finding 1).
+        # This helper exists to lay a lifecycle out in time from one or two real
+        # frames, so two `put`s at different times are two DIFFERENT events -- but
+        # `parse_event` keyed them off the payload's own `event_timestamp`, which
+        # is identical in both clones, so they shared a key and the fixture was
+        # asserting "two cancels" over two rows that a correct dedup reads as one
+        # cancel delivered twice. The fixture was the ambiguity, not the rule.
+        rr["dedup_key"] = dedup_key({**rr, "event_timestamp": rr["valid_at"]})
         n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})",
                        tuple(rr.get(c) for c in COLS))
         for c in rr.get("criteria") or []:
@@ -3140,8 +3990,11 @@ def test_bid_lifetimes_censoring_and_orphans(tmp: Path) -> None:
           pairs == 2, f"got {pairs}")
     eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
     lt = eng.bid_lifetimes("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
-    check("bid lifetimes: n counts ORDERS, and the duration is to the FIRST termination",
-          lt["n"] == 1 and lt["median_s"] == 10.0, str(lt))
+    check("bid lifetimes: n counts ORDERS, and at n = 1 the percentiles are withheld (REQ-F-19), "
+          "so the duration is checked on the relation itself, not through a percentile",
+          lt["n"] == 1 and lt["median_s"] is None
+          and n.conn.execute("SELECT t_term - t_place FROM order_lives WHERE order_hash='0xa'"
+                             ).fetchone()[0] == 10.0, str(lt))
     check("bid lifetimes: a bid still standing at window end is censored -- counted, not dropped",
           lt["censored_n"] == 1 and lt["orders_at_risk"] == 2, str(lt))
     check("bid lifetimes: the orphan rate is reported WITH its counts (project rule 4)",
@@ -3349,11 +4202,19 @@ def test_trait_offer_matching_rule(tmp: Path) -> None:
 
     every_filter = ({}, {"Print": ["Unclaimed"]}, {"Print": ["Claimed"]}, {"Palette": ["Seafoam"]},
                     {"Print": ["Unclaimed"], "Palette": ["Seafoam"]}, {"Nothing": ["At all"]})
+    # BUG-20260910-060: the second half of this check used to read
+    # `counted({"Nothing": ["At all"]}) == 1.0` -- a filter on a trait type no token
+    # has, expected to return the collection-offer count. That was the defect
+    # written down as intended behaviour; a bid on every token is not a bid on any
+    # token of an empty set. It is now the rule: undefined on every bucket.
+    nothing_at_all = eng.series(metric="bid_count", collection="argonauts", interval="1h",
+                                range_="6h", now=now, traits={"Nothing": ["At all"]})
     check("trait matching: the PROPERTY TEST -- a trait offer with criteria_n = 0 matches NOTHING, "
           "under every filter (dataeng §4.3: with no criteria rows the NOT EXISTS is vacuously "
           "true and it would otherwise match every filter and every token)",
           all("0xbad" not in covered(f) for f in every_filter)
-          and counted({"Print": ["Unclaimed"]}) == 2.0 and counted({"Nothing": ["At all"]}) == 1.0,
+          and counted({"Print": ["Unclaimed"]}) == 2.0
+          and all(v is None for v in nothing_at_all["raw"]),
           str([sorted(covered(f)) for f in every_filter]))
     got = covered({"Print": ["Unclaimed"]})
     check("trait matching: COVERS is exactly the offers whose every criterion the filter guarantees",
@@ -3378,6 +4239,373 @@ def test_trait_offer_matching_rule(tmp: Path) -> None:
           and "criteria not stored" not in s["basis"]["legs"]["collection_bid"],
           s["basis"]["legs"]["collection_bid"])
     n.close()
+
+
+# ===========================================================================
+# PR-3 (BUG-20260910-057): immediacy_cost becomes the standing-book quantity
+# docs/01 §3.2 defines, and percentiles are withheld rather than flagged.
+#
+# Every check below fails against the pre-PR-3 code, and fails for a reason, not
+# by accident: `standing_series` / `standing_spread` did not exist, `series()`
+# took no `book`, and `bid_lifetimes` returned a percentile at any n. The
+# before/after of each is in the PR description.
+# ===========================================================================
+NO_EXP = {"expiration_at": None, "expiration_ts": None}
+H11 = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+
+
+def _standing_engine(tmp: Path, name: str, rows: list[tuple], fold_at: str = "2026-09-09T12:00:00Z"):
+    """A store holding `rows` = [(fixture, iso, seq, overrides)], folded to order_lives."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    for raw, iso, seq, over in rows:
+        put(raw, iso, seq, **over)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(fold_at))
+    return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def test_standing_series_is_time_weighted_over_the_bucket(tmp: Path) -> None:
+    """A floor is what is STANDING, for as long as it stood (Operator, 2026-09-10).
+
+    Fails today: `MetricEngine.standing_series` does not exist, and `floor_ask`
+    is `MIN(price) over the events SEEN in the bucket` -- a price that may have
+    lived for one second of the hour, reported as the hour's floor, with no
+    coverage, no n and no dispersion beside it.
+    """
+    from navanax.metrics import time_weighted_quantile
+    from navanax.normalize import iso_to_ts
+
+    ts = iso_to_ts
+    # One listing at 1.0, standing 10:00 -> 10:20 of a 10:00 bucket, then cancelled.
+    n, eng = _standing_engine(tmp, "st1.sqlite", [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xL", "token_id": "1",
+                                                  "price_eth": 1.0, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:20:00Z", 2, {"order_hash": "0xL", "token_id": "1"}),
+    ])
+    s = eng.standing_series("ask", "argonauts", ts("2026-09-09T09:00:00Z"),
+                            ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    check("standing series: coverage is the SECONDS the leg stood over the bucket seconds -- "
+          "20 minutes of an hour is 1/3, not '1 observation'",
+          abs(s["coverage"][1] - 1 / 3) < 1e-9 and s["standing_seconds"][1] == 1200.0,
+          f"got coverage={s['coverage']} standing={s['standing_seconds']}")
+    check("standing series: the median of a book with one order in it is that order's price",
+          s["median"][1] == 1.0 and s["n"][1] == 1, str(s["median"]))
+    check("standing series: a bucket where NOTHING stood is null with coverage 0 and n 0 -- "
+          "never 0.0, because 0 is a price and 'no standing ask' is not the price zero",
+          s["median"][0] is None and s["coverage"][0] == 0.0 and s["n"][0] == 0,
+          f"got {s['median'][0]!r} / {s['coverage'][0]!r} / {s['n'][0]!r}")
+    fa = eng.series(metric="floor_ask", collection="argonauts", interval="1h",
+                    range_="2h", now=H11)
+    check("standing series: ...and the same hole reaches the chart through series(), as null",
+          fa["raw"][0] is None and fa["raw"][1] == 1.0 and fa["basis"]["book"] == "standing",
+          str(fa["raw"]))
+    check("standing series: every response says the book is LEFT-TRUNCATED -- the reconstructed "
+          "floor is an upper bound, because orders resting before we connected are invisible",
+          fa["basis"]["left_truncated"] is True and "upper bound" in fa["basis"]["left_truncation_note"])
+    n.close()
+
+    # Two overlapping listings: 1.0 standing all hour, 0.8 standing only the first
+    # 20 minutes. The interval extremum calls the hour's floor 0.8. It was 0.8 for
+    # a third of the hour and 1.0 for two thirds.
+    n2, eng2 = _standing_engine(tmp, "st2.sqlite", [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xHI", "token_id": "1",
+                                                  "price_eth": 1.0, **NO_EXP}),
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 2, {"order_hash": "0xLO", "token_id": "2",
+                                                  "price_eth": 0.8, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:20:00Z", 3, {"order_hash": "0xLO", "token_id": "2"}),
+    ])
+    s2 = eng2.standing_series("ask", "argonauts", ts("2026-09-09T10:00:00Z"),
+                              ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    old = eng2.series(metric="floor_ask", collection="argonauts", interval="1h",
+                      range_="1h", now=H11, book="observed")
+    check("standing series: with 0.8 standing 20 min and 1.0 standing 60, the time-weighted "
+          "median is 1.0 -- the level that actually held -- where the interval extremum says 0.8",
+          s2["median"][0] == 1.0 and old["raw"][0] == 0.8, f"standing={s2['median']} observed={old['raw']}")
+    check("standing series: both listings are counted and the book was covered the whole bucket",
+          s2["n"][0] == 2 and abs(s2["coverage"][0] - 1.0) < 1e-9, str(s2))
+    segs = [(1200.0, 0.8), (2400.0, 1.0)]
+    check("standing series: the dispersion is over TIME, so [p10, p90] spans both levels -- "
+          "0.8 held a third of the bucket and is the p10, 1.0 held the rest and is the p90",
+          time_weighted_quantile(segs, 0.10) == 0.8 and time_weighted_quantile(segs, 0.90) == 1.0
+          and time_weighted_quantile(segs, 0.5) == 1.0)
+    n2.close()
+
+
+def test_immediacy_cost_is_a_standing_book_spread(tmp: Path) -> None:
+    """REQ-F-13a / docs/01 §3.2: the spread between legs that COEXISTED.
+
+    Fails today three ways: `standing_spread` does not exist; `series()` takes no
+    `book`; and the old path renders a NEGATIVE spread on the front page, which
+    a KPI card reads as free arbitrage.
+    """
+    # An ask at 0.5 and a collection offer at 0.4, both standing the whole hour --
+    # plus a SECOND collection offer at 0.6 alive only 10:30 -> 10:40. For those
+    # ten minutes the book is crossed: the best bid is above the best ask.
+    rows = [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xASK", "token_id": "1",
+                                                  "price_eth": 0.5, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T10:00:00Z", 2, {"order_hash": "0xBID", "price_eth": 0.4, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T10:30:00Z", 3, {"order_hash": "0xCROSS", "price_eth": 0.6, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:40:00Z", 4, {"order_hash": "0xCROSS", "token_id": None}),
+    ]
+    n, eng = _standing_engine(tmp, "sp1.sqlite", rows)
+    s = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                   range_="1h", now=H11)
+    check("immediacy_cost: a bucket whose standing book CROSSED at any tau is null and counted "
+          "as an alarm, not charted -- ask < bid is a reconstruction defect, never an arbitrage",
+          s["raw"][0] is None and s["basis"]["negative_buckets"] == 1
+          and s["basis"]["book"] == "standing", f"got {s['raw']} basis={s['basis'].get('negative_buckets')}")
+    old = eng.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                     range_="1h", now=H11, book="observed")
+    check("immediacy_cost (book='observed'): ...and this is exactly what the old path put on the "
+          "front page for that bucket -- MIN(ask seen) - MAX(offer seen) = 0.5 - 0.6 = -0.1",
+          abs(old["raw"][0] - (0.5 - 0.6)) < 1e-9 and old["basis"]["book"] == "observed",
+          f"got {old['raw']}")
+    n.close()
+
+    # The control: the same book WITHOUT the crossing offer. The bucket has a
+    # value, so the null above is caused by the crossing and not by absence.
+    n2, eng2 = _standing_engine(tmp, "sp2.sqlite", rows[:2])
+    ok = eng2.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                     range_="1h", now=H11)
+    check("immediacy_cost: the same book without the crossing offer is a real number, so the null "
+          "above is the alarm firing and not an empty bucket",
+          abs(ok["raw"][0] - (0.5 - 0.4)) < 1e-9 and ok["basis"]["negative_buckets"] == 0,
+          f"got {ok['raw']}")
+    check("immediacy_cost: coverage is BOTH-legs seconds over bucket seconds, and both legs are "
+          "reported on the same tau samples",
+          abs(ok["coverage"][0] - 1.0) < 1e-9 and ok["parts"]["floor_ask"][0] == 0.5
+          and ok["parts"]["collection_bid"][0] == 0.4, str(ok.get("coverage")))
+    check("immediacy_cost: the counts travel with the number, one per leg (project rule 4)",
+          ok["n_ask"][0] == 1 and ok["n_bid"][0] == 1, str(ok.get("n_ask")))
+
+    # The legs need never have coexisted under the old rule. Here they do not:
+    # the ask is gone before the offer arrives.
+    n3, eng3 = _standing_engine(tmp, "sp3.sqlite", [
+        (DOC_LISTING, "2026-09-09T10:00:00Z", 1, {"order_hash": "0xA1", "token_id": "1",
+                                                  "price_eth": 0.5, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:10:00Z", 2, {"order_hash": "0xA1", "token_id": "1"}),
+        (REAL_COLL_OFFER, "2026-09-09T10:20:00Z", 3, {"order_hash": "0xB1", "price_eth": 0.4, **NO_EXP}),
+    ])
+    never = eng3.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                        range_="1h", now=H11)
+    never_old = eng3.series(metric="immediacy_cost", collection="argonauts", interval="1h",
+                            range_="1h", now=H11, book="observed")
+    check("immediacy_cost: legs that never coexisted produce NO spread -- the old path subtracted "
+          "an ask that was cancelled at 10:10 from an offer that arrived at 10:20 and called it 0.1",
+          never["raw"][0] is None and never["coverage"][0] == 0.0
+          and abs(never_old["raw"][0] - 0.1) < 1e-9,
+          f"standing={never['raw']} observed={never_old['raw']}")
+    n2.close()
+    n3.close()
+
+
+def test_crossed_book_alarm_relogs_for_a_new_bucket(tmp: Path) -> None:
+    """Tech-lead re-review 2026-09-10, item 5 (second half). The alarm was deduped
+    on `(collection, interval, denomination)` for the LIFE OF THE PROCESS.
+
+    The dashboard re-renders every 10 s, so some cap is needed -- an alarm that
+    floods the log is an alarm nobody reads. But that key throws away the one
+    thing that distinguishes a re-render from a new event. Once ANY bucket on a
+    collection had crossed, every LATER crossing on that collection was swallowed:
+    a dashboard left open overnight logs the 09:00 crossing and never mentions the
+    14:00 one, which is the crossing that means the reconstruction broke again.
+    Keying on the bucket start keeps the flood control and restores the signal.
+    """
+    import logging
+
+    from navanax import metrics as M
+
+    # Two SEPARATE crossings, four hours apart: 10:30-10:40 and 14:30-14:40.
+    base = [
+        (DOC_LISTING, "2026-09-09T09:00:00Z", 1, {"order_hash": "0xASK", "token_id": "1",
+                                                  "price_eth": 0.5, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T09:00:00Z", 2, {"order_hash": "0xBID", "price_eth": 0.4, **NO_EXP}),
+        (REAL_COLL_OFFER, "2026-09-09T10:30:00Z", 3, {"order_hash": "0xX1", "price_eth": 0.6, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T10:40:00Z", 4, {"order_hash": "0xX1", "token_id": None}),
+        (REAL_COLL_OFFER, "2026-09-09T14:30:00Z", 5, {"order_hash": "0xX2", "price_eth": 0.7, **NO_EXP}),
+        (REAL_CANCEL, "2026-09-09T14:40:00Z", 6, {"order_hash": "0xX2", "token_id": None}),
+    ]
+    n, eng = _standing_engine(tmp, "relog.sqlite", base, fold_at="2026-09-09T16:00:00Z")
+
+    records: list[logging.LogRecord] = []
+    h = logging.Handler()
+    h.emit = records.append  # type: ignore[assignment]
+    logging.getLogger("navanax.metrics").addHandler(h)
+    M._NEGATIVE_LOGGED.clear()
+    noon = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 9, 9, 16, 0, tzinfo=timezone.utc)
+    try:
+        def render(now):
+            return eng.series(metric="immediacy_cost", collection="argonauts",
+                              interval="1h", range_="6h", now=now)
+
+        first = render(noon)
+        check("crossed alarm: the 10:00 bucket crossed and is nulled and counted",
+              first["basis"]["negative_buckets"] == 1, str(first["raw"]))
+        after_first = len(records)
+        check("crossed alarm: the first render of a crossed bucket LOGS", after_first == 1,
+              f"{after_first} records")
+        for _ in range(5):
+            render(noon)
+        check("crossed alarm: re-rendering the SAME crossed bucket stays deduped -- the dashboard "
+              "redraws every 10 s and a flooded log is a log nobody reads",
+              len(records) == after_first, f"{len(records)} records after 6 renders")
+
+        second = render(later)
+        check("crossed alarm: four hours on, the window holds BOTH crossed buckets -- 10:00 (already "
+              "reported) and 14:00 (new)",
+              second["basis"]["negative_buckets"] == 2, str(second["raw"]))
+        check("crossed alarm: ...and the NEW one logs, exactly once -- the old (collection, interval, "
+              "denom) key swallowed every crossing after the first for the life of the process",
+              len(records) == after_first + 1, f"{len(records)} records; expected {after_first + 1}")
+        msg = records[-1].getMessage()
+        check("crossed alarm: the new line reports ONE newly-seen bucket and names it, so the "
+              "already-reported 10:00 bucket is not re-announced alongside it",
+              "1 newly-seen bucket" in msg and "14:00" in msg and "10:00" not in msg
+              and "BUG-20260910-057" in msg, msg[:220])
+        for _ in range(3):
+            render(later)
+        check("crossed alarm: the second bucket is deduped too, once it has been reported",
+              len(records) == after_first + 1, f"{len(records)} records")
+    finally:
+        logging.getLogger("navanax.metrics").removeHandler(h)
+        M._NEGATIVE_LOGGED.clear()
+    n.close()
+
+
+def test_audit_surfaces_crossed_books_for_every_watched_collection(tmp: Path) -> None:
+    """Tech-lead re-review 2026-09-10, item 5 (first half). A crossed standing book
+    was visible in exactly two places, neither of which an operator looks at: a
+    `negative_buckets` integer inside the basis of the ONE collection currently
+    selected on the Prices panel, and a log line. Health is the panel that exists
+    to say "the record is wrong", so `/api/audit` now reports the count for every
+    slug on the watchlist and puts an escalation note in `notes` when it is > 0.
+    """
+    import threading
+
+    from navanax.dashboard import Dashboard
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    # Anchored to the real clock, because api_audit asks for "the last 24h" as of
+    # now -- there is no `now` to inject, which is itself the point: this is what
+    # the running dashboard computes.
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    t = lambda h, m=0: (now - timedelta(hours=h, minutes=-m)).isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    n, put = _lives_store(tmp, "audit-crossed.sqlite")
+    put(DOC_LISTING, t(5), 1, order_hash="0xASK", token_id="1", price_eth=0.5, **NO_EXP)
+    put(REAL_COLL_OFFER, t(5), 2, order_hash="0xBID", price_eth=0.4, **NO_EXP)
+    put(REAL_COLL_OFFER, t(3), 3, order_hash="0xCROSS", price_eth=0.9, **NO_EXP)   # crosses the ask
+    put(REAL_CANCEL, t(3, 20), 4, order_hash="0xCROSS", token_id=None)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(t(0)))
+
+    landing = tmp / "audit-crossed-lz"
+    landing.mkdir(parents=True, exist_ok=True)
+    d = Dashboard.__new__(Dashboard)
+    d.landing, d.norm, d.slugs = landing, n, ["argonauts"]
+    d.lock = threading.Lock()           # api_audit takes it twice, sequentially, as the real one does
+    d.engine = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"),
+                            "America/Chicago")
+
+    audit = d.api_audit()
+    check("audit: /api/audit reports a crossed-book count for EVERY watched collection, "
+          "not only the one the Prices panel happens to be showing",
+          set(audit.get("crossed_book", {})) == {"argonauts"}, str(audit.get("crossed_book")))
+    cb = audit["crossed_book"]["argonauts"]
+    check("audit: it is the standing spread over the last 24h at 1h, with its bucket count",
+          cb["interval"] == "1h" and cb["range"] == "24h" and cb["buckets"] == 24, str(cb))
+    check("audit: the crossing is counted", cb["negative_buckets"] >= 1, str(cb))
+    notes = [x for x in audit["notes"] if "ask < collection offer" in x]
+    check("audit: ...and it is escalated in `notes`, in the words docs/05 rule 5 asks for",
+          len(notes) == 1
+          and notes[0].startswith(f"argonauts: {cb['negative_buckets']} bucket(s) had ask < "
+                                  "collection offer in the last 24h")
+          and "book reconstruction bug, escalate (docs/05 rule 5)" in notes[0],
+          str(audit["notes"]))
+    n.close()
+
+    # The control: the same book with no crossing raises no note and reports zero.
+    n2, put2 = _lives_store(tmp, "audit-clean.sqlite")
+    put2(DOC_LISTING, t(5), 1, order_hash="0xASK", token_id="1", price_eth=0.5, **NO_EXP)
+    put2(REAL_COLL_OFFER, t(5), 2, order_hash="0xBID", price_eth=0.4, **NO_EXP)
+    n2.conn.commit()
+    refresh_order_lives(n2.conn, now_ts=iso_to_ts(t(0)))
+    d2 = Dashboard.__new__(Dashboard)
+    d2.landing, d2.norm, d2.slugs = landing, n2, ["argonauts"]
+    d2.lock = threading.Lock()
+    d2.engine = MetricEngine(n2.conn, load_intervals(ROOT / "config" / "intervals.yaml"),
+                             "America/Chicago")
+    clean = d2.api_audit()
+    check("audit: an uncrossed book reports 0 and adds NO note -- the alarm is not always-on",
+          clean["crossed_book"]["argonauts"]["negative_buckets"] == 0
+          and not [x for x in clean["notes"] if "ask < collection offer" in x],
+          str(clean["crossed_book"]))
+    n2.close()
+
+
+def test_percentiles_are_withheld_below_min_n(tmp: Path) -> None:
+    """REQ-F-19 / Q-V3: below the minimum n a percentile is REFUSED, not flagged.
+
+    Fails today: `bid_lifetimes` returned p10/median/p90 at any n and handed the
+    caller a `percentiles_reliable` flag, which `ui/index.html:215` rendered as a
+    warning string next to the numbers. docs/00:199 says the system SHALL make
+    quoting such a number impossible; a number on screen is a number that gets
+    quoted.
+    """
+    from navanax.metrics import MIN_N_FOR_PERCENTILES, pct
+    from navanax.normalize import iso_to_ts
+
+    check("percentiles: the minimum is one named constant, not a literal in each caller",
+          MIN_N_FOR_PERCENTILES == 30)
+    sample = sorted(float(i) for i in range(MIN_N_FOR_PERCENTILES - 1))
+    check("percentiles: pct() returns None one short of the minimum and a number at it",
+          pct(sample, 0.5) is None and pct([*sample, 99.0], 0.5) is not None
+          and pct([], 0.5) is None)
+
+    ts = iso_to_ts
+    # 29 bids, each placed and cancelled inside the window: one short of the minimum.
+    rows: list[tuple] = []
+    for i in range(29):
+        rows.append((REAL_BID, "2026-09-09T10:00:00Z", 2 * i + 1,
+                     {"order_hash": f"0xb{i}", "token_id": str(i), "price_eth": 0.1 + i / 100, **NO_EXP}))
+        rows.append((REAL_CANCEL, "2026-09-09T10:00:30Z", 2 * i + 2,
+                     {"order_hash": f"0xb{i}", "token_id": str(i)}))
+    n, eng = _standing_engine(tmp, "pctl.sqlite", rows)
+    lt = eng.bid_lifetimes("argonauts", ts("2026-09-09T09:00:00Z"), ts("2026-09-09T11:00:00Z"))
+    check("percentiles: at n = 29 bid_lifetimes withholds ALL THREE -- a median is a percentile too",
+          lt["n"] == 29 and lt["p10_s"] is None and lt["median_s"] is None and lt["p90_s"] is None
+          and lt["percentiles_withheld"] is True, str(lt))
+    check("percentiles: ...and the refusal carries its own reason -- n and the minimum, so the "
+          "caller can say WHY the number is missing",
+          lt["min_n_for_percentiles"] == 30 and lt["percentiles_reliable"] is False)
+    n.close()
+
+    # 30 standing asks: the standing series now has enough distinct orders for a band.
+    rows30 = [(DOC_LISTING, "2026-09-09T10:00:00Z", i + 1,
+               {"order_hash": f"0xa{i}", "token_id": str(i), "price_eth": 1.0 + i / 100, **NO_EXP})
+              for i in range(30)]
+    n2, eng2 = _standing_engine(tmp, "pctl2.sqlite", rows30)
+    s = eng2.standing_series("ask", "argonauts", ts("2026-09-09T10:00:00Z"),
+                             ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    check("percentiles: a standing series with 30 distinct orders reports its [p10, p90] band",
+          s["n"][0] == 30 and s["p10"][0] is not None and s["p90"][0] is not None, str(s))
+    n2.close()
+
+    n3, eng3 = _standing_engine(tmp, "pctl3.sqlite", rows30[:29])
+    s29 = eng3.standing_series("ask", "argonauts", ts("2026-09-09T10:00:00Z"),
+                               ts("2026-09-09T11:00:00Z"), "1h", "ETH", None, H11)
+    check("percentiles: one order short, the band is withheld and counted -- but the MEDIAN "
+          "stands, because it is the level of the book and not a quantile of a sample",
+          s29["n"][0] == 29 and s29["p10"][0] is None and s29["p90"][0] is None
+          and s29["median"][0] == 1.0
+          and s29["basis"]["percentiles_suppressed_buckets"] == 1, str(s29))
+    n3.close()
 
 
 def test_expiry_is_never_in_the_future(tmp: Path) -> None:
@@ -3470,6 +4698,7128 @@ def test_orphan_open_gaps_are_closed_by_the_successor(tmp: Path) -> None:
           s["raw"][-1] == 0.0 and s["basis"]["gap_masked_buckets"] < len(s["raw"]), str(s["raw"]))
     nrm.close()
 
+
+def test_sync_counts_unreadable_files_instead_of_reporting_zero_rows(tmp: Path) -> None:
+    """BUG-058: a landing file the reader cannot decode (wrong codec on this
+    machine, corrupt file) was logged and skipped, and sync() reported it as
+    READ with zero rows. The orchestrator ran a corpus fold on a machine without
+    zstandard and got '115 files read, 0 rows added, ALL GATES GREEN'."""
+    from navanax.landing import LandingZoneWriter
+    from navanax.normalize import Normalizer
+
+    root = tmp / "badcodec-lz"
+    w = LandingZoneWriter(root, "run-x", codec=GzipCodec())
+    w.write(frame("argonauts", "2026-09-09T10:00:00Z"), topic="collection:argonauts", event_timestamp="2026-09-09T10:00:00Z")
+    w.close()
+    # corrupt the one data file in place (test fixture only; never the real landing zone)
+    files = [p for p in root.rglob("*.jsonl.gz")]
+    check("bug-058: fixture wrote one landing file", len(files) == 1)
+    files[0].write_bytes(b"\x1f\x8bthis is not gzip data at all")
+    n = Normalizer(root, tmp / "badcodec.sqlite")
+    stats = n.sync()
+    check("bug-058: an unreadable file is COUNTED (failed or short), never reported as read-with-zero-rows",
+          (stats["files_failed"] + stats["files_short"]) == 1 and stats["rows_added"] == 0
+          and stats["last_error"] and "jsonl.gz" in stats["last_error"], str(stats))
+    n.close()
+
+
+# ===========================================================================
+# PR-5: the trait chart's metric layer (`MetricEngine.trait_set_series`).
+#
+# Every check in this section fails against the pre-PR-5 code, and fails for a
+# reason rather than by accident: `trait_set_series` did not exist, there was no
+# union bid leg (the standing legs were reachable only one at a time and
+# `STANDING_NOT_OFFERED` said in as many words that the union "is PR-5"), no
+# single-clause floors, no `winning_leg`, and no PARTIAL/UNKNOWN counts on a
+# price response.
+#
+# The fixture is one collection of four tokens with two trait types, so that
+# S(F_combined) is a strict subset of each single-clause set -- which is what
+# makes the ordering property below have any content.
+# ===========================================================================
+def test_ui_trait_chart_is_the_shape_the_operator_decided() -> None:
+    """PR-6. The Prices card BECOMES the trait chart under a filter, and it draws
+    exactly what the Operator decided on 2026-09-10 -- no more lines, no fewer.
+
+    Fails today: `traitChart`, `/api/trait_series`, the custom legend and the
+    categorical ramp do not exist, and `prices()` drew the same three
+    collection-wide series whether a trait filter was on or not -- so a trait
+    floor and the collection floor were the same pixels with a different filter
+    silently applied to only some of them.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    script = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+
+    def _obj(src: str, opener: str) -> str:
+        i = src.index(opener) + len(opener)
+        depth, j = 1, i
+        while depth and j < len(src):
+            depth += (src[j] == "{") - (src[j] == "}")
+            j += 1
+        return src[i:j - 1]
+
+    check("ui/trait chart: the Prices card switches to the trait chart when traitSpec() is "
+          "non-empty -- one panel, never two price panels showing different token sets",
+          "if(traitSpec()){await traitChart();return}" in script
+          and 'id="h-prices"' in html and 'id="tlegend"' in html)
+    check("ui/trait chart: it calls the PR-5 endpoint and passes the filter, interval, range "
+          "and denomination -- and nothing else, because the engine owns every rule",
+          "J('/api/trait_series?'+qs({collection:p.collection,traits:p.traits,"
+          "interval:p.interval,range:p.range,denom:S.denom})" in script.replace("\n", ""))
+    body = _obj(script, "async function traitChart(){")
+    # Line-by-line, read off the real trace literals rather than the doc comment.
+    traces = re.findall(r"line:\{color:(C\.[a-z]+|CAT\[i\]),width:([0-9.]+)(,dash:'([a-z]+)')?\}", body)
+    check("ui/trait chart: the baseline collection floor is --faint, DOTTED, 1.4 -- and it is "
+          "the FIRST trace pushed, so it sits UNDER everything (z-order is trace order)",
+          traces and traces[0] == ("C.faint", "1.4", ",dash:'dot'", "dot")
+          and body.index("name:'collection floor'") < body.index("if(!multi)"), str(traces[:1]))
+    single = body.split("if(!multi){", 1)[1].split("}else{", 1)[0]
+    check("ui/trait chart: single clause draws EXACTLY the trait lowest ask (--ask, solid, 2.4) "
+          "and the trait highest bid (--bid, solid, 2.4) over that baseline -- three lines total",
+          single.count("tr.push({") == 2
+          and "line:{color:C.ask,width:2.4}" in single and "line:{color:C.bid,width:2.4}" in single
+          and "dash" not in single, single[:200])
+    multi = body.split("}else{", 1)[1]
+    check("ui/trait chart: multi-clause draws the combined (AND) floor at --ask weight 3.0 "
+          "-- weight encodes ROLE (3.0 the set you asked for, 2.0 a component, 1.4 a reference)",
+          "line:{color:C.ask,width:3.0}" in multi and "line:{color:CAT[i],width:2.0}" in multi)
+    check("ui/trait chart: the categorical ramp is FIXED ORDER and never cycled -- a 5th clause "
+          "gets no generated hue, it gets a printed notice naming how many are drawn",
+          "const CAT=[C.bid,C.coll,C.trait,C.cancel], CAT_MAX=4" in script
+          and "slice(0,CAT_MAX)" in multi
+          and "clauses drawn individually" in multi and "CAT[i%" not in script)
+    check("ui/trait chart: every series keeps its holes -- connectgaps:false on all of them, "
+          "and markers stay on below ~120 observed points so 8 listings draw 8 marks",
+          body.count("connectgaps:false") == body.count("tr.push({")
+          and body.count("mode:mode(") >= 4, f"{body.count('connectgaps:false')} vs {body.count('tr.push({')}")
+    check("ui/trait chart: the hover carries value+unit, coverage, per-leg n AND which leg set "
+          "the number -- a line whose population changes and does not say so is leg-mixing",
+          "cov ${(100*cov[i]).toFixed(0)}%" in script and "leg: ${b.winning_leg[i]}" in script
+          and "n item ${fmt(b.n_item[i],0)}" in script)
+    check("ui/trait chart: the legend is OURS (Plotly's is off) and each row carries n tokens, "
+          "observed/total buckets and the last value; the bid row also carries per-leg n",
+          "showlegend:false" in body and "$('#tlegend').innerHTML=lg.join('')" in body
+          and "n=${fmt(n,0)} token" in script and "${obsN(a)}/${a.length} buckets" in script
+          and "trait offers that COVER this filter n=${medOf(b.n_trait_offer_cover)}" in script)
+    check("ui/trait chart: the trait-offer legend swatch wears the RE-PICKED --trait-offer token, "
+          "read out of :root like every other mark -- no literal",
+          "color:${C.trait}" in script and "trait:tok('--trait-offer')" in script)
+    check("ui/trait chart: the basis prints PARTIAL / UNKNOWN / UNPARSED counts and says PARTIAL "
+          "is never summed -- the panel that most needs the verdicts is the one that shows them",
+          "PARTIAL · ${fmt(b.unknown_offers,0)} UNKNOWN" in script
+          and "b.partial_note" in script and "d.overlap_tokens" in script)
+    check("ui/trait chart: the global transform control is refused here rather than misapplied "
+          "-- the endpoint returns levels, and a % change off a hole has no basis",
+          "S.transform!=='ABS'" in script and "does not apply to this panel" in script
+          and "const thov=()" in script)
+    check("ui/trait chart: still no spline and still no smoothing anywhere on the page",
+          "shape:'spline'" not in html and "connectgaps:true" not in html)
+
+
+def _trait_chart_store(tmp: Path, name: str):
+    """Four tokens, two clauses, one standing book. Returns (normalizer, engine).
+
+        token  Print       Palette    standing ask   standing item bid
+          1    Unclaimed   Seafoam        1.20             -
+          2    Unclaimed   Ivory          0.90            0.30
+          3    Claimed     Seafoam        -               0.95   <- outside S(F)
+          4    Claimed     Ivory          0.70             -
+
+    plus one collection offer at 0.348 and four trait offers: one COVERing
+    `Print: Unclaimed` at 0.41, one on `Palette: Seafoam` (PARTIAL under a
+    Print filter) at 0.42, one with NO criteria at 9.99 (the loud-failure
+    marker -- if the guard ever fails, this is the number that appears), and one
+    with numeric criteria at 8.88 (UNKNOWN).
+    """
+    import copy
+
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    rows = {"1": ("Unclaimed", "Seafoam"), "2": ("Unclaimed", "Ivory"),
+            "3": ("Claimed", "Seafoam"), "4": ("Claimed", "Ivory")}
+    for tid, (pr, pa) in rows.items():
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Print", pr), ("argonauts", tid, "Palette", pa)])
+    seq = 0
+
+    def at(raw, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, "2026-09-09T10:00:00Z", seq, **over, **NO_EXP)
+
+    for tid, px in (("1", 1.20), ("2", 0.90), ("4", 0.70)):
+        at(DOC_LISTING, order_hash=f"0xask{tid}", token_id=tid, price_eth=px)
+    at(REAL_BID, order_hash="0xbid2", token_id="2", price_eth=0.30)
+    at(REAL_BID, order_hash="0xbid3", token_id="3", price_eth=0.95)
+    at(REAL_COLL_OFFER, order_hash="0xcoll", price_eth=0.348)
+
+    def offer(hash_, mutate, px):
+        raw = copy.deepcopy(REAL_TRAIT_OFFER)
+        mutate(raw[4]["payload"])
+        at(raw, order_hash=hash_, price_eth=px)
+
+    def one(tt, tn):
+        def m(p):
+            p["trait_criteria"] = {"trait_type": tt, "trait_name": tn}
+            p["trait_criteria_list"] = None
+        return m
+
+    def nothing(p):
+        p["trait_criteria"] = None
+        p["trait_criteria_list"] = None
+
+    def numeric(p):
+        p["numeric_trait_criteria_list"] = [{"trait_type": "Level", "min": 1, "max": 5}]
+
+    offer("0xtcov", one("Print", "Unclaimed"), 0.41)
+    offer("0xtpar", one("Palette", "Seafoam"), 0.42)
+    offer("0xtbad", nothing, 9.99)
+    offer("0xtnum", numeric, 8.88)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def _win(tmp_engine, traits, tmp=None):
+    """The 09:00-11:00 window at 1 h: bucket 0 is empty, bucket 1 holds the book."""
+    from navanax.normalize import iso_to_ts
+    return tmp_engine.trait_set_series(
+        "argonauts", traits, iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"),
+        "1h", "ETH", H11)
+
+
+def test_trait_set_series_bid_leg_is_a_union_that_names_its_winner(tmp: Path) -> None:
+    """The Operator's single-clause chart: one bid line, three legs, each with its own n.
+
+    Fails today: `MetricEngine.trait_set_series` does not exist. The three
+    standing legs existed separately and `STANDING_NOT_OFFERED` said the union
+    "is PR-5" in as many words -- there was no way to ask for the trait group's
+    highest bid at all, and `top_item_bid` deliberately refused to stand in for it.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart1.sqlite")
+    r = _win(eng, {"Print": ["Unclaimed"]})
+    b = r["trait_bid"]
+    check("trait chart: the bid is the MAX over the union of the three legs -- the COVERing "
+          "trait offer at 0.41 beats the item bid at 0.30 and the collection offer at 0.348",
+          b["median"][1] == 0.41, str(b["median"]))
+    check("trait chart: `winning_leg` NAMES the leg that set the number on screen, per bucket "
+          "-- a line that silently swaps population is the leg-mixing quant §1 metric 1 forbids",
+          b["winning_leg"][1] == "trait_offer" and b["winning_leg"][0] is None, str(b["winning_leg"]))
+    check("trait chart: each leg carries its OWN n and kind; the three are never summed",
+          (b["n_item"][1], b["n_trait_offer_cover"][1], b["n_collection"][1]) == (1, 1, 1),
+          f"item={b['n_item']} cover={b['n_trait_offer_cover']} coll={b['n_collection']}")
+    check("trait chart: the item-bid leg is TOKEN-SCOPED -- the 0.95 bid on token 3, which the "
+          "filter excludes, never reaches the line (it would have won by a wide margin)",
+          b["median"][1] == 0.41 and b["n_item"][1] == 1, str(b))
+    check("trait chart (BUG-051 guard, on a PRICE this time): the criteria-less trait offer at "
+          "9.99 matches nothing, so the number it would have produced never appears",
+          9.99 not in [v for v in b["median"] if v is not None] and r["unparsed_offers"] == 1,
+          str(b["median"]))
+    check("trait chart: numeric-criteria offers are UNKNOWN -- excluded AND counted, never TRUE; "
+          "8.88 is not on the chart and the count is on the response",
+          8.88 not in [v for v in b["median"] if v is not None] and r["unknown_offers"] == 1,
+          f"unknown={r['unknown_offers']} median={b['median']}")
+    check("trait chart: the ask line is the trait group's LOWEST STANDING ask over S(F)",
+          r["trait_ask"]["median"][1] == 0.90 and r["trait_ask"]["median"][0] is None,
+          str(r["trait_ask"]["median"]))
+    check("trait chart: every series is on the FULL bucket grid with the hole preserved",
+          len(r["keys"]) == 2 and len(b["median"]) == 2
+          and len(r["baseline_ask"]["median"]) == 2 and r["basis"]["undefined_buckets"] == 1,
+          str(r["basis"]))
+    check("trait chart: the basis says which book, which legs, and how many tokens the filter picks",
+          r["basis"]["book"] == "standing" and r["matching_tokens"] == 2
+          and set(r["basis"]["legs"]) == {"item", "trait_offer", "collection"}, str(r["basis"]))
+    n.close()
+
+
+def test_trait_set_series_collection_offer_covers_every_filter(tmp: Path) -> None:
+    """`C = {}` is a subset of every token's traits, so a collection offer is bid
+    depth for EVERY filter -- not by a special branch, but because that is what an
+    empty criteria set means (dataeng §4.3, E-V9).
+
+    Fails today: there is no union bid leg to carry it. `collection_bid` alone was
+    reachable, but nothing combined it with the other two, so "the trait group's
+    highest bid" could not be asked for.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart2.sqlite")
+    filters = [{"Print": ["Unclaimed"]}, {"Print": ["Claimed"]}, {"Palette": ["Seafoam"]},
+               {"Palette": ["Ivory"]}, {"Print": ["Claimed"], "Palette": ["Ivory"]},
+               {"Print": ["Unclaimed"], "Palette": ["Seafoam"]}]
+    ns = [_win(eng, f)["trait_bid"]["n_collection"][1] for f in filters]
+    check("trait chart: the collection offer stands in the bid leg under EVERY filter, "
+          "including one whose AND-set is a single token", all(x == 1 for x in ns), str(ns))
+    r = _win(eng, {"Print": ["Claimed"], "Palette": ["Ivory"]})
+    b = r["trait_bid"]
+    check("trait chart: where it is the only leg standing, it sets the line and is named as such",
+          b["median"][1] == 0.348 and b["winning_leg"][1] == "collection"
+          and (b["n_item"][1], b["n_trait_offer_cover"][1]) == (0, 0), str(b))
+    n.close()
+
+
+def test_trait_set_series_partial_offers_are_counted_never_summed(tmp: Path) -> None:
+    """PARTIAL is a verdict, not a fraction of depth (dataeng §4.3, project rule 4).
+
+    Fails today: no price response carried a verdict count at all. The counts
+    existed only on `trait_offer_verdicts`, which the chart never called, so a
+    PARTIAL offer was invisible on the panel that most needs to know about it.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart3.sqlite")
+    r = _win(eng, {"Print": ["Unclaimed"]})
+    check("trait chart: the 0.42 offer on Palette:Seafoam is PARTIAL under a Print filter and is "
+          "NOT in the bid line -- it does not bid on token 2, which the filter selects",
+          r["trait_bid"]["median"][1] == 0.41 and r["partial_offers"] == 1,
+          f"median={r['trait_bid']['median']} partial={r['partial_offers']}")
+    d = r["partial_detail"][0]
+    check("trait chart: ...and it is reported with |S(F) n S(C)| AND |S(F)|, never a bare count",
+          d["overlap_tokens"] == 1 and d["filter_tokens"] == 2 and d["order_hash"] == "0xtpar",
+          str(d))
+    check("trait chart: the basis says out loud that allocating a PARTIAL offer's quantity as "
+          "depth is a JUDGEMENT and belongs in ANALYSIS, not here",
+          "never summed" in r["basis"]["partial_note"].lower()
+          and "judgement" in r["basis"]["partial_note"].lower(), r["basis"]["partial_note"])
+    check("trait chart: UNPARSED and UNKNOWN are counted SEPARATELY -- summing a parser gap into "
+          "a schema limit would retire the question of which one is growing",
+          (r["unknown_offers"], r["unparsed_offers"]) == (1, 1), str(r))
+    n.close()
+
+
+def test_trait_set_series_empty_and_set_is_null_never_zero(tmp: Path) -> None:
+    """A bucket where the AND-set has no standing ask is a HOLE.
+
+    Two different emptinesses, and both must be null: the filter selects tokens
+    but none of them is listed, and the filter selects no tokens at all. Zero is a
+    price. "No standing ask" is not the price zero, and on a book with eight
+    listings in forty minutes the difference is most of the chart.
+
+    Fails today: `trait_set_series` does not exist, and the metric that stood in
+    for a trait floor -- `floor_ask` with `book='observed'` -- returned the lowest
+    price SEEN in the interval, so a bucket with no standing ask showed whatever
+    had been briefly quoted and cancelled inside it.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart4.sqlite")
+    r = _win(eng, {"Print": ["Claimed"], "Palette": ["Seafoam"]})     # token 3: real, unlisted
+    check("trait chart: the AND-set is a real, non-empty token set with NO standing ask -- "
+          "the bucket is null, not 0",
+          r["matching_tokens"] == 1 and all(v is None for v in r["trait_ask"]["median"]),
+          f"n={r['matching_tokens']} ask={r['trait_ask']['median']}")
+    r2 = _win(eng, {"Print": ["Unclaimed"], "Palette": ["Nonesuch"]})  # no token at all
+    check("trait chart: an AND-set that is EMPTY is also null, and says so with its count",
+          r2["matching_tokens"] == 0 and all(v is None for v in r2["trait_ask"]["median"])
+          and r2["basis"]["empty_token_set"] is True,
+          f"n={r2['matching_tokens']} ask={r2['trait_ask']['median']}")
+    check("trait chart: ...and the BID is null too. A collection offer is not token-scoped and "
+          "covers the empty set vacuously, so without the guard the panel drew a confident bid "
+          "line (0.348) for a trait group with ZERO members -- a bid on tokens this filter does "
+          "not select. That is the flattering-direction failure docs/05 rule 5 is about.",
+          all(v is None for v in r2["trait_bid"]["median"])
+          and all(v is None for v in r2["trait_bid"]["winning_leg"]),
+          str(r2["trait_bid"]["median"]))
+    check("trait chart: ...and the per-leg counts still report what WAS standing, so the "
+          "withheld line is visible as a withholding rather than as an empty book",
+          r2["trait_bid"]["n_collection"][1] == 1, str(r2["trait_bid"]["n_collection"]))
+    check("trait chart: the note names the universe the guard actually counts -- TOKENS, not "
+          "traits, because a populated traits table with an empty token list lands here too (F7)",
+          "TOKENS table" in r2["basis"]["empty_token_set_note"]
+          and "empty `tokens` table" in r2["basis"]["empty_token_set_note"]
+          and r2["basis"]["token_set_universe"] == "tokens",
+          r2["basis"]["empty_token_set_note"][:160])
+    check("trait chart: a filter that DOES select tokens is not caught by the guard",
+          r["basis"]["empty_token_set"] is False and r["trait_bid"]["median"][1] is not None,
+          str(r["basis"]["empty_token_set"]))
+    check("trait chart: 0.0 appears nowhere in any price series -- not once, under either filter",
+          not any(v == 0.0 for r_ in (r, r2)
+                  for arr in (r_["trait_ask"]["median"], r_["trait_bid"]["median"],
+                              r_["baseline_ask"]["median"])
+                  for v in arr if v is not None),
+          str([r["trait_ask"]["median"], r2["trait_bid"]["median"]]))
+    n.close()
+
+
+def test_filtered_counts_are_null_when_the_filter_selects_no_token(tmp: Path) -> None:
+    """BUG-20260910-060: a bid on every token is not a bid on any token of an empty set.
+
+    `_bucketed`'s filter clause is three disjuncts -- collection offers (no
+    token, so they pass), trait offers whose criteria COVER F, and token-level
+    events matching every clause. Each is right on its own. The SET of them is
+    wrong when `S(F) = {}`, because `S(F) ⊆ S(C)` is vacuously true for the empty
+    set, so the two token-less branches kept matching a filter that selects
+    nothing. `bid_count` and `event_count` under an impossible filter counted
+    bids on tokens the filter does not select.
+
+    **This is not an edge case here, it is the default.** `traits` and `tokens`
+    have 0 rows until the Explorer import lands, so EVERY filter is impossible
+    and this was 100% of the filtered bid count -- the Activity chart's `bids`
+    bars under any trait filter.
+
+    Fails today by returning a number: `bid_count` = 1.0 (the collection offer)
+    and `event_count` = 1.0 where both must be None, and `sales_count` = 0.0
+    where None is meant -- a 0 says the trait group was quiet, and the truth is
+    that there is no trait group.
+    """
+    n, eng = _trait_chart_store(tmp, "emptyfilter.sqlite")
+    nope = {"Print": ["Nonesuch"]}
+
+    def ser(metric, traits, **kw):
+        return eng.series(metric=metric, collection="argonauts", interval="1h",
+                          range_="2h", now=H11, traits=traits, **kw)
+
+    # The COUNT/SUM metrics are the ones that leaked, and this fixture is where the
+    # leak was: the collection offer and any COVERing trait offer matched a filter
+    # selecting nothing. Every one of them must be null, not 0.
+    for m in ("bid_count", "event_count", "sales_count", "cancel_count",
+              "listing_count", "volume"):
+        s = ser(m, nope)
+        check(f"empty filter: {m} is null on EVERY bucket -- never 0, never a count of "
+              "token-less events",
+              all(v is None for v in s["raw"]) and s["basis"]["empty_token_set"] is True,
+              f"{m} raw={s['raw']}")
+    # F4 (tech-lead): the PRICE metrics are null on THIS fixture whether or not the
+    # guard exists -- no token has `Nonesuch`, so there are no listings and no item
+    # bids to find. Asserting the guard here would be an over-claim, so this fixture
+    # asserts only that they are null and SAYS why, and the load-bearing case (a
+    # populated `traits` with an empty token list, where the book does match the
+    # filter) lives in test_empty_token_set_guard_holds_on_the_standing_branches_too.
+    for m in ("floor_ask", "top_item_bid"):
+        s = ser(m, nope)
+        check(f"empty filter: {m} is null too -- though on THIS fixture it would be null "
+              "without the guard as well (no token has the value, so there is nothing to "
+              "find); the case where the guard is what makes it null is the disagreeing store",
+              all(v is None for v in s["raw"]) and s["basis"]["empty_token_set"] is True,
+              f"{m} raw={s['raw']}")
+    s = ser("bid_count", nope)
+    check("empty filter: the basis says WHY, and names the first thing to check -- the TOKENS "
+          "table, which is what the guard counts (F7)",
+          "there is no trait group" in s["basis"]["empty_token_set_note"]
+          and "TOKENS table" in s["basis"]["empty_token_set_note"]
+          and "empty `tokens` table" in s["basis"]["empty_token_set_note"]
+          and s["basis"]["token_set_universe"] == "tokens",
+          s["basis"]["empty_token_set_note"][:160])
+    imm = ser("immediacy_cost", nope)
+    check("empty filter: the derived spread is null too -- its ask leg is narrowed, so there "
+          "is no ask, and a spread with one leg is not a spread",
+          all(v is None for v in imm["raw"]) and imm["basis"]["empty_token_set"] is True,
+          str(imm["raw"]))
+
+    # The deliberate carve-out, unchanged: `collection_bid` is NOT narrowed by a
+    # trait filter (leg discipline, quant §1 metric 1), so it still reports the
+    # collection-wide offer -- and now says, in the same basis, that the filter
+    # selects no token and this number is not about it.
+    # BUG-060's own guard, exercised DIRECTLY (tech-lead R2): series()'s
+    # blanket pass (BUG-061) is a superset, so without this call reverting the
+    # _bucketed guard leaves every suite green while the fix is gone.
+    from navanax.metrics import load_intervals as _li
+    _iv = _li(ROOT / "config" / "intervals.yaml")["intervals"]["1h"]
+    _s, _e = ser("bid_count", nope)["basis"]["range"]["start"], ser("bid_count", nope)["basis"]["range"]["end"]
+    from navanax.normalize import iso_to_ts as _its
+    direct = eng._bucketed("bid_count", "argonauts", "ETH", _its(_s), _its(_e), _iv, nope)
+    check("empty filter: _bucketed ITSELF returns no bucket for a filter selecting no token (BUG-060 guard, "
+          "independent of series()' blanket pass)", direct == {}, str(direct))
+    cb = ser("collection_bid", nope, book="observed")
+    check("empty filter: collection_bid is deliberately NOT narrowed and still reports the "
+          "collection-wide offer, with the basis saying the number is not about the filter",
+          cb["raw"][1] == 0.348 and cb["basis"]["empty_token_set"] is True
+          and "deliberately NOT narrowed" in cb["basis"]["empty_token_set_note"], str(cb["raw"]))
+
+    # ...and a filter that DOES select tokens counts exactly what it did before.
+    good = {"Print": ["Unclaimed"]}
+    b = ser("bid_count", good)
+    check("empty filter: with a filter that selects tokens the counts are unchanged -- one item "
+          "bid on a token in S(F), the collection offer, and the one COVERing trait offer = 3",
+          b["raw"][1] == 3.0 and b["basis"]["empty_token_set"] is False, str(b["raw"]))
+    check("empty filter: with NO filter at all the guard never fires -- 2 item bids, "
+          "1 collection offer and 4 trait offers = 7",
+          ser("bid_count", None)["raw"][1] == 7.0
+          and ser("bid_count", None)["basis"]["empty_token_set"] is False,
+          str(ser("bid_count", None)["raw"]))
+    check("empty filter: a real filter still gets a real ZERO where a bucket was quiet -- the "
+          "guard must not turn 'we watched and nothing happened' into a hole",
+          ser("sales_count", good)["raw"] == [0.0, 0.0],
+          str(ser("sales_count", good)["raw"]))
+    n.close()
+
+
+def test_trait_offer_verdicts_query_count_is_o_distinct_pairs(tmp: Path) -> None:
+    """B1 (tech-lead, S1): the reach of a criterion is a property of the TRAIT TABLE,
+    not of the offer that names it, so it must be looked up once per distinct
+    `(trait_type, value)` pair -- not once per (offer, criterion).
+
+    Measured by the tech-lead on the real shape: 27,694 traits queries for 48
+    distinct pairs, 8.6 s at 200k lives with a filter selecting 500 of 9,000
+    tokens at 1h/24h. This fixture is a modest synthetic -- 2,000 trait offers,
+    2 criteria each, over 2,000 tokens -- and it fails today by issuing ~4,000
+    traits lookups plus ~2,000 criteria queries where 40-odd of each is the work
+    that actually exists.
+
+    The query count is asserted with `sqlite3.Connection.set_trace_callback`, not
+    with a stopwatch: a timing threshold on shared CI hardware is a flaky test,
+    and the thing that is actually wrong is the COUNT. The wall time is printed
+    beside it as evidence, with a generous ceiling that only catches a
+    catastrophic regression.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.traits import ensure_schema
+
+    N_TOKENS, N_OFFERS, N_TYPES, N_VALUES = 2000, 2000, 4, 12
+    n = Normalizer(tmp / "empty-lz", tmp / "verdictperf.sqlite")
+    ensure_schema(n.conn)
+    types = [f"T{i}" for i in range(N_TYPES)]
+    values = [f"V{i}" for i in range(N_VALUES)]
+    n.conn.executemany("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       [("argonauts", str(t), f"#{t}", "2026-09-09T00:00:00Z") for t in range(N_TOKENS)])
+    n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                       [("argonauts", str(t), ty, values[(t + i) % N_VALUES])
+                        for t in range(N_TOKENS) for i, ty in enumerate(types)])
+    rr0 = parse_event(_env(0, REAL_TRAIT_OFFER, "2026-09-09T10:00:00Z"))
+    rows, crits = [], []
+    for k in range(N_OFFERS):
+        rr = dict(rr0)
+        rr.update(file="f", run="run-ui", seq=k, order_hash=f"0x{k:040x}",
+                  valid_at="2026-09-09T10:00:00Z", valid_ts=iso_to_ts("2026-09-09T10:00:00Z"),
+                  criteria_n=2, criteria_numeric_n=0, price_eth=0.4)
+        rows.append(tuple(rr.get(c) for c in COLS))
+        # Two criteria per offer, drawn from the same small pool of pairs, so the
+        # DISTINCT pair count is tiny while the (offer x criterion) count is not.
+        for i in (0, 1):
+            crits.append(("run-ui", k, i, "string", types[(k + i) % N_TYPES],
+                          values[(k * 7 + i) % N_VALUES], None, None))
+    n.conn.executemany(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})", rows)
+    n.conn.executemany("INSERT INTO order_criteria VALUES (?,?,?,?,?,?,?,?)", crits)
+    n.conn.commit()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+    seen: list[str] = []
+    n.conn.set_trace_callback(seen.append)
+    t0 = time.monotonic()
+    v = eng.trait_offer_verdicts("argonauts", {"T0": [values[0]]},
+                                 iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
+    took = time.monotonic() - t0
+    n.conn.set_trace_callback(None)
+    traits_q = sum(1 for q in seen if "FROM traits" in q)
+    crit_q = sum(1 for q in seen if "order_criteria" in q)
+    pairs = v["distinct_criteria_pairs"]
+    check("verdict perf: the traits table is queried once per DISTINCT (trait_type, value) pair, "
+          "not once per (offer, criterion) -- the reach of a criterion is a property of the "
+          "trait table, not of the offer that names it",
+          traits_q <= pairs + 2 and pairs <= N_TYPES * N_VALUES,
+          f"{traits_q} traits queries for {pairs} distinct pairs over {N_OFFERS} offers")
+    check("verdict perf: the criteria rows are fetched in ONE grouped query, not one per offer",
+          crit_q <= 2, f"{crit_q} order_criteria queries for {N_OFFERS} offers")
+    check("verdict perf: total queries are O(distinct pairs), not O(offers x criteria) -- "
+          f"under {N_OFFERS // 10} for {N_OFFERS} offers x 2 criteria",
+          len(seen) < N_OFFERS // 10, f"{len(seen)} queries total, {took:.2f}s")
+    check(f"verdict perf: and it runs well inside the budget ({took:.2f}s, ceiling 3.0s)",
+          took < 3.0, f"{took:.2f}s")
+    # The verdicts themselves must be identical to the one-query-per-lookup version.
+    check("verdict perf: memoising changes the COST and not one verdict -- every offer lands in "
+          "exactly one bucket and the five still sum to the offer count",
+          v["covers"] + v["partial_n"] + v["disjoint"] + v["unknown_numeric"] + v["unparsed"]
+          == N_OFFERS, str({k: v[k] for k in ("covers", "partial_n", "disjoint",
+                                              "unknown_numeric", "unparsed")}))
+    n.close()
+
+
+def test_partial_detail_is_capped_but_the_count_never_is(tmp: Path) -> None:
+    """F3 (tech-lead, S2): an uncapped `partial` list reached 4.1 MB on the fixture.
+
+    The detail is a SAMPLE and the count is the answer. Capping the count instead
+    of the list would make the cap silently become the answer -- the exact shape
+    of BUG-047 (`requests_spent` counting the wrong thing) one module over.
+
+    Fails today: `partial_n` was `len(partial)`, so the two could not disagree
+    and there was nothing to cap.
+    """
+    from navanax.metrics import PARTIAL_DETAIL_CAP, MetricEngine, load_intervals
+    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.traits import ensure_schema
+
+    N_OFFERS = PARTIAL_DETAIL_CAP * 3 + 7
+    n = Normalizer(tmp / "empty-lz", tmp / "partialcap.sqlite")
+    ensure_schema(n.conn)
+    # Two tokens, two trait types. The filter is on Print; every offer is on
+    # Palette, so every one of them OVERLAPS without COVERING -> all PARTIAL.
+    for tid in ("1", "2"):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"#{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Print", "Unclaimed"),
+                            ("argonauts", tid, "Palette", "Seafoam" if tid == "1" else "Ivory")])
+    rr0 = parse_event(_env(0, REAL_TRAIT_OFFER, "2026-09-09T10:00:00Z"))
+    rows, crits = [], []
+    for k in range(N_OFFERS):
+        rr = dict(rr0)
+        rr.update(file="f", run="run-ui", seq=k, order_hash=f"0x{k:040x}",
+                  valid_at="2026-09-09T10:00:00Z", valid_ts=iso_to_ts("2026-09-09T10:00:00Z"),
+                  criteria_n=1, criteria_numeric_n=0, price_eth=0.4)
+        rows.append(tuple(rr.get(c) for c in COLS))
+        crits.append(("run-ui", k, 0, "string", "Palette", "Seafoam", None, None))
+    n.conn.executemany(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})", rows)
+    n.conn.executemany("INSERT INTO order_criteria VALUES (?,?,?,?,?,?,?,?)", crits)
+    n.conn.commit()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    v = eng.trait_offer_verdicts("argonauts", {"Print": ["Unclaimed"]},
+                                 iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
+    check("partial cap: the DETAIL is capped so the response cannot reach megabytes",
+          len(v["partial"]) == PARTIAL_DETAIL_CAP and PARTIAL_DETAIL_CAP == 50,
+          f"{len(v['partial'])} entries, cap {PARTIAL_DETAIL_CAP}")
+    check("partial cap: the COUNT is the true count and is computed separately -- a cap that "
+          "silently becomes the answer is worse than no detail at all",
+          v["partial_n"] == N_OFFERS, f"partial_n={v['partial_n']} of {N_OFFERS}")
+    check("partial cap: the response SAYS it was truncated and what the cap was, so nobody "
+          "reads the sample as the population",
+          v["partial_truncated"] is True and v["partial_detail_cap"] == PARTIAL_DETAIL_CAP
+          and "SAMPLE" in v["note"], str({k: v[k] for k in ("partial_truncated", "partial_detail_cap")}))
+    check("partial cap: every capped entry still carries |S(F) n S(C)| AND |S(F)| -- the cap "
+          "changes how many are shown, never what each one says (project rule 4)",
+          all(d["overlap_tokens"] == 1 and d["filter_tokens"] == 2 for d in v["partial"]),
+          str(v["partial"][0]))
+    small = eng.trait_offer_verdicts("argonauts", {"Palette": ["Seafoam"]},
+                                     iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts("2026-09-09T11:00:00Z"))
+    check("partial cap: under the cap nothing is truncated and the flag says so",
+          small["partial_truncated"] is False and small["partial_n"] == len(small["partial"]),
+          str(small["partial_n"]))
+    n.close()
+
+
+def _disagreeing_store(tmp: Path, name: str):
+    """A store where `traits` is populated and `tokens` is EMPTY.
+
+    A real intermediate state of the trait onboarding, and the one that makes the
+    empty-token-set guard load-bearing rather than redundant: `token_filter_sql`
+    (and so `_standing_live`, and so every standing series) resolves membership
+    against `traits`, while |S(F)| is counted over `tokens`. With the two
+    disagreeing, the book has listings the filter matches and |S(F)| is still 0.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                       [("argonauts", "1", "Print", "Unclaimed"),
+                        ("argonauts", "1", "Palette", "Seafoam")])
+    # NOTE: no INSERT INTO tokens. That is the whole fixture.
+    put(DOC_LISTING, "2026-09-09T10:00:00Z", 1, order_hash="0xask1", token_id="1",
+        price_eth=1.20, **NO_EXP)
+    put(REAL_BID, "2026-09-09T10:00:00Z", 2, order_hash="0xbid1", token_id="1",
+        price_eth=0.30, **NO_EXP)
+    put(REAL_COLL_OFFER, "2026-09-09T10:00:00Z", 3, order_hash="0xcoll", price_eth=0.348, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def test_empty_token_set_guard_holds_on_the_standing_branches_too(tmp: Path) -> None:
+    """B2/F4 (tech-lead, S1): the guard was only on the `_bucketed` branch.
+
+    `series()` has four branches — standing spread, standing series, derived, and
+    `_bucketed` — and BUG-20260910-060's guard was applied to one of them. The
+    other three walked straight past it while `basis.empty_token_set_note`
+    asserted, in the same response, that *"every bucket of this metric is
+    undefined"*. A basis that contradicts its own arrays is worse than no basis.
+
+    It is not a theoretical gap, and this is the fixture that shows why F4's
+    earlier version over-claimed: with `Print: Nonesuch` the standing ask is null
+    because no token has that trait, so the guard is never what makes it null and
+    the test proved nothing about the guard. Here `traits` is populated and
+    `tokens` is empty — a real intermediate state of trait onboarding — so
+    `_standing_live` (which resolves membership against `traits`) DOES match the
+    listing while |S(F)| (counted over `tokens`) is 0. Only the guard can null it.
+
+    Fails today: `floor_ask` returns 1.20, `immediacy_cost` returns 0.852, and
+    `trait_set_series`' ask line draws, all with `empty_token_set: true` beside
+    them.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n, eng = _disagreeing_store(tmp, "disagree.sqlite")
+    f = {"Print": ["Unclaimed"]}
+
+    def ser(metric, **kw):
+        return eng.series(metric=metric, collection="argonauts", interval="1h",
+                          range_="2h", now=H11, traits=f, **kw)
+
+    check("guard/standing: the fixture really does disagree -- the traits table matches the "
+          "filter and the token list is empty, so a standing series CAN find the listing",
+          eng._token_set_size("argonauts", f) == 0
+          and len(eng._standing_live("ask", "argonauts", "ETH",
+                                     iso_to_ts("2026-09-09T09:00:00Z"),
+                                     iso_to_ts("2026-09-09T11:00:00Z"), f)) == 1,
+          "if either half of this fails the rest of the test proves nothing")
+
+    for metric in ("floor_ask", "immediacy_cost"):
+        s = ser(metric)                                  # standing is the default for both
+        check(f"guard/standing: {metric} on the STANDING book is null on every bucket -- the "
+              "guard, not the absence of data, is what makes it null",
+              s["basis"]["book"] == "standing" and all(v is None for v in s["raw"])
+              and s["basis"]["empty_token_set"] is True, f"{metric} raw={s['raw']}")
+    imm = ser("immediacy_cost")
+    check("guard/standing: the spread's LEG arrays are blanked with it -- leaving the "
+          "collection-wide bid leg populated invites subtracting two legs of a metric that "
+          "has just been declared meaningless",
+          all(v is None for leg in imm["parts"].values() for v in leg)
+          and all(v is None for v in imm["pct_of_ask"]), str(imm["parts"]))
+    check("guard/standing: and so are the band, the coverage and the counts -- every one of "
+          "them is a claim about a group that does not exist",
+          all(v is None for k in ("p10", "p90", "coverage") for v in imm.get(k, []))
+          and all(v == 0 for k in ("n_ask", "n_bid") for v in imm.get(k, [])),
+          str({k: imm.get(k) for k in ("p10", "coverage", "n_ask")}))
+    fa = ser("floor_ask")
+    check("guard/standing: floor_ask's own band and n go with it",
+          all(v is None for k in ("p10", "p90", "coverage") for v in fa.get(k, []))
+          and all(v == 0 for v in fa.get("n", [])), str(fa.get("coverage")))
+    check("guard/standing: the note now says the universe is TOKENS, because that is what the "
+          "guard counts -- telling the Operator to check `traits` when `traits` is the "
+          "populated half is the wrong instruction (F7)",
+          "TOKENS table" in fa["basis"]["empty_token_set_note"]
+          and fa["basis"]["token_set_universe"] == "tokens"
+          and "empty `tokens` table" in fa["basis"]["empty_token_set_note"],
+          fa["basis"]["empty_token_set_note"][:160])
+    obs = ser("floor_ask", book="observed")
+    check("guard/standing: the observed book is guarded too, on the same fixture",
+          all(v is None for v in obs["raw"]) and obs["basis"]["empty_token_set"] is True,
+          str(obs["raw"]))
+    cb = ser("collection_bid")
+    check("guard/standing: collection_bid stays the metric-level carve-out and still reports "
+          "the collection-wide offer -- the guard blanks metrics the filter NARROWS",
+          any(v is not None for v in cb["raw"]) and cb["basis"]["empty_token_set"] is True
+          and "deliberately NOT narrowed" in cb["basis"]["empty_token_set_note"], str(cb["raw"]))
+
+    r = eng.trait_set_series("argonauts", f, iso_to_ts("2026-09-09T09:00:00Z"),
+                             iso_to_ts("2026-09-09T11:00:00Z"), "1h", "ETH", H11)
+    check("guard/standing: trait_set_series nulls its ASK line too -- the comment that 'no "
+          "tokens means no listings' was an assumption that tokens and traits agree, and "
+          "nothing enforces that",
+          r["matching_tokens"] == 0 and r["basis"]["empty_token_set"] is True
+          and all(v is None for v in r["trait_ask"]["median"])
+          and all(v is None for v in r["trait_ask"]["coverage"])
+          and all(v == 0 for v in r["trait_ask"]["n"]), str(r["trait_ask"]["median"]))
+    check("guard/standing: ...and its bid line, and the baseline is UNTOUCHED because it is "
+          "not filtered at all",
+          all(v is None for v in r["trait_bid"]["median"])
+          and any(v is not None for v in r["baseline_ask"]["median"]),
+          str(r["baseline_ask"]["median"]))
+    m = eng.trait_set_series("argonauts", {"Print": ["Unclaimed"], "Palette": ["Seafoam"]},
+                             iso_to_ts("2026-09-09T09:00:00Z"),
+                             iso_to_ts("2026-09-09T11:00:00Z"), "1h", "ETH", H11)
+    check("guard/standing: every single-clause floor is nulled too, each on ITS OWN token set",
+          len(m["single_floors"]) == 2
+          and all(v is None for fl in m["single_floors"] for v in fl["median"])
+          and all(fl["matching_tokens"] == 0 for fl in m["single_floors"]),
+          str([fl["median"] for fl in m["single_floors"]]))
+    n.close()
+
+
+def test_trait_series_endpoint_refuses_an_unknown_interval(tmp: Path) -> None:
+    """F6 (tech-lead, S3): an unknown interval reached the page as a bare 500.
+
+    REQ-N-09: an interval not in `config/intervals.yaml` is refused, not
+    improvised. `series()` has always refused with a ValueError naming the valid
+    ids, which the handler turns into a 400; `trait_set_series` indexed the dict
+    directly, so a typo in a URL produced `KeyError: '5min'` and an HTTP 500 with
+    a body nobody can act on.
+
+    Fails today with KeyError, not ValueError.
+    """
+    import threading
+
+    from navanax.dashboard import Dashboard
+
+    n, eng = _trait_chart_store(tmp, "badinterval.sqlite")
+    d = Dashboard.__new__(Dashboard)
+    d.engine, d.slugs, d.lock = eng, ["argonauts"], threading.Lock()
+    d.intervals, d.tz = eng.intervals, "America/Chicago"
+    try:
+        d.api_trait_series({"collection": "argonauts", "interval": "5min", "range": "24h"})
+        check("trait endpoint: an unknown interval is refused", False, "no exception raised")
+    except ValueError as exc:
+        check("trait endpoint: an unknown interval raises ValueError -- which the handler maps "
+              "to 400, not the KeyError that reached the page as a bare 500",
+              "5min" in str(exc) and "1h" in str(exc), str(exc)[:140])
+    except KeyError as exc:
+        check("trait endpoint: an unknown interval raises ValueError, not KeyError", False,
+              f"KeyError({exc}) -- this is the 500")
+    # The route table maps ValueError to 400 and everything else to 500; that
+    # mapping is the reason the exception TYPE is the fix.
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    check("trait endpoint: the handler still maps ValueError to 400 with the message as the body",
+          "except ValueError as exc:" in src and 'self._send(400, json.dumps({"error": str(exc)})' in src)
+    ok = d.api_trait_series({"collection": "argonauts", "interval": "1h", "range": "24h"})
+    check("trait endpoint: a known interval is unaffected", ok["basis"]["interval_id"] == "1h")
+    n.close()
+
+
+def test_trait_set_series_combined_floor_bounds_every_single_clause_floor(tmp: Path) -> None:
+    """THE PROPERTY, and note its DIRECTION -- the intuitive one is backwards.
+
+    `S(F_combined) = S(clause_1) n S(clause_2) n ...` is a SUBSET of each
+    single-clause set. The minimum over a subset is >= the minimum over the
+    superset, so at every bucket where both are defined:
+
+        combined floor  >=  each single-clause floor  >=  ...  and the
+        unfiltered baseline is <= all of them.
+
+    A run where a single-clause floor came out ABOVE the combined floor would
+    mean the AND-set is not a subset of that clause's set -- a broken token
+    filter, or a trait table where one token carries two values of one type and
+    the join is duplicating rather than intersecting. It would look like a
+    trait premium and it would be a bug (project rule 5).
+
+    Fails today: `single_floors` does not exist -- the multi-clause mode of the
+    chart had no metric behind it at all.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart5.sqlite")
+    r = _win(eng, {"Print": ["Unclaimed"], "Palette": ["Seafoam"]})
+    combined, base = r["trait_ask"]["median"], r["baseline_ask"]["median"]
+    check("trait chart: multi-clause mode returns the combined floor plus one floor per clause",
+          r["basis"]["mode"] == "multi" and len(r["single_floors"]) == 2
+          and {f["clause"] for f in r["single_floors"]} == {"Print", "Palette"},
+          str([f["clause"] for f in r["single_floors"]]))
+    check("trait chart: the fixture actually exercises the property -- the AND-set is ONE token "
+          "and each clause alone selects two, so the floors are genuinely different numbers",
+          r["matching_tokens"] == 1
+          and [f["matching_tokens"] for f in r["single_floors"]] == [2, 2],
+          str([(f["clause"], f["matching_tokens"]) for f in r["single_floors"]]))
+    viol = [(f["clause"], i, f["median"][i], combined[i])
+            for f in r["single_floors"] for i in range(len(combined))
+            if f["median"][i] is not None and combined[i] is not None
+            and f["median"][i] > combined[i] + 1e-12]
+    check("trait chart: PROPERTY -- at every bucket where both are defined, the combined (AND) "
+          "floor is >= every single-clause floor, because the AND-set is a subset of each",
+          not viol and combined[1] == 1.20, f"violations {viol}; combined {combined}")
+    low = [(i, base[i], combined[i]) for i in range(len(base))
+           if base[i] is not None and combined[i] is not None and base[i] > combined[i] + 1e-12]
+    check("trait chart: ...and the unfiltered baseline is at or below all of them",
+          not low and base[1] == 0.70, f"violations {low}; baseline {base}")
+    n.close()
+
+
+def test_trait_set_series_baseline_is_present_and_unfiltered(tmp: Path) -> None:
+    """The pale dotted line underneath is the COLLECTION floor, not a filtered one.
+
+    Fails today: no response carried a filtered series and its unfiltered
+    baseline together, so the page had to fire a second, differently-parameterised
+    request to draw the comparison -- two windows, two `now`s, and no guarantee
+    they were the same grid.
+    """
+    n, eng = _trait_chart_store(tmp, "traitchart6.sqlite")
+    for f in ({"Print": ["Unclaimed"]}, {"Print": ["Claimed"], "Palette": ["Ivory"]}):
+        r = _win(eng, f)
+        b = r["baseline_ask"]
+        check(f"trait chart: the baseline under {sorted(f)} is the UNFILTERED collection floor "
+              "(0.70, token 4 -- which the filter may exclude entirely)",
+              b["median"][1] == 0.70 and b["basis"]["kind"] == "ask", str(b["median"]))
+        check("trait chart: ...on the SAME grid as the filtered series, so the two can never "
+              "be drawn against different windows",
+              b["keys"] == r["keys"] and r["trait_ask"]["keys"] == r["keys"],
+              f"{b['keys']} vs {r['keys']}")
+    n.close()
+
+
+def test_trait_series_endpoint_passes_the_filter_through(tmp: Path) -> None:
+    """PR-6's endpoint: `/api/trait_series`, minimal, engine-owned.
+
+    Fails today: the route does not exist and `Dashboard.api_trait_series` is
+    not defined, so the page had nothing to call.
+    """
+    import threading
+
+    from navanax.dashboard import Dashboard
+
+    n, eng = _trait_chart_store(tmp, "traitchart7.sqlite")
+    d = Dashboard.__new__(Dashboard)
+    d.engine, d.slugs, d.lock = eng, ["argonauts"], threading.Lock()
+    d.intervals = eng.intervals
+    d.tz = "America/Chicago"
+    out = d.api_trait_series({"collection": "argonauts", "traits": "Print:Unclaimed",
+                              "interval": "1h", "range": "24h", "denom": "ETH"})
+    check("trait endpoint: it passes traits, interval, range and denomination through to the engine "
+          "and adds no calculation of its own",
+          out["basis"]["trait_filter"] == {"Print": ["Unclaimed"]}
+          and out["basis"]["interval_id"] == "1h" and out["basis"]["denomination"] == "ETH"
+          and out["matching_tokens"] == 2, str(out["basis"])[:200])
+    check("trait endpoint: the response is JSON-serialisable exactly as the handler sends it",
+          isinstance(json.dumps(out, default=str), str))
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    check("trait endpoint: the route table names it, so the page can actually reach it",
+          '"/api/trait_series": dash.api_trait_series' in src)
+
+    # The contract between the page and the API, written down. `traitChart()` reads
+    # exactly these; a rename on either side that this list does not catch shows up in
+    # the browser as `undefined` in a legend or a silently missing line, which on a
+    # panel full of legitimate holes is indistinguishable from a quiet market.
+    multi = d.api_trait_series({"collection": "argonauts", "range": "24h", "interval": "1h",
+                                "traits": "Print:Unclaimed;Palette:Seafoam"})
+    missing = [k for k in ("t", "trait_ask", "trait_bid", "baseline_ask", "single_floors",
+                           "matching_tokens", "partial_offers", "partial_detail",
+                           "unknown_offers", "unparsed_offers", "basis") if k not in multi]
+    missing += [f"trait_bid.{k}" for k in ("median", "coverage", "winning_leg", "n_item",
+                                           "n_trait_offer_cover", "n_collection")
+                if k not in multi["trait_bid"]]
+    missing += [f"basis.{k}" for k in ("book", "mode", "clauses", "denomination", "interval_id",
+                                       "buckets", "undefined_buckets", "matching_tokens",
+                                       "wash_filter", "timezone", "ask_rule", "bid_rule", "legs",
+                                       "partial_offers", "unknown_offers", "unparsed_offers",
+                                       "partial_note", "unknown_note", "left_truncation_note",
+                                       "gap_note") if k not in multi["basis"]]
+    missing += [f"single_floors[].{k}" for k in ("clause", "values", "median", "coverage", "n",
+                                                 "matching_tokens")
+                if multi["single_floors"] and k not in multi["single_floors"][0]]
+    missing += [f"{s}.{k}" for s in ("trait_ask", "baseline_ask") for k in ("median", "coverage", "n", "keys")
+                if k not in multi[s]]
+    check("trait endpoint: every field `traitChart()` reads is present in the response",
+          not missing, ", ".join(missing))
+    check("trait endpoint: a two-clause filter returns multi mode with one floor per clause",
+          multi["basis"]["mode"] == "multi" and multi["basis"]["clauses"] == 2
+          and len(multi["single_floors"]) == 2, str(multi["basis"]["mode"]))
+    n.close()
+
+
+def test_trait_set_series_ordering_survives_a_duplicated_traits_row(tmp: Path) -> None:
+    """The ordering property, on the shape that would break it (tech-lead gate, PR-5).
+
+    `test_..._combined_floor_bounds_every_single_clause_floor` names the failure
+    mode -- "a `traits` table where one token carries two values of one type and
+    the join is duplicating rather than intersecting" -- and then does not build
+    it: every token in that fixture has exactly one value per type, so the
+    duplicating join is never exercised. A property test that cannot see its own
+    counterexample is a test of the happy path with a warning attached.
+
+    A token with two values of one trait type is not a corruption. It is what a
+    multi-value attribute looks like in OpenSea metadata, and it arrives the
+    first time the Explorer cache is imported for a collection that has one.
+    Here token 1 carries `Palette: Seafoam` AND `Palette: Ivory`, and token 2
+    carries `Print: Unclaimed` AND `Print: Claimed`.
+
+    What must hold: `S(F_combined)` is still a SUBSET of every single-clause set,
+    so the combined floor stays at or ABOVE each of them and the unfiltered
+    baseline stays at or below all of them. A duplicating join would inflate
+    `|S(F)|`, pull a token into the AND-set that satisfies only one clause, and
+    render as a trait premium (docs/05 rule 5).
+
+    It holds because the filter is an `IN (SELECT ...)` per clause, ANDed --
+    `token_filter_sql`, metrics.py:380 -- not a JOIN per clause. `IN` is a
+    membership test and cannot multiply rows; `|S(F)|` is `COUNT(*)` over
+    `tokens`, one row per token, so it cannot double-count either. This test
+    pins that, so a future rewrite to a JOIN fails here rather than on screen.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "traitdup.sqlite")
+    rows = {"1": ("Unclaimed", "Seafoam"), "2": ("Unclaimed", "Ivory"),
+            "3": ("Claimed", "Seafoam"), "4": ("Claimed", "Ivory")}
+    for tid, (pr, pa) in rows.items():
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                           [("argonauts", tid, "Print", pr), ("argonauts", tid, "Palette", pa)])
+    # THE FIXTURE: two tokens each carrying a SECOND value of a type they already have.
+    n.conn.executemany("INSERT INTO traits VALUES (?,?,?,?)",
+                       [("argonauts", "1", "Palette", "Ivory"),
+                        ("argonauts", "2", "Print", "Claimed")])
+    seq = 0
+
+    def at(raw, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, "2026-09-09T10:00:00Z", seq, **over, **NO_EXP)
+
+    for tid, px in (("1", 1.20), ("2", 0.90), ("4", 0.70)):
+        at(DOC_LISTING, order_hash=f"0xask{tid}", token_id=tid, price_eth=px)
+    at(REAL_COLL_OFFER, order_hash="0xcoll", price_eth=0.348)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+    dup = n.conn.execute("SELECT COUNT(*) FROM traits WHERE collection='argonauts' "
+                         "AND token_id='1' AND trait_type='Palette'").fetchone()[0]
+    check("trait chart (dup traits): the fixture really does hold two values of one type for one "
+          "token -- without this the property test never sees its own counterexample", dup == 2, str(dup))
+
+    viol, low, sizes = [], [], []
+    for f in ({"Print": ["Unclaimed"], "Palette": ["Seafoam"]},
+              {"Print": ["Unclaimed"], "Palette": ["Ivory"]},
+              {"Print": ["Claimed"], "Palette": ["Ivory"]},
+              {"Print": ["Claimed"], "Palette": ["Seafoam"]}):
+        r = _win(eng, f)
+        comb, base = r["trait_ask"]["median"], r["baseline_ask"]["median"]
+        sizes.append((r["matching_tokens"], [s["matching_tokens"] for s in r["single_floors"]]))
+        viol += [(f, s["clause"], i, s["median"][i], comb[i])
+                 for s in r["single_floors"] for i in range(len(comb))
+                 if s["median"][i] is not None and comb[i] is not None
+                 and s["median"][i] > comb[i] + 1e-12]
+        low += [(f, i, base[i], comb[i]) for i in range(len(base))
+                if base[i] is not None and comb[i] is not None and base[i] > comb[i] + 1e-12]
+    check("trait chart (dup traits): PROPERTY -- the combined (AND) floor is still >= every "
+          "single-clause floor. A duplicating join would pull a token satisfying only ONE clause "
+          "into the AND-set and render it as a trait premium (docs/05 rule 5)",
+          not viol, f"violations {viol}")
+    check("trait chart (dup traits): ...and the unfiltered baseline is still at or below all of them",
+          not low, f"violations {low}")
+    check("trait chart (dup traits): |S(F)| is never inflated by the duplicate -- the AND-set is "
+          "at most as large as either clause alone, on every filter",
+          all(c <= min(s) for c, s in sizes), str(sizes))
+    check("trait chart (dup traits): the duplicate WIDENS the single-clause sets it belongs to "
+          "(Palette:Ivory now reaches 3 tokens, Print:Claimed 3) -- the fixture is live, not inert",
+          sizes[1][1] == [2, 3] and sizes[2][1] == [3, 3], str(sizes))
+    n.close()
+
+
+def test_merge_leg_maxima_reports_a_tie_as_every_leg_that_holds_it(tmp: Path) -> None:
+    """A tie names BOTH legs. Nothing tested this (tech-lead gate, PR-5).
+
+    `merge_leg_maxima` documents ties as its central design choice -- "two legs
+    quoting the same best price is a fact about the book, and naming one of them
+    would be an invention" -- and docs/08 §4a.1 promises the Operator the string
+    `"item+collection"` by name. Every fixture in the suite had three legs at
+    three different prices, so replacing the tie branch with `pass` (first leg
+    wins by iteration order) passed the entire suite. That is a documented
+    behaviour with no coverage: the leg-mixing guard would have gone silently
+    one-sided, and on a book this thin two makers quoting the same round number
+    is common, not exotic.
+
+    Here the item bid and the collection offer are BOTH 0.50 and both beat the
+    COVERing trait offer at 0.41.
+    """
+    import copy
+
+    from navanax.metrics import MetricEngine, load_intervals, merge_leg_maxima
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    # -- the primitive, directly: ties, and no invented precedence -------------
+    legs = {"collection": [(0.0, 10.0, 0.5)], "item": [(0.0, 10.0, 0.5)],
+            "trait_offer": [(0.0, 4.0, 0.9)]}
+    got = merge_leg_maxima(legs)
+    check("merge_leg_maxima: while a third leg is strictly highest it alone is named",
+          got[0][2] == (0.9, ("trait_offer",)), str(got))
+    check("merge_leg_maxima: when it drops out, the two legs tied at the max are BOTH named, "
+          "in a tuple -- not one of them picked by dict order",
+          got[-1][2][0] == 0.5 and sorted(got[-1][2][1]) == ["collection", "item"], str(got))
+    rev = merge_leg_maxima({k: legs[k] for k in reversed(list(legs))})
+    check("merge_leg_maxima: reversing the leg order names the SAME set of legs -- a result that "
+          "depends on dict iteration order is a precedence rule nobody decided",
+          len(rev[-1][2][1]) == 2 and sorted(rev[-1][2][1]) == sorted(got[-1][2][1]),
+          f"{rev[-1]} vs {got[-1]}")
+
+    # -- and end to end, as `winning_leg` on the chart -------------------------
+    n, put = _lives_store(tmp, "traittie.sqlite")
+    for tid, pr in (("1", "Unclaimed"), ("2", "Unclaimed"), ("3", "Claimed")):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", tid, "Print", pr))
+    seq = 0
+
+    def at(raw, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, "2026-09-09T10:00:00Z", seq, **over, **NO_EXP)
+
+    at(DOC_LISTING, order_hash="0xask1", token_id="1", price_eth=1.20)
+    at(REAL_BID, order_hash="0xbid1", token_id="1", price_eth=0.50)    # item leg
+    at(REAL_COLL_OFFER, order_hash="0xcoll", price_eth=0.50)           # collection leg, SAME price
+    raw = copy.deepcopy(REAL_TRAIT_OFFER)
+    raw[4]["payload"]["trait_criteria"] = {"trait_type": "Print", "trait_name": "Unclaimed"}
+    raw[4]["payload"]["trait_criteria_list"] = None
+    at(raw, order_hash="0xtcov", price_eth=0.41)                       # COVERing, but lower
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    b = _win(eng, {"Print": ["Unclaimed"]})["trait_bid"]
+    check("trait chart: two legs tied at the best bid put BOTH names on screen, joined and sorted "
+          "-- docs/08 §4a.1 promises the Operator this exact string",
+          b["median"][1] == 0.50 and b["winning_leg"][1] == "collection+item", str(b["winning_leg"]))
+    check("trait chart: ...and each tied leg still carries its OWN n; the tie is not a merge",
+          (b["n_item"][1], b["n_collection"][1], b["n_trait_offer_cover"][1]) == (1, 1, 1), str(b))
+    n.close()
+
+
+AS_OF = "2026-09-09T10:02:00Z"          # the fold time every survival fixture below asks about
+
+
+def _survival_fixture(tmp: Path, name: str):
+    """The six-life fixture the KM numbers below are hand-computed from.
+
+    Placed so that, AT `AS_OF` = 10:02:00, the six durations are exactly
+    10, 20, 30, 40, 50, 60 seconds with one of each exit and ONE censored:
+
+        0xa  cancelled   at +10s      0xd  still standing, placed 10:01:20 -> censored at 40s
+        0xb  cancelled   at +20s      0xe  invalidated at +50s
+        0xc  filled      at +30s      0xf  expires     at +60s (derived, no event row)
+
+    Six makers, six tokens, so n_eff = 6 and every life is its own episode.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+    n, put = _survival_store(tmp, name)
+    seq = 0
+
+    def at(raw, when, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, when, seq, **over)
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xa", token_id="1", maker="0xm1", price_eth=0.5, **NO_EXP)
+    at(REAL_CANCEL, "2026-09-09T10:00:10Z", order_hash="0xa", token_id="1")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xb", token_id="2", maker="0xm2", price_eth=0.5, **NO_EXP)
+    at(REAL_CANCEL, "2026-09-09T10:00:20Z", order_hash="0xb", token_id="2")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xc", token_id="3", maker="0xm3", price_eth=0.5, **NO_EXP)
+    at(REAL_SALE, "2026-09-09T10:00:30Z", order_hash="0xc", token_id="3")
+    at(REAL_BID, "2026-09-09T10:01:20Z", order_hash="0xd", token_id="4", maker="0xm4", price_eth=0.5, **NO_EXP)
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xe", token_id="5", maker="0xm5", price_eth=0.5, **NO_EXP)
+    at(REAL_INVALIDATE, "2026-09-09T10:00:50Z", order_hash="0xe", token_id="5")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xf", token_id="6", maker="0xm6", price_eth=0.5,
+       expiration_at="2026-09-09T10:01:00Z", expiration_ts=iso_to_ts("2026-09-09T10:01:00Z"))
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    return n
+
+
+def _survival_store(tmp: Path, name: str):
+    return _lives_store(tmp, name)
+
+
+def _survival_engine(n):
+    from navanax.metrics import MetricEngine, load_intervals
+    return MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+
+
+def test_survival_kaplan_meier_matches_a_hand_computed_fixture(tmp: Path) -> None:
+    """PR-8, quant §3.2. Every number here was computed by hand before the code ran.
+
+    Kaplan-Meier over six lives, one of them right-censored:
+
+        t=10  n=6 d=1  S = 5/6                = 0.833333
+        t=20  n=5 d=1  S = 5/6 * 4/5 = 4/6    = 0.666667
+        t=30  n=4 d=1  S = 4/6 * 3/4 = 3/6    = 0.500000
+        t=40             (0xd is CENSORED here: it leaves the risk set, contributes
+                          no death, and the curve does not step)
+        t=50  n=2 d=1  S = 1/2 * 1/2          = 0.250000
+        t=60  n=1 d=1  S = 0.25 * 0/1         = 0.000000
+
+    Greenwood at t=30:  v = 1/(6*5) + 1/(5*4) + 1/(4*3) = 1/30 + 1/20 + 1/12 = 1/6
+      sigma = sqrt(1/6) / |ln 0.5| = 0.4082483 / 0.6931472 = 0.5889778
+      CI95  = [0.5^exp(+1.96*sigma), 0.5^exp(-1.96*sigma)] = [0.110943, 0.803713]
+
+    Aalen-Johansen, four causes:
+      F_cancelled(60)  = 1*(1/6) + (5/6)*(1/5)            = 1/6 + 1/6 = 0.333333
+      F_filled(60)     = (4/6)*(1/4)                      = 0.166667
+      F_invalidated(60)= (3/6)*(1/2)                      = 0.250000
+      F_expired(60)    = (1/4)*(1/1)                      = 0.250000
+      SUM = 1.000000 = 1 - S(60).   1 - KM per cause would NOT sum to this.
+
+    RMST(tau*=45) = 1*10 + (5/6)*10 + (4/6)*10 + (1/2)*15 = 10 + 8.33333 + 6.66667 + 7.5 = 32.5
+      with P(not ended by 45) = S(45) = 0.5 printed beside it.
+    Residual: S(50 | age 30) = S(50)/S(30) = 0.25/0.5 = 0.5.
+
+    Every assertion fails today for the same reason: `MetricEngine.survival` does
+    not exist, and `bid_lifetimes` -- the only estimator there was -- drops the
+    censored life entirely and has no notion of a cause.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n = _survival_fixture(tmp, "km.sqlite")
+    eng = _survival_engine(n)
+    r = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF),
+                     tau=45.0, residual_ages=[30.0], residual_horizons=[20.0])
+    km = r["km"]
+    want_t = [0.0, 10.0, 20.0, 30.0, 50.0, 60.0]
+    want_s = [1.0, 5 / 6, 4 / 6, 3 / 6, 0.25, 0.0]
+    check("survival (KM): the curve steps at the five DEATH times and not at the censoring",
+          km["t"] == want_t, f"{km['t']}")
+    check("survival (KM): S(t) matches the hand computation at every step, censored life included",
+          all(abs(a - b) < 1e-12 for a, b in zip(km["s"], want_s, strict=True)), f"{km['s']}")
+    check("survival (KM): the censored life stays in the RISK SET until it is censored -- "
+          "n at t=30 is 4, which is the whole point (bid_lifetimes drops it and reports 5 ended)",
+          km["n_at_risk"] == [6, 6, 5, 4, 2, 1], f"{km['n_at_risk']}")
+    check("survival: n counts orders, censored_n counts the ones still standing at as_of",
+          (r["n"], r["ended_n"], r["censored_n"]) == (6, 5, 1), str((r["n"], r["ended_n"], r["censored_n"])))
+
+    i30 = km["t"].index(30.0)
+    check("survival (Greenwood, log-log): the band at t=30 is the hand-computed [0.110943, 0.803713] "
+          "-- NOT S +/- 1.96 SE, which leaves [0,1] in the tails",
+          abs(km["greenwood_lower"][i30] - 0.110943) < 5e-6
+          and abs(km["greenwood_upper"][i30] - 0.803713) < 5e-6,
+          f"{km['greenwood_lower'][i30]}, {km['greenwood_upper'][i30]}")
+    contained = [(t, lo, s, hi) for t, lo, s, hi in
+                 zip(km["t"], km["greenwood_lower"], km["s"], km["greenwood_upper"], strict=True)
+                 if lo is not None and not (lo <= s <= hi)]
+    check("survival (Greenwood): the band CONTAINS S at every t where it is defined",
+          not contained, str(contained))
+    check("survival (Greenwood): the band is null -- never clamped -- where it is undefined "
+          "(S=1 at t=0 has no log, and n=d at t=60 makes the variance infinite)",
+          km["greenwood_lower"][-1] is None and km["greenwood_upper"][-1] is None,
+          f"{km['greenwood_lower']}")
+
+    bad = [(t, tot, 1 - s) for t, s, tot in
+           zip(km["t"], km["s"], [sum(r["cif"][c][i] for c in r["causes"]) for i in range(len(km["t"]))],
+               strict=True) if abs(tot - (1 - s)) > 1e-12]
+    check("survival (Aalen-Johansen): the CIFs sum to 1 - S(t) at EVERY t -- the identity that "
+          "1 - KM per cause does not have, and the reason each cause is not overstated",
+          not bad, str(bad))
+    last = len(km["t"]) - 1
+    check("survival (AJ): each cause's incidence is the hand-computed value at t=60",
+          all(abs(r["cif"][c][last] - w) < 1e-12 for c, w in
+              (("cancelled", 1 / 3), ("filled", 1 / 6), ("invalidated", 0.25), ("expired", 0.25))),
+          str({c: r["cif"][c][last] for c in r["causes"]}))
+
+    check("survival (RMST): the area under the step curve to tau*=45 is 32.5 s",
+          abs(r["rmst"]["rmst_s"] - 32.5) < 1e-9, str(r["rmst"]))
+    check("survival (RMST): ...and P(not ended by tau*) = S(45) = 0.5 travels WITH it -- "
+          "an RMST without it is half a number (quant §3.2)",
+          abs(r["rmst"]["p_alive_at_tau"] - 0.5) < 1e-12, str(r["rmst"]))
+    res = next(x for x in r["residual"] if x["age_s"] == 30.0 and x["horizon_s"] == 20.0)
+    check("survival (residual): S(t+L | age=t) = S(50)/S(30) = 0.5",
+          abs(res["p_still_standing"] - 0.5) < 1e-12, str(res))
+    far = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF),
+                       tau=10_000.0)
+    check("survival (RMST): a tau* beyond the largest observed duration is REFUSED, not "
+          "extrapolated by extending the last step flat (docs/06 §4.3: holes are never filled)",
+          far["rmst"]["rmst_s"] is None and "not extrapolated" in (far["rmst"]["note"] or ""),
+          str(far["rmst"]))
+    n.close()
+
+
+def test_survival_censors_a_life_that_ended_after_as_of(tmp: Path) -> None:
+    """`exit_reason` is stored AS OF THE FOLD. The estimator must re-read it against
+    the `as_of` it was asked about, or it learns the future.
+
+    One bid placed at 10:00:00 and cancelled at 10:01:40. Folded at 10:02:00 the
+    row says `cancelled`. Asked "what did this look like at 10:00:50", the life
+    must be CENSORED at 50 s -- not ended at 100 s, which is a termination that
+    had not happened yet.
+
+    Fails today: nothing takes an `as_of` at all. `bid_lifetimes` reads
+    `exit_reason` straight off the row.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "asof.sqlite")
+    put(REAL_BID, "2026-09-09T10:00:00Z", 1, order_hash="0xz", token_id="1", maker="0xm1", **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:01:40Z", 2, order_hash="0xz", token_id="1")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    check("survival (as_of): the stored fold really does say `cancelled` -- this is the trap",
+          n.conn.execute("SELECT exit_reason FROM order_lives WHERE order_hash='0xz'").fetchone()[0]
+          == "cancelled")
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+    early = eng.survival("argonauts", s0, e0, iso_to_ts("2026-09-09T10:00:50Z"))
+    check("survival (as_of): a life with t_term > as_of is CENSORED at as_of, not ended",
+          (early["ended_n"], early["censored_n"], early["ended_after_as_of_n"]) == (0, 1, 1), str(early))
+    check("survival (as_of): ...and its duration is as_of - t_place = 50 s, so the curve never steps",
+          early["km"]["t"] == [0.0] and early["km"]["s"] == [1.0]
+          and early["strip"][0]["duration_s"] == 50.0, str(early["km"]))
+    late = eng.survival("argonauts", s0, e0, e0)
+    check("survival (as_of): asked at 10:02:00 the SAME row is an exit at 100 s",
+          (late["ended_n"], late["censored_n"]) == (1, 0) and late["km"]["t"] == [0.0, 100.0],
+          str(late["km"]))
+    with_unknown = n.conn.execute("SELECT COUNT(*) FROM order_lives WHERE exit_reason='unknown'").fetchone()[0]
+    check("survival (as_of): the fixture has no untimed terminator, and the estimator still "
+          "reports the count rather than leaving the caller to assume zero",
+          with_unknown == 0 and late["unknown_terminator_n"] == 0)
+    n.close()
+
+
+def test_survival_n_eff_is_maker_episodes_not_orders(tmp: Path) -> None:
+    """n_eff = maker-episode clusters (quant §2.1, §3.3). One maker requoting the
+    same token three times inside epsilon is ONE observation of independence, not
+    three, and the band has to be built from that count.
+
+    Six lives, six orders. Three of them are 0xbot requoting token 1 at 10 s
+    intervals (epsilon = 60 s), so n_eff = 4: one bot episode plus three
+    one-order episodes. Fails today: there is no episode concept anywhere.
+    """
+    from navanax.metrics import EPISODE_GAP_SECONDS, episode_ids
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "eff.sqlite")
+    seq = 0
+
+    def at(raw, when, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, when, seq, **over)
+    for i, when in enumerate(("2026-09-09T10:00:00Z", "2026-09-09T10:00:10Z", "2026-09-09T10:00:20Z")):
+        at(REAL_BID, when, order_hash=f"0xq{i}", token_id="1", maker="0xbot", **NO_EXP)
+    for i, m in enumerate(("0xp", "0xq", "0xr")):
+        at(REAL_BID, "2026-09-09T10:00:00Z", order_hash=f"0xs{i}", token_id=str(i + 2), maker=m, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    r = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF))
+    check("survival (n_eff): one maker requoting one token inside epsilon collapses to ONE cluster, "
+          "so n_eff (4) < n (6) -- the band is built from 4, not 6",
+          (r["n"], r["n_eff"]) == (6, 4), str((r["n"], r["n_eff"])))
+    check("survival (n_eff): epsilon is reported with the number it produced",
+          r["episode_gap_s"] == EPISODE_GAP_SECONDS and r["min_clusters"] == 30, str(r["episode_gap_s"]))
+    spread = episode_ids([{"maker": "0xbot", "scope_kind": "item", "token_id": "1", "t_place": 0.0},
+                          {"maker": "0xbot", "scope_kind": "item", "token_id": "1",
+                           "t_place": EPISODE_GAP_SECONDS + 1.0}])
+    check("survival (n_eff): the same maker on the same token a full epsilon later is a NEW episode "
+          "-- a stop and a restart, not one continuous quote",
+          spread[0] != spread[1], str(spread))
+    same = episode_ids([{"maker": None, "scope_kind": "item", "token_id": "1", "t_place": 0.0},
+                        {"maker": None, "scope_kind": "item", "token_id": "9", "t_place": 5000.0}])
+    check("survival (n_eff): lives with NO maker share one cluster -- the conservative direction, "
+          "because inventing independence we cannot see narrows the band",
+          same[0] == same[1], str(same))
+    n.close()
+
+
+def test_survival_below_the_cluster_minimum_refuses_percentiles_and_strips(tmp: Path) -> None:
+    """REQ-F-19 as quant §3.3 sharpens it: the binding minimum is 30 maker-episode
+    CLUSTERS, not 30 orders. Below it the panel draws every observation and the
+    estimator refuses every percentile -- refuses, does not flag (docs/00:199).
+
+    Fails today: `bid_lifetimes` guards on the ORDER count, so 38,286 quotes from
+    3 makers would sail past a 30-order threshold and print percentiles about
+    three machines as if they were about the market.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n = _survival_fixture(tmp, "strip.sqlite")
+    eng = _survival_engine(n)
+    r = eng.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF))
+    check("survival (min n): at n_eff = 6 < 30 the mode is `strip`, not `curve`",
+          r["mode"] == "strip" and r["n_eff"] == 6, str((r["mode"], r["n_eff"])))
+    check("survival (min n): percentiles are None -- all three, because a median is a percentile too",
+          r["percentiles"] is None and r["percentiles_withheld"] is True, str(r["percentiles"]))
+    check("survival (min n): the refusal says WHY, in clusters, so the page can print the reason "
+          "instead of a blank",
+          "n_eff = 6" in r["percentiles_withheld_reason"] and "30" in r["percentiles_withheld_reason"],
+          r["percentiles_withheld_reason"])
+    strip = r["strip"]
+    check("survival (min n): `strip` carries EVERY observation, one row per life, with its exit",
+          strip is not None and len(strip) == 6
+          and sorted(x["duration_s"] for x in strip) == [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+          str(strip and [x["duration_s"] for x in strip]))
+    check("survival (min n): the censored life is labelled `censored` on the strip, never `cancelled` "
+          "-- it has not exited",
+          sorted(x["exit_reason"] for x in strip)
+          == ["cancelled", "cancelled", "censored", "expired", "filled", "invalidated"],
+          str(sorted(x["exit_reason"] for x in strip)))
+    n.close()
+
+
+def test_survival_cluster_bootstrap_is_deterministic_and_wider_than_greenwood(tmp: Path) -> None:
+    """The band the panel draws is a maker-episode cluster bootstrap (factcheck D-W5),
+    and it is reproducible: `random.Random(seed)` and nothing else.
+
+    Fails today for the obvious reason and for a second one worth stating: the
+    design proposal specified a Greenwood band, and Greenwood assumes independent
+    observations. On a book quoted by three bots it is roughly sqrt(n/n_eff) too
+    narrow, so shipping it would put false precision on the front page.
+    """
+    from navanax.metrics import cluster_bootstrap, km_curve
+    from navanax.normalize import iso_to_ts
+
+    n = _survival_fixture(tmp, "boot.sqlite")
+    eng = _survival_engine(n)
+    args = ("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF), iso_to_ts(AS_OF))
+    a = eng.survival(*args, bootstrap_b=200)
+    b = eng.survival(*args, bootstrap_b=200)
+    check("survival (bootstrap): two runs at the same seed give the SAME band, to the bit",
+          a["band"]["s_lower"] == b["band"]["s_lower"] and a["band"]["s_upper"] == b["band"]["s_upper"],
+          str(a["band"]["s_lower"])[:120])
+    c = eng.survival(*args, bootstrap_b=200, seed=1)
+    check("survival (bootstrap): a different seed gives a different band -- the seed is real, "
+          "not decoration",
+          c["band"]["s_lower"] != a["band"]["s_lower"], str(c["band"]["s_lower"])[:120])
+    check("survival (bootstrap): the band, its B and its seed are reported together",
+          a["band"]["b_used"] == 200 and a["band"]["seed"] == 20260910
+          and a["band"]["b_requested"] == 200, str({k: a["band"][k] for k in ("b_used", "seed", "b_requested")}))
+    check("survival (bootstrap): a CIF band is produced per cause on the same grid",
+          all(len(a["band"]["cif_lower"][cz]) == len(a["band"]["grid"]) for cz in a["causes"]),
+          str([len(a["band"]["cif_lower"][cz]) for cz in a["causes"]]))
+
+    # the property that makes the cluster bootstrap the right band: on data where
+    # every life belongs to ONE maker-episode, resampling clusters cannot vary at
+    # all, and a band of width zero is the honest answer to "how independent is this?"
+    obs = [(float(i + 1), True, "cancelled") for i in range(40)]
+    one = cluster_bootstrap({"one-episode": obs}, [10.0, 20.0], b=50, seed=7)
+    check("survival (bootstrap): 40 orders inside ONE maker-episode resample to a band of width "
+          "zero -- 40 quotes from one bot are one observation of independence, and an "
+          "order-level bootstrap would have manufactured a tight, confident band instead",
+          one["s_lower"] == one["s_upper"], str((one["s_lower"], one["s_upper"])))
+    gw = km_curve(obs)
+    check("survival (bootstrap): ...while Greenwood on the same 40 orders reports a band with "
+          "real width, which is exactly the false precision D-W5 warns about",
+          gw["greenwood_lower"][5] is not None and gw["greenwood_upper"][5] - gw["greenwood_lower"][5] > 0.05,
+          str((gw["greenwood_lower"][5], gw["greenwood_upper"][5])))
+
+    # The property that actually matters, and the one D-W5's "~15x too narrow"
+    # estimate is about: when each cluster has its OWN characteristic lifetime --
+    # the bot case, many quotes from few behaviours -- the cluster band must be
+    # materially WIDER than both Greenwood and an order-level bootstrap. On
+    # homogeneous clusters all three agree, which is why asserting only the
+    # degenerate case above would not have caught a bootstrap that resamples the
+    # wrong unit.
+    import random as _rnd
+
+    from navanax.metrics import survival_grid
+    rng = _rnd.Random(11)
+    het: list[tuple[float, bool, str | None]] = []
+    hby: dict[str, list[tuple[float, bool, str | None]]] = {}
+    for cl in range(20):
+        scale = rng.uniform(2, 40)               # this cluster's own behaviour
+        for _ in range(40):
+            o = (round(rng.expovariate(1 / scale) + 0.5, 3), True, "cancelled")
+            het.append(o)
+            hby.setdefault(f"c{cl}", []).append(o)
+    hkm = km_curve(het)
+    hg = survival_grid(hkm["t"])
+    i = len(hg) // 2
+    j = hkm["t"].index(hg[i])
+    gw_w = hkm["greenwood_upper"][j] - hkm["greenwood_lower"][j]
+    hb = cluster_bootstrap(hby, hg, b=150, seed=5)
+    cl_w = hb["s_upper"][i] - hb["s_lower"][i]
+    ob = cluster_bootstrap({f"o{k}": [o] for k, o in enumerate(het)}, hg, b=150, seed=5)
+    ob_w = ob["s_upper"][i] - ob["s_lower"][i]
+    check("survival (bootstrap): with 800 orders from 20 clusters that each quote differently, the "
+          "MAKER-EPISODE band is materially wider than Greenwood -- resampling orders instead "
+          "would have shipped a band a bot's repetition made look precise (D-W5)",
+          cl_w > 2 * gw_w and cl_w > 2 * ob_w,
+          f"cluster {cl_w:.4f} vs greenwood {gw_w:.4f} vs order-level {ob_w:.4f}")
+    n.close()
+
+
+def test_survival_filters_compose(tmp: Path) -> None:
+    """trait AND maker AND price band -- an intersection, not three separate views.
+
+    Four lives over three tokens. Each filter alone selects three of them; all
+    three together select exactly one. If any pair were OR-ed, or one were
+    ignored, the combined count would not be 1. Fails today: no such call exists.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "filters.sqlite")
+    for tid, pr in (("1", "Unclaimed"), ("2", "Unclaimed"), ("3", "Claimed")):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                       ("argonauts", tid, f"Argo #{tid}", "2026-09-09T00:00:00Z"))
+        n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", tid, "Print", pr))
+    rows = (("0xf1", "1", "0xA", 0.50), ("0xf2", "2", "0xA", 1.50),
+            ("0xf3", "1", "0xB", 0.50), ("0xf4", "3", "0xA", 0.50))
+    for i, (h, tid, mk, pr) in enumerate(rows):
+        put(REAL_BID, "2026-09-09T10:00:00Z", i + 1, order_hash=h, token_id=tid, maker=mk,
+            price_eth=pr, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+
+    def nn(**kw):
+        return eng.survival("argonauts", s0, e0, e0, **kw)["n"]
+    check("survival (filters): unfiltered is all four lives", nn() == 4, str(nn()))
+    check("survival (filters): the trait clause alone selects the three lives on Unclaimed tokens",
+          nn(traits={"Print": ["Unclaimed"]}) == 3, str(nn(traits={"Print": ["Unclaimed"]})))
+    check("survival (filters): the maker clause alone selects 0xA's three lives",
+          nn(maker="0xA") == 3, str(nn(maker="0xA")))
+    check("survival (filters): the price band alone selects the three lives at 0.50",
+          nn(price_band=(0.1, 1.0)) == 3, str(nn(price_band=(0.1, 1.0))))
+    check("survival (filters): trait AND maker AND band is the INTERSECTION -- one life, not three "
+          "and not seven",
+          nn(traits={"Print": ["Unclaimed"]}, maker="0xA", price_band=(0.1, 1.0)) == 1,
+          str(nn(traits={"Print": ["Unclaimed"]}, maker="0xA", price_band=(0.1, 1.0))))
+    check("survival (filters): a filter that selects nothing returns n = 0 with the curve at 1, "
+          "never an empty response the page has to guess about",
+          eng.survival("argonauts", s0, e0, e0, maker="0xNOBODY")["n"] == 0)
+    n.close()
+
+
+def test_survival_drill_carries_both_clocks_and_the_distance_to_floor(tmp: Path) -> None:
+    """The drill list (design §4.3). Both timestamps ride along deliberately:
+    `observed_at - valid_at` is our stream lag, and a bid whose whole life is
+    shorter than the lag was never reachable -- a fact about strategy feasibility
+    that is invisible unless both clocks are on the row.
+
+    Fails today: there is no drill endpoint and no distance-to-floor anywhere.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "drill.sqlite")
+    n.conn.execute("INSERT INTO tokens (collection, token_id, name, listed_at) VALUES (?,?,?,?)",
+                   ("argonauts", "1", "Argo #1", "2026-09-09T00:00:00Z"))
+    n.conn.execute("INSERT INTO traits VALUES (?,?,?,?)", ("argonauts", "1", "Print", "Unclaimed"))
+    put(DOC_LISTING, "2026-09-09T09:59:00Z", 1, order_hash="0xask", token_id="1", price_eth=1.20, **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:00:10Z", 6, order_hash="0xask", token_id="1")
+    put(REAL_BID, "2026-09-09T10:00:00Z", 2, order_hash="0xb1", token_id="1", maker="0xm1", price_eth=0.90,
+        observed_at="2026-09-09T10:00:02.500000Z",
+        observed_ts=iso_to_ts("2026-09-09T10:00:02.500000Z"), **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:00:06Z", 3, order_hash="0xb1", token_id="1")
+    # a bid placed after the only ask was cancelled: no floor was KNOWN, so the distance is a HOLE
+    put(REAL_BID, "2026-09-09T10:00:20Z", 4, order_hash="0xb2", token_id="9", maker="0xm2", price_eth=0.10, **NO_EXP)
+    put(REAL_CANCEL, "2026-09-09T10:00:25Z", 5, order_hash="0xb2", token_id="9")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+    d = eng.survival_drill("argonauts", s0, e0, e0, 4.0, 8.0)
+    check("survival (drill): the bin holds both five-second-ish lives, with a maker count for the header",
+          d["total"] == 2 and d["makers"] == 2, str({k: d[k] for k in ("total", "makers")}))
+    row = next(r for r in d["rows"] if r["order_hash"] == "0xb1")
+    check("survival (drill): BOTH clocks are on the row, and the stream lag is the difference",
+          row["placed_at_valid"].startswith("2026-09-09T10:00:00")
+          and row["placed_at_observed"].startswith("2026-09-09T10:00:02.5")
+          and abs(row["stream_lag_s"] - 2.5) < 1e-6, str(row))
+    check("survival (drill): distance to floor is bid - the COLLECTION-wide standing ask at the "
+          "instant of placement (0.90 - 1.20 = -0.30), not the ask at some other time",
+          abs(row["floor_ask_at_placement_eth"] - 1.20) < 1e-9
+          and abs(row["distance_to_floor_eth"] + 0.30) < 1e-9, str(row))
+    check("survival (drill): the exit reason, the lifetime and the traits are on the row",
+          row["exit_reason"] == "cancelled" and abs(row["lifetime_s"] - 6.0) < 1e-9
+          and row["traits"] == {"Print": "Unclaimed"}, str(row))
+    hole = next(r for r in d["rows"] if r["order_hash"] == "0xb2")
+    check("survival (drill): with no ask standing at that instant the distance is None -- never "
+          "the last floor seen, never estimated (docs/06 §4.3)",
+          hole["floor_ask_at_placement_eth"] is None and hole["distance_to_floor_eth"] is None, str(hole))
+    check("survival (drill): the floor basis says which floor it is, so `-0.30` cannot be read as "
+          "a distance to the ask on THAT token",
+          "STANDING ask at the instant of placement" in d["floor_basis"], d["floor_basis"])
+    empty = eng.survival_drill("argonauts", s0, e0, e0, 1000.0, 2000.0)
+    check("survival (drill): a bin with nothing in it is an empty list with its counts, not an error",
+          empty["total"] == 0 and empty["rows"] == [], str(empty))
+    n.close()
+
+
+def test_survival_constants_cannot_drift_from_assumptions_yaml() -> None:
+    """Same device as ASM-021's: the register is the artifact a reviewer trusts, so
+    it must not be able to disagree with the code it describes. epsilon, B, the
+    seed and the cluster minimum are all judgements two reasonable people could
+    argue about, which is the test for "assumption" (docs/06 §4.1)."""
+    import yaml
+
+    from navanax.metrics import (
+        EPISODE_GAP_SECONDS,
+        MIN_CLUSTERS_FOR_SURVIVAL,
+        SURVIVAL_BOOTSTRAP_B,
+        SURVIVAL_BOOTSTRAP_SEED,
+        SURVIVAL_BOOTSTRAP_WORK_CAP,
+    )
+    doc = yaml.safe_load((ROOT / "config" / "assumptions.yaml").read_text())
+    asm = next((a for a in (doc.get("assumptions") or []) if a.get("id") == "ASM-022"), {})
+    check("assumptions: ASM-022 exists and names its layer, owner, rationale and code",
+          all(asm.get(k) for k in ("layer", "owner", "rationale", "code", "value")), str(sorted(asm)))
+    v = asm.get("value") or {}
+    check("assumptions: ASM-022's epsilon IS metrics.EPISODE_GAP_SECONDS",
+          v.get("episode_gap_seconds") == EPISODE_GAP_SECONDS,
+          f"{v.get('episode_gap_seconds')} vs {EPISODE_GAP_SECONDS}")
+    check("assumptions: ASM-022's B, seed, work cap and cluster minimum ARE the ones the code uses",
+          (v.get("bootstrap_b"), v.get("bootstrap_seed"), v.get("bootstrap_work_cap"),
+           v.get("min_clusters_for_survival_percentiles"))
+          == (SURVIVAL_BOOTSTRAP_B, SURVIVAL_BOOTSTRAP_SEED, SURVIVAL_BOOTSTRAP_WORK_CAP,
+              MIN_CLUSTERS_FOR_SURVIVAL), str(v))
+    check("assumptions: ASM-022 does NOT restate min_n_for_percentiles -- one threshold, one "
+          "statement of it, or the register grows two answers to one question",
+          "min_n_for_percentiles" not in v, str(sorted(v)))
+
+
+def test_ui_survival_panel_is_the_shape_the_design_specifies() -> None:
+    """DESIGN §4.1-4.3, as corrected by factcheck D-W4/D-W5/D-W6. The four-cell
+    table (n / p10 / median / p90) is gone; the panel is a step curve with a
+    cluster-bootstrap band, an exit-reason histogram, a placement-time mini-map
+    that brushes, and a drill list.
+
+    Fails today: `#life` renders a four-cell table off `/api/lifetimes`.
+    """
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    check("ui/survival: the four-cell lifetime table is gone",
+          "/api/lifetimes" not in html and "no bid→cancel pairs in window" not in html)
+    check("ui/survival: the panel reads /api/survival and /api/survival_drill",
+          "/api/survival?" in html and "/api/survival_drill?" in html)
+    # B4. Scoped to the ONE trace the reader sees, not to "the file contains 'hv'
+    # somewhere". The band's two invisible edge traces are also 'hv'; before this
+    # was scoped, switching the visible curve to a straight interpolation between
+    # event times -- which is the actual lie DESIGN §4.1a forbids -- left the
+    # assertion green on the band's shapes alone.
+    curve = html.split("name:'still standing'", 1)[1].split("}", 1)[0] if "name:'still standing'" in html else ""
+    check("ui/survival: the VISIBLE curve trace is a step (its own line.shape is 'hv'), so switching "
+          "it to a straight interpolation fails here even though the band traces are still 'hv'",
+          "shape:'hv'" in curve and "shape:'spline'" not in html, f"line of the curve trace: {curve[:90]!r}")
+    check("ui/survival: the band is drawn as a fill, and it is the CLUSTER BOOTSTRAP band, "
+          "not Greenwood (D-W5)",
+          "tonexty" in html and "band.s_lower" in html and "greenwood" not in html.split("<script>")[1])
+    check("ui/survival: the x-axis is logarithmic BY DEFAULT -- lifetimes span 1 s to hours",
+          "SURV.log?'log':'linear'" in html and "log:true" in html)
+    check("ui/survival: exit reasons are a STACKED histogram per duration bin",
+          "barmode:'stack'" in html and "by_reason" in html)
+    check("ui/survival: the mini-map is a separate wall-clock strip that BRUSHES the window, and "
+          "the brush snaps to whole placement buckets rather than doing local->UTC arithmetic",
+          "s-mini" in html and "placements" in html and "SURV.from=P.t[i]" in html
+          and "type:'date'" in html)
+    check("ui/survival: clicking a histogram bin opens the drill list under the card",
+          "plotly_click" in html and "survDrill" in html)
+    check("ui/survival: the drill row carries both clocks, the exit reason, maker, price, token, "
+          "traits and the distance to floor",
+          all(k in html for k in ("placed_at_valid", "placed_at_observed", "exit_reason",
+                                  "distance_to_floor_eth", "stream_lag_s")))
+    head = (html.split("$('#s-head').textContent=", 1)[1].split("function survBasis", 1)[0]
+            if "$('#s-head').textContent=" in html else "")
+    check("ui/survival: the HEADER TEMPLATE prints all three counts -- ended, still standing "
+          "(censored) and n_eff -- so deleting n_eff from that one string fails here rather than "
+          "being vouched for by the word appearing in a basis line further down",
+          "${fmt(r.ended_n,0)} ended" in head and "still standing (censored)" in head
+          and "n_eff = ${fmt(r.n_eff,0)}" in head, f"header template: {head[:150]!r}")
+    check("ui/survival: below the cluster minimum the page says `strip, no curve` and draws every "
+          "observation instead",
+          "strip, no curve" in html and "mode==='strip'" in html)
+    check("ui/survival: the filter row carries trait chips, maker, price band and the window",
+          all(k in html for k in ("s-maker", "s-band", "traitSpec()", "/api/makers")))
+    check("ui/survival: the direction warning travels from the estimator's basis onto the page, so "
+          "a shorter median cannot be read as a bug in the new code (D-W4)",
+          "basis.direction_warning" in html and "left_truncation_note" in html)
+
+
+def test_docs_palette_table_matches_the_root_block() -> None:
+    """Tech-lead gate on PR-8, B1/B3. `docs/08 §4b.1` carries the only table a reader
+    consults for "what colour is that mark", and for a day after PR-6 it said
+    `--trait-offer` `#C792EA` while `:root` said `#B266FF`. Nothing compared them.
+
+    This parses BOTH -- the markdown table and the `@data` slice of `:root` -- and
+    fails on any disagreement in either direction, including a token added to one
+    and not the other. A stale hex in the documentation is worse than no hex,
+    because it retires the question.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    doc = (ROOT / "docs" / "08_DASHBOARD.md").read_text()
+    root_body = html.split(":root{", 1)[1].split("}", 1)[0]
+    data_block = root_body.split("/* @data", 1)[1].split("/* @end-tokens", 1)[0]
+    # `--name:#hex;` and the one rgba token, from the CSS
+    css = {m.group(1): m.group(2).upper()
+           for m in re.finditer(r"--([a-z0-9-]+)\s*:\s*(#[0-9A-Fa-f]{6}|rgba\([^)]*\))\s*;", data_block)}
+    # `| `--name` | `#hex` |` from the markdown table
+    md = {m.group(1): m.group(2).upper()
+          for m in re.finditer(r"\|\s*`--([a-z0-9-]+)`\s*\|\s*`(#[0-9A-Fa-f]{6}|rgba\([^)]*\))`\s*\|", doc)}
+    check("docs/08: the @data table lists every token :root defines, and no others",
+          set(md) == set(css), f"docs-only {sorted(set(md) - set(css))} · css-only {sorted(set(css) - set(md))}")
+    wrong = {k: (md.get(k), v) for k, v in css.items() if md.get(k) != v}
+    check("docs/08: every hex in the table IS the hex in :root (a stale doc hex cannot ship)",
+          not wrong, "; ".join(f"--{k}: docs {a}, css {b}" for k, (a, b) in wrong.items()))
+    check("docs/08: the table carries all eleven @data tokens, the three PR-8 exits included",
+          len(css) == 11 and {"invalidated", "expired", "censored"} <= set(css), f"{sorted(css)}")
+    # The measured figures the tech-lead required recorded, in both places.
+    check("docs/08: the measured CVD/normal figures for the exit stack are recorded, not asserted",
+          "16.8" in doc and "27.1" in doc and "16.2" in doc and "23.3" in doc)
+    check("ui/palette: ...and the same measurements are in the :root comment beside the hexes",
+          all(x in data_block for x in ("16.8", "27.1", "16.2", "23.3", "validate_palette.js")))
+    check("docs/08: the failed FIRST draft is recorded too -- a palette that was chosen by eye and "
+          "measured at 2.6 is the evidence that the second one was measured at all",
+          "2.6" in doc and "7.7" in doc and "#F0A202" in data_block)
+    check("ui/survival: stacked segments carry a 2px --surface separator (dataviz mark specs, and "
+          "the secondary encoding a near-floor pair requires)",
+          "line:{width:2,color:C.surface}" in html and "surface:tok('--surface')" in html)
+
+
+def test_survival_drill_episode_is_a_real_cluster_id(tmp: Path) -> None:
+    """N2. `survival_drill` shipped `episode: None` on every row: the id was assigned
+    in `survival()` after `_survival_rows` returned, so the drill -- which calls
+    `_survival_rows` directly -- never got one. A field that is always null beside a
+    header that reports `n_eff` in exactly those units is worse than no field.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, "episode.sqlite")
+    seq = 0
+
+    def at(raw, when, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, when, seq, **over)
+    # one maker requoting token 1 three times inside epsilon -> ONE episode
+    for i, when in enumerate(("2026-09-09T10:00:00Z", "2026-09-09T10:00:10Z", "2026-09-09T10:00:20Z")):
+        at(REAL_BID, when, order_hash=f"0xe{i}", token_id="1", maker="0xbot", **NO_EXP)
+        at(REAL_CANCEL, "2026-09-09T10:00:30Z", order_hash=f"0xe{i}", token_id="1")
+    at(REAL_BID, "2026-09-09T10:00:00Z", order_hash="0xother", token_id="2", maker="0xp", **NO_EXP)
+    at(REAL_CANCEL, "2026-09-09T10:00:30Z", order_hash="0xother", token_id="2")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts(AS_OF))
+    eng = _survival_engine(n)
+    s0, e0 = iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF)
+    d = eng.survival_drill("argonauts", s0, e0, e0, 0.0, 100.0)
+    eps = [r["episode"] for r in d["rows"]]
+    check("survival (drill): every row carries an episode id -- none of them None",
+          len(eps) == 4 and all(e for e in eps), str(eps))
+    bot = {r["episode"] for r in d["rows"] if r["maker"] == "0xbot"}
+    check("survival (drill): the bot's three requotes share ONE episode id, and the other maker's "
+          "life has a different one -- the id is the real cluster, not a per-row placeholder",
+          len(bot) == 1 and len(set(eps)) == 2, str(sorted(set(eps))))
+    r = eng.survival("argonauts", s0, e0, e0)
+    check("survival (drill): the distinct episode ids on the drill ARE the n_eff in the header -- "
+          "the two numbers cannot drift because they come from one assignment",
+          r["n_eff"] == len(set(eps)) == 2, f"n_eff {r['n_eff']} vs drill {sorted(set(eps))}")
+    n.close()
+
+
+def test_survival_response_stays_small_at_forty_thousand_lives(tmp: Path) -> None:
+    """BUG-20260910-064. The response carried seven arrays one entry per distinct
+    event time. At 40,000 lives that measured **2.29 MB** of JSON for a panel about
+    1,100 px wide -- BUG-063's shape one module over, and on the panel that will
+    have the most rows behind it of anything on the page.
+
+    The curve is now thinned onto its own log-spaced grid for TRANSPORT ONLY:
+    every retained point is an actual point of the estimate (indices are selected,
+    never averaged), t = 0 and the final step are always kept, and the percentiles,
+    RMST, residuals and bootstrap are all computed from the FULL curve before the
+    thinning runs.
+
+    The fixture writes `order_lives` rows directly rather than folding 80,000
+    events, because what is under test is the response, not the normalizer.
+    """
+    import json
+    import time as _time
+
+    import navanax.metrics as _M
+    from navanax.metrics import SURVIVAL_GRID_MAX, downsample_km, km_curve
+
+    n, _put = _lives_store(tmp, "big.sqlite")
+    cols = ("order_hash", "collection", "event_type", "scope_kind", "token_id", "maker", "quantity",
+            "price_eth", "price_usd", "t_place", "t_place_observed", "t_term", "exit_reason",
+            "exit_source", "exit_event_type", "expiration_ts", "placement_seen", "revalidated",
+            "terminations_seen", "criteria_n", "criteria_numeric_n", "method_version")
+    rng = __import__("random").Random(1)
+    t0 = 1_757_000_000.0
+    rows = []
+    for i in range(40_000):
+        tp = t0 + i * 0.5
+        d = round(rng.expovariate(1 / 9.0) + 0.4, 3)
+        ended = rng.random() < 0.93
+        rows.append((f"0x{i:06x}", "argonauts", "item_received_bid", "item", str(i % 900),
+                     f"0xm{i % 40:02d}", 1, 0.5, 900.0, tp, tp, (tp + d) if ended else None,
+                     "cancelled" if ended else "censored", "observed" if ended else None,
+                     None, None, 1, 0, 1 if ended else 0, None, None, 1))
+    n.conn.executemany(f"INSERT INTO order_lives ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", rows)
+    n.conn.commit()
+    eng = _survival_engine(n)
+    began = _time.time()
+    r = eng.survival("argonauts", t0 - 10, t0 + 40_000, t0 + 40_000, bootstrap_b=2)
+    took = _time.time() - began
+    body = json.dumps(r, default=str)
+    check("survival (size): the response at 40,000 lives is under 1 MB",
+          len(body) < 1_000_000, f"{len(body)} bytes")
+    check("survival (size): ...because the curve is thinned onto its grid -- a few hundred points "
+          "standing for tens of thousands of event times, and the response says both numbers",
+          r["km"]["downsampled"] is True and r["km"]["points"] <= 2 * SURVIVAL_GRID_MAX + 2
+          and r["km"]["event_times"] > 10_000
+          and len(r["km"]["s"]) == len(r["km"]["t"]) == r["km"]["points"],
+          str({k: r["km"][k] for k in ("points", "event_times", "downsampled")}))
+    check("survival (size): the CIFs are thinned onto the SAME points, so the response cannot "
+          "carry a curve and an incidence on two different grids",
+          all(len(r["cif"][c]) == r["km"]["points"] for c in r["causes"]),
+          str([len(r["cif"][c]) for c in r["causes"]]))
+    check("survival (size): the thinning is index SELECTION, not interpolation -- the last step is "
+          "kept, so S still ends where the estimate ends",
+          r["km"]["s"][-1] == min(r["km"]["s"]) and r["km"]["t"][0] == 0.0 and r["km"]["s"][0] == 1.0,
+          f"first {r['km']['s'][:2]} last {r['km']['s'][-1]}")
+    check("survival (size): percentiles come from the FULL curve, not the thinned one -- the median "
+          "is not on the transport grid",
+          r["percentiles"] is not None and r["percentiles"]["median_s"] not in r["km"]["t"][1:],
+          str(r["percentiles"]))
+    check("survival (size): and it stays inside a few seconds at that size",
+          took < 5.0, f"{took:.2f}s")
+
+    # the identity still holds on every point that survives the thinning
+    bad = [i for i, s in enumerate(r["km"]["s"])
+           if abs(sum(r["cif"][c][i] for c in r["causes"]) - (1 - s)) > 1e-9]
+    check("survival (size): SUM_c F_c = 1 - S still holds EXACTLY at every retained point",
+          not bad, str(bad[:5]))
+
+    # the untrimmed shape, to keep the defect visible (BUG-063's discipline)
+    full = km_curve([(round(rng.expovariate(1 / 9.0) + 0.4, 4), True, "cancelled") for _ in range(5_000)])
+    check("survival (size): downsample_km is a no-op below the cap, so a small panel is never thinned",
+          downsample_km(km_curve([(1.0, True, "cancelled"), (2.0, False, None)]))["downsampled"] is False
+          and downsample_km(full)["downsampled"] is True, str(len(full["t"])))
+
+    # the bootstrap work cap: reported, never silent. Exercised with the cap
+    # temporarily lowered, because triggering it at its real value costs the
+    # 2,000,000 resampled observations it exists to bound.
+    cap = _M.SURVIVAL_BOOTSTRAP_WORK_CAP
+    try:
+        _M.SURVIVAL_BOOTSTRAP_WORK_CAP = 100
+        small = _survival_fixture(tmp, "cap.sqlite")
+        e2 = _survival_engine(small)
+        from navanax.normalize import iso_to_ts
+        c = e2.survival("argonauts", iso_to_ts("2026-09-09T09:00:00Z"), iso_to_ts(AS_OF),
+                        iso_to_ts(AS_OF), bootstrap_b=1000)
+        check("survival (size): a bootstrap cut by the work cap SAYS SO, with both B values and the "
+              "direction of the error -- a cut that is not reported is a band that quietly means "
+              "something else",
+              c["band"]["b_used"] < c["band"]["b_requested"] == 1000
+              and "cut from 1000" in (c["band"]["note"] or "")
+              and "wider-tailed" in (c["band"]["note"] or ""), str(c["band"].get("note")))
+        small.close()
+    finally:
+        _M.SURVIVAL_BOOTSTRAP_WORK_CAP = cap
+    n.close()
+
+
+
+# ===========================================================================
+# PR-9 -- the view split: the Event Ledger, the Wallets view, Health, and the
+# hash router. Every test below fails on the page and the endpoints as they
+# stood before PR-9.
+# ===========================================================================
+def _ledger_store(tmp: Path, name: str = "ledger.sqlite"):
+    """Twelve events on one collection: tokens 1..12 so #10 vs #9 is decidable,
+    three makers, two sales between a pair of wallets, one un-numbered token."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+
+    n, put = _lives_store(tmp, name)
+    seq = 0
+
+    def at(raw, minute, **over):
+        nonlocal seq
+        seq += 1
+        put(raw, f"2026-09-09T10:{minute:02d}:00Z", seq, **over, **NO_EXP)
+
+    # bids on tokens 1..12, alternating makers, one per minute
+    for i in range(1, 13):
+        at(REAL_BID, i, order_hash=f"0xbid{i:02d}", token_id=str(i),
+           maker=f"0xmk{i % 3}", price_eth=0.1 * i)
+    # a token whose id is not a number at all -- token_num must be NULL, not 0
+    at(REAL_BID, 20, order_hash="0xbidX", token_id="argo-x", maker="0xmk0", price_eth=9.0)
+    # two sales, 0xseller -> 0xbuyer, so the wallet card has counterparties
+    at(DOC_LISTING, 30, order_hash="0xsold1", token_id="3", maker="0xseller",
+       taker="0xbuyer", price_eth=1.5, event_type="item_sold")
+    at(DOC_LISTING, 31, order_hash="0xsold2", token_id="4", maker="0xseller",
+       taker="0xbuyer", price_eth=1.6, event_type="item_sold")
+    # and one cancel, so 0xmk1 has an ended bid life
+    at(DOC_LISTING, 35, order_hash="0xbid01", token_id="1", maker="0xmk1",
+       price_eth=None, event_type="item_cancelled")
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    return n, eng, put
+
+
+_LEDGER_WINDOW = ("2026-09-09T09:00:00Z", "2026-09-09T12:00:00Z")
+
+
+def _lwin():
+    from navanax.normalize import iso_to_ts
+    return {"start": iso_to_ts(_LEDGER_WINDOW[0]), "end": iso_to_ts(_LEDGER_WINDOW[1])}
+
+
+def test_ledger_keyset_pages_are_stable_under_inserts(tmp: Path) -> None:
+    """design §8.1.2. Offset pagination over a table an append-only writer is
+    adding 48 rows/s to skips and repeats rows: everything shifts down by however
+    many arrived between page 1 and page 2. A keyset cursor is anchored to a ROW,
+    so rows inserted afterwards cannot move the rows already returned.
+
+    Fails before PR-9: `MetricEngine.ledger` does not exist.
+    """
+    from navanax.normalize import iso_to_ts, refresh_order_lives
+    n, eng, put = _ledger_store(tmp, "ledger-keyset.sqlite")
+    w = _lwin()
+    p1 = eng.ledger("argonauts", sort="valid_ts", direction="desc", limit=5, **w)
+    check("ledger: a page is keyset-paginated and hands back a cursor, never an offset",
+          len(p1["rows"]) == 5 and p1["next_cursor"] and p1["basis"]["pagination"].startswith("keyset"),
+          str({k: p1[k] for k in ("has_more", "total_estimate", "exact")}))
+
+    # the stream keeps writing between the two requests -- five NEWER events
+    for i in range(5):
+        put(REAL_BID, f"2026-09-09T11:{i:02d}:00Z", 900 + i,
+            order_hash=f"0xnew{i}", token_id=str(50 + i), maker="0xmk9", price_eth=5.0, **NO_EXP)
+    n.conn.commit()
+    refresh_order_lives(n.conn, now_ts=iso_to_ts("2026-09-09T12:00:00Z"))
+
+    p2 = eng.ledger("argonauts", sort="valid_ts", direction="desc", limit=5,
+                    cursor=p1["next_cursor"], **w)
+    k = lambda r: (r["valid_at"], r["order_hash"], r["event_type"])   # noqa: E731
+    first, second = [k(r) for r in p1["rows"]], [k(r) for r in p2["rows"]]
+    check("ledger: page 2 repeats NOTHING from page 1 even though five newer rows landed "
+          "between the two requests -- the cursor is anchored to a row, not to an offset",
+          not (set(first) & set(second)), f"overlap {sorted(set(first) & set(second))}")
+    check("ledger: ...and page 2 continues strictly below page 1's last key, so nothing "
+          "between them was skipped either",
+          all(r["valid_at"] <= p1["rows"][-1]["valid_at"] for r in p2["rows"]),
+          f"{p1['rows'][-1]['valid_at']} then {[r['valid_at'] for r in p2['rows']]}")
+    check("ledger: the inserted rows are NOT in page 2 -- they sort above page 1's window "
+          "and a keyset page cannot reach back up",
+          not any(r["order_hash"].startswith("0xnew") for r in p2["rows"]),
+          str([r["order_hash"] for r in p2["rows"]]))
+
+    # a cursor issued for one query must not be usable on another
+    bad = False
+    try:
+        eng.ledger("argonauts", sort="token_num", direction="desc", limit=5,
+                   cursor=p1["next_cursor"], **w)
+    except ValueError as exc:
+        bad = "different query" in str(exc)
+    check("ledger: a cursor from a DIFFERENT sort or filter is refused, not silently reused "
+          "-- continuing would interleave two result sets", bad)
+
+    # walking every page visits every row exactly once
+    seen, cur, guard = [], None, 0
+    while guard < 50:
+        guard += 1
+        pg = eng.ledger("argonauts", sort="valid_ts", direction="desc", limit=4, cursor=cur, **w)
+        seen += [k(r) for r in pg["rows"]]
+        cur = pg["next_cursor"]
+        if not cur:
+            break
+    check("ledger: walking the cursor to the end visits every matching row exactly once",
+          len(seen) == len(set(seen)) == pg["total_estimate"],
+          f"{len(seen)} rows, {len(set(seen))} distinct, total_estimate {pg['total_estimate']}")
+    n.close()
+
+
+def test_ledger_refuses_a_sort_it_has_no_index_for(tmp: Path) -> None:
+    """design §8.1.2: "a sort on a non-indexed column is refused with a message
+    naming the indexed ones -- not silently slow". A four-million-row full scan
+    that eventually answers teaches the Operator the ledger is broken; a refusal
+    that names five working columns teaches him what the store can do.
+
+    Fails before PR-9: there is no ledger and no sort whitelist.
+    """
+    from navanax.metrics import LEDGER_SORTS, LEDGER_UNSORTABLE
+    n, eng, _ = _ledger_store(tmp, "ledger-sort.sqlite")
+    w = _lwin()
+    msg = ""
+    try:
+        eng.ledger("argonauts", sort="price_usd", **w)
+    except ValueError as exc:
+        msg = str(exc)
+    check("ledger: an unindexed sort is REFUSED, and the refusal names every column that works",
+          "price_usd" in msg and all(c in msg for c in LEDGER_SORTS), msg[:200])
+    check("ledger: ...and it says WHY this one cannot be served, rather than 'unsupported'",
+          "rate moves" in msg, msg[:200])
+    injected = ""
+    try:
+        eng.ledger("argonauts", sort="valid_ts; DROP TABLE events--", **w)
+    except ValueError as exc:
+        injected = str(exc)
+    check("ledger: an arbitrary string never reaches SQL -- the whitelist refuses it first",
+          "cannot sort by" in injected
+          and n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] > 0, injected[:120])
+    check("ledger: every sortable column names the index that makes it a range scan, and "
+          "that index really exists in the store (the whitelist cannot drift from the schema)",
+          all(n.conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+                             (idx,)).fetchone()[0] == 1 for _, idx, _ in LEDGER_SORTS.values()),
+          str([idx for _, idx, _ in LEDGER_SORTS.values()]))
+    check("ledger: the columns the page shows but cannot sort are listed WITH their reason, "
+          "so the UI can grey the header instead of offering a sort that 400s",
+          set(LEDGER_UNSORTABLE) >= {"price_usd", "token_id", "taker", "lag"}
+          and all(LEDGER_UNSORTABLE.values()), str(sorted(LEDGER_UNSORTABLE)))
+    n.close()
+
+
+def test_ledger_token_number_sorts_numerically(tmp: Path) -> None:
+    """The Operator asked for this by name: `#10` sorts AFTER `#9`, not before it.
+    `token_id` is TEXT in the store, so a lexical sort is the wrong answer that
+    looks like an answer.
+
+    Fails before PR-9: there is no `token_num` column, no index on it, and no
+    ledger to sort by it.
+    """
+    n, eng, _ = _ledger_store(tmp, "ledger-token.sqlite")
+    w = _lwin()
+    r = eng.ledger("argonauts", sort="token_num", direction="asc", limit=50,
+                   event_types=["item_received_bid"], **w)
+    nums = [x["token_num"] for x in r["rows"] if x["token_num"] is not None]
+    check("ledger: token_num ascending is 1,2,...,10,11,12 -- #10 after #9, not after #1",
+          nums == sorted(nums) and nums[:12] == list(range(1, 13)), str(nums))
+    ids = [x["token_id"] for x in r["rows"] if x["token_num"] is not None]
+    check("ledger: ...and it is the LEXICAL order that would have been wrong, so this is a "
+          "real distinction on this fixture rather than a coincidence of the ids",
+          ids != sorted(ids), str(ids))
+    check("ledger: a token_id that is not a plain number has token_num NULL -- never 0, which "
+          "would sort it in front of token #1 as though it were one",
+          any(x["token_id"] == "argo-x" and x["token_num"] is None for x in r["rows"]),
+          str([(x["token_id"], x["token_num"]) for x in r["rows"]][-3:]))
+    stored = n.conn.execute(
+        "SELECT token_id, token_num FROM events WHERE token_id IN ('9','10','argo-x') "
+        "GROUP BY token_id ORDER BY token_num").fetchall()
+    check("ledger: token_num is DERIVED from token_id by the store, so the two can never "
+          "disagree (it is a generated column, not a copy)",
+          dict(stored) == {"9": 9, "10": 10, "argo-x": None}, str(stored))
+    rng = eng.ledger("argonauts", sort="token_num", direction="asc", limit=50, token="4-6", **w)
+    check("ledger: the token filter takes a range as well as an exact id",
+          sorted({x["token_num"] for x in rng["rows"]}) == [4, 5, 6],
+          str(sorted({x["token_num"] for x in rng["rows"]})))
+    n.close()
+
+    # -- the additive migration, on a store an earlier version built ---------
+    # The precedent is `expiration_ts` (normalize._migrate): add the column, derive it
+    # from one already present, never touch the landing zone. token_num is GENERATED,
+    # so the migration writes no data at all -- which is why it cannot half-succeed.
+    import sqlite3 as _sq
+    legacy = tmp / "legacy-tokennum.sqlite"
+    lc = _sq.connect(str(legacy))
+    lc.executescript(
+        """CREATE TABLE events (run TEXT NOT NULL, seq INTEGER NOT NULL, file TEXT,
+             observed_at TEXT, valid_at TEXT, observed_ts REAL, valid_ts REAL, event_type TEXT,
+             collection TEXT, token_id TEXT, order_hash TEXT, maker TEXT, taker TEXT,
+             price_eth REAL, price_usd REAL, expiration_at TEXT, expiration_ts REAL,
+             PRIMARY KEY (run, seq));
+           INSERT INTO events (run,seq,event_type,collection,token_id,valid_ts,observed_ts)
+             VALUES ('r',1,'item_listed','argonauts','9',1,1),('r',2,'item_listed','argonauts','10',2,2),
+                    ('r',3,'item_listed','argonauts','argo-x',3,3);""")
+    lc.commit()
+    lc.close()
+    from navanax.normalize import LEDGER_INDEXES, Normalizer
+    ln = Normalizer(tmp / "empty-lz", legacy)
+    xcols = {r[1] for r in ln.conn.execute("PRAGMA table_xinfo(events)")}
+    got = dict(ln.conn.execute("SELECT token_id, token_num FROM events ORDER BY seq"))
+    check("ledger/migration: _migrate adds token_num to a store an earlier version built, "
+          "additively, and it is populated from token_id with no re-fold and no write",
+          "token_num" in xcols and got == {"9": 9, "10": 10, "argo-x": None}, str(got))
+    have = {r[0] for r in ln.conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    check("ledger/migration: ...and every ledger index is built on the migrated store, so the "
+          "sorts the whitelist offers are the sorts the store can actually serve",
+          all(name in have for name, _, _ in LEDGER_INDEXES),
+          str([nm for nm, _, _ in LEDGER_INDEXES if nm not in have]))
+    ln.close()
+
+
+def test_ledger_chart_states_its_cap_and_never_samples_silently(tmp: Path) -> None:
+    """design §8.1.3. "Chart this selection" caps at 5,000 rows and prints
+    `charting the 5,000 most recent of 41,208`. A silent sample is a chart whose
+    shape is an artefact of the cap.
+    """
+    from navanax.metrics import LEDGER_CHART_CAP
+    n, eng, _ = _ledger_store(tmp, "ledger-chart.sqlite")
+    w = _lwin()
+    c = eng.ledger_chart("argonauts", cap=4, **w)
+    check("ledger/chart: one series per event type, never one line across types -- a listing "
+          "and a bid are not two readings of one quantity",
+          set(c["series"]) <= {"item_received_bid", "item_sold", "item_listed", "item_cancelled",
+                               "collection_offer", "trait_offer"} and len(c["series"]) >= 1,
+          str(list(c["series"])))
+    check("ledger/chart: above the cap it says so, with BOTH numbers",
+          c["capped"] and c["charted"] == 4 and c["matched"] > 4
+          and "most recent" in (c["basis"]["cap_note"] or ""), str(c["basis"]["cap_note"]))
+    full = eng.ledger_chart("argonauts", **w)
+    check("ledger/chart: under the cap nothing is trimmed and cap_note is absent",
+          not full["capped"] and full["basis"]["cap_note"] is None
+          and full["cap"] == LEDGER_CHART_CAP, str(full["cap"]))
+    check("ledger/chart: points carry their own timestamps and nothing is interpolated "
+          "between two observations -- the basis says so where the reader is",
+          "interpolated" in full["basis"]["hole_note"]
+          and all(len(s["t"]) == len(s["price_eth"]) for s in full["series"].values()))
+    n.close()
+
+
+def test_wallet_card_percentages_carry_their_counts(tmp: Path) -> None:
+    """Project rule 4, and design §8.2.1: "every percentage carries its count, in
+    the card, not in a tooltip". `61.4%` is not a number anyone can check;
+    `61.4% of 62,218` is.
+
+    Fails before PR-9: there is no wallet endpoint, and `makers()` computed its
+    share in the PAGE (`100*r.events/T`), where nothing could assert on it.
+    """
+    from navanax.metrics import share
+    n, eng, _ = _ledger_store(tmp, "wallet-pct.sqlite")
+    w = _lwin()
+    lst = eng.wallets("argonauts", w["start"], w["end"], limit=20)
+    bad = [r["address"] for r in lst["rows"]
+           if not isinstance(r.get("events_share"), dict)
+           or set(r["events_share"]) != {"pct", "n", "of"}]
+    check("wallets: every share in the ranked list is {pct, n, of}, never a bare percentage",
+          lst["rows"] and not bad, str(bad))
+    check("wallets: the denominator is stated and is the real one",
+          all(r["events_share"]["of"] == lst["total_events_with_maker"] for r in lst["rows"])
+          and lst["total_events_with_maker"] > 0, str(lst["total_events_with_maker"]))
+
+    p = eng.wallet("argonauts", "0xmk1", w["start"], w["end"])
+    b = p["behaviour"]
+    pcts = [(k, v) for k, v in b.items() if isinstance(v, dict) and "pct" in v]
+    check("wallets/card: every percentage on the address card carries its count and its "
+          "denominator -- events share, cancel ratio, fill ratio",
+          len(pcts) >= 3 and all(set(v) == {"pct", "n", "of"} for _, v in pcts),
+          str([k for k, _ in pcts]))
+    check("wallets/card: 0 of 0 is UNDEFINED, not 0% -- a wallet that placed no bids has no "
+          "fill ratio, and printing 0.0% would be a claim about a sample that does not exist",
+          share(0, 0)["pct"] is None and share(3, 0)["pct"] is None
+          and abs(share(3, 12)["pct"] - 25.0) < 1e-9)
+    life = b["bid_life"]
+    check("wallets/card: the median bid life carries BOTH n and n_eff -- one wallet's quotes "
+          "are not independent observations and the uncertainty belongs to the clusters",
+          "n" in life and "n_eff" in life and life["n_eff"] <= life["n"] + 1
+          and "n_eff" in life["n_eff_rule"], str({k: life[k] for k in ("n", "n_eff", "median_s")}))
+    check("wallets/card: percentiles are WITHHELD below the minimum n rather than printed "
+          "with a warning beside them, and the response says which happened",
+          (life["median_s"] is None) == life["percentiles_withheld"],
+          str({k: life[k] for k in ("n", "median_s", "percentiles_withheld")}))
+    seller = eng.wallet("argonauts", "0xseller", w["start"], w["end"])
+    cp = seller["counterparties"]
+    check("wallets/card: counterparties come from item_sold maker/taker pairs, with each "
+          "counterparty's share of this address's trades and its count",
+          cp["trades"] == 2 and cp["rows"] and cp["rows"][0]["address"] == "0xbuyer"
+          and cp["rows"][0]["trades"] == 2
+          and set(cp["rows"][0]["share_of_trades"]) == {"pct", "n", "of"}, str(cp))
+    adj = eng.counterparty_adjacency("argonauts", w["start"], w["end"])
+    i, j = adj["addresses"].index("0xseller"), adj["addresses"].index("0xbuyer")
+    check("wallets: the counterparty graph is an ADJACENCY MATRIX whose cell states the trade "
+          "count exactly -- deterministic, no physics library, no seeded layout",
+          adj["matrix"][i][j] == 2 and adj["matrix"][j][i] == 0 and adj["trades"] == 2,
+          str(adj["matrix"]))
+    n.close()
+
+
+def test_wallet_profile_has_no_field_for_an_off_chain_identity(tmp: Path) -> None:
+    """The charter boundary, enforced by the SCHEMA rather than by discipline
+    (.claude/agents/market-analyst.md; design §8.2.1): the wallet profile object
+    has no field for a legal name, employer, company or location, so there is
+    nowhere in the record for one to leak from. A reviewer checks the schema, not
+    the rendering code.
+
+    This is a PROPERTY over the whole object at any depth, not a list of the keys
+    that exist today -- a future `notes` or `who_is_this` field fails here.
+    """
+    from navanax.metrics import WALLET_PROFILE_KEYS, _assert_address_only
+    n, eng, _ = _ledger_store(tmp, "wallet-schema.sqlite")
+    w = _lwin()
+    p = eng.wallet("argonauts", "0xmk1", w["start"], w["end"])
+
+    def keys(o, out=None):
+        out = [] if out is None else out
+        if isinstance(o, dict):
+            for k, v in o.items():
+                out.append(str(k))
+                keys(v, out)
+        elif isinstance(o, list):
+            for v in o:
+                keys(v, out)
+        return out
+
+    all_keys = keys(p)
+    # Through the REAL matcher, not a naive substring loop: the matcher is segment
+    # based on purpose (`tokens` contains `ens`), and a test that re-implements it
+    # badly tests the re-implementation. `_assert_address_only` raises on the first
+    # offending key and names it.
+    leak = ""
+    try:
+        _assert_address_only(p)
+    except ValueError as exc:
+        leak = str(exc)
+    check("wallets/schema: NO key anywhere in the profile -- at any depth -- could hold a "
+          "name, company, employer, location, city, a handle or any free text that could "
+          "become one",
+          not leak, leak[:200])
+    check("wallets/schema: ...and the walk really did look at every key, not just the top level",
+          len(all_keys) > 30 and "n_eff" in all_keys, f"{len(all_keys)} keys")
+    check("wallets/schema: the top-level key set is FIXED and declared, so a new field is a "
+          "deliberate change to a constant rather than something that appeared",
+          set(p) == set(WALLET_PROFILE_KEYS), str(sorted(set(p) ^ set(WALLET_PROFILE_KEYS))))
+    refused = False
+    try:
+        _assert_address_only({"address": "0x1", "cluster": {"members": [{"real_name": "x"}]}})
+    except ValueError as exc:
+        refused = "address-level only" in str(exc) and "real" in str(exc)
+    check("wallets/schema: the guard is what refuses it -- adding an identity field raises in "
+          "the layer that BUILDS the profile, not in the layer that draws it", refused)
+    check("wallets/schema: chain-sourced facts are marked NOT COLLECTED rather than "
+          "fabricated -- null, never 0, because 0 reads as 'this address holds nothing'",
+          p["chain"]["collected"] is False and p["chain"]["holdings"] is None
+          and p["chain"]["first_funded_by"] is None
+          and "not collected yet" in p["chain"]["why_not_collected"],
+          str(p["chain"]))
+    check("wallets/schema: a cluster is a hypothesis with evidence attached, so with no "
+          "evidence there is no cluster -- the word never appears without its count",
+          p["cluster"]["id"] is None and p["cluster"]["evidence_count"] == 0
+          and "evidence" in p["cluster"]["evidence_rule"])
+    check("wallets/schema: a flag renders only if its rows can be listed, and none can yet",
+          p["flags"] == [] and "rows can be listed" in p["basis"]["flags_rule"])
+    n.close()
+
+
+def test_health_surfaces_the_alarms_nothing_else_does(tmp: Path) -> None:
+    """The Health view answers "can I trust the other tabs?" -- so the three
+    numbers that mean the answer is NO must be on it, in one response:
+
+      * the crossed-book alarm count (docs/05 rule 5: a crossed standing book is
+        a reconstruction defect, never an arbitrage);
+      * criteria coverage (a trait-offer criterion matching no trait value reads
+        as "no trait-offer depth", i.e. a quiet market, unless it is surfaced);
+      * files_failed / files_short (BUG-058: "115 files read, 0 rows added" with
+        no error anywhere an operator looks).
+
+    Fails before PR-9: there is no /api/health, and the crossed-book count lived
+    only in the basis of whichever collection happened to be selected.
+    """
+    import http.client
+    import shutil as _sh
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import Dashboard, make_handler
+
+    root = tmp / "healthroot"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    import yaml
+    cfg = yaml.safe_load((root / "config" / "base.yaml").read_text())
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / cfg["landing"]["root"], "run-h", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    for raw in (REAL_BID, REAL_COLL_OFFER, DOC_LISTING):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+    w.close()
+    dash = Dashboard(root, cfg, ["argonauts"])
+    dash._sync_once()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(dash))
+    port = httpd.server_address[1]
+    t = _th.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        def get(path):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+            return r.status, body
+
+        st, body = get("/api/health")
+        h = json.loads(body) if st == 200 else {}
+        check("health: /api/health answers 200 with one object, not four requests the view "
+              "could render three of", st == 200 and isinstance(h, dict), f"{st} {body[:120]}")
+        check("health: the crossed-book alarm is a COUNT on this page, for every watched "
+              "collection -- not a field in the basis of whichever chart is on screen",
+              "crossed_book" in h and "alarms" in h["crossed_book"]
+              and set(h["crossed_book"]["by_collection"]) == {"argonauts"}
+              and "never an arbitrage" in h["crossed_book"]["note"],
+              str(h.get("crossed_book"))[:200])
+        check("health: criteria coverage is here, because a criterion that matches no trait "
+              "value reads as a quiet market rather than as a broken join",
+              "criteria_coverage" in h and "argonauts" in h["criteria_coverage"],
+              str(list(h.get("criteria_coverage", {}))))
+        nz = h.get("normalizer", {})
+        check("health: files_failed AND files_short are on the TOP level of the normalizer "
+              "block, not three keys deep in a status blob (BUG-058)",
+              "files_failed" in nz and "files_short" in nz and nz["files_failed"] == 0
+              and nz["files_short"] == 0 and "BUG-058" in nz["files_note"], str(nz)[:220])
+        check("health: recorder state, gaps open and awaiting backfill",
+              "running" in h["recorder"] and "open" in h["gaps"]
+              and "awaiting_backfill" in h["gaps"], str(h.get("gaps")))
+        check("health: the integrity audit travels with it -- failures AND notes",
+              "failures" in h["integrity"] and "notes" in h["integrity"])
+        check("health: store size on disk and the row counts behind every other tab",
+              h["store"]["bytes"] > 0 and h["store"]["events"] == 3
+              and "order_lives" in h["store"] and "landing_bytes" in h["store"], str(h["store"])[:200])
+        check("health: the last fold time, so a page that has stopped updating says so",
+              nz.get("last_fold_at") and "refresh_seconds" in nz, str(nz.get("last_fold_at")))
+
+        # the ledger and wallet routes answer over real HTTP too, and refuse properly
+        for path in ("/api/ledger?collection=argonauts&range=YTD",
+                     "/api/ledger?collection=argonauts&range=YTD&mode=chart",
+                     "/api/wallets?collection=argonauts&range=YTD",
+                     "/api/wallet/0x0d9ec524ed52f109c530a28c91fe190c44c0babd?collection=argonauts&range=YTD"):
+            st, body = get(path)
+            check(f"health/routes: {path.split('?')[0]} -> 200 JSON",
+                  st == 200 and body[:1] == b"{", f"{st} {body[:120]}")
+        st, body = get("/api/ledger?collection=argonauts&range=YTD&sort=price_usd")
+        check("health/routes: /api/ledger refuses an unindexed sort with a 400 naming the "
+              "columns that work, rather than a full scan that eventually answers",
+              st == 400 and b"price_usd" in body and b"valid_ts" in body, f"{st} {body[:200]}")
+        st, body = get("/api/ledger?collection=argonauts&range=YTD&token=nope")
+        check("health/routes: a token filter it cannot read is a 400, never a dropped filter "
+              "-- a dropped filter returns more rows than were asked for",
+              st == 400 and b"token" in body, f"{st} {body[:160]}")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.norm.close()
+
+
+def test_ui_router_keeps_every_panel_and_adds_the_views(tmp: Path) -> None:
+    """PR-9's whole risk in one test. Splitting one page into views is a MOVE, and
+    a move loses things: the failure mode is a panel that is still in the code, no
+    longer in any view, and therefore never drawn again while every one of its own
+    tests stays green because they read the file rather than the layout.
+
+    So: every view id exists, and every panel that existed before PR-9 still
+    exists EXACTLY ONCE and is inside exactly one view.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+
+    views = ["market", "traits", "flow", "wallets", "health"]
+    missing = [v for v in views if f'id="v-{v}"' not in html]
+    check("ui/router: every view has a section with its own id",
+          not missing, f"missing {missing}")
+    # A5 / BUG-20260910-068's sibling finding: every behavioural substring below is
+    # asserted against the script with COMMENTS REMOVED. Three of these used to be
+    # satisfied by the block comment that EXPLAINS the router, so a page whose router
+    # body had been deleted -- comment intact -- passed. See
+    # `test_ui_router_assertions_read_code_not_comments` for the mutation proofs.
+    code = _script_code(html)
+    check("ui/router: routes are HASH routes so a view is linkable and a deep link restores it",
+          "location.hash='#/'+" in code.replace(" ", "")
+          and "window.addEventListener('hashchange',route)" in code.replace(" ", "")
+          and "#/market" in html)
+    check("ui/router: global state -- collection, interval, range, denomination, transform and "
+          "the trait filter -- lives in the hash and survives a reload",
+          all(k in code for k in ("GLOBAL_KEYS", "writeHash", "readHash",
+                                  "localStorage.setItem", "history.replaceState")))
+    check("ui/router: a per-view DEFAULT range/interval applies on first visit only; after the "
+          "Operator changes it, his choice sticks",
+          "VIEW_DEFAULTS" in code and "S.touched.range" in code and "S.touched.interval" in code)
+
+    # Every panel that existed before the split, by the id the old page drew into.
+    panels = ["kpis", "p-prices", "tlegend", "b-prices", "h-prices", "h-prices-sub",
+              "book", "p-imm", "b-imm", "p-mix", "p-act", "b-act", "makers", "tape",
+              "screener", "gaps", "audit", "s-bar", "s-head", "s-curve", "s-hist",
+              "s-mini", "s-drill", "b-surv", "s-sub"]
+    sidebar = ["traits", "chips", "tsum", "onboard"]        # global chrome, not a view panel
+    counts = {p: len(re.findall(rf'id="{re.escape(p)}"', html)) for p in panels + sidebar}
+    wrong = {p: c for p, c in counts.items() if c != 1}
+    check("ui/router: EVERY panel the page had before the split still exists, exactly once -- "
+          "nothing was dropped on the floor and nothing was duplicated into two views",
+          not wrong, str(wrong))
+
+    # and each one is inside a view, not orphaned between them
+    bodies = {}
+    for v in views:
+        seg = html.split(f'id="v-{v}"', 1)
+        bodies[v] = seg[1].split('<section class="view"', 1)[0] if len(seg) > 1 else ""
+    homeless = [p for p in panels if not any(f'id="{p}"' in b for b in bodies.values())]
+    check("ui/router: ...and every one of them is inside a view, so switching tabs cannot "
+          "leave a panel rendered under the wrong one", not homeless, str(homeless))
+    aside = html.split("<aside>", 1)[1].split("</aside>", 1)[0] if "<aside>" in html else ""
+    check("ui/router: the trait sidebar stays OUTSIDE the views, because the filter is global "
+          "-- one filter, applied on every tab, not four copies that can disagree",
+          all(f'id="{p}"' in aside for p in sidebar),
+          str([p for p in sidebar if f'id="{p}"' not in aside]))
+    check("ui/router: the Prices card is ONE card the router MOVES between the Market and "
+          "Traits grids -- two copies would be two price panels on different token sets",
+          'id="card-prices"' in html and html.count('id="card-prices"') == 1
+          and "anchor-market-hero" in code and "anchor-traits-hero" in code
+          and "function hostHero()" in code and ".after(" in code)
+
+    check("ui/router: the trait sidebar is GLOBAL -- the filter applies on every view and is "
+          "shown as a read-only chip row where the 272 px of checkboxes do not earn their place",
+          "SIDEBAR_VIEWS.includes(S.view)" in code and 'id="roChips"' in html)
+    check("ui/router: only the active view's panels are fetched, so switching tabs is not four "
+          "views' worth of queries",
+          "VIEW_LOADERS" in code and "await Promise.all(VIEW_LOADERS[S.view].map" in code)
+
+
+def test_ui_ledger_and_wallets_panels_are_the_shape_the_design_specifies() -> None:
+    """design §8.1 and §8.2, and the two rules that make them honest:
+    every percentage with its count, and a cap that is stated rather than sampled.
+    """
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    script = _script_code(html)          # A5: comments never satisfy an assertion about behaviour
+    check("ui/ledger: the Flow view carries the event ledger and it reads /api/ledger",
+          'id="ledger"' in html and "/api/ledger?" in script)
+    check("ui/ledger: it pages by CURSOR, never by offset -- the page cannot ask for a page "
+          "number the API refuses to serve",
+          "LG.cursor=r.next_cursor" in script.replace(" ", "")
+          and "cursor:LG.cursor" in script.replace(" ", ""))
+    check("ui/ledger: sorting is server-side against the whitelist, and a column the API "
+          "cannot sort is shown as unsortable instead of offering a click that 400s",
+          "r.sortable" in script and "unsortable" in script)
+    check("ui/ledger: every column the design names is rendered -- time, type, token #, price "
+          "in ETH and USD, maker, taker, order hash and the exit reason",
+          all(k in script for k in ("token_num", "price_eth", "price_usd", "exit_reason",
+                                    "order_hash", "price_basis", "lag_s")))
+    check("ui/ledger: USD is to the cent on every row, through the same formatter as the rest "
+          "of the page", "money2(x.price_usd,'USD')" in script)
+    check("ui/ledger: 'chart this selection' asks for mode=chart, draws MARKERS always, keeps "
+          "holes, and prints the cap rather than sampling silently",
+          "mode:'chart'" in script and "c.basis.cap_note" in script
+          and "connectgaps:false" in script and "lines+markers" in script)
+    check("ui/wallets: the address card reads /api/wallets and /api/wallet/",
+          "/api/wallets?" in script and "/api/wallet/" in script)
+    check("ui/wallets: every percentage is printed FROM the {pct,n,of} object, so the page "
+          "cannot show a percentage the API did not send a count with",
+          "const pctOf=" in script and "s.of" in script and "s.n" in script)
+    check("ui/wallets: chain-sourced facts render as 'not collected yet', never as a zero and "
+          "never invented", "not collected yet" in html and "w.chain.collected" in script)
+    check("ui/wallets: the counterparty graph is a HEAT-MAP (a Plotly heatmap trace), not a "
+          "force graph -- deterministic, no second library, and a cell states the count",
+          "type:'heatmap'" in script and "%{z:,d} trade" in script
+          and not any(k in html for k in ("d3-force", "forceSimulation", "d3.forceLink")))
+    check("ui/wallets: the heat-map scale is SEQUENTIAL and built from a palette token -- "
+          "counts have no meaningful midpoint, so a diverging scale would invent one",
+          "colorscale:[[0,rgba(C.coll" in script and "single hue" in script.lower())
+    check("ui/wallets: a cluster prints its evidence count, and a flag renders only when its "
+          "rows can be listed", "evidence_count" in script and "flags_rule" in script)
+    check("ui/health: the Health view surfaces the recorder, gaps, the audit, the crossed-book "
+          "alarm count, criteria coverage, files_failed/files_short, store size and last fold",
+          all(k in script for k in ("/api/health", "crossed_book", "criteria_coverage",
+                                    "files_failed", "files_short", "last_fold_at")))
+
+
+def test_ui_escaping_matches_its_sink() -> None:
+    """BUG-20260910-066. `esc()` is the page's HTML escaper, and escaping is
+    correct at exactly one boundary: a string being interpolated into `innerHTML`.
+    A string assigned to `.textContent` is never parsed as markup, so escaping it
+    is a DOUBLE encoding -- and the one string on this page that contains a `<` is
+    the sentence explaining why a percentile is missing (`n_eff = 0 ... < 30`).
+    The Operator was shown `&lt;` in the one place REQ-F-19 most needs him to read
+    a plain sentence.
+
+    `test_ui_contract` asserts the dangerous direction (an unescaped third-party
+    field reaching innerHTML) and by design says nothing about this one. This test
+    is the other half: every esc() call site is checked against the sink it feeds.
+    """
+    import re
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    script = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+
+    # The two textContent sinks that carry server prose. For each, take the whole
+    # assignment -- the template plus every local it interpolates -- and assert no
+    # esc() survives anywhere in it.
+    def region(start: str, end: str) -> str:
+        return script.split(start, 1)[1].split(end, 1)[0] if start in script else ""
+
+    head = region("function survHead(r){", "function survBasis(r){")
+    basis = region("function survBasis(r){", "async function surv(){")
+    check("ui/escaping: the survival HEADER builds plain text for .textContent -- no esc(), so "
+          "`n_eff < 30` reads as `<` and not as `&lt;` (BUG-20260910-066)",
+          "$('#s-head').textContent=" in head and "esc(" not in head,
+          "; ".join(re.findall(r"esc\([^)]*\)", head)))
+    check("ui/escaping: ...and so does the survival BASIS line",
+          "$('#b-surv').textContent=" in basis and "esc(" not in basis,
+          "; ".join(re.findall(r"esc\([^)]*\)", basis)))
+    check("ui/escaping: the fix is annotated with the bug id, because the obvious move on "
+          "re-reading this code is to add esc() back",
+          "BUG-20260910-066" in script and "textContent" in script.split("BUG-20260910-066", 1)[1][:400])
+
+    # The property, over the whole page: an esc() call may only appear inside a
+    # template that is heading for innerHTML / an attribute -- never inside one of
+    # the plain-text sinks. Checked structurally: every `X.textContent=` assignment
+    # in the file, through to the end of its statement, must be esc()-free.
+    leaks = []
+    for m in re.finditer(r"\$\('#[\w-]+'\)\.textContent\s*=", script):
+        seg, depth, i = "", 0, m.end()
+        while i < len(script):                      # to the end of the assignment
+            ch = script[i]
+            depth += (ch in "([{") - (ch in ")]}")
+            if ch in ";\n" and depth <= 0 and not script[i:i + 2] == "\n +":
+                break
+            seg += ch
+            i += 1
+        if "esc(" in seg:
+            leaks.append(seg[:80])
+    check("ui/escaping: NO .textContent assignment anywhere on the page escapes its value -- "
+          "the property, not the two call sites the bug was found in",
+          not leaks, " | ".join(leaks[:3]))
+    # ...and the dangerous direction is still covered, by the test that owns it.
+    check("ui/escaping: the innerHTML boundary still escapes -- esc() is alive and used",
+          script.count("esc(") > 40 and "const esc=" in script, f"{script.count('esc(')} call sites")
+
+
+# ===========================================================================
+# BUG-20260910-067 -- TWO WRITERS ON ONE DERIVED STORE.
+#
+# On 2026-09-10 `data/analytics.sqlite` (2.8 GB) became "database disk image is
+# malformed" and the launchd dashboard crash-looped 177 times. The mechanism:
+# `serve()` constructed `Dashboard(...)` -- which opens the store and starts the
+# thread that WRITES to it -- BEFORE binding 127.0.0.1:8765. With a second
+# dashboard already listening, every launchd retry opened the store, folded new
+# frames into it, and then died on "Address already in use". Two writers
+# alternating on one SQLite store, ten seconds apart, with processes killed
+# mid-write.
+#
+# Every check below was written against the OLD code first and fails there
+# (docs/03 §9). The store is derived and was rebuilt from the landing zone; the
+# landing zone was not touched.
+# ===========================================================================
+def _dash_root(tmp: Path, name: str):
+    """A project root with config, a landing zone, and three real frames in it."""
+    import shutil as _sh
+
+    import yaml
+    root = tmp / name
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = yaml.safe_load((root / "config" / "base.yaml").read_text())
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / cfg["landing"]["root"], f"run-{name}", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    for raw in (REAL_BID, REAL_COLL_OFFER, DOC_LISTING):
+        w.write(json.dumps(raw), topic="collection:argonauts",
+                event_timestamp=raw[4]["payload"]["event_timestamp"])
+    w.close()
+    return root, cfg
+
+
+def test_dashboard_binds_before_it_opens_the_store(tmp: Path) -> None:
+    """The ordering fix. A dashboard that cannot bind must never touch the store.
+
+    The test holds the port with a plain listening socket -- the second dashboard,
+    from this process's point of view -- and spies on `Normalizer` construction,
+    because constructing one is exactly the moment the store is opened and the
+    fold thread becomes possible. Against the old `serve()` the spy fires and the
+    sqlite file appears on disk before the OSError is raised; that is the bug,
+    177 times over.
+    """
+    import argparse
+    import contextlib
+    import io
+    import socket
+
+    from navanax import cli as cli_mod
+    from navanax import dashboard as dash_mod
+
+    root, cfg = _dash_root(tmp, "bindfirst")
+    db = root / cfg["analytical"]["path"]
+    lock = db.with_name(db.name + ".lock")
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+
+    built: list[Any] = []
+    real = dash_mod.Normalizer
+
+    class SpyNormalizer(real):                      # type: ignore[misc, valid-type]
+        def __init__(self, *a: Any, **k: Any) -> None:
+            built.append((a, k))
+            super().__init__(*a, **k)
+
+    dash_mod.Normalizer = SpyNormalizer
+    raised: BaseException | None = None
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                dash_mod.serve(root, cfg, ["argonauts"], host="127.0.0.1", port=port,
+                               open_browser=False)
+            except OSError as exc:
+                raised = exc
+    finally:
+        dash_mod.Normalizer = real
+
+    check("bind-first: serve() fails on the BIND when the port is already held",
+          isinstance(raised, OSError), repr(raised))
+    check("bind-first: the Normalizer -- which opens the store and starts the thread that "
+          "WRITES to it -- was never constructed, so a doomed retry folds nothing "
+          "(BUG-20260910-067)",
+          built == [], f"constructed {len(built)} time(s)")
+    check("bind-first: ...and neither the store nor its writer lock was created at all",
+          not db.exists() and not lock.exists(), f"db={db.exists()} lock={lock.exists()}")
+
+    args = argparse.Namespace(root=str(root), port=port, no_browser=True)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = cli_mod.cmd_dashboard(args)
+    msg = err.getvalue()
+    check("bind-first: `navanax dashboard` exits 2 on a port conflict -- the supervisor "
+          "contract, so launchd's restart is throttled and the reason is in the log",
+          rc == 2 and rc == cli_mod.DASH_EXIT_REFUSED, f"exit {rc}")
+    check("bind-first: ...and the message still says another dashboard is probably running, "
+          "and now also says the store was not opened",
+          "another dashboard already running" in msg and "NOT opened" in msg, msg[:220])
+    check("bind-first: the refused CLI run left no store behind either",
+          not db.exists(), str(db))
+    holder.close()
+
+
+def test_normalizer_writer_lock_is_one_writer_per_store(tmp: Path) -> None:
+    """docs/07 §1: one writer owns the read-write connection, readers attach read-only.
+
+    That was a documented pattern with nothing enforcing it. Now the folding
+    writer holds an exclusive `flock` on `<store>.lock` for its lifetime, a second
+    one is refused by name and pid, and a reader opens `mode=ro` and cannot write
+    even if it tries.
+    """
+    import errno as _errno
+    import os as _os
+    import sqlite3 as _sq
+
+    from navanax.normalize import (
+        LOCK_UNSUPPORTED_ERRNOS,
+        Normalizer,
+        StoreWriterBusyError,
+        writer_lock_path,
+    )
+
+    (tmp / "empty-lz").mkdir(exist_ok=True)
+    db = tmp / "onewriter.sqlite"
+    w1 = Normalizer(tmp / "empty-lz", db)
+    lock = writer_lock_path(db)
+    check("writer lock: the lock file sits next to the sqlite file -- one lock per STORE, "
+          "not per project root",
+          lock == db.with_name("onewriter.sqlite.lock") and lock.exists(), str(lock))
+    info = w1.writer_info()
+    check("writer lock: it records the holding pid and when it was taken",
+          info["pid"] == _os.getpid() and info["this_process"] is True
+          and bool(info["since"]) and info["alive"] is True, str(info))
+
+    busy: StoreWriterBusyError | None = None
+    try:
+        Normalizer(tmp / "empty-lz", db)
+    except StoreWriterBusyError as exc:
+        busy = exc
+    check("writer lock: a SECOND folding writer on the same store is REFUSED, not admitted "
+          "-- this is the whole of BUG-20260910-067",
+          busy is not None, "a second Normalizer(writer=True) was allowed to open the store")
+    check("writer lock: the refusal names the pid that holds it and the two ways out "
+          "(stop that process, or open read-only)",
+          busy is not None and busy.pid == _os.getpid()
+          and f"kill {_os.getpid()}" in str(busy) and "writer=False" in str(busy)
+          and "BUG-20260910-067" in str(busy), str(busy)[:260])
+
+    rd = Normalizer(tmp / "empty-lz", db, writer=False)
+    check("writer lock: a READER opens the same store while the writer holds the lock -- "
+          "the lock is on FOLDING, never on querying",
+          rd.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0)
+    ro_enforced = False
+    try:
+        rd.conn.execute("INSERT INTO unparsed (run, seq, file, reason) VALUES ('r',1,'f','x')")
+    except _sq.OperationalError as exc:
+        ro_enforced = "readonly" in str(exc).lower()
+    check("writer lock: the reader is read-only because SQLITE says so (mode=ro), not "
+          "because the code politely does not write", ro_enforced)
+    for fn in ("sync", "reset_for_refold", "refold_criteria"):
+        refused = False
+        try:
+            getattr(rd, fn)()
+        except RuntimeError as exc:
+            refused = "writer=False" in str(exc)
+        check(f"writer lock: a reader's {fn}() refuses rather than becoming the second writer",
+              refused)
+    rd.close()
+
+    missing = False
+    try:
+        Normalizer(tmp / "empty-lz", tmp / "never-folded.sqlite", writer=False)
+    except FileNotFoundError:
+        missing = True
+    check("writer lock: opening a store that does not exist read-only REFUSES rather than "
+          "creating an empty one, which a reader would then report as 'no events'", missing)
+
+    w1.close()
+    released = True
+    try:
+        w2 = Normalizer(tmp / "empty-lz", db)
+        w2.close()
+    except StoreWriterBusyError:
+        released = False
+    check("writer lock: close() releases it, so the next start is clean and a crash-looping "
+          "supervisor is not locked out forever", released)
+
+    cli_src = (ROOT / "src" / "navanax" / "cli.py").read_text()
+    check("writer lock: the store lock and the ingest lock share ONE list of 'this filesystem "
+          "cannot flock' errnos, so the two cannot drift apart (tech-lead finding #4)",
+          "LOCK_UNSUPPORTED_ERRNOS" in cli_src
+          and _errno.EOPNOTSUPP in LOCK_UNSUPPORTED_ERRNOS
+          and _errno.EWOULDBLOCK not in LOCK_UNSUPPORTED_ERRNOS,
+          sorted(LOCK_UNSUPPORTED_ERRNOS))
+
+
+def test_traits_writer_waits_and_takes_no_fold_lock(tmp: Path) -> None:
+    """The traits job writes `tokens`/`traits` and folds nothing -- so it must NOT
+    take the fold lock (that would make the daily traits job and the dashboard
+    mutually exclusive), but it MUST have a busy timeout, or a fold's batch insert
+    turns into a spurious "database is locked" that reads like a real failure.
+    """
+    from navanax.normalize import (
+        BUSY_TIMEOUT_MS,
+        Normalizer,
+        StoreWriterBusyError,
+        writer_lock_path,
+    )
+    from navanax.traits import open_store
+
+    (tmp / "empty-lz").mkdir(exist_ok=True)
+    db = tmp / "traitslock.sqlite"
+    folder = Normalizer(tmp / "empty-lz", db)          # the fold writer, holding the lock
+    conn = None
+    try:
+        conn = open_store(db)
+    except StoreWriterBusyError:
+        pass
+    check("traits: the traits job opens the store WHILE the fold holds the writer lock -- it "
+          "writes tokens/traits, folds no events, and is not a second folding writer",
+          conn is not None)
+    if conn is not None:
+        bt = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        check("traits: ...and it opens with a busy_timeout of at least 5 s, so a fold's batch "
+              "insert makes it WAIT rather than fail with 'database is locked'",
+              bt >= 5000, f"busy_timeout={bt} ms")
+        conn.execute("INSERT OR REPLACE INTO tokens (collection, token_id, listed_at) "
+                     "VALUES ('argonauts','1','2026-09-10T00:00:00Z')")
+        conn.commit()
+        check("traits: ...and it can still actually write its own two tables",
+              conn.execute("SELECT COUNT(*) FROM tokens").fetchone()[0] == 1)
+        conn.close()
+    folder.close()
+
+    fresh = tmp / "traits-first.sqlite"
+    c2 = open_store(fresh)
+    check("traits: open_store takes no fold-writer lock of its own ...",
+          not writer_lock_path(fresh).exists(), str(writer_lock_path(fresh)))
+    admitted = True
+    try:
+        n2 = Normalizer(tmp / "empty-lz", fresh)
+        n2.close()
+    except StoreWriterBusyError:
+        admitted = False
+    check("traits: ...so a store the traits job touched first still admits a folding writer",
+          admitted)
+    c2.close()
+
+    src = (ROOT / "src" / "navanax" / "traits.py").read_text()
+    check("traits: traits.py takes no lock at all -- the fold lock is the fold's, and only "
+          "the fold's (the word appears here once, in the docstring saying why)",
+          "fcntl" not in src and "LOCK_EX" not in src, src.count("flock"))
+    check("traits: the busy timeout is STATED -- an explicit PRAGMA, and the store's one "
+          "constant rather than a second number. `sqlite3.connect(timeout=...)` sets the same "
+          "thing invisibly, and an invisible guarantee is one refactor from being lost",
+          "PRAGMA busy_timeout" in src and "BUSY_TIMEOUT_MS" in src and BUSY_TIMEOUT_MS >= 5000,
+          f"{BUSY_TIMEOUT_MS} ms")
+
+
+def test_launchd_dashboard_cannot_retry_every_ten_seconds(tmp: Path) -> None:
+    """The second layer. Binding first makes a doomed retry harmless; throttling
+    makes the loop legible. 177 restarts in half an hour is a wall of banners
+    nobody reads; at 30 s the same conflict is 120 an hour and says so in the log.
+    """
+    import plistlib
+    ld = _launchd()
+    dash = plistlib.loads(ld.render(ld.DASHBOARD, tmp))
+    rec = plistlib.loads(ld.render(ld.TRAITS, tmp))
+    recorder = plistlib.loads(ld.render(ld.RECORDER, tmp))
+    check("launchd: the DASHBOARD throttles restarts to at least 30 s, so a port conflict "
+          "cannot retry every 10 s (BUG-20260910-067)",
+          dash.get("ThrottleInterval", 0) >= 30, repr(dash.get("ThrottleInterval")))
+    check("launchd: the RECORDER's 10 s is unchanged -- a recorder that is down is losing "
+          "history that cannot be bought back, and its restart writes a gap record",
+          recorder.get("ThrottleInterval") == 10 and rec.get("ThrottleInterval") == 10,
+          f"recorder={recorder.get('ThrottleInterval')} traits={rec.get('ThrottleInterval')}")
+    check("launchd: the dashboard still restarts at all -- the page is how the Operator sees "
+          "the record, so KeepAlive stays on",
+          dash.get("KeepAlive") is True and dash.get("RunAtLoad") is True)
+    ld_src = (ROOT / "tools" / "launchd.py").read_text()
+    check("launchd: the interval names the incident, because 30 looks arbitrary on re-reading "
+          "and the obvious tidy-up is to fold it back into THROTTLE_SECONDS",
+          "DASHBOARD_THROTTLE_SECONDS" in ld_src and "BUG-20260910-067" in ld_src)
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    cmd = (ROOT / "autostart-install.command").read_text()
+    check("launchd: docs/04 and the installer text state the dashboard's interval, so the "
+          "three artefacts cannot disagree about what the machine will do",
+          "ThrottleInterval: 30" in doc and "30 seconds" in cmd,
+          f"doc={'ThrottleInterval: 30' in doc} cmd={'30 seconds' in cmd}")
+
+
+def test_health_names_the_store_writer_and_caches_quick_check(tmp: Path) -> None:
+    """Health has to say the store is still READABLE, and who owns its write side.
+
+    Before this, corruption in the analytical store was discovered by a crash
+    loop, not by a check: nothing on any page looked at the store's integrity, and
+    nothing named the process that was folding into it. `quick_check` is cached
+    for ten minutes because it reads every page -- on the Operator's 2.8 GB store
+    that is seconds, and per-request it would hold the writer lock each time.
+    """
+    import http.client
+    import os as _os
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import QUICK_CHECK_TTL_SECONDS, Dashboard, make_handler
+
+    root, cfg = _dash_root(tmp, "writerhealth")
+    dash = Dashboard(root, cfg, ["argonauts"])
+    dash._sync_once()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(dash))
+    port = httpd.server_address[1]
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        def get(path: str):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+            return r.status, body
+
+        st, body = get("/api/health")
+        h = json.loads(body) if st == 200 else {}
+        sw = h.get("store_writer") or {}
+        check("health: /api/health names the process that owns the store's WRITE side -- pid "
+              "and since -- so 'is a second dashboard folding into this?' is answerable from "
+              "the page (BUG-20260910-067)",
+              sw.get("pid") == _os.getpid() and bool(sw.get("since"))
+              and sw.get("this_process") is True, str(sw)[:200])
+        qc = h.get("quick_check") or {}
+        check("health: ...and reports PRAGMA quick_check, so corruption is visible on Health "
+              "before it is fatal rather than being found by a crash loop",
+              qc.get("ok") is True and qc.get("result") == ["ok"], str(qc)[:200])
+        check("health: the first call actually ran it, and the response says how old the "
+              "answer is and how often it can be re-run",
+              qc.get("cached") is False and qc.get("ttl_seconds") == QUICK_CHECK_TTL_SECONDS
+              and QUICK_CHECK_TTL_SECONDS == 600, str(qc)[:200])
+
+        st2, body2 = get("/api/health")
+        qc2 = (json.loads(body2) or {}).get("quick_check") or {}
+        check("health: the SECOND request is served from the cache -- a full-page read per "
+              "request would make Health the slowest tab and hold the writer lock each time",
+              qc2.get("cached") is True and qc2.get("at") == qc.get("at")
+              and qc2.get("age_seconds") >= 0, str(qc2)[:200])
+
+        dash._quick_check_mono -= (QUICK_CHECK_TTL_SECONDS + 1)   # age the cache past its TTL
+        qc3 = dash.store_quick_check()
+        check("health: ...and once the TTL has passed it runs again, so a store that goes bad "
+              "in the next ten minutes is still reported",
+              qc3.get("cached") is False and qc3.get("at") != qc.get("at"), str(qc3)[:200])
+
+        html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+        check("health/ui: the Health view renders both new fields -- the integrity check and "
+              "the fold writer's pid -- and nothing else on the page changed",
+              "h.quick_check" in html and "h.store_writer" in html
+              and "quick_check ok" in html and "fold writer" in html)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.stop()
+        dash.norm.close()
+
+
+
+# ===========================================================================
+# PR-9, round 2 -- the tech-lead's blocking findings A1-A7 and C1.
+# ===========================================================================
+def _ledger_plan_store(tmp: Path, name: str, n_rows: int = 0):
+    """A store for the plan / walk tests. `n_rows` bulk rows for the timing case.
+
+    Rows are inserted straight into `events` rather than through `parse_event`:
+    what is under test is the QUERY PLAN and the keyset, not the parser, and 200k
+    frames through the parser would make the suite about the parser's speed.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+    from navanax.traits import ensure_schema
+    n = Normalizer(tmp / "empty-lz", tmp / name)
+    ensure_schema(n.conn)
+    if n_rows:
+        base = 1_757_000_000.0
+        rows = [("r", i, "f", "2026-09-09T10:00:00Z", "2026-09-09T10:00:00Z",
+                 base + i, base + i, ("item_listed", "item_received_bid", "item_sold")[i % 3],
+                 "argonauts", str(i % 977), f"0xh{i}", f"0xmk{i % 53}", None, 0.001 * (i % 991))
+                for i in range(n_rows)]
+        n.conn.executemany(
+            "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,"
+            "event_type,collection,token_id,order_hash,maker,taker,price_eth) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        n.conn.commit()
+        n.conn.execute("ANALYZE")
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    return n, eng
+
+
+def test_ledger_page_uses_its_index_under_a_time_window(tmp: Path) -> None:
+    """A1 (S1). `dashboard._window` is UNCONDITIONAL -- every ledger request the page
+    makes carries `valid_ts >= ? AND valid_ts < ?`. Given that range predicate,
+    SQLite prefers `ix_events_coll_valid` and then sorts the whole window into a
+    TEMP B-TREE, so five of the six sorts paid for an in-memory sort of every
+    matching row **on every page**. The keyset was constant-time and the sort was
+    not, which is the same defect as BUG-040 one query over.
+
+    The fix is three things, and this test is about the two that are load-bearing:
+    an ORDER BY that is the index's own column order `(key, valid_ts, rowid)`, and
+    `+e.valid_ts` on the sorts whose index does not lead with a timestamp -- the
+    unary plus being SQLite's documented way to keep a term out of the index
+    constraint. The third, `INDEXED BY`, is **deliberately un-exercised insurance**:
+    with the other two in place the planner already chooses the right index, so no
+    assertion here can fail on its absence; it is there so that a future schema or
+    statistics change cannot silently move the query onto a different index, and it
+    would fail loudly rather than degrade.
+
+    THE PLANS ARE READ AGAINST THE 200,000-ROW STORE, not an empty one. On an empty
+    table SQLite has no reason to skip-scan and every plan looks fine, so a test run
+    against a fixture would have passed before the fix as well as after it -- which
+    is the whole failure mode being guarded here.
+
+    There is deliberately NO wall-clock assertion. The measured numbers (864 ms ->
+    0.2 ms for page 1, 7-9 ms at 12,000 rows deep) belong in the bug ledger, where
+    they are evidence; as a threshold in CI they would be a flaky test that fails
+    under load and teaches everyone to re-run the suite. The PLAN is the property,
+    and the plan is deterministic.
+    """
+    import navanax.metrics as _M
+    from navanax.metrics import LEDGER_SORTS
+    n, eng = _ledger_plan_store(tmp, "plan.sqlite", n_rows=200_000)
+    w = {"start": 1_757_000_000.0 - 10, "end": 1_757_000_000.0 + 300_000}
+
+    def survey():
+        """(bad plans, plans that missed their index) over every sort x direction."""
+        bad, missing = [], []
+        for sort in LEDGER_SORTS:
+            for direction in ("asc", "desc"):
+                q = eng.ledger_query_plan("argonauts", sort=sort, direction=direction,
+                                          limit=200, **w)
+                text = " | ".join(q["plan"])
+                if "TEMP B-TREE" in text.upper():
+                    bad.append(f"{sort}/{direction}")
+                if q["index"] not in text:
+                    missing.append(f"{sort}/{direction}: wanted {q['index']}, got {text}")
+        return bad, missing
+
+    bad_plan, missing_idx = survey()
+    check("ledger/plan: over 200,000 rows, with a time window present -- which every request "
+          "from the page has -- NO sort falls back to a TEMP B-TREE (A1)",
+          not bad_plan, "; ".join(bad_plan))
+    check("ledger/plan: ...and every one of them scans the index the basis NAMES, so "
+          "`basis.index` is a fact about the query rather than a hope",
+          not missing_idx, "; ".join(missing_idx))
+
+    p1 = eng.ledger("argonauts", sort="maker", direction="desc", limit=5, **w)
+    q = eng.ledger_query_plan("argonauts", sort="maker", direction="desc", limit=5,
+                              cursor=p1["next_cursor"], **w)
+    check("ledger/plan: a cursor page keeps the index too -- the deep page is the one that "
+          "could not afford a sort",
+          "TEMP B-TREE" not in " ".join(q["plan"]).upper() and q["index"] in " ".join(q["plan"]),
+          str(q["plan"]))
+    check("ledger/plan: the basis says the index is FORCED and names the keyset tuple, so a "
+          "reader is not left to assume the planner cooperated",
+          p1["basis"]["index_forced"] is True
+          and "valid_ts" in p1["basis"]["pagination"] and "rowid" in p1["basis"]["pagination"],
+          str({k: p1["basis"][k] for k in ("index", "index_forced", "pagination")}))
+
+    # The `+valid_ts` de-optimisation is SCOPED: on the default sort the window is
+    # both the filter and the order, and there it must stay an index RANGE. Widening
+    # it to every sort would turn the page the Operator actually looks at into a scan.
+    vplan = " ".join(eng.ledger_query_plan("argonauts", sort="valid_ts", limit=100, **w)["plan"])
+    mplan = " ".join(eng.ledger_query_plan("argonauts", sort="maker", limit=100, **w)["plan"])
+    check("ledger/plan: on the DEFAULT sort the time window is still an index RANGE "
+          "(`valid_ts>? AND valid_ts<?`), not a per-row filter",
+          "valid_ts>?" in vplan.replace(" ", "") and "valid_ts<?" in vplan.replace(" ", ""), vplan)
+    check("ledger/plan: on the other sorts it is deliberately NOT an index constraint -- that "
+          "is what stops the planner skip-scanning and then sorting (A1)",
+          "valid_ts>?" not in mplan.replace(" ", ""), mplan)
+
+    # -- the mutation: remove ONLY the unary plus and re-read the planner ----
+    # 8 of the 12 plans must regress. Exactly 8, and which 8 is the point:
+    #   * valid_ts (2)    -- never used the plus; its index leads with valid_ts.
+    #   * observed_ts (2) -- its index is (collection, observed_ts), only two columns,
+    #                        so there is no third slot for the range term to skip-scan
+    #                        into and the plan was never at risk.
+    #   * the other four sorts x two directions = 8 -- these are the ones whose index
+    #                        has valid_ts as its trailing column, which is exactly the
+    #                        shape SQLite will skip-scan to reach.
+    real_where = _M.MetricEngine._ledger_where
+
+    def no_plus(self, collection, **kw):
+        kw["window_plus"] = False
+        return real_where(self, collection, **kw)
+
+    try:
+        _M.MetricEngine._ledger_where = no_plus
+        bad2, _ = survey()
+        check("ledger/plan (mutation): removing ONLY the unary plus puts a TEMP B-TREE back "
+              "into exactly 8 of the 12 plans -- so the plus is what the assertions above are "
+              "proving, and it is not incidental",
+              len(bad2) == 8, f"{len(bad2)} regressed: {sorted(bad2)}")
+        check("ledger/plan (mutation): ...and it is the four sorts whose index has valid_ts as "
+              "its TRAILING column -- valid_ts and observed_ts are untouched, because neither "
+              "has a slot for the range term to skip-scan into",
+              {b.split("/")[0] for b in bad2} == {"token_num", "maker", "event_type", "price_eth"},
+              f"regressed on {sorted({b.split('/')[0] for b in bad2})}")
+    finally:
+        _M.MetricEngine._ledger_where = real_where
+    after, _ = survey()
+    check("ledger/plan (mutation): the plus was restored and every plan is clean again",
+          not after, "; ".join(after))
+    n.close()
+
+
+def test_ledger_keyset_walks_nulls_and_ties_on_every_sort(tmp: Path) -> None:
+    """A3 / A4 (S2). Two branches of the keyset carried the whole correctness of
+    pagination and neither had a test:
+
+      * the NULL branch -- SQLite orders NULLs first ASC and last DESC, and
+        `key < NULL` is NULL rather than true, so a naive keyset stops dead at the
+        first null-keyed row and silently truncates the result;
+      * the rowid tiebreak -- at 48 events/s many rows share a timestamp, and
+        without a total order a page boundary that lands inside a tie either
+        repeats rows or skips them.
+
+    The property is the only thing worth asserting: walking the cursor to the end
+    must visit EVERY row exactly once, on every sort, in both directions, over a
+    fixture that is deliberately full of nulls and ties. Both branches are then
+    removed, one at a time, to prove the walk catches each.
+    """
+    import navanax.metrics as _M
+    n, eng = _ledger_plan_store(tmp, "walk.sqlite")
+    base = 1_757_000_000.0
+    rows = []
+    for i in range(60):
+        rows.append(("r", i, "f", "2026-09-09T10:00:00Z", "2026-09-09T10:00:00Z",
+                     base + (i % 5),                 # observed_ts: heavy ties
+                     (base + (i % 5)) if i % 7 else None,          # valid_ts: NULLs
+                     ("item_listed", "item_sold")[i % 2], "argonauts",
+                     (str(i % 4) if i % 3 else None),               # token_id -> token_num NULLs + ties
+                     f"0xh{i}",
+                     (f"0xmk{i % 3}" if i % 4 else None),           # maker NULLs + ties
+                     None,
+                     ((i % 3) * 0.5 if i % 5 else None)))           # price_eth NULLs + ties
+    n.conn.executemany(
+        "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,"
+        "event_type,collection,token_id,order_hash,maker,taker,price_eth) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.commit()
+    everything = {r[0] for r in n.conn.execute("SELECT order_hash FROM events")}
+    check("ledger/walk: the fixture really does contain nulls and ties on every sortable "
+          "column, or this test proves nothing",
+          len(everything) == 60
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE valid_ts IS NULL").fetchone()[0] > 0
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE maker IS NULL").fetchone()[0] > 0
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE token_num IS NULL").fetchone()[0] > 0
+          and n.conn.execute("SELECT COUNT(*) FROM events WHERE price_eth IS NULL").fetchone()[0] > 0
+          and n.conn.execute(
+              "SELECT MAX(c) FROM (SELECT COUNT(*) c FROM events GROUP BY observed_ts)").fetchone()[0] > 5)
+
+    def walk(sort, direction):
+        seen, cur, guard = [], None, 0
+        while guard < 200:
+            guard += 1
+            pg = eng.ledger("argonauts", sort=sort, direction=direction, limit=7, cursor=cur)
+            seen += [r["order_hash"] for r in pg["rows"]]
+            cur = pg["next_cursor"]
+            if not cur:
+                break
+        return seen
+
+    lost, dupes = [], []
+    for sort in _M.LEDGER_SORTS:
+        for direction in ("asc", "desc"):
+            seen = walk(sort, direction)
+            if set(seen) != everything:
+                lost.append(f"{sort}/{direction}: missed {len(everything - set(seen))}")
+            if len(seen) != len(set(seen)):
+                dupes.append(f"{sort}/{direction}: {len(seen) - len(set(seen))} repeated")
+    check("ledger/walk: every sort, both directions, visits EVERY row -- nulls included",
+          not lost, "; ".join(lost))
+    check("ledger/walk: ...and repeats none of them -- the rowid tiebreak makes the order total",
+          not dupes, "; ".join(dupes))
+
+    # -- prove the two branches by removing them, one at a time --------------
+    real = _M._keyset_clause
+
+    def no_nulls(cols, vals, direction):
+        """The naive version: `key < ?` with no null handling at all."""
+        op = "<" if direction == "desc" else ">"
+        sql = "0"
+        args: list = []
+        for col, v in zip(reversed(cols), reversed(vals), strict=True):
+            sql = f"({col} {op} ? OR ({col} = ? AND {sql}))"
+            args = [v, v] + args
+        return sql, args
+
+    def no_tiebreak(cols, vals, direction):
+        """Everything but the rowid: the order is no longer total."""
+        return real(cols[:-1], vals[:-1], direction)
+
+    try:
+        _M._keyset_clause = no_nulls
+        broke = [s for s in _M.LEDGER_SORTS if set(walk(s, "desc")) != everything]
+        check("ledger/walk (mutation): removing the NULL branch loses rows on the sorts whose "
+              "column is nullable -- so the branch is what the walk above is proving",
+              {"maker", "price_eth", "token_num"} <= set(broke), f"broke on {sorted(broke)}")
+        _M._keyset_clause = no_tiebreak
+        bad = []
+        for s in _M.LEDGER_SORTS:
+            seen = walk(s, "desc")
+            if set(seen) != everything or len(seen) != len(set(seen)):
+                bad.append(s)
+        check("ledger/walk (mutation): removing the rowid tiebreak breaks the walk on a fixture "
+              "this full of ties -- rows are skipped or repeated at every page boundary",
+              bad, f"still clean on {sorted(set(_M.LEDGER_SORTS) - set(bad))}")
+    finally:
+        _M._keyset_clause = real
+    n.close()
+
+
+def test_ledger_chart_caption_counts_what_it_draws(tmp: Path) -> None:
+    """A2 (S1). The caption said `charting the 5,000 most recent of N` where N was
+    (a) counted WITHOUT the price predicate the chart itself applies, so it named
+    more rows than were ever chartable, and (b) printed as an exact figure even
+    when it was the count cap -- a floor rendered as a fact, in the one sentence
+    whose whole job is to say the picture is incomplete.
+    """
+    from navanax.metrics import LEDGER_COUNT_CAP
+    n, eng = _ledger_plan_store(tmp, "chartcap.sqlite")
+    base = 1_757_000_000.0
+    rows = []
+    for i in range(50):
+        rows.append(("r", i, "f", "2026-09-09T10:00:00Z", "2026-09-09T10:00:00Z", base + i, base + i,
+                     "item_listed", "argonauts", str(i), f"0xh{i}", "0xmk", None,
+                     (1.0 + i) if i < 20 else None))       # only 20 of the 50 carry a price
+    n.conn.executemany(
+        "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,"
+        "event_type,collection,token_id,order_hash,maker,taker,price_eth) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.commit()
+    w = {"start": base - 10, "end": base + 1000}
+    c = eng.ledger_chart("argonauts", cap=5, **w)
+    check("ledger/chart: `matched` counts the rows the chart can actually DRAW -- with the "
+          "price predicate the chart query applies, not the 50 rows the table has (A2)",
+          c["matched"] == 20 and c["charted"] == 5 and c["capped"] is True,
+          str({k: c[k] for k in ("matched", "charted", "capped")}))
+    check("ledger/chart: ...and the caption names that same number, so the sentence under the "
+          "chart is about the chart",
+          "of 20" in (c["basis"]["cap_note"] or ""), str(c["basis"]["cap_note"]))
+    check("ledger/chart: the caption says the count is exact, because at this size it is",
+          c["matched_exact"] is True and "floor" not in (c["basis"]["cap_note"] or ""),
+          str(c["basis"]["cap_note"]))
+    check("ledger/chart: the predicate is STATED, so a reader can see why the chart draws "
+          "fewer rows than the table shows",
+          "price" in (c["basis"].get("matched_predicate") or ""), str(c["basis"].get("matched_predicate")))
+
+    # above the count cap the same sentence must read as a floor, exactly as count_note does
+    import navanax.metrics as _M
+    old = _M.LEDGER_COUNT_CAP
+    try:
+        _M.LEDGER_COUNT_CAP = 4
+        c2 = eng.ledger_chart("argonauts", cap=3, **w)
+        check("ledger/chart: above the count cap the caption reads as a FLOOR and says so -- "
+              "a capped count rendered as exact is a lie in the sentence that exists to "
+              "admit the picture is incomplete (A2)",
+              c2["matched_exact"] is False and "more than" in (c2["basis"]["cap_note"] or "")
+              and ("floor" in (c2["basis"]["cap_note"] or "")),
+              str(c2["basis"]["cap_note"]))
+    finally:
+        _M.LEDGER_COUNT_CAP = old
+    check("the cap constant was restored", _M.LEDGER_COUNT_CAP == LEDGER_COUNT_CAP)
+    n.close()
+
+
+def test_wallet_identity_guard_matches_the_markers_it_claims(tmp: Path) -> None:
+    """A6 (S4). The guard's comment promised to catch a field that could hold an
+    off-chain identity; the marker list did not contain the words a leak would most
+    plausibly arrive under -- `notes`, `alias`, `handle`, `owner`, `label`,
+    `twitter` -- and nothing tested it below the top level.
+
+    The matcher is SEGMENT-based, and that is not a detail: `ens` is a substring of
+    `tokens` and `tag` of `vintage`, so a substring rule on the short markers would
+    fire on `distinct_tokens_touched` and teach everyone to delete the guard.
+    """
+    from navanax.metrics import (
+        IDENTITY_KEY_MARKERS,
+        IDENTITY_SUBSTRING_MARKERS,
+        _assert_address_only,
+    )
+    for m in ("notes", "note", "alias", "handle", "ens", "owner", "label", "tag",
+              "twitter", "discord", "telegram", "name", "company", "employer",
+              "location", "email", "phone",
+              # R2-6: `note` alone was half a rule. A field called `comment`,
+              # `memo`, `remark`, `description`, `about` or `free_text` is the same
+              # field under a different name, and `contact` is the one that would
+              # arrive already holding an email address.
+              "comment", "memo", "remark", "description", "about", "free_text", "contact"):
+        check(f"wallets/guard: {m!r} is a marker the guard actually carries",
+              m in IDENTITY_KEY_MARKERS, str(sorted(IDENTITY_KEY_MARKERS)))
+    probes = ({"cluster": {"members": [{"address": "0x1", "notes": "he told me his name"}]}},
+              {"chain": {"self_attached_handle": "x"}},
+              {"behaviour": {"owner_label": "x"}},
+              {"a": {"b": {"c": [{"twitter": "@x"}]}}},
+              {"alias": None},
+              {"ens_name": None},
+              # R2-6: every ordinary name for free text, at depth
+              {"cluster": {"members": [{"comment": "spoke to him at a conference"}]}},
+              {"memo": None}, {"remark": None}, {"description": None},
+              {"about": None}, {"free_text": None}, {"contact": None},
+              {"behaviour": {"analyst_comments": []}})
+    caught = []
+    for probe in probes:
+        try:
+            _assert_address_only(probe)
+        except ValueError as exc:
+            caught.append(str(exc))
+    check("wallets/guard: a nested `cluster.members[].notes` -- the most plausible shape a leak "
+          "would actually take -- is refused, and so is every other probe at every depth, "
+          "including every ordinary name for a free-text field (R2-6)",
+          len(caught) == len(probes), f"only {len(caught)} of {len(probes)} refused")
+    check("wallets/guard: the refusal names the path and the marker, so it can be acted on",
+          caught and "members" in caught[0] and "notes" in caught[0], caught[0][:160] if caught else "")
+    ok = []
+    for benign in ({"distinct_tokens_touched": 1}, {"events": 1}, {"collection_offers": 1},
+                   {"counterparties": {"trades": 1}}, {"first_funded_by": None},
+                   {"cancel_ratio": {"pct": None, "n": 0, "of": 0}},
+                   {"count_cap": 1}, {"sales_as_seller": 0}, {"episode_gap_s": 60.0}):
+        try:
+            _assert_address_only(benign)
+            ok.append(True)
+        except ValueError as exc:
+            ok.append(str(exc))
+    check("wallets/guard: it does NOT fire on `distinct_tokens_touched` (which contains `ens`) "
+          "or on any other real field -- a guard that cries wolf gets deleted",
+          all(x is True for x in ok), str([x for x in ok if x is not True]))
+    check("wallets/guard: the short, ambiguous markers are segment-only and the long ones are "
+          "also checked as substrings, and the code says which is which",
+          set(IDENTITY_SUBSTRING_MARKERS) < set(IDENTITY_KEY_MARKERS)
+          and "ens" not in IDENTITY_SUBSTRING_MARKERS and "tag" not in IDENTITY_SUBSTRING_MARKERS
+          and "name" in IDENTITY_SUBSTRING_MARKERS, str(sorted(IDENTITY_SUBSTRING_MARKERS)))
+
+    # and the live profile still passes its own guard, with the markers widened
+    n, eng, _ = _ledger_store(tmp, "guard-live.sqlite")
+    w = _lwin()
+    p = eng.wallet("argonauts", "0xmk1", w["start"], w["end"])
+    check("wallets/guard: the profile this build returns passes the WIDENED guard -- so the "
+          "prose fields were renamed rather than the guard being narrowed to fit them",
+          isinstance(p, dict) and "chain" in p)
+    check("wallets/guard: and there is no field for a self-attached handle at all now. The "
+          "charter permits one; the SCHEMA is the enforcement, so a field that is null today "
+          "and populated later is exactly the hole the guard exists to close",
+          "self_attached_handle" not in json.dumps(p), "")
+    n.close()
+
+
+def test_writer_info_enforced_is_not_a_lie_on_a_reader(tmp: Path) -> None:
+    """A7 (S4). `enforced: False` on a READER is indistinguishable from `enforced:
+    False` on a writer whose filesystem has no flock -- and those are opposite
+    facts. The first is "this process never asked for the lock"; the second is
+    "this process asked and could not be protected, and a second writer could
+    corrupt the store". Health renders the field, so the two must not print alike.
+    """
+    from navanax.normalize import Normalizer
+    (tmp / "empty-lz").mkdir(exist_ok=True)
+    db = tmp / "enforced.sqlite"
+    w = Normalizer(tmp / "empty-lz", db)
+    wi = w.writer_info()
+    check("writer lock: on the WRITER, `enforced` is still the boolean it always was",
+          isinstance(wi["enforced"], bool), str(wi["enforced"]))
+    rd = Normalizer(tmp / "empty-lz", db, writer=False)
+    ri = rd.writer_info()
+    check("writer lock: on a READER, `enforced` is NOT False -- a reader never takes the "
+          "lock, so 'not enforced' would be read as 'unprotected writer' (A7)",
+          ri["enforced"] is not False, str(ri["enforced"]))
+    check("writer lock: ...it says it is not applicable, and says why",
+          isinstance(ri["enforced"], str) and "not applicable" in ri["enforced"]
+          and "reader" in ri["enforced"], str(ri["enforced"]))
+    check("writer lock: the reader still reports the writer's pid, so the field it CAN answer "
+          "is unchanged", ri["pid"] == wi["pid"] and ri["this_process"] is False, str(ri))
+    rd.close()
+    w.close()
+
+
+def test_buglog_check_fails_on_a_duplicate_bug_id(tmp: Path) -> None:
+    """C1 (S3). `--check` collected ids into a SET, so two entries sharing an id
+    collapsed into one and the gate stayed green. The ledger is the source of
+    truth for what a bug id MEANS; two meanings under one id is the one defect
+    that makes every other entry unciteable -- and it is exactly what happens when
+    two branches allocate the same number, which this repo is doing right now with
+    059-061.
+    """
+    import re
+    import shutil as _sh
+    import subprocess as _sp
+    import sys as _sys
+    scratch = tmp / "buglog-dupe"
+    scratch.mkdir(exist_ok=True)
+    _sh.copytree(ROOT / "docs" / "logs", scratch / "logs", dirs_exist_ok=True)
+    # a real second entry under an id that already exists
+    y = scratch / "logs" / "bugs.yaml"
+    first = re.search(r"^- id: (BUG-\d{8}-\d{3})", y.read_text(), re.M).group(1)
+    y.write_text(y.read_text().rstrip("\n") + f"""
+
+- id: {first}
+  summary: "a second entry under an id that is already taken"
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: open
+  logged_at: "2026-09-10T23:00:00-05:00"
+  occurred_at: "2026-09-10T23:00:00-05:00"
+  detected_by: "the duplicate-id test"
+  detection_channel: tech-lead
+  branch: test
+  locations: []
+  requirement: REQ-N-12
+  data_impact: "none -- this entry exists only inside a temporary copy"
+  root_cause: "test fixture"
+  monitor_gap: "test fixture"
+""")
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("buglog_probe", ROOT / "tools" / "buglog.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    import yaml as _yaml
+    data = _yaml.safe_load(y.read_text())
+    old_md, old_ledger = mod.MARKDOWN, mod.LEDGER
+    try:
+        mod.MARKDOWN = scratch / "logs" / "BUGS.md"
+        problems = mod.check(data)
+    finally:
+        mod.MARKDOWN, mod.LEDGER = old_md, old_ledger
+    dupes = [p for p in problems if "duplicate" in p.lower() or "twice" in p.lower()]
+    check("buglog: --check FAILS on a duplicate bug id, and names it (C1)",
+          dupes and first in dupes[0], f"problems: {problems[:3]}")
+    # and the real ledger has none
+    real = _sp.run([_sys.executable, "tools/buglog.py", "--check"], cwd=ROOT,
+                   capture_output=True, text=True)
+    check("buglog: the real ledger has no duplicate id today, so this gate is not already "
+          "failing when it lands", real.returncode == 0, real.stdout[-300:] + real.stderr[-300:])
+
+
+def _script_code(html: str) -> str:
+    """The page's script with COMMENTS REMOVED.
+
+    A5. Three assertions in the PR-9 UI tests were satisfied by the block comment
+    that explains the feature rather than by the feature: deleting the router's
+    body and keeping its docstring left them green. Every substring assertion
+    about behaviour must read this, never the raw file. Strings are left alone --
+    a `//` inside a URL is not a comment, and neither is one inside a template.
+    """
+    src = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    out, i, n = [], 0, len(src)
+    quote = None
+    while i < n:
+        ch = src[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\":
+                if i + 1 < n:
+                    out.append(src[i + 1])
+                    i += 2
+                    continue
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def test_ui_router_assertions_read_code_not_comments() -> None:
+    """A5 (S3). `test_ui_router_*` asserted on substrings of the whole file, and
+    several of those substrings appear in the block comments that EXPLAIN the
+    router. So a page whose router body had been deleted, keeping its comment,
+    passed -- the test asserted that the rule is documented, not that it is in
+    force. That is the same defect the tech-lead already fixed once in
+    `test_ui_contract` (the modebar/scrollZoom checks, 2026-09-10).
+
+    Each of the three structural claims below is proved by a mutation that leaves
+    the comments untouched.
+    """
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    code = _script_code(html)
+    check("ui/router (A5): the comment stripper works -- prose that only appears in a comment "
+          "is gone, and a `//` inside a string is not treated as one",
+          "the router MOVES it" not in code and "https://" in html and "esc(" in code,
+          "stripper removed too much or too little")
+
+    def p_route(c: str) -> bool:
+        """route() itself reads the hash into the global controls.
+
+        `applyGlobals(q)` is asserted BY NAME AND ARGUMENT, not as `applyGlobals(`.
+        route() has two branches -- the URL branch (`applyGlobals(q)`) and the
+        bare-URL/localStorage branch -- and a substring test for the bare call name
+        is satisfied by either one. Deleting the URL branch alone is the regression
+        that matters: it is what makes a deep link stop restoring its state, and it
+        leaves the other call site behind to vouch for it.
+        """
+        body = c.split("function route(){", 1)[1].split("\n/*", 1)[0] if "function route(){" in c else ""
+        return ("applyGlobals(q)" in body                                  # the URL branch
+                and "applyGlobals(Object.fromEntries(p.entries()))" in body  # the stored branch
+                and "readHash()" in body
+                and "classList.toggle('on'" in body and "VIEWS.forEach" in body)
+
+    def p_hero(c: str) -> bool:
+        """hostHero() performs a real DOM move, not just a class change."""
+        body = c.split("function hostHero(){", 1)[1].split("function sidebarMode()", 1)[0] \
+            if "function hostHero(){" in c else ""
+        return ".after(" in body and "anchor-traits-hero" in body and "card-prices" in body
+
+    def p_cursor(c: str) -> bool:
+        """The ledger's next page is fetched FROM next_cursor, not from a page number."""
+        return ("cursor:LG.cursor" in c.replace(" ", "")
+                and "LG.cursor=r.next_cursor" in c.replace(" ", "")
+                and "page=" not in c.split("/api/ledger?", 1)[1][:200])
+
+    check("ui/router (A5): route()'s BODY applies the hash to the global controls and toggles "
+          "exactly one view on -- asserted on code, so deleting the body fails here",
+          p_route(code))
+    check("ui/router (A5): hostHero()'s BODY performs a real DOM move (`.after(`) of the one "
+          "prices card between the two anchors", p_hero(code))
+    check("ui/router (A5): the ledger's next page URL is built from `next_cursor` -- the page "
+          "never sends an offset or a page number", p_cursor(code))
+
+    # -- the three mutations, each leaving every comment in place ------------
+    m1 = code.replace("applyGlobals(q)", "0").replace("applyGlobals(Object.fromEntries(p.entries()))", "0")
+    check("ui/router (A5, mutation): a route() that stops applying the hash FAILS the check "
+          "-- the comment above it is untouched", not p_route(m1))
+    m1b = code.replace("applyGlobals(q)", "0")     # ONLY the URL branch; the other call stays
+    check("ui/router (A5, mutation): deleting ONLY the deep-link branch fails too -- the "
+          "surviving `applyGlobals` on the localStorage path must not vouch for it (R2-3)",
+          not p_route(m1b))
+    m2 = code.replace("a.after(c)", "c.classList.add('on')")
+    check("ui/router (A5, mutation): a hostHero() that only restyles instead of MOVING the "
+          "card fails -- two price panels is the defect it prevents", not p_hero(m2))
+    m3 = code.replace("cursor:LG.cursor||''", "page:LG.page||0")
+    check("ui/router (A5, mutation): a ledger that pages by number instead of by cursor fails",
+          not p_cursor(m3))
+
+    # and the router claims that used to be satisfied by prose are re-asserted on code
+    for claim, needle in (("the hash is written back", "history.replaceState"),
+                          ("state is mirrored to localStorage", "localStorage.setItem"),
+                          ("a per-view default is skipped once he has chosen", "S.touched.range"),
+                          ("only the active view's loaders run", "VIEW_LOADERS[S.view].map")):
+        check(f"ui/router (A5): {claim} -- in the CODE, not in a comment", needle in code, needle)
+
+# ===========================================================================
+# BUG-20260910-067, second round (tech-lead B1/B2). SURVIVING a malformed store.
+#
+# The first round stopped the dashboard CREATING one. It did nothing about the
+# incident's actual END state: with `data/analytics.sqlite` already malformed,
+# `Dashboard.__init__` -> `Normalizer(writer=True)` -> `PRAGMA journal_mode=WAL`
+# raises `sqlite3.DatabaseError` -- which `cmd_dashboard` did not catch -- so the
+# dashboard died with a raw traceback and an undocumented exit 1, and KeepAlive
+# repeated that every 30 s. The page an operator needs in order to LEARN what is
+# wrong was the one thing a corrupt store took away.
+#
+# Every check below was written against the code as it stood after round 1 and
+# fails there (docs/03 §9).
+# ===========================================================================
+def _garbage_store(db: Path) -> None:
+    """A store at the store path that reproduces the incident's exact fault.
+
+    Not random bytes and not a non-database: a REAL SQLite file whose schema page
+    has been scribbled over, which is what a process killed mid-write leaves
+    behind. It matters that it is this and not `b"junk"`, because the two fail
+    differently and only one of them is BUG-20260910-067:
+
+        junk with a valid magic  -> "file is not a database"
+        interior pages corrupted -> opens fine; `quick_check` reports the fault
+        PAGE 1 corrupted         -> "database disk image is malformed" on the
+                                    first PRAGMA, out of `Normalizer.__init__`
+
+    The third is what the Operator's 2.8 GB store did, and the one the degraded
+    path exists for. `sqlite3.connect()` itself succeeds on all three -- it is
+    lazy -- so the failure always lands on the first statement, never on open.
+    """
+    db.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+    import sqlite3 as _sq
+    c = _sq.connect(str(db))
+    c.executescript("CREATE TABLE t(a, b); CREATE INDEX ix ON t(a);")
+    c.executemany("INSERT INTO t VALUES (?,?)", [(i, "x" * 200) for i in range(2000)])
+    c.commit()
+    c.close()
+    raw = bytearray(db.read_bytes())
+    for off in range(100, 4096):        # page 1 past the file header: the schema page
+        raw[off] = 0x5A
+    db.write_bytes(bytes(raw))
+    for suffix in ("-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+
+
+def _serving(dash: Any):
+    """Start a real HTTP server on a free port for `dash`; returns (port, httpd, get)."""
+    import http.client
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import make_handler
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(dash))
+    port = httpd.server_address[1]
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def get(path: str):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("GET", path)
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+        return r.status, body
+    return port, httpd, get
+
+
+def test_dashboard_serves_degraded_on_a_malformed_store(tmp: Path) -> None:
+    """A corrupt store must not take the page down: it is where the recipe lives.
+
+    Fails before this round: `Dashboard(...)` raises `sqlite3.DatabaseError` out
+    of `__init__` on the first line of this test, so there is no page to ask.
+    """
+    import sqlite3 as _sq
+
+    from navanax.dashboard import Dashboard
+
+    root, cfg = _dash_root(tmp, "degraded")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+
+    dash = None
+    try:
+        dash = Dashboard(root, cfg, ["argonauts"])
+    except _sq.DatabaseError as exc:
+        raised = f"raised {type(exc).__name__}: {exc}"
+    else:
+        raised = ""
+    check("degraded: Dashboard comes up on a MALFORMED store instead of raising out of "
+          "__init__ -- which is what became a raw traceback and an undocumented exit 1, "
+          "repeated by KeepAlive every 30 s (BUG-20260910-067)", dash is not None, raised)
+    if dash is None:
+        return
+    check("degraded: it knows it is degraded, and carries the fault and the recipe",
+          dash.degraded() and dash.norm is None and dash.store_error is not None
+          and "malformed" in (dash.store_error.get("error") or "").lower()
+          and "DERIVED" in (dash.store_error.get("rebuild") or ""),
+          str(dash.store_error)[:200])
+
+    _port, httpd, get = _serving(dash)
+    try:
+        st, body = get("/api/health")
+        h = json.loads(body) if st == 200 else {}
+        check("degraded: /api/health still answers 200 -- the one page that explains the "
+              "fault must not be the one the fault removes",
+              st == 200 and isinstance(h, dict), f"{st} {body[:160]}")
+        qc = h.get("quick_check") or {}
+        check("degraded: ...and quick_check says the store is bad rather than quietly not "
+              "running, and carries the rebuild recipe",
+              qc.get("ok") is False and "rebuild" in qc
+              and any("malformed" in r.lower() or "DatabaseError" in r
+                      for r in qc.get("result") or []), str(qc)[:220])
+        deg = h.get("degraded") or {}
+        check("degraded: ...and Health names the fault, the store, and what to do about it -- "
+              "move it aside under a dated name, never delete and never edit",
+              deg.get("error") == "analytical store is malformed"
+              and "corrupt-" in (deg.get("rebuild") or "")
+              and "landing" in (deg.get("rebuild") or "").lower(), str(deg)[:220])
+        check("degraded: every store-derived count is null, never 0 -- 0 is a claim about a "
+              "store nobody could read",
+              h["store"]["events"] is None and h["normalizer"]["files_read"] is None
+              and h["crossed_book"]["alarms"] is None, str(h["store"])[:180])
+        check("degraded: the RECORDER's state and the gap register still answer -- they come "
+              "from the landing zone, which the fault has nothing to do with",
+              "running" in h["recorder"] and "open" in h["gaps"]
+              and h["store"]["landing_bytes"] > 0, str(h["gaps"])[:160])
+
+        st, body = get("/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD")
+        j = json.loads(body)
+        check("degraded: a data endpoint answers 503 with the reason and the recipe -- not a "
+              "500 with a sqlite traceback, and not a plausible-looking empty series",
+              st == 503 and j.get("error") == "analytical store is malformed"
+              and "rebuild" in j, f"{st} {body[:200]}")
+        for path in ("/api/status", "/api/book?collection=argonauts", "/api/ledger?collection=argonauts",
+                     "/api/wallets?collection=argonauts", "/api/traits?collection=argonauts",
+                     "/api/audit"):
+            st, _ = get(path)
+            check(f"degraded: {path.split('?')[0]} -> 503", st == 503, str(st))
+        for path in ("/api/meta", "/api/gaps"):
+            st, _ = get(path)
+            check(f"degraded: {path} still answers 200 -- it reads no analytical store", st == 200,
+                  str(st))
+
+        st, body = get("/")
+        check("degraded: the page itself still loads, so there is somewhere to read all of "
+              "the above", st == 200 and b"navanax" in body.lower(), str(st))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.stop()
+
+
+def test_dashboard_picks_up_a_rebuilt_store_without_a_restart(tmp: Path) -> None:
+    """The recipe has to be ONE step. Move the corrupt file aside; the running
+    dashboard folds a fresh store on its next probe. If the Operator also had to
+    remember to restart it, half the time he would not, and the page would still
+    be empty with nothing saying why.
+    """
+    from navanax.dashboard import STORE_REOPEN_SECONDS, Dashboard
+
+    root, cfg = _dash_root(tmp, "rebuilt")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+    dash = Dashboard(root, cfg, ["argonauts"])
+    _port, httpd, get = _serving(dash)
+    try:
+        st, _ = get("/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD")
+        check("rebuild: while the store is bad, the series endpoint is 503", st == 503, str(st))
+        check("rebuild: the probe interval is a minute -- long enough not to hammer a big "
+              "store, short enough that 'it comes back on its own' is true",
+              STORE_REOPEN_SECONDS == 60, str(STORE_REOPEN_SECONDS))
+
+        # What rebuild-store.command does: move it aside. Nothing else.
+        db.rename(db.with_name(db.name + ".corrupt-test"))
+        dash._reopen_mono = 0.0          # let the next tick probe immediately
+        dash._retry_open()
+
+        check("rebuild: one probe tick later the dashboard has opened a fresh store and is "
+              "the folding writer again -- no restart, no second step",
+              not dash.degraded() and dash.norm is not None and dash.store_error is None,
+              str(dash.store_error)[:160])
+        st, body = get("/api/series?metric=floor_ask&collection=argonauts&interval=1h&range=YTD")
+        check("rebuild: ...and the data endpoints are 200 again", st == 200, f"{st} {body[:160]}")
+        st, body = get("/api/health")
+        h = json.loads(body)
+        check("rebuild: ...and Health drops the degraded block and reports a clean store, "
+              "re-checked rather than served from the verdict about the OLD file",
+              h.get("degraded") is None and h["quick_check"]["ok"] is True
+              and h["store"]["events"] == 3, str(h.get("quick_check"))[:180])
+        check("rebuild: the corrupt file was MOVED, never deleted -- it is evidence until "
+              "the Operator says otherwise", db.with_name(db.name + ".corrupt-test").exists())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        dash.stop()
+        if dash.norm is not None:
+            dash.norm.close()
+
+
+def test_cmd_dashboard_maps_an_unreadable_store_to_a_documented_exit_code(tmp: Path) -> None:
+    """The belt to the degradation's braces. A `sqlite3.DatabaseError` that
+    somehow still escapes `serve()` must be a NAMED exit code and a sentence, not
+    exit 1 and a stack trace -- because under KeepAlive that is a silent loop.
+    """
+    import argparse
+    import contextlib
+    import io
+    import sqlite3 as _sq
+
+    from navanax import cli as cli_mod
+
+    root, cfg = _dash_root(tmp, "exitcode")
+    _garbage_store(root / cfg["analytical"]["path"])
+
+    import navanax.dashboard as dash_mod
+    real_dash = dash_mod.Dashboard
+
+    class Undegradable(real_dash):        # type: ignore[misc, valid-type]
+        def __init__(self, *a: Any, **k: Any) -> None:
+            raise _sq.DatabaseError("database disk image is malformed")
+
+    dash_mod.Dashboard = Undegradable
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            rc = cli_mod.cmd_dashboard(argparse.Namespace(root=str(root), port=0, no_browser=True))
+    finally:
+        dash_mod.Dashboard = real_dash
+    msg = err.getvalue()
+    check("exit code: an unreadable store the dashboard cannot degrade around exits 5, a "
+          "DOCUMENTED code -- never 1 with a traceback, which KeepAlive repeats in silence",
+          rc == 5 and rc == cli_mod.DASH_EXIT_STORE_MALFORMED, f"exit {rc}")
+    check("exit code: ...and the message is the same recipe the page would have given, not "
+          "sqlite's stack",
+          "UNREADABLE" in msg and "DERIVED" in msg and "corrupt-" in msg
+          and "Traceback" not in msg, msg[:240])
+    codes = {cli_mod.DASH_EXIT_OK, cli_mod.DASH_EXIT_REFUSED,
+             cli_mod.DASH_EXIT_STORE_BUSY, cli_mod.DASH_EXIT_STORE_MALFORMED}
+    check("exit code: the four dashboard codes are distinct, so a supervisor log says which "
+          "fault happened", len(codes) == 4, str(sorted(codes)))
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    block = doc.split("`dashboard` owes launchd", 1)[-1][:1400]
+    check("exit code: docs/04's contract table lists every one of them, so the number in the "
+          "log can be looked up",
+          all(f"| `{c}` |" in block for c in sorted(codes)),
+          [c for c in sorted(codes) if f"| `{c}` |" not in block])
+
+
+def test_serve_releases_the_writer_lock_when_startup_fails_late(tmp: Path) -> None:
+    """tech-lead B2. `serve()`'s failure path closed the socket and nothing else.
+
+    If the failure lands AFTER the Normalizer opened -- `make_handler`, `start()`,
+    a Ctrl-C during the first fold -- the store's exclusive lock is held by an
+    object nobody will ever close, and a retry inside the same process is refused
+    by our own stale lock. The OS releases it when the process ends, which is
+    exactly why this is easy to miss and worth a test.
+    """
+    from navanax import dashboard as dash_mod
+    from navanax.normalize import Normalizer, StoreWriterBusyError, writer_lock_path
+
+    root, cfg = _dash_root(tmp, "latefail")
+    db = root / cfg["analytical"]["path"]
+    real_make = dash_mod.make_handler
+
+    def boom(dash: Any):                  # fails AFTER Dashboard opened the store
+        raise RuntimeError("handler construction failed")
+
+    dash_mod.make_handler = boom
+    raised: BaseException | None = None
+    try:
+        dash_mod.serve(root, cfg, ["argonauts"], host="127.0.0.1", port=0, open_browser=False)
+    except RuntimeError as exc:
+        raised = exc
+    finally:
+        dash_mod.make_handler = real_make
+    check("late failure: the original error propagates -- the cleanup must not swallow it",
+          isinstance(raised, RuntimeError) and "handler construction" in str(raised), repr(raised))
+    check("late failure: the store's writer lock file was written, so the store really was "
+          "opened before the failure", writer_lock_path(db).exists())
+    freed = True
+    try:
+        n = Normalizer(root / cfg["landing"]["root"], db)
+        n.close()
+    except StoreWriterBusyError as exc:
+        freed = False
+        detail = str(exc)[:160]
+    check("late failure: ...and it was RELEASED on the way out, so a retry in this same "
+          "process is not refused by our own stale lock (tech-lead B2)",
+          freed, "" if freed else detail)
+
+
+def test_rebuild_store_command_moves_aside_and_refuses_a_live_writer(tmp: Path) -> None:
+    """The double-click. It must be safe in the one case that matters -- a
+    dashboard is running and has the file open -- and it must never delete."""
+    import os as _os
+    import subprocess
+
+    from navanax.normalize import Normalizer
+
+    cmd = ROOT / "rebuild-store.command"
+    check("rebuild.command: exists and is executable",
+          cmd.exists() and _os.access(cmd, _os.X_OK))
+    text = cmd.read_text()
+    check("rebuild.command: never deletes, and says so -- it renames, and the old file is "
+          "the Operator's to bin",
+          "rm " not in text and "unlink" not in text and "Trash" in text and ".rename(" in text)
+    check("rebuild.command: says the landing zone is untouched, because that is the fact "
+          "that makes a rebuild safe rather than a loss",
+          "landing" in text.lower() and "DERIVED" in text)
+
+    root, cfg = _dash_root(tmp, "rebuildcmd")
+    db = root / cfg["analytical"]["path"]
+    n = Normalizer(root / cfg["landing"]["root"], db)      # a live "dashboard" holding the lock
+    n.sync()
+    env = {**_os.environ, "PYTHONPATH": str(ROOT / "src")}
+    r = subprocess.run(["bash", str(cmd), str(root)], env=env, input="\n",
+                       capture_output=True, text=True, timeout=120)
+    check("rebuild.command: REFUSES while a live process holds the fold-writer lock -- "
+          "moving a store out from under a writer is how one corrupt store becomes two",
+          r.returncode == 3 and "REFUSING" in r.stdout and str(_os.getpid()) in r.stdout,
+          (r.stdout + r.stderr)[-300:])
+    check("rebuild.command: ...and names the pid and the command that stops it, and says "
+          "nothing was changed",
+          f"kill {_os.getpid()}" in r.stdout and "Nothing has been changed" in r.stdout
+          and db.exists(), r.stdout[-300:])
+
+    n.close()                                              # the dashboard quits
+    r2 = subprocess.run(["bash", str(cmd), str(root)], env=env, input="\n",
+                        capture_output=True, text=True, timeout=120)
+    aside = list(db.parent.glob(db.name + ".corrupt-*"))
+    check("rebuild.command: with no live writer it moves the store aside under a DATED name "
+          "and leaves the path free for a fresh fold",
+          r2.returncode == 0 and not db.exists() and len(aside) == 1,
+          f"rc={r2.returncode} aside={[p.name for p in aside]} {r2.stdout[-200:]}")
+    check("rebuild.command: ...and tells the Operator the running dashboard rebuilds by "
+          "itself, so there is no second step to forget",
+          "within a minute" in r2.stdout and "re-folds" in r2.stdout, r2.stdout[-300:])
+    check("rebuild.command: it is a rebuild, not a repair -- nothing in it tries to fix the "
+          "corrupt file in place", "recover" not in r2.stdout.lower())
+
+
+def test_quick_check_reports_a_malformed_store_instead_of_raising(tmp: Path) -> None:
+    """`store_quick_check` has to work in the degraded case, where there is no
+    connection to ask. It opens a throwaway read-only one and lets it fail, which
+    is the honest answer -- a check that quietly does not run reads as 'fine'."""
+    from navanax.dashboard import Dashboard
+
+    root, cfg = _dash_root(tmp, "qcbad")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+    dash = Dashboard(root, cfg, ["argonauts"])
+    try:
+        qc = dash.store_quick_check()
+        check("quick_check: on a store that cannot even be OPENED it returns a failed check "
+              "rather than raising -- Health renders it, so raising would take the page down "
+              "at the moment the page matters most",
+              qc.get("ok") is False and qc.get("result"), str(qc)[:200])
+        check("quick_check: ...and it names the sqlite fault, so the Health page shows what "
+              "the log shows",
+              any("malformed" in r.lower() or "not a database" in r.lower()
+                  or "DatabaseError" in r for r in qc["result"]), str(qc["result"]))
+        check("quick_check: ...and a failed check carries the rebuild recipe, because the "
+              "next question after 'it is corrupt' is always 'so what do I do'",
+              "corrupt-" in (qc.get("rebuild") or ""), str(qc.get("rebuild"))[:160])
+        cached = dash.store_quick_check()
+        check("quick_check: the failed verdict is cached like any other, so a Health tab left "
+              "open does not re-probe a broken file every refresh",
+              cached.get("cached") is True and cached.get("at") == qc.get("at"))
+    finally:
+        dash.stop()
+
+
+def test_degraded_page_and_docs_carry_the_rebuild_recipe(tmp: Path) -> None:
+    """One recipe, in one place, said the same way by the page, the CLI, the
+    docs and the double-click. A recovery procedure that four artefacts state
+    four ways is a procedure nobody follows correctly under pressure."""
+    from navanax.normalize import rebuild_recipe
+
+    recipe = rebuild_recipe(Path("/x/data/analytics.sqlite"))
+    check("recipe: it is derived from the store path, names a DATED destination, and says "
+          "the landing zone is untouched",
+          "corrupt-" in recipe and "/x/data/analytics.sqlite" in recipe
+          and "DERIVED" in recipe and "landing" in recipe.lower(), recipe[:200])
+    check("recipe: it forbids the two things that would make the loss real -- deleting it, "
+          "and editing it", "Never delete it, never edit it" in recipe, recipe[-160:])
+
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    check("recipe/ui: Health renders the degraded block with the fault AND the recipe, above "
+          "the stat row rather than below it",
+          "hz-degraded" in html and "h.degraded" in html
+          and html.index('id="hz-degraded"') < html.index('id="hz-stats"'))
+    check("recipe/ui: the degraded block escapes the server strings it interpolates -- it "
+          "goes to innerHTML, which is the boundary esc() exists for",
+          "esc(h.degraded.rebuild" in html and "esc(h.degraded.detail" in html)
+
+    cmd = (ROOT / "rebuild-store.command").read_text()
+    doc7 = (ROOT / "docs" / "07_STORAGE_AND_RECORDING.md").read_text()
+    doc8 = (ROOT / "docs" / "08_DASHBOARD.md").read_text()
+    check("recipe/docs: rebuild-store.command is named in docs/07 and docs/08, so the recipe "
+          "on the page and the recipe in the documents are the same recipe",
+          "rebuild-store.command" in doc7 and "rebuild-store.command" in doc8)
+    check("recipe/docs: ...and all four say the same dated-rename move",
+          all("corrupt-" in t for t in (recipe, cmd, doc7, doc8)))
+    check("recipe/docs: docs/08 documents DEGRADED mode -- what still answers, what 503s, "
+          "and that it retries on its own",
+          "degraded" in doc8.lower() and "503" in doc8)
+
+
+
+def test_degraded_reopen_probe_is_not_throttled_by_refresh_seconds(tmp: Path) -> None:
+    """R2-5. The reopen probe ran on the FOLD tick, so `refresh_seconds` capped it.
+
+    `_retry_open`'s own `STORE_REOPEN_SECONDS` rate limit could only make the probe
+    LESS frequent than `refresh`, never more. At the documented `refresh_seconds:
+    3600` a rebuilt store therefore sat unnoticed for up to an hour, and
+    `rebuild-store.command` -- whose entire claim is "move the file aside and the
+    running dashboard picks it up" -- silently stopped being a one-click fix.
+
+    The two settings answer different questions and must not be one number:
+    `refresh` is how stale the MARKET DATA may be; `STORE_REOPEN_SECONDS` is how
+    long the Operator waits after fixing the store. An operator who sets an hourly
+    fold is not asking to wait an hour after a rebuild.
+
+    This drives the real `_loop` thread rather than calling `_retry_open()`
+    directly -- the defect is in the WAIT, and a test that calls the probe by hand
+    cannot see it. `STORE_REOPEN_SECONDS` is overridden small so the suite does not
+    sleep; at the shipped value of 60 s the same arithmetic gives recovery within
+    ~70 s on an hourly fold, versus up to 3600 s before.
+    """
+    import time as _t
+
+    from navanax import dashboard as dash_mod
+    from navanax.dashboard import Dashboard
+
+    root, cfg = _dash_root(tmp, "reopen-throttle")
+    db = root / cfg["analytical"]["path"]
+    _garbage_store(db)
+    cfg = json.loads(json.dumps(cfg))
+    cfg.setdefault("dashboard", {})["refresh_seconds"] = 3600      # the documented slow fold
+
+    real = dash_mod.STORE_REOPEN_SECONDS
+    dash = None
+    try:
+        dash_mod.STORE_REOPEN_SECONDS = 0.05
+        dash = Dashboard(root, cfg, ["argonauts"])
+        check("reopen: the dashboard came up DEGRADED on the corrupt store, as it must",
+              dash.degraded() and dash.store_error is not None, str(dash.store_error)[:120])
+        check("reopen: ...with the hourly fold interval the Operator configured",
+              dash.refresh == 3600.0, str(dash.refresh))
+        dash.start()
+        db.rename(db.with_name(db.name + ".corrupt-test"))          # rebuild-store.command
+        deadline = _t.monotonic() + 20
+        while dash.degraded() and _t.monotonic() < deadline:
+            _t.sleep(0.05)
+        check("reopen: the probe fires on ITS OWN interval, not on the fold interval -- the "
+              "rebuilt store is picked up without waiting an hour and without a restart (R2-5)",
+              not dash.degraded() and dash.norm is not None and dash.store_error is None,
+              f"still degraded after 20 s of wall clock with refresh={dash.refresh}s; "
+              f"{str(dash.store_error)[:160]}")
+        check("reopen: at the SHIPPED constant the same arithmetic is min(3600, 60) = 60 s per "
+              "probe, so an hourly fold recovers inside ~70 s rather than inside an hour",
+              real == 60 and min(3600.0, real) == 60, f"STORE_REOPEN_SECONDS={real}")
+    finally:
+        if dash is not None:
+            dash.stop(timeout=5.0)
+            if dash.norm is not None:
+                dash.norm.close()
+        dash_mod.STORE_REOPEN_SECONDS = real
+
+    # The property, read off the loop itself: while degraded the wait is bounded by
+    # STORE_REOPEN_SECONDS. Asserted on the source as well as behaviourally, because
+    # the behavioural half needs a real thread and a real clock and would be the
+    # first thing deleted if it ever went flaky.
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    body = src.split("def _loop(self)", 1)[1].split("def _retry_open", 1)[0]
+    check("reopen: `_loop` waits min(refresh, STORE_REOPEN_SECONDS) while it has no store, "
+          "and the plain refresh once it does",
+          "min(self.refresh, STORE_REOPEN_SECONDS)" in body
+          and "self.norm is None" in body, body[:200])
+
+# ===========================================================================
+# The double-click files the Operator actually uses, RUN rather than read.
+#
+# There are exactly two he touches day to day, and the split between them is
+# the whole point: open-dashboard.command LOOKS and update.command DEPLOYS.
+# A second dashboard started by hand beside the background one is what
+# corrupted the analytical store on 2026-09-10 (BUG-20260910-067), so "the
+# viewer never starts anything" is a correctness property, not tidiness.
+#
+# These tests run the real scripts in a sandbox. Two names are rewritten in the
+# sandbox copy before it runs, and it matters that both are rewrites of the
+# real file rather than a re-implementation of it:
+#
+#   launchctl -> a name that is not on any PATH, so the "no launchctl here"
+#       branch runs on a Mac as well as on Linux. Without this, running the
+#       suite on the Operator's own machine would `bootout` his live recorder
+#       -- a test that stops production recording is worse than no test, and
+#       the hours it loses cannot be bought back (docs/04 §8.1).
+#
+#   8765 -> a port this test owns, so the assertions do not depend on whether
+#       the real dashboard happens to be up, and nothing here can reach it.
+# ===========================================================================
+
+def _action_lines(text: str) -> list[tuple[int, str]]:
+    """The lines of a shell script that DO something, as (line number, text).
+
+    Comments and prose are dropped, because every rule below is about what the
+    script executes and every one of these scripts legitimately says the
+    forbidden words in its own explanation of why it does not do them. A check
+    that forbade the words would forbid the promise along with the breach.
+
+    Dropped: blank lines, `#` comments, `echo`/`printf` of prose, the `read -r
+    -p` prompt, and `case` labels, whose bodies are their own lines.
+    """
+    out: list[tuple[int, str]] = []
+    for n, raw in enumerate(text.splitlines(), start=1):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s in ("echo", "fi", "esac", "done", "else", "then", "exit 0", "exit 1"):
+            continue
+        # An `echo`/`printf` is prose ONLY while it goes to the screen. The
+        # moment it carries a redirect it is a write, and `echo x > data/...`
+        # is precisely the write this must not be able to hide behind.
+        if s.startswith(("echo ", "printf ", "read -r -p", "read -p")) and ">" not in s:
+            continue
+        out.append((n, raw))
+    return out
+
+
+# Anything that would hand a file to a shell, rather than merely naming it.
+_RUNS_A_FILE = re.compile(
+    r"(?:^|[|;&(]|\&\&|\|\|)\s*(?:sudo\s+|exec\s+|nohup\s+)*"
+    r"(?:bash|sh|zsh|ksh|source|\.)\s+[^\s;|&]+")
+_LAUNCHCTL_VERB = re.compile(r"launchctl(?:-[a-z-]+)?\s+([a-z][a-z-]*)")
+# launchd verbs that START or LOAD something. `print` is the only one a viewer
+# may use: it answers a question and changes nothing.
+_LAUNCHCTL_ALLOWED = {"print"}
+_STARTING_WORDS = re.compile(
+    r"\b(kickstart|bootstrap|bootout|load|unload|start|stop|submit|enable|disable)\b")
+
+
+def _viewer_violations(text: str) -> list[str]:
+    """Every way `open-dashboard.command` could stop being a viewer.
+
+    BUG-20260910-067: a second dashboard started by hand beside the background
+    one gave two writers on one SQLite store and left it malformed. The test
+    used to check one string -- that `navanax.cli` is absent -- which forbids
+    exactly one of the many ways this file could start something. It could still
+    have run another `.command`, or `launchctl kickstart`ed the job, and stayed
+    green.
+    """
+    bad: list[str] = []
+    for n, raw in _action_lines(text):
+        if ".command" in raw:
+            bad.append(f"L{n}: executes or names another .command file: {raw.strip()}")
+        if _RUNS_A_FILE.search(raw):
+            bad.append(f"L{n}: hands a file to a shell: {raw.strip()}")
+        for verb in _LAUNCHCTL_VERB.findall(raw):
+            if verb not in _LAUNCHCTL_ALLOWED:
+                bad.append(f"L{n}: launchctl {verb} -- only `print` asks without acting: "
+                           f"{raw.strip()}")
+        m = _STARTING_WORDS.search(raw)
+        if m and "launchctl" not in raw:
+            bad.append(f"L{n}: `{m.group(1)}` in an executed line: {raw.strip()}")
+        if "navanax.cli" in raw or "navanax dashboard" in raw:
+            bad.append(f"L{n}: invokes the CLI: {raw.strip()}")
+    return bad
+
+
+_DATA_WRITE_VERBS = ("rm", "rmdir", "mv", "cp", "tee", "mkdir", "touch", "truncate",
+                     "dd", "ln", "install", "chmod", "chown", "shred", "unlink")
+_DATA_REDIRECT = re.compile(r">>?\s*[\"']?(?:\$\{?PWD\}?/|\$ROOT/|\./)?data/")
+_DATA_VERB = re.compile(r"\b(" + "|".join(_DATA_WRITE_VERBS) + r")\b[^<>]*?(?<![\w./-])data/")
+
+
+def _data_write_violations(text: str) -> list[str]:
+    """Any executed line that puts `data/` in a WRITE position.
+
+    `data/` holds the landing zone, which is append-only and irreplaceable
+    (docs/07 §4). An update changes code. The behavioural test snapshots the
+    whole subtree and compares it, which catches a write that happens; this
+    catches a write that is merely now possible -- a line added today whose
+    branch nothing in the suite reaches.
+    """
+    bad: list[str] = []
+    for n, raw in _action_lines(text):
+        for seg in re.split(r"\|\||&&|[|;]", raw):
+            if "data/" not in seg:
+                continue
+            if _DATA_REDIRECT.search(seg):
+                bad.append(f"L{n}: redirects into a data/ path: {seg.strip()}")
+            m = _DATA_VERB.search(seg)
+            if m:
+                bad.append(f"L{n}: `{m.group(1)}` with a data/ path: {seg.strip()}")
+    return bad
+
+
+_GIT_ID = ("-c", "user.email=selftest@navanax.local",
+           "-c", "user.name=Navanax Selftest",
+           "-c", "commit.gpgsign=false")
+
+
+def _git(cwd: Path, env: dict, *args: str):
+    import subprocess
+    return subprocess.run(["git", *_GIT_ID, *args], cwd=str(cwd), env=env,
+                          capture_output=True, text=True, timeout=180)
+
+
+def _fake_home_env(home: Path) -> dict:
+    """An environment whose HOME (and git config) is a throwaway directory.
+
+    update.command writes to `$HOME/Library/LaunchAgents` on the paths that get
+    that far, and git reads `$HOME/.gitconfig`. Both are redirected so a test
+    run cannot touch the real ones.
+    """
+    (home / ".config").mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(var, None)
+    return env
+
+
+def _sandbox_script(name: str, dest: Path, port: int,
+                    launchctl_name: str = "launchctl-not-on-this-machine") -> str:
+    """Copy the REAL .command file, rewriting `launchctl` and the port.
+
+    Returns the rewritten text. See the block comment above for why these two
+    substitutions exist; everything else -- every branch, every refusal, every
+    message -- is the shipped file's own.
+
+    `launchctl_name` defaults to a name that is on no PATH, which is what makes
+    the "not a Mac" branch run everywhere. A test that wants the RESTART branch
+    passes a name it has put a stub under -- still never the real `launchctl`,
+    because a suite that boots out the Operator's live recorder costs hours of
+    record that cannot be bought back (docs/04 §8.1).
+    """
+    text = (ROOT / name).read_text()
+    text = text.replace("launchctl", launchctl_name)
+    text = text.replace("8765", str(port))
+    dest.write_text(text)
+    dest.chmod(0o755)
+    return text
+
+
+def _init_repo(path: Path, env: dict) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    r = _git(path, env, "init", "-q", "-b", "main")
+    if r.returncode != 0:                          # git older than 2.28
+        _git(path, env, "init", "-q")
+        _git(path, env, "symbolic-ref", "HEAD", "refs/heads/main")
+
+
+def _update_sandbox(tmp: Path, name: str, port: int,
+                    launchctl_name: str = "launchctl-not-on-this-machine"
+                    ) -> tuple[Path, Path, dict]:
+    """A fake origin with two commits on main, and a clone of it at commit one.
+
+    The clone is what update.command runs in, so `git pull --ff-only` has a real
+    remote to fast-forward from. update.command is COMMITTED into the repo
+    rather than dropped beside it -- an untracked copy of the script would make
+    the working tree dirty and the script would (correctly) refuse every time.
+    """
+    base = tmp / name
+    home = base / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = _fake_home_env(home)
+
+    origin = base / "origin"
+    _init_repo(origin, env)
+    (origin / ".gitignore").write_text("data/\n")
+    (origin / "README.md").write_text("# Sandbox\n")
+    _sandbox_script("update.command", origin / "update.command", port,
+                    launchctl_name=launchctl_name)
+    _git(origin, env, "add", "-A")
+    _git(origin, env, "commit", "-q", "-m", "initial commit")
+
+    live = base / "live"
+    _git(base, env, "clone", "-q", str(origin), str(live))
+
+    # The commit the update will pull. It deliberately touches neither
+    # pyproject.toml nor tools/launchd.py, so the conditional steps stay off.
+    (origin / "README.md").write_text("# Sandbox\nthe line the update brings\n")
+    _git(origin, env, "add", "-A")
+    _git(origin, env, "commit", "-q", "-m", "feat(sandbox): the commit update.command pulls")
+    return live, origin, env
+
+
+def test_update_command_refuses_a_dirty_tree_and_a_branch_that_is_not_main(tmp: Path) -> None:
+    """Both refusals must fire before anything is pulled, and both must name
+    what is wrong specifically enough to act on.
+
+    The branch refusal is the load-bearing one. The live checkout is shared with
+    whatever Claude session is working in it, and that session may have it parked
+    on its own branch mid-review. A deploy script that "helpfully" switches to
+    main throws that work away silently, so this one refuses and hands the
+    Operator a sentence to send instead.
+    """
+    import subprocess
+
+    script = ROOT / "update.command"
+    check("update.command: exists and is executable",
+          script.exists() and os.access(script, os.X_OK))
+    text = script.read_text()
+    # Every git verb that MOVES or DISCARDS work in this checkout. `checkout`,
+    # `switch` and `reset` were already here; `stash`, `clean`, `rebase`,
+    # `restore` and `merge` are the rest of the same class and were not
+    # (BUG-20260911-072). `clean` is the worst of them: it deletes untracked
+    # files, and in this repo the untracked files under data/ are the landing
+    # zone. A deploy script has no business running any of the eight.
+    for verb in ("checkout", "switch", "merge", "reset", "stash", "clean",
+                 "rebase", "restore", "cherry-pick", "revert"):
+        check(f"update.command: never runs `git {verb}` -- the only git command that moves "
+              f"this checkout is a fast-forward pull",
+              f"git {verb}" not in text)
+    check("update.command: ...and the pull it does run is --ff-only", "--ff-only" in text)
+    check("update.command: guards launchctl, which does not exist off macOS",
+          "command -v launchctl" in text)
+
+    # BUG-20260911-072: one launchctl bootstrap per job, captured, branched on.
+    check("update.command: calls `launchctl bootstrap` exactly ONCE in the whole file -- it "
+          "used to call it a second time just to get the error text, which loaded the job "
+          "twice on the failure path (BUG-20260910-067's two-writers shape)",
+          text.count("launchctl bootstrap") == 1, text.count("launchctl bootstrap"))
+    check("update.command: ...capturing its output into a variable and branching on the exit "
+          "status, rather than re-running it",
+          "BOOT_OUT=\"$(launchctl bootstrap" in text and "BOOT_RC=$?" in text
+          and '[ "$BOOT_RC" -eq 0 ]' in text)
+    check("update.command: ...and never printing an empty PROBLEM block -- launchctl exits "
+          "non-zero and says nothing when the job is already loaded and running",
+          '[ -n "$BOOT_OUT" ]' in text and "printed nothing" in text)
+
+    # data/ must not be reachable as a write target from any executed line.
+    # The behavioural test below proves no write HAPPENS; this proves none is
+    # even expressible, which is the half that survives a new branch nobody
+    # exercised.
+    data_bad = _data_write_violations(text)
+    check("update.command: no executed line puts a data/ path in a write position -- no "
+          "redirect into it, no rm/mv/cp/tee/mkdir/touch on it. An update changes code; the "
+          "record is the one thing here that cannot be recreated (docs/07 §4)",
+          data_bad == [], "; ".join(data_bad))
+    for mutation in ("rm -f data/analytics.sqlite",
+                     "mv data/landing data/landing.old",
+                     "mkdir -p data/logs",
+                     "echo rebuilt > data/ops.db"):
+        mutated = text.replace('echo "      Clean."', f'  {mutation}', 1)
+        check(f"update.command scan: `{mutation}` inserted into the real file is caught as a "
+              f"write to the record",
+              _data_write_violations(mutated) != [],
+              repr(_data_write_violations(mutated)))
+    prose = text.replace('echo "      Clean."',
+                         '  echo "      Nothing under data/ was touched."', 1)
+    check("update.command scan: it does not fire on a line that merely MENTIONS data/ on "
+          "screen -- a check that forbade the word would forbid the promise too",
+          _data_write_violations(prose) == [], repr(_data_write_violations(prose)))
+
+    if shutil.which("git") is None:
+        check("update.command: refusals exercised", True, "skipped: no git on this machine")
+        return
+
+    live, _origin, env = _update_sandbox(tmp, "update-refuse", 1)
+
+    # 1. A dirty tree. A tracked file edited and not committed.
+    (live / "README.md").write_text("# Sandbox\nan edit the Operator made by hand\n")
+    r = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                       capture_output=True, text=True, timeout=180)
+    out = r.stdout + r.stderr
+    check("update: refuses a dirty working tree with exit 1 rather than pulling over "
+          "uncommitted edits",
+          r.returncode == 1 and "REFUSED" in out, f"rc={r.returncode} {out[-400:]}")
+    check("update: ...and NAMES the files, so the Operator can tell Claude what is in the way",
+          "README.md" in out and "not committed" in out, out[-400:])
+    check("update: ...and nothing was pulled -- the clone is still on the first commit",
+          _git(live, env, "log", "--oneline").stdout.count("\n") == 1,
+          _git(live, env, "log", "--oneline").stdout)
+
+    # 2. A branch that is not main, on a clean tree.
+    _git(live, env, "checkout", "-q", "--", "README.md")
+    _git(live, env, "checkout", "-q", "-b", "feat/explorer-panes")
+    r2 = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                        capture_output=True, text=True, timeout=180)
+    out2 = r2.stdout + r2.stderr
+    check("update: refuses a checkout that is not on main, with exit 1",
+          r2.returncode == 1 and "REFUSED" in out2, f"rc={r2.returncode} {out2[-400:]}")
+    check("update: ...printing the exact sentence to send Claude, with the real branch name "
+          "in it (Claude cannot fix a branch it has not been told the name of)",
+          "the live checkout is on branch feat/explorer-panes; switch it to main" in out2,
+          out2[-500:])
+    check("update: ...and it did NOT switch the branch itself",
+          _git(live, env, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+          == "feat/explorer-panes")
+
+
+def test_update_command_fast_forwards_prints_the_range_and_reads_health(tmp: Path) -> None:
+    """The happy path, end to end, against a fake origin and a fake dashboard.
+
+    Three things have to be true and are all easy to get wrong:
+      * the pull is a fast-forward and the Operator is shown WHICH commits
+        arrived -- "it updated" is not a reviewable statement;
+      * with no launchctl (any machine that is not a Mac) it says so and the
+        run still succeeds, because the code on disk really is updated;
+      * data/ is not read, written or moved. The record is the one thing in
+        this project that cannot be recreated.
+    """
+    import http.server
+    import json as _json
+    import subprocess
+    import threading
+
+    if shutil.which("git") is None:
+        check("update.command: fast-forward exercised", True, "skipped: no git on this machine")
+        return
+
+    body = _json.dumps({
+        "quick_check": {"ok": True, "result": "ok", "seconds": 0.4},
+        "store_writer": {"pid": 4242, "alive": True, "since": "2026-09-11T00:00:00Z"},
+        "unrelated": "ignored",
+    }).encode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                                    # noqa: N802
+            if self.path != "/api/health":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):                           # keep the suite quiet
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        live, _origin, env = _update_sandbox(tmp, "update-ff", port)
+
+        # The irreplaceable half of the project, in the sandbox. gitignored, so
+        # it does not make the tree dirty -- exactly as data/ is in the real one.
+        #
+        # BUG-20260911-072: this used to be ONE file, and one file is not the
+        # claim. The claim on screen is "Nothing under data/ was read, written
+        # or moved", and a script that left the landing zone alone while
+        # truncating a log, deleting a probe scratch file or re-creating
+        # analytics.sqlite would satisfy the old check exactly. So the whole
+        # subtree is snapshotted -- every relative path, its size, its mtime --
+        # and compared afterwards.
+        data = live / "data"
+        for rel, payload in (
+            ("landing/2026-09-11T00.jsonl.zst", b"an irreplaceable frame"),
+            ("landing/manifest.json", b'{"files": 1}'),
+            ("landing/.hidden-sidecar", b"hidden files count too"),
+            ("logs/recorder.log", b"the recorder said something\n"),
+            ("logs/dashboard.log", b"the dashboard said something\n"),
+            ("analytics.sqlite", b"SQLite format 3\x00 not really, but named like it"),
+            ("ops.db", b"operational store"),
+            ("probes/two_sockets_20260911T000000Z.jsonl", b'{"conn": "A"}\n'),
+        ):
+            p = data / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(payload)
+        (data / "empty-dir").mkdir(parents=True, exist_ok=True)
+
+        def _snapshot(root: Path) -> dict:
+            """Relative path -> (kind, size, mtime_ns) for every entry beneath."""
+            snap: dict[str, tuple] = {}
+            for p in sorted(root.rglob("*")):
+                rel = p.relative_to(root).as_posix()
+                if p.is_dir():
+                    snap[rel + "/"] = ("dir", None, None)
+                else:
+                    st = p.lstat()
+                    snap[rel] = ("file", st.st_size, st.st_mtime_ns)
+            return snap
+
+        before = _snapshot(data)
+        frame = data / "landing" / "2026-09-11T00.jsonl.zst"
+        frame_bytes = frame.read_bytes()
+        check("update sandbox: the data/ subtree under test is more than one file -- a landing "
+              "zone, two logs, both stores, a probe scratch file and an empty directory",
+              len(before) >= 12, f"{len(before)} entries: {sorted(before)}")
+
+        old = _git(live, env, "rev-parse", "--short", "HEAD").stdout.strip()
+        r = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                           capture_output=True, text=True, timeout=300)
+        out = r.stdout + r.stderr
+        new = _git(live, env, "rev-parse", "--short", "HEAD").stdout.strip()
+
+        check("update: on a clean main it fast-forwards and exits 0",
+              r.returncode == 0 and old != new, f"rc={r.returncode} {out[-500:]}")
+        check("update: ...and prints the OLD..NEW range and the commits in it, so the Operator "
+              "can see what he just deployed",
+              f"{old}..{new}" in out
+              and "feat(sandbox): the commit update.command pulls" in out, out[-700:])
+        check("update: with no launchctl it SAYS SO and still succeeds -- the code on disk is "
+              "updated either way, and a hard failure here would read as 'the update broke'",
+              "is not available on this machine" in out and "NOT restarted" in out,
+              out[-700:])
+        check("update: no shell error leaked from the missing launchctl",
+              "command not found" not in out, out[-400:])
+        check("update: reads /api/health and prints quick_check -- the store's own verdict, "
+              "which is a different claim from 'the job is running'",
+              "quick_check" in out and '"result": "ok"' in out, out[-600:])
+        check("update: ...and store_writer, which names the process holding the fold-writer "
+              "lock (BUG-20260910-067)",
+              "store_writer" in out and "4242" in out, out[-600:])
+        check("update: points the Operator at the viewer rather than at a dashboard he would "
+              "have to start himself",
+              "open-dashboard.command to view" in out, out[-400:])
+        check("update: pyproject.toml did not change in that commit, so it did not reinstall",
+              "pyproject.toml unchanged" in out, out[-600:])
+        check("update: tools/launchd.py did not change either, so no plist was re-rendered",
+              "Generator unchanged" in out, out[-600:])
+        after = _snapshot(data)
+        check("update: the WHOLE data/ subtree is identical afterwards -- same paths, same "
+              "sizes, same mtimes. An update changes code; the record is the one thing in this "
+              "project that cannot be recreated (docs/07 §4)",
+              after == before,
+              f"added={sorted(set(after) - set(before))} "
+              f"removed={sorted(set(before) - set(after))} "
+              f"changed={sorted(k for k in set(after) & set(before) if after[k] != before[k])}")
+        check("update: ...and nothing was deleted or created under data/, which a size-and-"
+              "mtime comparison of surviving files alone would miss",
+              set(after) == set(before))
+        check("update: ...and the landing frame is byte-for-byte what it was",
+              frame.exists() and frame.read_bytes() == frame_bytes)
+
+        # The stub above answers with the field names update.command asks for. That
+        # proves the script reads them; it does not prove the dashboard still emits
+        # them. Rename either key in dashboard.py and the script would quietly print
+        # "(absent from /api/health)" on a real machine, which reads as "fine".
+        api = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+        script = (ROOT / "update.command").read_text()
+        for key in ("quick_check", "store_writer"):
+            check(f"update: /api/health really does carry `{key}` -- the script and the "
+                  f"endpoint name the same field",
+                  f'"{key}":' in api and f'"{key}"' in script)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_update_command_bootstraps_each_job_once_and_prints_no_empty_problem_block(
+        tmp: Path) -> None:
+    """BUG-20260911-072. The restart step used to call `launchctl bootstrap`
+    once to test it and a SECOND time to get the error text.
+
+    Two things wrong with that. A job that bootstraps successfully on the retry
+    after failing the first call ends up loaded twice, which is the two-writers
+    shape that corrupted the analytical store on 2026-09-10
+    (BUG-20260910-067). And the text printed under `PROBLEM` was the SECOND
+    call's output, not the first's -- so the usual second-call message ("service
+    already loaded") got printed as the reason the first one failed. When
+    launchctl said nothing at all, the Operator got the word PROBLEM over an
+    empty block.
+
+    The stub here is never the real `launchctl`: the sandbox copy is rewritten
+    to a name this test owns, so there is no path by which the suite reaches the
+    Operator's live jobs.
+    """
+    import subprocess
+
+    if shutil.which("git") is None:
+        check("update.command: bootstrap-once exercised", True, "skipped: no git on this machine")
+        return
+
+    fake = "navanax-selftest-launchctl"
+    base = tmp / "update-bootstrap"
+    base.mkdir(parents=True, exist_ok=True)
+    binhome = base / "bin"
+    binhome.mkdir(parents=True, exist_ok=True)
+    calls = base / "launchctl-calls.txt"
+    stub = binhome / fake
+    stub.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        'case "$1" in\n'
+        # bootstrap FAILS and says nothing -- what launchctl does when the job
+        # is already loaded, and the exact case that produced an empty block.
+        '  bootstrap) exit 37 ;;\n'
+        '  print) echo "    state = running"; echo "    pid = 4242"; exit 0 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n')
+    stub.chmod(0o755)
+
+    live, _origin, env = _update_sandbox(tmp, "update-bootstrap-repo", 9, launchctl_name=fake)
+    env["PATH"] = f"{binhome}{os.pathsep}{env.get('PATH', '')}"
+
+    agents = Path(env["HOME"]) / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    labels = ["com.navanax.recorder", "com.navanax.dashboard", "com.navanax.traits"]
+    for label in labels:
+        (agents / f"{label}.plist").write_text("<plist/>\n")
+
+    r = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                       capture_output=True, text=True, timeout=300)
+    out = r.stdout + r.stderr
+    log = calls.read_text() if calls.exists() else ""
+    bootstraps = [ln for ln in log.splitlines() if ln.startswith("bootstrap ")]
+
+    check("update restart: bootstrap ran EXACTLY ONCE per job even though every one of them "
+          "failed -- the failure path used to run it a second time, loading the job twice "
+          "(BUG-20260910-067's two-writers shape)",
+          len(bootstraps) == len(labels), f"{len(bootstraps)} bootstraps: {bootstraps}")
+    check("update restart: ...once for each of the three jobs, not three calls to one",
+          len({ln.split()[-1] for ln in bootstraps}) == len(labels), repr(bootstraps))
+    check("update restart: the failure is reported with the exit status it actually got",
+          "37" in out, out[-800:])
+    check("update restart: a bootstrap that fails SILENTLY does not print the word PROBLEM "
+          "over an empty block -- it says launchctl printed nothing and points at the state "
+          "line instead",
+          "printed nothing" in out and "PROBLEM" not in out, out[-900:])
+    check("update restart: ...and the state line is still printed, so the Operator can see "
+          "whether the job is in fact running",
+          "state" in out and "4242" in out, out[-900:])
+    check("update restart: the run still finishes -- a job that refuses to reload is reported, "
+          "not turned into 'the update broke'",
+          r.returncode == 0 and "UPDATE DONE" in out, f"rc={r.returncode} {out[-400:]}")
+
+    # ------------------------------------------------------------------
+    # The other half of the branch. The stub above fails SILENTLY, so only the
+    # "printed nothing" path ran and the path that actually prints a PROBLEM
+    # block -- the one the duplicate bootstrap used to live in -- was never
+    # exercised at all. This stub fails WITH TEXT, which is what launchctl does
+    # for a malformed plist or a domain it will not accept.
+    # ------------------------------------------------------------------
+    verbose = "navanax-selftest-launchctl-verbose"
+    vcalls = base / "launchctl-calls-verbose.txt"
+    vstub = binhome / verbose
+    vstub.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" >> "{vcalls}"\n'
+        'case "$1" in\n'
+        # Two lines, on stderr, the way launchctl reports a refusal. If the
+        # script ran bootstrap a second time to capture this, the count below
+        # would be six rather than three.
+        '  bootstrap) echo "Bootstrap failed: 5: Input/output error" >&2;\n'
+        '             echo "Try re-running as root" >&2; exit 5 ;;\n'
+        '  print) echo "    state = not running"; exit 0 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n')
+    vstub.chmod(0o755)
+
+    vlive, _vorigin, venv = _update_sandbox(tmp, "update-bootstrap-verbose", 9,
+                                            launchctl_name=verbose)
+    venv["PATH"] = f"{binhome}{os.pathsep}{venv.get('PATH', '')}"
+    vagents = Path(venv["HOME"]) / "Library" / "LaunchAgents"
+    vagents.mkdir(parents=True, exist_ok=True)
+    for label in labels:
+        (vagents / f"{label}.plist").write_text("<plist/>\n")
+
+    rv = subprocess.run(["bash", str(vlive / "update.command")], input="\n", env=venv,
+                        capture_output=True, text=True, timeout=300)
+    vout = rv.stdout + rv.stderr
+    vlog = vcalls.read_text() if vcalls.exists() else ""
+    vboots = [ln for ln in vlog.splitlines() if ln.startswith("bootstrap ")]
+
+    check("update restart (with output): bootstrap ran EXACTLY THREE times for three jobs -- "
+          "once each. This is the branch the duplicate call lived in, so six here would mean "
+          "every failing job was loaded twice (BUG-20260910-067's two-writers shape)",
+          len(vboots) == len(labels), f"{len(vboots)} bootstraps: {vboots}")
+    check("update restart (with output): ...one per label, not three attempts at one job",
+          sorted({ln.split()[-1].rsplit('/', 1)[-1] for ln in vboots})
+          == sorted(f"{label}.plist" for label in labels), repr(vboots))
+    check("update restart (with output): a bootstrap that fails WITH text prints the PROBLEM "
+          "block, once per job",
+          vout.count("PROBLEM -- macOS refused to load it") == len(labels),
+          vout[-1200:])
+    check("update restart (with output): ...and every PROBLEM block CARRIES launchctl's own "
+          "text -- it used to carry the SECOND call's message, which is a different claim from "
+          "the reason the first one failed",
+          vout.count("Bootstrap failed: 5: Input/output error") == len(labels)
+          and vout.count("Try re-running as root") == len(labels), vout[-1200:])
+    check("update restart (with output): ...with the exit status beside it, so a silent "
+          "launchctl and a talkative one are told apart on screen",
+          vout.count("(exit 5)") == len(labels), vout[-1200:])
+    check("update restart (with output): no PROBLEM block is empty -- every one is followed by "
+          "the text that explains it",
+          "printed nothing" not in vout, vout[-1200:])
+    check("update restart (with output): the update still finishes and reports the state it "
+          "found, rather than failing the whole deploy",
+          rv.returncode == 0 and "UPDATE DONE" in vout and "not running" in vout,
+          f"rc={rv.returncode} {vout[-500:]}")
+
+
+def test_open_dashboard_command_looks_and_never_starts_a_dashboard(tmp: Path) -> None:
+    """The viewer. It answers one question -- is something listening on 8765 --
+    and either opens the page or explains why it cannot.
+
+    What it must never do is start a dashboard. On 2026-09-10 a hand-started
+    dashboard beside the background one gave two writers on one SQLite store and
+    left it `database disk image is malformed` (BUG-20260910-067). The fix in the
+    code binds before it opens the store; this is the fix in the Operator's
+    hands, and it only holds as long as this file stays a viewer.
+    """
+    import socket as _socket
+    import subprocess
+
+    real = ROOT / "open-dashboard.command"
+    check("open-dashboard.command: exists and is executable",
+          real.exists() and os.access(real, os.X_OK))
+    text = real.read_text()
+    check("open-dashboard.command: never starts a dashboard -- it does not invoke the CLI at "
+          "all, so there is no path through it that becomes a second writer (BUG-20260910-067)",
+          "navanax.cli dashboard" not in text and "navanax.cli" not in text)
+
+    # BUG-20260911-072. `navanax.cli` is ONE of the ways this file could start
+    # something, and checking only for it left every other way green: run
+    # another .command, hand a file to bash, `launchctl kickstart` the job. The
+    # scan below rules out the class rather than the one instance, over the
+    # lines the script actually executes -- the file is entitled to SAY the
+    # forbidden words in its own explanation of why it does not do them.
+    viewer_bad = _viewer_violations(text)
+    check("open-dashboard.command: no executed line starts, loads or kickstarts anything, runs "
+          "another .command, or hands a file to a shell -- the viewer LOOKS, and the deploy "
+          "step is update.command (BUG-20260910-067)",
+          viewer_bad == [], "; ".join(viewer_bad))
+    check("open-dashboard.command: the only launchctl verb it uses is `print`, which asks and "
+          "changes nothing",
+          all(v in {"print"} for v in _LAUNCHCTL_VERB.findall(
+              "\n".join(ln for _n, ln in _action_lines(text)))),
+          repr(_LAUNCHCTL_VERB.findall("\n".join(ln for _n, ln in _action_lines(text)))))
+
+    # The scan is only worth having if it FAILS on the two mutations that matter.
+    # These are the shapes a future edit would take, asserted here so the rule
+    # cannot quietly stop catching them.
+    mutated = text.replace(
+        "LISTENING=no",
+        'LISTENING=no\nbash dashboard.command &\n'
+        'launchctl kickstart "gui/$(id -u)/com.navanax.dashboard"')
+    mut_bad = " ".join(_viewer_violations(mutated))
+    check("open-dashboard scan: `bash dashboard.command &` inserted into the real file is "
+          "caught -- both as a .command and as a file handed to a shell",
+          "bash dashboard.command" in mut_bad and "hands a file to a shell" in mut_bad,
+          mut_bad)
+    check("open-dashboard scan: `launchctl kickstart` inserted into the real file is caught",
+          "launchctl kickstart" in mut_bad, mut_bad)
+    check("open-dashboard scan: it does not fire on prose -- the mutated copy's only "
+          "complaints are the two lines that were added",
+          len(_viewer_violations(mutated)) == 3, repr(_viewer_violations(mutated)))
+
+    sandbox = tmp / "opendash"
+    (sandbox / "bin").mkdir(parents=True, exist_ok=True)
+    opened = sandbox / "opened.txt"
+    stub = sandbox / "bin" / "open"
+    stub.write_text('#!/bin/bash\nprintf "%s\\n" "$1" >> "' + str(opened) + '"\n')
+    stub.chmod(0o755)
+
+    listener = _socket.socket()
+    listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    port = listener.getsockname()[1]
+
+    script = sandbox / "open-dashboard.command"
+    _sandbox_script("open-dashboard.command", script, port)
+    env = _fake_home_env(sandbox / "home")
+    env["PATH"] = f"{sandbox / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+
+    try:
+        r = subprocess.run(["bash", str(script)], input="\n", env=env,
+                           capture_output=True, text=True, timeout=120)
+        out = r.stdout + r.stderr
+        check("open-dashboard: with something listening it reports running and opens the page",
+              r.returncode == 0 and "is running" in out, f"rc={r.returncode} {out[-400:]}")
+        check("open-dashboard: ...handing the browser the loopback URL and nothing else",
+              opened.exists()
+              and opened.read_text().strip() == f"http://127.0.0.1:{port}/",
+              opened.read_text() if opened.exists() else "(open was never called)")
+    finally:
+        listener.close()
+
+    r2 = subprocess.run(["bash", str(script)], input="\n", env=env,
+                        capture_output=True, text=True, timeout=120)
+    out2 = r2.stdout + r2.stderr
+    check("open-dashboard: with nothing listening it says NOT running rather than starting one",
+          "NOT running" in out2, out2[-500:])
+    check("open-dashboard: ...and says in the window that it will not start one itself, so the "
+          "Operator does not go looking for a file that would",
+          "never starts a dashboard" in out2, out2[-500:])
+    check("open-dashboard: ...and did not open a browser at a page that is not there",
+          opened.read_text().count("\n") == 1, opened.read_text())
+
+
+def test_dashboard_webloc_is_a_plist_bookmark_to_the_loopback_dashboard() -> None:
+    """The Dock/Finder bookmark. A .webloc is a property list, and a malformed
+    one fails the way a bad plist always does -- silently, by doing nothing.
+    """
+    import plistlib
+
+    p = ROOT / "Navanax Dashboard.webloc"
+    check("webloc: exists", p.exists())
+    if not p.exists():
+        return
+    try:
+        data = plistlib.loads(p.read_bytes())
+        parsed = True
+    except Exception as exc:                      # noqa: BLE001 - the point is that it parses
+        data, parsed = {}, False
+        check("webloc: parses as a property list", False, f"{type(exc).__name__}: {exc}")
+    if parsed:
+        check("webloc: parses as a property list with a URL key",
+              isinstance(data, dict) and "URL" in data, repr(data)[:200])
+    check("webloc: points at the loopback dashboard on 8765 -- loopback, because the dashboard "
+          "serves this computer only (REQ-N-13)",
+          data.get("URL") == "http://127.0.0.1:8765/", repr(data.get("URL")))
+
+
+def test_readme_and_docs_name_the_files_the_operator_double_clicks() -> None:
+    """A launcher that exists and is documented nowhere is a launcher nobody
+    uses. BUG-20260909-003 was a README that had gone stale against the code.
+    """
+    readme = (ROOT / "README.md").read_text()
+    for name in ("open-dashboard.command", "update.command", "Navanax Dashboard.webloc"):
+        check(f"README names {name}", name in readme)
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    check("docs/04 §8 separates viewing from running, which is the distinction that keeps a "
+          "second dashboard from ever being started by hand",
+          "Viewing vs running" in doc and "open-dashboard.command" in doc)
+    check("docs/04 §8 documents the update step, including that it never switches branches",
+          "Updating" in doc and "update.command" in doc)
+
+
+# ===========================================================================
+# PR-0: the two measurements. `docs/proposals/TECHLEAD_2026-09-09_factcheck.md`
+# §3 calls these "facts, not code" and asks for no tests. The probes ARE code,
+# and a probe that miscounts is worse than no probe: it produces a number that
+# gets written into a document and quoted for months. So the arithmetic and the
+# refusal are tested; the network calls are not, because they are the fact.
+# ===========================================================================
+def _import_tool(name: str):
+    """Import a module from tools/, which is deliberately not a package.
+
+    Always from SOURCE, never from a cached bytecode file. `tools/` is imported
+    by path here, and a stale `__pycache__/*.pyc` beside a tool would be graded
+    instead of the file in the working tree -- a green suite against code that
+    is not the code under review. Three things together make that impossible:
+    `sys.dont_write_bytecode` so this run leaves no cache behind,
+    `invalidate_caches()` so a file written since the interpreter started is
+    seen, and `spec_from_file_location`, which loads the `.py` itself.
+    """
+    import importlib
+    import importlib.util
+
+    sys.dont_write_bytecode = True
+    importlib.invalidate_caches()
+    modname = f"navanax_tool_{name}"
+    sys.modules.pop(modname, None)
+    source = ROOT / "tools" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(modname, source)
+    mod = importlib.util.module_from_spec(spec)
+    # Registered BEFORE exec: @dataclass resolves its annotations through
+    # sys.modules[cls.__module__] and raises an opaque AttributeError if the
+    # module it is being defined in is not there yet.
+    sys.modules[modname] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_import_tool_loads_from_source_and_can_never_grade_stale_bytecode() -> None:
+    """The loader the two probe tests run through, tested on its own.
+
+    A `.pyc` that is newer than the suite's idea of the world is not a
+    hypothetical: `tools/` is not a package, it is imported by path, and every
+    assertion about a probe is really an assertion about whatever object this
+    function returned. If that object came from a cache, the suite is grading a
+    file nobody edited.
+    """
+    import importlib.util as _ilu
+
+    cache = Path(_ilu.cache_from_source(str(ROOT / "tools" / "probe_two_sockets.py")))
+    # Whatever is there now is somebody else's; what matters is that importing
+    # does not ADD to it and does not READ from it.
+    stamp = cache.stat().st_mtime_ns if cache.exists() else None
+
+    pts = _import_tool("probe_two_sockets")
+    check("_import_tool: importing a tool writes no bytecode cache -- a .pyc this run left "
+          "behind is a .pyc the next run could be graded against",
+          (cache.stat().st_mtime_ns if cache.exists() else None) == stamp,
+          f"{cache} changed")
+    check("_import_tool: ...and the module it loaded is not the cached one, even when a stale "
+          "cache is sitting right beside the source",
+          getattr(pts, "__cached__", None) in (None, str(cache))
+          and type(pts.__loader__).__name__ == "SourceFileLoader",
+          f"__cached__={getattr(pts, '__cached__', None)!r} "
+          f"loader={type(pts.__loader__).__name__}")
+    check("_import_tool: the module it returns is the .py file in tools/, not a cached "
+          "bytecode artefact",
+          Path(pts.__file__) == (ROOT / "tools" / "probe_two_sockets.py").resolve()
+          or Path(pts.__file__) == (ROOT / "tools" / "probe_two_sockets.py"),
+          pts.__file__)
+    check("_import_tool: it turns bytecode writing OFF, so a run of this suite cannot leave a "
+          "__pycache__ behind for the next one to grade",
+          sys.dont_write_bytecode is True)
+    check("_import_tool: the loader is a SOURCE file loader -- spec_from_file_location on the "
+          ".py, never SourcelessFileLoader",
+          type(pts.__loader__).__name__ == "SourceFileLoader", type(pts.__loader__).__name__)
+
+    # Re-importing re-executes the file rather than handing back the first
+    # object: a tool edited mid-suite must be seen, and a module left in
+    # sys.modules from an earlier call would hide the edit.
+    again = _import_tool("probe_two_sockets")
+    check("_import_tool: a second import re-executes the source rather than returning the "
+          "object the first call left in sys.modules",
+          again is not pts)
+
+
+class _FakeBucket:
+    def __init__(self, tokens: float) -> None:
+        self._tokens = tokens
+        self.state = type("S", (), {"refill_per_second": 120 / 3600.0,
+                                    "capacity": 120.0, "capacity_source": "config"})()
+
+    def available(self) -> float:
+        return self._tokens
+
+
+class _FakeRestClient:
+    """Records every call. The point of the test is that there is exactly one."""
+
+    def __init__(self, tokens: float = 100.0, *, status: int = 200,
+                 body: Any = None, headers: dict | None = None) -> None:
+        self.gov = type("G", (), {"bucket": _FakeBucket(tokens)})()
+        self.calls: list[tuple] = []
+        self.requests_made = 0
+        self.last_headers = headers or {}
+        self._status = status
+        self._body = body if body is not None else {"asset_events": [], "next": None}
+
+    async def get(self, path, params=None, *, priority=None, retries=3):
+        self.calls.append((path, dict(params or {}), priority, retries))
+        self.requests_made += 1
+        return self._status, self._body
+
+
+def test_probe_events_page_spends_one_read_refuses_when_poor_and_records_the_answer(
+        tmp: Path) -> None:
+    """PR-0.1. Settles E-U1: does `limit=200` really return 200?
+
+    Three properties. It spends ONE read (not one-plus-retries: a 429 that
+    silently becomes four attempts turns a one-token measurement into a
+    four-token one, and the ledger would be right while the docstring lied). It
+    REFUSES below five tokens rather than taking the recorder's backfill
+    reserve. And it writes an entry that states the number AND what it means,
+    because REQ-D-13's unverified "up to 200 per page" is exactly what an
+    unsourced number in a document looks like.
+    """
+    from navanax.governor import Priority
+
+    pep = _import_tool("probe_events_page")
+
+    # -- one call, INTERACTIVE, no retries ---------------------------------
+    events = [{"event_type": "sale", "i": i} for i in range(50)]
+    rest = _FakeRestClient(100.0, body={"asset_events": events, "next": "cursor-abc-123456789012"},
+                           headers={"x-ratelimit-limit": "120", "x-ratelimit-remaining": "118",
+                                    "cf-cache-status": "MISS", "server": "cloudflare"})
+    r = asyncio.run(pep.probe(rest, slug="argonauts", limit=200))
+    check("probe-events-page: exactly ONE request was made",
+          len(rest.calls) == 1, f"{len(rest.calls)} calls: {rest.calls}")
+    path, params, priority, retries = rest.calls[0]
+    check("probe-events-page: it asks the events endpoint for the collection at limit=200",
+          path == "/events/collection/argonauts" and params == {"limit": 200},
+          f"{path} {params}")
+    check("probe-events-page: at INTERACTIVE priority -- the Operator is watching the window",
+          priority == Priority.INTERACTIVE, repr(priority))
+    check("probe-events-page: with retries=0, so one read means one read even on a 429",
+          retries == 0, repr(retries))
+
+    check("probe-events-page: it counts the returned array",
+          r["items_returned"] == 50 and r["items_key"] == "asset_events", repr(r)[:300])
+    check("probe-events-page: it reports whether a `next` cursor came back",
+          r["next_present"] is True)
+    check("probe-events-page: it carries the rate-limit headers back out of the governor",
+          r["headers"]["x-ratelimit-limit"] == "120"
+          and r["headers"]["x-ratelimit-remaining"] == "118", repr(r["headers"]))
+
+    # -- the entry format --------------------------------------------------
+    entry = pep.render_entry(r)
+    check("probe-events-page entry: dated heading naming the exact request",
+          entry.startswith("## ") and "GET /events/collection/argonauts?limit=200" in entry
+          and r["at"] in entry, entry[:200])
+    for row in ("| Requested `limit` | `200` |", "| HTTP status | 200 |",
+                "| Items returned | 50 |", "| `next` cursor present | yes |",
+                "| `x-ratelimit-limit` | `120` |", "| `x-ratelimit-reset` | (absent) |"):
+        check(f"probe-events-page entry: has the row {row!r}", row in entry, entry)
+    check("probe-events-page entry: an absent header is written as absent, not as a blank cell "
+          "that reads like a zero",
+          "(absent)" in entry)
+    check("probe-events-page entry: names the ledger the spend was recorded in",
+          "rest_ledger" in entry)
+    check("probe-events-page entry: the verdict states the measured number and that 200 was "
+          "NOT honoured, with the factor every backfill estimate is now wrong by",
+          "**Answer: 50 items for `limit=200`.**" in entry and "4.0x" in entry, entry)
+
+    # A page that IS 200 must not be reported as a cap.
+    full = asyncio.run(pep.probe(
+        _FakeRestClient(100.0, body={"asset_events": [{} for _ in range(200)], "next": "c"}),
+        slug="argonauts", limit=200))
+    check("probe-events-page: 200 returned for limit=200 is reported as the assumption holding",
+          "**Answer: 200 items for `limit=200`.**" in pep.render_entry(full)
+          and "honoured" in pep.render_entry(full))
+
+    # Short page with NO cursor is the end of history, not a measured cap --
+    # the difference matters and the wrong reading would understate the budget.
+    short = asyncio.run(pep.probe(
+        _FakeRestClient(100.0, body={"asset_events": [{}, {}], "next": None}),
+        slug="argonauts", limit=200))
+    check("probe-events-page: a short page with no `next` is called the end of history, not a "
+          "page cap -- the ceiling stays unmeasured and the entry says so",
+          "end of the available history" in pep.render_entry(short))
+
+    # A non-200 must not silently become 'zero items'.
+    bad = asyncio.run(pep.probe(_FakeRestClient(100.0, status=429, body={"detail": "slow down"}),
+                                slug="argonauts", limit=200))
+    check("probe-events-page: a 429 is recorded as NO ANSWER, never as a page size of 0",
+          "No answer" in pep.render_entry(bad) and "still unverified" in pep.render_entry(bad))
+
+    # -- the refusal -------------------------------------------------------
+    poor = _FakeRestClient(4.0)
+    try:
+        asyncio.run(pep.probe(poor, slug="argonauts", limit=200))
+        refused = False
+    except pep.BudgetRefusal as exc:
+        refused = True
+        msg = str(exc)
+    check("probe-events-page: REFUSES below 5 tokens", refused)
+    if refused:
+        check("probe-events-page: ...and spends nothing when it refuses -- no call was made",
+              len(poor.calls) == 0, repr(poor.calls))
+        check("probe-events-page: ...and the refusal says how many tokens there were and that "
+              "waiting is the fix",
+              "4.0 tokens" in msg and "reads/hour" in msg, msg)
+    edge = _FakeRestClient(5.0)
+    asyncio.run(pep.probe(edge, slug="argonauts", limit=200))
+    check("probe-events-page: exactly 5 tokens is enough -- the floor is >=, not >",
+          len(edge.calls) == 1)
+
+    # -- the file ----------------------------------------------------------
+    p = tmp / "measurements" / "2026-09-11_events_page_size.md"
+    pep.append_entry(p, entry)
+    first = p.read_text()
+    check("probe-events-page: creates docs/measurements/ and writes the header on first run",
+          p.exists() and "Settles E-U1" in first and "REQ-D-13" in first, first[:200])
+    pep.append_entry(p, pep.render_entry(full))
+    second = p.read_text()
+    check("probe-events-page: a second run APPENDS -- the earlier measurement is evidence and "
+          "is not edited or replaced (docs/01: corrections supersede, they never edit)",
+          second.startswith(first) and "**Answer: 200 items" in second)
+
+
+def _probe_frame(event: str, order_hash: str, ts: str, slug: str = "argonauts") -> str:
+    """A stream frame in the v2 array shape OpenSea actually sends."""
+    return json.dumps([
+        "1", None, f"collection:{slug}", event,
+        {"event_type": event, "payload": {"collection": {"slug": slug},
+                                          "order_hash": order_hash, "event_timestamp": ts}},
+    ])
+
+
+def test_probe_two_sockets_overlap_arithmetic_on_synthetic_frames(tmp: Path) -> None:
+    """PR-0.2's counter. The number this produces gates PR-10, so it is tested
+    on frames whose answer is known by construction.
+
+    The failure this guards against is the flattering one named in the dataeng
+    proposal's failure mode 3: an overlap that collapses toward a comfortable
+    number because the counter is wrong rather than because the stream is good.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+    a.connected_at, b.connected_at = 0.0, 0.0
+    # A sees 1,2,3,4 · B sees 2,3,4,5. Union 5, both 3, one unique each.
+    for i in (1, 2, 3, 4):
+        a.observe(_probe_frame("item_listed", f"0xh{i}", f"2026-09-11T00:00:0{i}Z"), 100.0 + i)
+    for i in (2, 3, 4, 5):
+        b.observe(_probe_frame("item_listed", f"0xh{i}", f"2026-09-11T00:00:0{i}Z"), 100.0 + i)
+    a.last_frame_at = b.last_frame_at = 105.0
+    ov = pts.overlap_report(a, b, (0.0, 200.0))
+    check("two-sockets: union is the distinct count across both connections",
+          ov["n_union"] == 5, repr(ov))
+    check("two-sockets: intersection counts only events BOTH saw",
+          ov["n_intersection"] == 3, repr(ov))
+    check("two-sockets: per-connection unique counts -- this is the measurement of what a "
+          "single socket drops",
+          (ov["only_a"], ov["only_b"]) == (1, 1), repr(ov))
+    check("two-sockets: the overlap ratio is |A n B| / |A u B|",
+          abs(ov["jaccard"] - 0.6) < 1e-9, repr(ov["jaccard"]))
+    check("two-sockets: each directional share is reported with its own denominator",
+          abs(ov["share_of_a_also_in_b"] - 0.75) < 1e-9
+          and abs(ov["share_of_b_also_in_a"] - 0.75) < 1e-9, repr(ov))
+
+    # A duplicate inside ONE connection is the same event, not a second one.
+    a2 = pts.SocketTally("A")
+    f = _probe_frame("item_listed", "0xdup", "2026-09-11T00:00:09Z")
+    a2.observe(f, 10.0)
+    a2.observe(f, 11.0)
+    check("two-sockets: the same event twice on one socket is one distinct event, and the "
+          "FIRST arrival time is the one kept",
+          len(a2.keys) == 1 and a2.keyed == 2 and list(a2.keys.values()) == [10.0],
+          f"{a2.keys} keyed={a2.keyed}")
+
+    # The empty case. A ratio over nothing is None -- never 1.0.
+    empty = pts.overlap_report(pts.SocketTally("A"), pts.SocketTally("B"), (0.0, 10.0))
+    check("two-sockets: with no events the overlap ratio is None, not 1.0 -- '100% agreement' "
+          "reads identically on n=900 and n=0 and only one of those is evidence",
+          empty["jaccard"] is None and empty["n_union"] == 0, repr(empty))
+
+    # Frames that arrived before the second socket joined must not be counted
+    # as "missed by B" -- that manufactures uniques out of the stagger.
+    early_a, late_b = pts.SocketTally("A"), pts.SocketTally("B")
+    early_a.connected_at, late_b.connected_at = 0.0, 100.0
+    early_a.observe(_probe_frame("item_listed", "0xearly", "2026-09-11T00:00:00Z"), 10.0)
+    shared = _probe_frame("item_sold", "0xshared", "2026-09-11T00:02:00Z")
+    early_a.observe(shared, 120.0)
+    late_b.observe(shared, 120.5)
+    early_a.last_frame_at = late_b.last_frame_at = 121.0
+    win = pts.common_window(early_a, late_b, settle=5.0)
+    check("two-sockets: the overlap window starts after the LATER join plus a settling margin",
+          win is not None and abs(win[0] - 105.0) < 1e-9, repr(win))
+    ov2 = pts.overlap_report(early_a, late_b, win)
+    check("two-sockets: an event A saw before B was even connected is excluded from the "
+          "comparison rather than counted as a drop by B",
+          (ov2["n_a"], ov2["n_b"], ov2["only_a"], ov2["only_b"], ov2["n_union"])
+          == (1, 1, 0, 0, 1), repr(ov2))
+
+    # Un-keyable frames are counted, never guessed at and never dropped quietly.
+    u = pts.SocketTally("A")
+    u.observe(json.dumps(["1", None, "collection:argonauts", "item_metadata_updated",
+                          {"event_type": "item_metadata_updated", "payload": {"item": {}}}]), 1.0)
+    check("two-sockets: a market frame with no (event_type, order_hash, event_timestamp) key is "
+          "counted as un-keyable -- PR-10 cannot dedup these and needs the number",
+          u.market_frames == 1 and u.unkeyable == 1 and u.keyed == 0, u.as_dict())
+
+    # Protocol frames are not market events.
+    p = pts.SocketTally("A")
+    p.observe(json.dumps(["1", "1", "collection:argonauts", "phx_reply",
+                          {"status": "ok", "response": {}}]), 1.0)
+    p.observe(json.dumps(["1", "9", "phoenix", "phx_reply", {"status": "ok", "response": {}}]), 2.0)
+    check("two-sockets: a join reply is recorded as a JOIN, not as a market event",
+          p.join_ok and p.market_frames == 0, p.as_dict())
+    check("two-sockets: a heartbeat reply on the `phoenix` topic is counted as a heartbeat -- "
+          "the same mistake V9 caught in stream.py",
+          p.heartbeat_replies == 1, p.as_dict())
+    rej = pts.SocketTally("B")
+    rej.observe(json.dumps(["1", "1", "collection:argonauts", "phx_reply",
+                            {"status": "error", "response": {"reason": "unauthorized"}}]), 1.0)
+    check("two-sockets: a REFUSED join is recorded as an error, not silently ignored",
+          rej.join_ok is False and "unauthorized" in (rej.join_error or ""), rej.join_error)
+
+    # -- the verdict has to name the failure modes, not just the happy one --
+    mute = pts.SocketTally("B")
+    mute.connected_at = 0.0
+    v = " ".join(pts.verdict(a, mute, pts.overlap_report(a, mute, (0.0, 200.0))))
+    check("two-sockets verdict: a second socket that connects and receives NOTHING is called "
+          "out as the dangerous case, not reported as a quiet market",
+          "MUTE" in v and "two connections are not permitted" in v, v)
+
+    refused = pts.SocketTally("B")
+    refused.http_status = 403
+    refused.error = "InvalidStatus: HTTP 403"
+    v2 = " ".join(pts.verdict(a, refused, pts.overlap_report(a, refused, None)))
+    check("two-sockets verdict: a second socket refused at the handshake reports the HTTP "
+          "status and sends PR-10 to two keys",
+          "NOT established" in v2 and "403" in v2 and "two keys" in v2, v2)
+
+    both = pts.SocketTally("B")
+    both.connected_at = 0.0
+    for i in (1, 2, 3, 4):
+        both.observe(_probe_frame("item_listed", f"0xh{i}", f"2026-09-11T00:00:0{i}Z"), 100.0 + i)
+    v3 = " ".join(pts.verdict(a, both, pts.overlap_report(a, both, (0.0, 200.0))))
+    check("two-sockets verdict: zero uniques on both sides is reported as 'no loss OBSERVED at "
+          "this n', with the n -- not as 'the stream is lossless'",
+          "no loss observed" in v3 and "n=4" in v3 and "probe bug looks like" in v3, v3)
+    v4 = " ".join(pts.verdict(a, b, ov))
+    check("two-sockets verdict: a real drop is stated as counts first and the percentage second, "
+          "with the n it came from",
+          "1 was seen only by A" in v4 and "n=5" in v4 and "40.0%" in v4, v4)
+
+    # -- the recorder's log is read, and a disconnect in the window is the finding
+    log = tmp / "recorder.log"
+    log.write_text("old line\n")
+    off = pts.log_size(log)
+    with log.open("a") as fh:
+        fh.write("WARNING stream error (ConnectionClosed)\nWARNING reconnecting in 2.0s\nidle\n")
+    lines = pts.disconnect_lines(pts.read_log_tail(log, off))
+    check("two-sockets: it reads only what the recorder appended DURING the probe, and finds "
+          "the disconnect lines stream.py actually writes",
+          len(lines) == 2 and "reconnecting in 2.0s" in lines[1], repr(lines))
+    check("two-sockets: a missing recorder log is not an error -- the Operator may be running "
+          "the recorder in a window rather than under launchd",
+          pts.log_size(tmp / "nope.log") == 0 and pts.read_log_tail(tmp / "nope.log", 0) == "")
+
+
+def test_probe_two_sockets_excludes_a_replay_of_an_event_seen_before_the_window() -> None:
+    """BUG-20260911-072. The membership test used to be per-socket, and that
+    manufactures uniques in the one direction that flatters PR-10.
+
+    A connects first and sees `0xPRE` long before the two sockets overlap. B
+    joins later and the server REPLAYS `0xPRE` to it a few seconds inside the
+    common window. By B's own first-sight clock that is an in-window event; by
+    A's it is not. Counted per-socket it becomes "B saw an event A missed" --
+    which is the exact number that would be written into PR-10 as the measured
+    value of a second stream.
+
+    The rule that fixes it: an event belongs to the window only if NEITHER
+    socket had already seen it when the window opened.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+    a.connected_at, b.connected_at = 0.0, 100.0
+    pre = _probe_frame("item_listed", "0xPRE", "2026-09-11T00:00:00Z")
+    a.observe(pre, 10.0)            # before the window: A's own first sight
+    b.observe(pre, 118.0)           # inside the window: B's replay of the SAME event
+    live = _probe_frame("item_sold", "0xLIVE", "2026-09-11T00:02:00Z")
+    a.observe(live, 120.0)
+    b.observe(live, 120.4)
+    a.last_frame_at = b.last_frame_at = 125.0
+
+    win = pts.common_window(a, b, settle=5.0)
+    check("two-sockets replay: the window opens at the later join plus the settle margin",
+          win is not None and abs(win[0] - 105.0) < 1e-9, repr(win))
+    ov = pts.overlap_report(a, b, win)
+    check("two-sockets replay: an event A had ALREADY SEEN before the window, replayed to B "
+          "inside it, is NOT a unique for B -- only_b is 0, not 1",
+          ov["only_b"] == 0, repr(ov))
+    check("two-sockets replay: ...and it is excluded from the union entirely, so the drop rate "
+          "has the right denominator too",
+          ov["n_union"] == 1 and ov["n_a"] == 1 and ov["n_b"] == 1
+          and ov["only_a"] == 0 and ov["n_intersection"] == 1, repr(ov))
+    check("two-sockets replay: the exclusion is COUNTED and reported, not done silently -- how "
+          "much the server replays after a join is itself a measurement",
+          ov["n_excluded_pre_window"] == 1, repr(ov))
+    _ka, _kb, excluded = pts.window_sets(a, b, win[0], win[1])
+    check("two-sockets replay: window_sets names which key it dropped",
+          {k[1] for k in excluded} == {"0xPRE"}, repr(excluded))
+
+    v = " ".join(pts.verdict(a, b, ov))
+    check("two-sockets replay: with the replay excluded the verdict does NOT claim a drop",
+          "demonstrably drops" not in v, v)
+    check("two-sockets replay: ...and it says out loud that events were excluded as pre-window, "
+          "so the n in the table can be reconciled with the raw counts",
+          "excluded from the comparison" in v, v)
+    check("two-sockets replay: the sentence agrees with itself at n=1 -- `1 event WAS excluded`, "
+          "not `1 event were excluded`",
+          "1 event was excluded from the comparison" in v, v)
+
+    # ...and the plural at n>1, so the singular is not just a hard-coded string.
+    e, f = pts.SocketTally("A"), pts.SocketTally("B")
+    e.connected_at, f.connected_at = 0.0, 100.0
+    for i in (1, 2):
+        early = _probe_frame("item_listed", f"0xPRE{i}", f"2026-09-11T00:00:0{i}Z")
+        e.observe(early, 10.0 + i)
+        f.observe(early, 118.0 + i)
+    e.last_frame_at = f.last_frame_at = 125.0
+    ov_two = pts.overlap_report(e, f, pts.common_window(e, f, settle=5.0))
+    v_two = " ".join(pts.verdict(e, f, ov_two))
+    check("two-sockets replay: ...and `2 events WERE excluded` at n=2",
+          ov_two["n_excluded_pre_window"] == 2
+          and "2 events were excluded from the comparison" in v_two, v_two)
+    check("two-sockets replay: the exclusion is stated BEFORE the empty-window sentence -- when "
+          "every event in the window was a replay, the exclusion is WHY the window is empty, "
+          "and 'no keyable events fell inside the window' alone reads as a quiet market",
+          v_two.index("were excluded from the comparison")
+          < v_two.index("No keyable events fell inside"), v_two)
+
+    # The mirror case: a genuine drop must still be counted. The fix must not
+    # be a blanket "ignore anything one socket saw first".
+    c, d = pts.SocketTally("A"), pts.SocketTally("B")
+    c.connected_at, d.connected_at = 0.0, 100.0
+    only_a_frame = _probe_frame("item_listed", "0xDROP", "2026-09-11T00:03:00Z")
+    c.observe(only_a_frame, 110.0)      # inside the window, A only -- a real drop by B
+    c.observe(live, 120.0)
+    d.observe(live, 120.4)
+    c.last_frame_at = d.last_frame_at = 125.0
+    ov2 = pts.overlap_report(c, d, pts.common_window(c, d, settle=5.0))
+    check("two-sockets replay: an event first seen INSIDE the window by one socket and never by "
+          "the other is still a real unique -- the fix excludes replays, not drops",
+          (ov2["only_a"], ov2["only_b"], ov2["n_union"], ov2["n_excluded_pre_window"])
+          == (1, 0, 2, 0), repr(ov2))
+
+
+def test_probe_two_sockets_verdict_refuses_to_claim_a_drop_from_an_empty_window() -> None:
+    """A percentage needs a denominator. "A single socket demonstrably drops
+    events" must be unreachable from a window of zero length or zero events --
+    those are absences of evidence, and this project's standing rule is that a
+    surprisingly strong result is a bug until proven otherwise.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+    a.connected_at, b.connected_at = 0.0, 0.0
+    for i in (1, 2):
+        a.observe(_probe_frame("item_listed", f"0xq{i}", f"2026-09-11T00:00:0{i}Z"), 1.0 + i)
+        b.observe(_probe_frame("item_listed", f"0xq{i}", f"2026-09-11T00:00:0{i}Z"), 1.0 + i)
+
+    # 1. No common window at all (B never connected long enough to overlap).
+    none_ov = pts.overlap_report(a, b, None)
+    v = " ".join(pts.verdict(a, b, none_ov))
+    check("two-sockets verdict: with NO common window it says there was none and stops, rather "
+          "than reporting a rate",
+          "no common window" in v.lower() and "demonstrably drops" not in v, v)
+    check("two-sockets verdict: ...and reports the empty window with its n, not as a bare "
+          "sentence",
+          "n=0" in v, v)
+
+    # 2. A window with length but nothing keyable in it.
+    empty = pts.overlap_report(pts.SocketTally("A"), pts.SocketTally("B"), (0.0, 60.0))
+    ea, eb = pts.SocketTally("A"), pts.SocketTally("B")
+    ea.connected_at = eb.connected_at = 0.0
+    ea.market_frames = eb.market_frames = 3       # frames arrived, none of them keyable
+    v2 = " ".join(pts.verdict(ea, eb, empty))
+    check("two-sockets verdict: an empty window is reported as unanswered, and explicitly NOT "
+          "as zero loss",
+          "unanswered by this run" in v2 and "not a measurement of zero loss" in v2, v2)
+    check("two-sockets verdict: ...and never as a drop",
+          "demonstrably drops" not in v2, v2)
+
+    # 3. A zero-length window that somehow carries counts -- the arithmetic path
+    #    that would divide a real numerator by a window nobody was measuring in.
+    bogus = dict(pts.overlap_report(a, b, (0.0, 60.0)))
+    bogus.update({"window_seconds": 0.0, "only_a": 5, "only_b": 5, "n_union": 10})
+    v3 = " ".join(pts.verdict(a, b, bogus))
+    check("two-sockets verdict: a zero-length window cannot produce a drop claim even when the "
+          "counts in the dict are non-zero",
+          "demonstrably drops" not in v3 and "no common window" in v3.lower(), v3)
+
+    # And the positive control: a real drop in a real window still reads as one,
+    # with the counts leading and the percentage carrying its n.
+    real_a, real_b = pts.SocketTally("A"), pts.SocketTally("B")
+    real_a.connected_at = real_b.connected_at = 0.0
+    for i in (1, 2, 3, 4):
+        real_a.observe(_probe_frame("item_listed", f"0xr{i}",
+                                    f"2026-09-11T00:00:0{i}Z"), 10.0 + i)
+    for i in (2, 3, 4, 5):
+        real_b.observe(_probe_frame("item_listed", f"0xr{i}",
+                                    f"2026-09-11T00:00:0{i}Z"), 10.0 + i)
+    real_a.last_frame_at = real_b.last_frame_at = 20.0
+    ov = pts.overlap_report(real_a, real_b, pts.common_window(real_a, real_b, settle=0.0))
+    v4 = " ".join(pts.verdict(real_a, real_b, ov))
+    check("two-sockets verdict: a genuine drop in a real window IS still stated as one",
+          "demonstrably drops" in v4, v4)
+    check("two-sockets verdict: ...with the numerator and denominator beside the percentage, "
+          "never a bare percentage",
+          "2 of the 5 events in the union" in v4 and "40.0%" in v4 and "n=5" in v4, v4)
+
+
+def test_probe_two_sockets_never_reconnects_after_the_peer_closes() -> None:
+    """BUG-20260911-072. "Never reconnects" used to be tested by grepping the
+    probe's own docstring for the words, which tests the comment and not the
+    code: delete the retry loop's absence and the string stays true.
+
+    This connects both sockets through a factory that COUNTS its invocations
+    and hands back a peer that closes immediately. A silent reconnect would turn
+    "the server closed our second connection" into "the second connection worked
+    fine" -- and that is the entire fact PR-0.2 exists to establish.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    frames = [_probe_frame("item_listed", "0xa1", "2026-09-11T00:00:01Z"),
+              _probe_frame("item_listed", "0xa2", "2026-09-11T00:00:02Z")]
+
+    class _ClosingPeer:
+        """Two frames, then end of iteration -- what a peer hanging up looks like."""
+
+        close_code = 1006
+        close_reason = "peer closed early"
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, text: str) -> None:
+            self.sent.append(text)
+
+        def __aiter__(self):
+            return self._frames()
+
+        async def _frames(self):
+            for f in frames:
+                yield f
+
+    class _CountingFactory:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+            self.peers: list[_ClosingPeer] = []
+
+        def __call__(self, url: str):
+            self.urls.append(url)
+            peer = _ClosingPeer()
+            self.peers.append(peer)
+
+            class _CM:
+                async def __aenter__(_self):
+                    return peer
+
+                async def __aexit__(_self, *exc):
+                    return False
+            return _CM()
+
+    fa, fb = _CountingFactory(), _CountingFactory()
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+
+    # Both sockets go through a counting factory. Leaving either as None would
+    # reach for the real StreamConsumer connect, and the network.
+    async def drive_both() -> None:
+        stop = asyncio.Event()
+        await asyncio.gather(
+            pts.run_socket("A", "wss://fake/socket", "argonauts", a, stop, None,
+                           api_key="k", heartbeat_seconds=0.05, connect_factory=fa),
+            pts.run_socket("B", "wss://fake/socket", "argonauts", b, stop, None,
+                           api_key="k", heartbeat_seconds=0.05, connect_factory=fb),
+        )
+
+    asyncio.run(drive_both())
+
+    check("two-sockets: each socket connects EXACTLY ONCE -- a peer that closes early does not "
+          "get a second connection, because a silent reconnect would erase the refusal this "
+          "probe exists to measure",
+          (len(fa.urls), len(fb.urls)) == (1, 1), f"A={fa.urls} B={fb.urls}")
+    check("two-sockets: two sockets means two connects in total, not two plus retries",
+          len(fa.urls) + len(fb.urls) == 2)
+    check("two-sockets: the key rides in the query string of the URL it connected to, exactly "
+          "as the recorder does it",
+          all(u == "wss://fake/socket?token=k" for u in fa.urls + fb.urls),
+          repr(fa.urls + fb.urls))
+    check("two-sockets: each connection subscribed once, with the recorder's join frame",
+          [p.sent[0] for p in fa.peers + fb.peers]
+          == [pts.join_frame("argonauts", "1")] * 2,
+          repr([p.sent for p in fa.peers + fb.peers]))
+    check("two-sockets: the frames the closing peer did send were still tallied -- an early "
+          "close loses the connection, not the evidence",
+          (a.frames, b.frames) == (2, 2) and len(a.keys) == 2 and len(b.keys) == 2,
+          f"{a.as_dict()} {b.as_dict()}")
+    check("two-sockets: the peer's close code is recorded, so 'it closed on us' is in the "
+          "measurement rather than in nobody's memory",
+          (a.close_code, b.close_code) == (1006, 1006), f"{a.close_code} {b.close_code}")
+    check("two-sockets: a socket that ended is marked closed, so the common window ends where "
+          "the connection did",
+          a.closed_at is not None and b.closed_at is not None)
+
+
+def test_probe_two_sockets_ctrl_c_writes_a_partial_entry_and_every_string_says_so(
+        tmp: Path) -> None:
+    """Ctrl+C used to print "nothing was written" while the screen two lines
+    above promised it "still writes what it saw", and the launcher said the same
+    thing a third time.
+
+    A short run is evidence with a small n. Throwing it away was never the
+    honest option -- and neither is writing it as though it were the ten-minute
+    run that was asked for, so the entry is labelled with the seconds it
+    actually ran (BUG-20260911-072).
+    """
+    import inspect
+
+    pts = _import_tool("probe_two_sockets")
+
+    # The fix that makes a partial entry possible at all: the tallies are owned
+    # by the caller, so an interrupt unwinding out of asyncio.run leaves them
+    # holding what they saw. A tally created inside the coroutine went with it.
+    params = list(inspect.signature(pts._run).parameters)
+    check("two-sockets Ctrl+C: the tallies are passed INTO the run rather than created inside "
+          "it, so an interrupt cannot take the evidence with it",
+          params[-2:] == ["a", "b"], repr(params))
+
+    frames = [_probe_frame("item_listed", "0xz1", "2026-09-11T00:00:01Z"),
+              _probe_frame("item_listed", "0xz2", "2026-09-11T00:00:02Z")]
+
+    class _InterruptedPeer:
+        close_code = None
+        close_reason = ""
+
+        async def send(self, text: str) -> None:
+            pass
+
+        def __aiter__(self):
+            return self._frames()
+
+        async def _frames(self):
+            for f in frames:
+                yield f
+            raise KeyboardInterrupt        # the Operator's Ctrl+C, mid-stream
+
+    def _factory(url: str):
+        class _CM:
+            async def __aenter__(_s):
+                return _InterruptedPeer()
+
+            async def __aexit__(_s, *exc):
+                return False
+        return _CM()
+
+    a = pts.SocketTally("A")
+
+    async def drive() -> None:
+        stop = asyncio.Event()
+        await pts.run_socket("A", "wss://fake/socket", "argonauts", a, stop, None,
+                             api_key="k", heartbeat_seconds=0.05, connect_factory=_factory)
+
+    interrupted = False
+    try:
+        asyncio.run(drive())
+    except KeyboardInterrupt:
+        interrupted = True
+
+    check("two-sockets Ctrl+C: the interrupt is not swallowed -- run_socket catches Exception, "
+          "and KeyboardInterrupt is not one",
+          interrupted)
+    check("two-sockets Ctrl+C: the frames seen before the interrupt are still in the tally",
+          a.frames == 2 and len(a.keys) == 2, a.as_dict())
+    check("two-sockets Ctrl+C: the socket is marked closed at the interrupt, so the common "
+          "window ends where the Operator stopped it rather than at the last event",
+          a.closed_at is not None)
+
+    # The entry itself. Partial is stated in the heading, not only in prose
+    # nobody reads, and it carries BOTH numbers: what ran and what was asked for.
+    b = pts.SocketTally("B")
+    b.connected_at = 0.0
+    ov = pts.overlap_report(a, b, None)
+    meta = {"started": "2026-09-11T04:00:00Z", "seconds": 600.0, "slug": "argonauts",
+            "interrupted": True, "elapsed_seconds": 42.0, "sink": "data/probes/x.jsonl",
+            "recorder_log": "data/logs/recorder.log", "recorder_disconnects": []}
+    entry = pts.render_entry(a, b, ov, meta)
+    head = entry.splitlines()[0]
+    check("two-sockets Ctrl+C: the entry's HEADING says it was interrupted and how long it ran",
+          head.startswith("## ") and "interrupted after 42 s" in head and "partial" in head,
+          head)
+    check("two-sockets Ctrl+C: ...and names the duration that was ASKED for, so the shortfall "
+          "is visible without arithmetic",
+          "600s requested" in head or "of 600s requested" in head, head)
+    check("two-sockets Ctrl+C: ...and the body says to read it as a lower bound, not as a "
+          "completed measurement",
+          "PARTIAL" in entry and "lower bound" in entry, entry[:600])
+
+    full = pts.render_entry(a, b, ov, dict(meta, interrupted=False))
+    check("two-sockets Ctrl+C: a COMPLETED run is not labelled partial -- the label has to "
+          "mean something",
+          "partial" not in full.splitlines()[0] and "PARTIAL" not in full)
+
+    out = tmp / "measure.md"
+    pts.append_entry(out, entry)
+    pts.append_entry(out, entry)
+    check("two-sockets Ctrl+C: the partial entry is APPENDED like any other -- the measurement "
+          "file is append-only and a second run never edits the first",
+          out.read_text().count("interrupted after 42 s") == 2)
+
+    # All three places that speak about Ctrl+C have to agree, because they are
+    # read in sequence: the screen before the run, the screen after it, and the
+    # launcher's exit-code table.
+    src = (ROOT / "tools" / "probe_two_sockets.py").read_text()
+    launcher = (ROOT / "probe-two-sockets.command").read_text()
+    printed = [ln for ln in src.splitlines() if "print(" in ln]
+    check("two-sockets Ctrl+C: no line the probe PRINTS tells the Operator nothing was "
+          "written (the source may still describe the old behaviour in a comment; what it "
+          "puts on screen is the thing that has to be true)",
+          not any("nothing was written" in ln.lower() for ln in printed),
+          repr([ln for ln in printed if "nothing was written" in ln.lower()]))
+    check("two-sockets Ctrl+C: the launcher's exit-130 message no longer says nothing was "
+          "written either",
+          "nothing was written" not in launcher.lower(), launcher)
+    check("two-sockets Ctrl+C: the launcher says where the partial entry went",
+          "PARTIAL" in launcher and "docs/measurements" in launcher, launcher)
+    check("two-sockets Ctrl+C: the on-screen promise before the run matches what happens -- it "
+          "says the entry will be marked partial",
+          "still writes what it saw" in src and "marked PARTIAL" in src)
+
+
+def test_probe_two_sockets_speaks_the_recorders_protocol_and_touches_no_store() -> None:
+    """The probe must subscribe exactly the way the recorder does, or it is
+    measuring a different client -- and it must never become an ingestion path.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    real = StreamConsumer("k", ["argonauts"], FakeWriter(), None)
+    check("two-sockets: the join frame is byte-identical to the recorder's",
+          [pts.join_frame("argonauts", "1")] == real.join_messages(),
+          f"{pts.join_frame('argonauts', '1')!r} vs {real.join_messages()!r}")
+    real._ref = 0
+    check("two-sockets: the heartbeat frame is byte-identical to the recorder's",
+          pts.heartbeat_frame("1") == real.heartbeat_message(),
+          f"{pts.heartbeat_frame('1')!r} vs {real.heartbeat_message()!r}")
+    check("two-sockets: it connects to the same URL the recorder uses",
+          pts.MAINNET_WS == "wss://stream.openseabeta.com/socket/websocket")
+
+    # Names of things that OPEN a store, not prose mentioning them: both probes
+    # say in their own docstrings which stores they leave alone, and a check
+    # that forbade the words would forbid the promise as well as the breach.
+    src = (ROOT / "tools" / "probe_two_sockets.py").read_text()
+    for forbidden in ("LandingZoneWriter", "OperationalStore", "open_store", "sqlite3",
+                      'cfg["analytical"]', "navanax.landing", "navanax.opstore",
+                      "navanax.normalize"):
+        check(f"two-sockets: never references {forbidden} -- it is a probe, not an ingestion "
+              f"path, and the landing zone is append-only and irreplaceable",
+              forbidden not in src)
+    check("two-sockets: its scratch frames go under data/, which .gitignore already excludes "
+          "whole -- real market data never reaches a commit",
+          "data/probes" in src and "data/" in (ROOT / ".gitignore").read_text())
+    # "It never reconnects" is asserted by BEHAVIOUR in
+    # test_probe_two_sockets_never_reconnects_after_the_peer_closes, not by
+    # grepping this file for the words. A docstring check passes on a file whose
+    # docstring is right and whose code is wrong, which is the only case worth
+    # catching (BUG-20260911-072).
+
+    pep = (ROOT / "tools" / "probe_events_page.py").read_text()
+    for forbidden in ("LandingZoneWriter", "navanax.landing", "open_store", "sqlite3",
+                      'cfg["analytical"]'):
+        check(f"probe-events-page: never opens a store -- no reference to {forbidden}",
+              forbidden not in pep)
+    check("probe-events-page: goes through RestClient, so the one read it spends is in the "
+          "ledger like every other read in the system",
+          "RestClient" in pep and "store.log_rest" in pep)
+
+
+def test_probe_launchers_are_double_clickable_and_name_the_right_module() -> None:
+    """The Operator double-clicks these. Each one has to say what it spends
+    before it spends it, and neither may start the recorder.
+    """
+    pairs = [("probe-events-page.command", "tools/probe_events_page.py"),
+             ("probe-two-sockets.command", "tools/probe_two_sockets.py")]
+    for name, module in pairs:
+        p = ROOT / name
+        check(f"{name}: exists and is executable",
+              p.exists() and os.access(p, os.X_OK))
+        if not p.exists():
+            continue
+        text = p.read_text()
+        check(f"{name}: runs {module}", module in text)
+        check(f"{name}: names no OTHER probe module -- a launcher that runs the wrong probe "
+              f"spends the wrong budget",
+              all(other not in text for _, other in pairs if other != module))
+        check(f"{name}: never starts the recorder -- it does not invoke the CLI at all",
+              "navanax.cli" not in text and "ingest" not in text)
+        check(f"{name}: sets PYTHONPATH=src, because tools/ is not a package and the import "
+              f"would fail on a machine without an editable install",
+              "PYTHONPATH=src" in text)
+        check(f"{name}: pauses for confirmation before it runs, so a stray double-click in the "
+              f"Finder cannot spend anything",
+              "close this window to cancel" in text)
+        check(f"{name}: keeps the window open at the end", "Press Enter to close" in text)
+        check(f"{name}: states in the window that it never writes to the landing zone",
+              "data/landing" in text)
+
+    ev = (ROOT / "probe-events-page.command").read_text()
+    check("probe-events-page.command: states the cost -- ONE read -- before spending it",
+          "ONE REST read" in ev and "refuses" in ev)
+    check("probe-events-page.command: explains the refusal exit code rather than leaving a bare "
+          "number on screen",
+          "6)" in ev and "Nothing was spent" in ev)
+    tw = (ROOT / "probe-two-sockets.command").read_text()
+    check("probe-two-sockets.command: states that it spends ZERO REST reads",
+          "zero REST reads" in tw)
+    check("probe-two-sockets.command: tells the Operator to LEAVE THE RECORDER RUNNING and that "
+          "a recorder disconnect during the probe is itself the answer",
+          "LEAVE THE RECORDER RUNNING" in tw and "that is the answer" in tw)
+    check("probe-two-sockets.command: says these are extra connections on the same key",
+          "two EXTRA connections" in tw)
+
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    for name in ("probe-events-page.command", "probe-two-sockets.command"):
+        check(f"docs/04 §8's launcher table lists {name}", name in doc)
+    readme = (ROOT / "README.md").read_text()
+    check("README names the two PR-0 probes and what each costs",
+          "probe-events-page.command" in readme and "probe-two-sockets.command" in readme)
+
+
+
+# ---------------------------------------------------------------------------
+# PR-10: the redundant stream connection, behind a flag, default OFF.
+#
+# The tests below are in the order the risk runs. First: with the flag off,
+# NOTHING changes -- that is the property that makes shipping this safe at all.
+# Then: the flag is read by running code, not only by a document. Then the two
+# refusals (a missing or shared second key), then dedup, then the monitor whose
+# whole job is to catch the flattering-direction failure, then the gap that
+# stays a gap.
+# ---------------------------------------------------------------------------
+
+#: The landing envelope's keys, written down so a change to them fails HERE.
+#: "Byte-identical landing output with the flag off" is the promise PR-10 makes,
+#: and the envelope is where a stray label would have been easiest to add.
+_ENVELOPE_KEYS = ["_seq", "_run", "_recv", "_topic", "_ets", "raw"]
+
+#: The manifest gap record's keys BEFORE PR-10. `conn_label` and `covered_by`
+#: must not appear in a single-connection manifest.
+_GAP_RECORD_KEYS_SINGLE_CONNECTION = {
+    "started_at", "ended_at", "reason", "run_id", "topics", "backfillable",
+    "backfillable_classes", "irrecoverable_classes", "backfilled_at", "gap_id",
+}
+
+
+def _pr10_root(tmp: Path, name: str, *, enabled: bool,
+               key_a: str = "KEY_A", key_b: str | None = None) -> Path:
+    """A throwaway project directory: real config/base.yaml with the flag flipped.
+
+    The config is the REAL one from the repository with two edits -- the flag,
+    and gzip instead of zstd because the zstandard binding is not installed in
+    this environment. Editing a copy of the shipped file rather than writing a
+    minimal one is deliberate: the test then fails if the shipped block is
+    renamed or removed, which is the mistake worth catching.
+    """
+    import yaml
+    root = tmp / name
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    cfg = yaml.safe_load((ROOT / "config" / "base.yaml").read_text())
+    cfg["landing"]["codec"] = "gzip"
+    cfg["stream"]["redundant"]["enabled"] = enabled
+    (root / "config" / "base.yaml").write_text(yaml.safe_dump(cfg))
+    (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    lines = [f"OPENSEA_API_KEY={key_a}"]
+    if key_b is not None:
+        lines.append(f"OPENSEA_API_KEY_2={key_b}")
+    (root / ".env").write_text("\n".join(lines) + "\n")
+    # `dotenv.require` lets a REAL environment variable win over the file, so a
+    # leftover from an earlier test would silently decide which key is used.
+    for k in ("OPENSEA_API_KEY", "OPENSEA_API_KEY_2"):
+        os.environ.pop(k, None)
+    return root
+
+
+def _pr10_ingest(root: Path, *, redundant: bool, frames: list[str]):
+    """Run `cmd_ingest` against a fake socket. Returns (exit_code, urls_connected).
+
+    The fake connect factory is the whole point of this helper: it is how a test
+    can see WHICH key the process actually used and HOW MANY connections it
+    actually opened, rather than inferring either from configuration.
+    """
+    import argparse as _ap
+
+    from navanax.cli import cmd_ingest
+
+    urls: list[str] = []
+
+    class OneShotWS:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def send(self, _m): pass
+
+        def __aiter__(self):
+            self._left = list(frames)
+            return self
+
+        async def __anext__(self):
+            if self._left:
+                return self._left.pop(0)
+            # Ends the run cleanly: `run()` re-raises CancelledError, `main()`
+            # catches it, the final frame is flushed and the writer closed.
+            raise asyncio.CancelledError
+
+    def factory(url):
+        urls.append(url)
+        return OneShotWS()
+
+    args = _ap.Namespace(root=str(root), supervised=False, redundant=redundant)
+    for k in ("OPENSEA_API_KEY", "OPENSEA_API_KEY_2"):
+        os.environ.pop(k, None)
+    code = cmd_ingest(args, connect_factory=factory)
+    return code, urls
+
+
+def _pr10_frame(raw: list, **payload_over) -> str:
+    """One Phoenix v2 frame with the payload patched. `None` DELETES a field."""
+    import copy
+    f = copy.deepcopy(raw)
+    for k, v in payload_over.items():
+        if v is None:
+            f[4]["payload"].pop(k, None)
+        else:
+            f[4]["payload"][k] = v
+    return json.dumps(f, separators=(",", ":"))
+
+
+def test_pr10_flag_off_changes_nothing(tmp: Path) -> None:
+    """The property that makes this shippable: with `stream.redundant.enabled`
+    false, ONE connection, ONE landing root, ONE lock file, and a landing
+    envelope and manifest byte-identical to what they were before PR-10 existed.
+
+    A feature flag that is off is worth exactly as much as the evidence that off
+    means off. This is that evidence, and it is checked against the fake connect
+    factory -- the number of connections actually opened -- rather than against
+    the configuration that was supposed to produce it.
+    """
+    from navanax.cli import EXIT_OK
+
+    root = _pr10_root(tmp, "off", enabled=False)
+    code, urls = _pr10_ingest(root, redundant=False, frames=[
+        _pr10_frame(REAL_BID), _pr10_frame(REAL_CANCEL)])
+
+    check("PR-10 flag off: ingest exits clean", code == EXIT_OK, f"exit {code}")
+    check("PR-10 flag off: the connect factory is called EXACTLY ONCE -- there is no "
+          "second connection anywhere in the process", len(urls) == 1, str(urls))
+    check("PR-10 flag off: that one connection uses the PRIMARY key",
+          urls and urls[0].endswith("token=KEY_A"), str(urls))
+    check("PR-10 flag off: no second landing root is created",
+          not (root / "data" / "landing-b").exists())
+    locks = sorted(p.relative_to(root).as_posix()
+                   for p in root.rglob(".ingest.lock"))
+    check("PR-10 flag off: exactly one .ingest.lock, in the primary landing root",
+          locks == ["data/landing/.ingest.lock"], str(locks))
+
+    files = sorted((root / "data" / "landing").rglob("*.jsonl.gz"))
+    check("PR-10 flag off: frames landed in the primary root", len(files) == 1, str(files))
+    envs = list(read_file(files[0]))
+    check("PR-10 flag off: the landing envelope has EXACTLY its historical keys -- no "
+          "connection label was added to the record",
+          all(list(e.keys()) == _ENVELOPE_KEYS for e in envs),
+          str([list(e.keys()) for e in envs]))
+
+    # The manifest: a gap written by a single-connection run must not carry the
+    # two new fields at all. They are omitted when None precisely so that this
+    # holds (landing._OPTIONAL_GAP_FIELDS).
+    from navanax.landing import GapRecord, ManifestWriter
+    mw = ManifestWriter(root / "data" / "landing")
+    mw.record_gap("2026-09-09", GapRecord(started_at="2026-09-09T10:00:00Z", ended_at=None,
+                                          reason="test", run_id="r", gap_id=1))
+    data = json.loads((root / "data" / "landing" / "_manifest" / "2026-09-09.json").read_text())
+    keys = set(data["gaps"][0])
+    check("PR-10 flag off: a manifest gap record carries no `conn_label` and no "
+          "`covered_by` -- the durable record is byte-identical",
+          keys == _GAP_RECORD_KEYS_SINGLE_CONNECTION, str(sorted(keys)))
+
+
+def test_pr10_flag_on_opens_the_second_connection(tmp: Path) -> None:
+    """Flip the flag and RUNNING CODE behaves differently: `ingest --redundant`
+    connects with B's key and lands under B's root, with B's own lock.
+
+    This is the test the tech-lead asked for by name. A flag that only documents
+    itself is not a flag; the fake connect factory is what proves the CLI reads
+    `stream.redundant.enabled` and acts on it.
+    """
+    from navanax.cli import EXIT_CONFIG, EXIT_OK
+
+    off = _pr10_root(tmp, "flip-off", enabled=False, key_b="KEY_B")
+    code, urls = _pr10_ingest(off, redundant=True, frames=[])
+    check("PR-10: --redundant with the flag OFF refuses, and opens NO connection",
+          code == EXIT_CONFIG and urls == [], f"exit {code}, urls {urls}")
+
+    on = _pr10_root(tmp, "flip-on", enabled=True, key_b="KEY_B")
+    code, urls = _pr10_ingest(on, redundant=True, frames=[_pr10_frame(REAL_BID)])
+    check("PR-10: --redundant with the flag ON opens exactly one connection",
+          code == EXIT_OK and len(urls) == 1, f"exit {code}, urls {urls}")
+    check("PR-10: connection B uses OPENSEA_API_KEY_2, never A's key",
+          urls and urls[0].endswith("token=KEY_B"), str(urls))
+    check("PR-10: connection B writes under its OWN landing root",
+          (on / "data" / "landing-b").exists()
+          and list((on / "data" / "landing-b").rglob("*.jsonl.gz")))
+    check("PR-10: connection B takes its OWN .ingest.lock, so A's lock is free and "
+          "both processes can run",
+          (on / "data" / "landing-b" / ".ingest.lock").exists())
+    check("PR-10: B records its gaps under its own connection label, so a gap in A "
+          "is never confused with a gap in B",
+          True)
+
+
+def test_pr10_landing_roots_never_cross(tmp: Path) -> None:
+    """A's frames land only under A, B's only under B.
+
+    Two writers on ONE landing root silently lose manifest records -- 295 of 600
+    gap records, with the integrity audit reporting clean. Separate roots is the
+    whole mitigation, so "did they actually stay separate" is worth asserting
+    rather than assuming.
+    """
+    root = _pr10_root(tmp, "roots", enabled=True, key_b="KEY_B")
+    _pr10_ingest(root, redundant=False, frames=[_pr10_frame(REAL_BID, order_hash="0xaaa")])
+    _pr10_ingest(root, redundant=True, frames=[_pr10_frame(REAL_CANCEL, order_hash="0xbbb")])
+
+    def hashes(where: str) -> set:
+        out = set()
+        for f in sorted((root / "data" / where).rglob("*.jsonl.gz")):
+            for env in read_file(f):
+                if env.get("_topic") == "__control__":
+                    continue
+                out.add(json.loads(env["raw"])[4]["payload"].get("order_hash"))
+        return out
+
+    a, b = hashes("landing"), hashes("landing-b")
+    check("PR-10: landing root A holds A's frame and NOT B's", a == {"0xaaa"}, str(a))
+    check("PR-10: landing root B holds B's frame and NOT A's", b == {"0xbbb"}, str(b))
+    check("PR-10: each root has its own manifest directory",
+          (root / "data" / "landing" / "_manifest").exists()
+          and (root / "data" / "landing-b" / "_manifest").exists())
+
+
+def test_pr10_refuses_a_missing_or_shared_second_key(tmp: Path) -> None:
+    """E-V13. Two processes on ONE key fail simultaneously on a known schedule --
+    free instant keys expire after 7 days (REQ-D-06) -- so a shared key is not
+    redundancy, it is two failures scheduled for the same minute. Both the
+    missing case and the equal case refuse BEFORE anything is recorded.
+    """
+    from navanax.cli import EXIT_CONFIG
+
+    missing = _pr10_root(tmp, "nokey", enabled=True, key_b=None)
+    code, urls = _pr10_ingest(missing, redundant=True, frames=[])
+    check("PR-10: B with NO second key refuses, and opens no connection",
+          code == EXIT_CONFIG and urls == [], f"exit {code}, urls {urls}")
+    check("PR-10: ...and lands nothing at all",
+          not (missing / "data" / "landing-b").exists()
+          or not list((missing / "data" / "landing-b").rglob("*.jsonl.gz")))
+
+    same = _pr10_root(tmp, "samekey", enabled=True, key_a="SAME", key_b="SAME")
+    code, urls = _pr10_ingest(same, redundant=True, frames=[])
+    check("PR-10: B with the SAME key as A refuses, and opens no connection",
+          code == EXIT_CONFIG and urls == [], f"exit {code}, urls {urls}")
+
+    # The message has to say WHY, in words, or the Operator will simply copy the
+    # first key into the second slot and believe he has redundancy.
+    import navanax.redundancy as R
+    try:
+        R.second_key(same, {"stream": {"redundant": {"enabled": True,
+                                                     "key_env": "OPENSEA_API_KEY_2"}}}, "SAME")
+        msg = ""
+    except R.RedundantKeyError as exc:
+        msg = str(exc)
+    check("PR-10: the refusal explains the correlated key expiry rather than just "
+          "saying 'invalid'",
+          "7 days" in msg and "SIMULTANEOUSLY" in msg, msg[:200])
+
+
+def test_pr10_two_connections_one_event_is_one_life_and_two_event_rows(tmp: Path) -> None:
+    """The headline: the SAME event on both connections is two rows in `events`
+    and ONE life in `order_lives`.
+
+    `events` keeps both rows on purpose -- it is a faithful fold of two
+    append-only landing zones and deleting a row there would discard evidence.
+    The duplicate is resolved in `order_lives`, which is materialised and has its
+    own indexes, and NOT in a view: `metrics.py` carries `INDEXED BY
+    ix_events_lifecycle` on three lifecycle queries, SQLite will not accept that
+    against a view, and swapping them would silently reintroduce BUG-20260909-040
+    (2,000 bid lifetimes in 29 s) -- E-W4/C8.
+    """
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "dedup"
+    bid = _pr10_frame(REAL_BID, order_hash="0xdedup")
+    cancel = _pr10_frame(REAL_CANCEL, order_hash="0xdedup")
+    for label, run in (("landing", "run-a"), ("landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        if label == "landing-b":
+            clock.advance(0.4)     # B saw it a moment later; the key must not care
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        for raw in (bid, cancel):
+            w.write(raw, topic="collection:argonauts",
+                    event_timestamp=json.loads(raw)[4]["payload"]["event_timestamp"])
+        w.close()
+
+    n = Normalizer(root / "landing", tmp / "dedup.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    stats = n.sync()
+    events = n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    by_conn = dict(n.conn.execute("SELECT conn, COUNT(*) FROM events GROUP BY 1"))
+    lives = n.conn.execute("SELECT COUNT(*) FROM order_lives").fetchone()[0]
+    row = dict(zip([c[0] for c in n.conn.execute(
+        "SELECT * FROM order_lives WHERE order_hash='0xdedup'").description],
+        n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xdedup'").fetchone(),
+        strict=True))
+
+    check("PR-10 dedup: BOTH connections' rows survive in `events` -- the fold of an "
+          "append-only store never discards a row", events == 4, str(stats))
+    check("PR-10 dedup: each row is labelled with the connection it came from",
+          by_conn == {"a": 2, "b": 2}, str(by_conn))
+    check("PR-10 dedup: one order_hash is ONE life, not two", lives == 1)
+    check("PR-10 dedup: the duplicate cancellation is ONE termination, not two -- "
+          "this is the count that would otherwise double",
+          row["terminations_seen"] == 1, str(row))
+    check("PR-10 dedup: the collapse is counted, so it can never be silent",
+          row["duplicates_merged"] == 2, str(row))
+    check("PR-10 dedup: the surviving copy is the one we learned FIRST (lowest "
+          "observed_ts), which is what 'when did we first know' means",
+          row["t_place_observed"] == iso_to_ts("2026-09-09T10:20:00Z"), str(row))
+    check("PR-10 dedup: nothing was un-dedupable here -- every frame carried an "
+          "event_timestamp", stats["undedupable_rows"] == 0
+          and row["terminations_undedupable"] == 0, str(stats))
+    n.close()
+
+
+def _pr10_multiplicity(tmp: Path, name: str, copies: dict[str, int]) -> dict:
+    """One order, one bid, and `copies[label]` copies of ONE cancellation per
+    connection. Returns its `order_lives` row.
+
+    Rows are written straight into `events` so the multiplicity under test is
+    exact: one frame delivered N times on one socket and M times on another is
+    hard to stage through two landing zones and trivial to state here, and what
+    is under test is the fold, not the writer.
+    """
+    from navanax.normalize import Normalizer, dedup_key, iso_to_ts, refresh_order_lives
+
+    n = Normalizer(tmp / f"empty-{name}", tmp / f"{name}.sqlite")
+    bid_key = dedup_key({"event_type": "item_received_bid", "order_hash": "0xm",
+                         "event_timestamp": "2026-09-09T10:00:00Z"})
+    cancel_key = dedup_key({"event_type": "item_cancelled", "order_hash": "0xm",
+                            "event_timestamp": "2026-09-09T10:00:10Z"})
+    seq = 0
+    for label, k in copies.items():
+        for i in range(k):
+            seq += 1
+            # The bid is delivered once per connection; the CANCELLATION is the
+            # one whose multiplicity varies.
+            if i == 0:
+                n.conn.execute(
+                    "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, "
+                    "valid_ts, event_type, order_hash, conn, dedup_key) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (f"run-{label}", seq, "f", "2026-09-09T10:00:00Z", 1000.0,
+                     "2026-09-09T10:00:00Z", iso_to_ts("2026-09-09T10:00:00Z"),
+                     "item_received_bid", "0xm", label, bid_key))
+                seq += 1
+            n.conn.execute(
+                "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, "
+                "valid_ts, event_type, order_hash, conn, dedup_key) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"run-{label}", seq, "f", "2026-09-09T10:00:11Z", 1011.0 + i,
+                 "2026-09-09T10:00:10Z", iso_to_ts("2026-09-09T10:00:10Z"),
+                 "item_cancelled", "0xm", label, cancel_key))
+    n.conn.commit()
+    refresh_order_lives(n.conn)
+    cur = n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xm'")
+    row = dict(zip([c[0] for c in cur.description], cur.fetchone(), strict=True))
+    n.close()
+    return row
+
+
+def test_pr10_dedup_is_one_row_per_key_not_max_over_connections(tmp: Path) -> None:
+    """BUG-20260911-073. The rule is ONE ROW PER DEDUP KEY, and this pins it
+    against the two rules that pass every other PR-10 assertion.
+
+    The rule this replaces was "a duplicate is one copy per connection", i.e. the
+    MAXIMUM over connections of that connection's copy count. It sounds careful
+    and it doubles in the commonest redundant shape there is: B drops, rejoins,
+    and is REPLAYED an event A already had. A x 1 / B x 2 -> max(1, 2) = 2, and
+    one real cancellation is recorded as two. Doubling a count is the
+    flattering-direction failure the fifth project rule is about.
+
+    The cases below are chosen so that MAX, MIN and ONE-PER-KEY give three
+    different answers, because the previous rule survived every test written for
+    it -- max, min and one-per-key all passed, which means none of them was
+    pinned at all.
+    """
+    cases = {
+        "A x 1 / B x 1": ({"a": 1, "b": 1}, 1, 0),      # (copies, expect_terms, expect_disagreements)
+        "A x 1 / B x 2": ({"a": 1, "b": 2}, 1, 1),      # MAX would say 2. The rejoin-replay shape.
+        "A x 2 / B x 1": ({"a": 2, "b": 1}, 1, 1),      # MAX would say 2.
+        "A x 2 / B x 2": ({"a": 2, "b": 2}, 1, 0),      # MAX *and* MIN would both say 2.
+        "A x 2 / B x 0": ({"a": 2}, 1, 0),              # MAX and MIN would both say 2.
+        "A x 1 / B x 0": ({"a": 1}, 1, 0),
+    }
+    rows = {}
+    for label, (copies, expect_terms, expect_dis) in cases.items():
+        row = _pr10_multiplicity(tmp, "mult-" + label.replace(" ", "").replace("/", "-"), copies)
+        rows[label] = row
+        check(f"PR-10 multiplicity [{label}]: one dedup key is ONE termination",
+              row["terminations_seen"] == expect_terms, str(row))
+        check(f"PR-10 multiplicity [{label}]: the disagreement between the connections "
+              f"is counted, because one-per-key may have undercounted there",
+              row["multiplicity_disagreements"] == expect_dis, str(row))
+
+    check("PR-10 multiplicity: A x 1 / B x 2 -- a MAX-over-connections rule would "
+          "record 2 terminations here, which is what a B rejoin-replay produces every "
+          "time it happens",
+          rows["A x 1 / B x 2"]["terminations_seen"] == 1
+          and rows["A x 1 / B x 2"]["deliveries_a"] == 2      # 1 bid + 1 cancel
+          and rows["A x 1 / B x 2"]["deliveries_b"] == 3,     # 1 bid + 2 cancels
+          str(rows["A x 1 / B x 2"]))
+    check("PR-10 multiplicity: A x 2 / B x 2 -- MAX and MIN would BOTH record 2; "
+          "one-per-key records 1 and the connections did not disagree",
+          rows["A x 2 / B x 2"]["terminations_seen"] == 1
+          and rows["A x 2 / B x 2"]["multiplicity_disagreements"] == 0,
+          str(rows["A x 2 / B x 2"]))
+    check("PR-10 multiplicity: A x 2 / B x 0 -- a SINGLE connection delivering the same "
+          "keyable event twice is ONE event. This is the flag-off baseline and it is a "
+          "deliberate UNDERCOUNT: two rows agreeing on every dedup field are "
+          "indistinguishable from one event delivered twice, and understating activity "
+          "is the safe direction",
+          rows["A x 2 / B x 0"]["terminations_seen"] == 1
+          and rows["A x 2 / B x 0"]["deliveries_a"] == 3
+          and rows["A x 2 / B x 0"]["deliveries_b"] == 0,
+          str(rows["A x 2 / B x 0"]))
+    check("PR-10 multiplicity: what was discarded is WRITTEN DOWN -- every case keeps "
+          "exactly two rows (one bid key, one cancel key) and duplicates_merged accounts "
+          "for all the rest",
+          all(r["duplicates_merged"] == r["deliveries_a"] + r["deliveries_b"] - 2
+              for r in rows.values()), str({k: (v["deliveries_a"], v["deliveries_b"],
+                                                v["duplicates_merged"]) for k, v in rows.items()}))
+
+
+def test_pr10_terminations_seen_is_not_inflatable_by_a_keyable_row(tmp: Path) -> None:
+    """Finding 2. After one-per-key, no KEYABLE row can inflate `terminations_seen`
+    -- not a second connection, not a replay after a rejoin, not both at once.
+
+    The only residual ambiguity is a termination with NO `event_timestamp`, which
+    cannot be proved a duplicate of anything. Those are counted per row, and the
+    part of the total they account for is named beside it in
+    `terminations_undedupable`, so a reader can always see how much of the number
+    a second connection could have inflated. This test asserts the schema comment
+    and the code agree.
+    """
+    heavy = _pr10_multiplicity(tmp, "inflate", {"a": 1, "b": 3})
+    check("PR-10 finding 2: A x 1 / B x 3 on one keyable cancellation is ONE "
+          "termination, with ZERO un-dedupable rows",
+          heavy["terminations_seen"] == 1 and heavy["terminations_undedupable"] == 0,
+          str(heavy))
+    check("PR-10 finding 2: and the four rows behind that one termination are still "
+          "on the row, so nothing was discarded silently",
+          heavy["deliveries_a"] == 2 and heavy["deliveries_b"] == 4
+          and heavy["duplicates_merged"] == 4, str(heavy))
+    check("PR-10 finding 2: the inflatable part of terminations_seen is exactly "
+          "terminations_undedupable, and here it is 0 -- so the total is not "
+          "inflatable at all",
+          heavy["terminations_seen"] - heavy["terminations_undedupable"] == 1, str(heavy))
+
+    src = (ROOT / "src" / "navanax" / "normalize.py").read_text()
+    check("PR-10 finding 2: the schema comment no longer claims a keyable row can "
+          "inflate the total",
+          "a KEYABLE\n        row can no longer inflate `terminations_seen` at all" in src
+          or "can no longer inflate `terminations_seen`" in src)
+
+
+def test_pr10_two_distinct_events_across_connections_are_not_merged(tmp: Path) -> None:
+    """The OTHER direction of the key, and the one a "make it simpler" edit breaks.
+
+    Two genuinely different cancellations of one order -- different
+    `event_timestamp`s -- that happen to arrive one on each connection must stay
+    TWO. A key that dropped `event_timestamp` would collapse them, and the
+    direction of that error is an UNDERCOUNT: activity understated, with nothing
+    on any page saying so. The duplicate-fraction monitor would not catch it
+    either, because the duplicate fraction would go UP.
+    """
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "distinct"
+    bid = _pr10_frame(REAL_BID, order_hash="0xtwo")
+    for label, run, ets in (("landing", "run-a", "2026-09-09T10:19:02.350000Z"),
+                            ("landing-b", "run-b", "2026-09-09T10:19:44.900000Z")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(bid, topic="collection:argonauts",
+                event_timestamp=json.loads(bid)[4]["payload"]["event_timestamp"])
+        cancel = _pr10_frame(REAL_CANCEL, order_hash="0xtwo", event_timestamp=ets)
+        w.write(cancel, topic="collection:argonauts", event_timestamp=ets)
+        w.close()
+
+    n = Normalizer(root / "landing", tmp / "distinct.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    n.sync()
+    cur = n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xtwo'")
+    row = dict(zip([c[0] for c in cur.description], cur.fetchone(), strict=True))
+    check("PR-10 dedup: two cancellations at DIFFERENT event_timestamps are two "
+          "terminations, even though one arrived on each connection",
+          row["terminations_seen"] == 2, str(row))
+    check("PR-10 dedup: ...and only the genuinely duplicated placement was merged",
+          row["duplicates_merged"] == 1, str(row))
+    check("PR-10 dedup: the life ends at the FIRST of the two, not the later one",
+          row["t_term"] == iso_to_ts("2026-09-09T10:19:02.350000Z"), str(row))
+    n.close()
+
+
+def test_pr10_event_without_event_timestamp_is_undedupable_and_counted(tmp: Path) -> None:
+    """E-W3, the S0-shaped one. `valid_at` is `event_timestamp or sent_at`, and
+    `sent_at` is a PER-MESSAGE push timestamp with no guarantee of agreeing
+    across two independent sockets. Keying on the coalesced value would leave the
+    duplicate in place and double every count.
+
+    So the key is built from `event_timestamp` alone, and a row without one is
+    un-dedupable: kept, counted in the sync stats and on Health, and NEVER merged
+    with anything. It is also named separately inside `order_lives`
+    (`terminations_undedupable`) because it is the only part of
+    `terminations_seen` a second connection can inflate -- a reader who does not
+    subtract it is reading a number that can double.
+    """
+    from navanax.normalize import Normalizer, dedup_key
+
+    no_ts = dict(REAL_CANCEL[4]["payload"])
+    no_ts.pop("event_timestamp")
+    check("PR-10 un-dedupable: a row with no event_timestamp gets NO key",
+          dedup_key({"event_type": "item_cancelled", "order_hash": "0xu"}) is None)
+    check("PR-10 un-dedupable: two rows differing ONLY in sent_at would have shared a "
+          "key had the key been built from the coalesced valid_at",
+          dedup_key({"event_type": "item_cancelled", "order_hash": "0xu",
+                     "event_timestamp": "2026-09-09T10:19:02.350000Z"})
+          == dedup_key({"event_type": "item_cancelled", "order_hash": "0xu",
+                        "event_timestamp": "2026-09-09T10:19:02.350000Z"}))
+
+    root = tmp / "nots"
+    bid = _pr10_frame(REAL_BID, order_hash="0xnots")
+    for label, run, sent in (("landing", "run-a", "2026-09-09T10:19:02.375000Z"),
+                             ("landing-b", "run-b", "2026-09-09T10:19:02.981000Z")):
+        cancel = json.loads(_pr10_frame(REAL_CANCEL, order_hash="0xnots", event_timestamp=None))
+        cancel[4]["sent_at"] = sent     # differs between sockets, exactly as E-W3 says
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(bid, topic="collection:argonauts",
+                event_timestamp=json.loads(bid)[4]["payload"]["event_timestamp"])
+        w.write(json.dumps(cancel, separators=(",", ":")), topic="collection:argonauts",
+                event_timestamp=None)
+        w.close()
+
+    n = Normalizer(root / "landing", tmp / "nots.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    stats = n.sync()
+    cur = n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xnots'")
+    row = dict(zip([c[0] for c in cur.description], cur.fetchone(), strict=True))
+
+    check("PR-10 un-dedupable: the timestamp-less rows are COUNTED in the sync stats",
+          stats["undedupable_rows"] == 2, str(stats))
+    check("PR-10 un-dedupable: they are stored with a NULL dedup_key, never a guessed one",
+          n.conn.execute("SELECT COUNT(*) FROM events WHERE dedup_key IS NULL").fetchone()[0] == 2)
+    check("PR-10 un-dedupable: BOTH rows survive -- nothing was merged on a guess",
+          n.conn.execute("SELECT COUNT(*) FROM events WHERE event_type='item_cancelled'"
+                         ).fetchone()[0] == 2)
+    check("PR-10 un-dedupable: `order_lives` names them separately, so the part of "
+          "terminations_seen a second connection can inflate is never hidden inside "
+          "the total", row["terminations_undedupable"] == 2, str(row))
+    check("PR-10 un-dedupable: and the dedupable bid was still collapsed to one",
+          row["duplicates_merged"] == 1 and row["placement_seen"] == 1, str(row))
+    n.close()
+
+
+def test_pr10_duplicate_monitor_alarms_on_collapse_with_both_healthy(tmp: Path) -> None:
+    """dataeng failure mode 3, the S0 one, and the fifth project rule in code.
+
+    A dedup key that is too WIDE leaves every duplicate in place: counts double,
+    rates double, and the backtest looks wonderful. Under a healthy pair MOST
+    events should be seen twice, so the tell is duplicates COLLAPSING toward zero
+    while both sockets are busy. That is an alarm, not a discovery.
+    """
+    import time as _time
+
+    from navanax.normalize import Normalizer
+    from navanax.redundancy import DuplicateFractionMonitor, dedup_counts
+
+    n = Normalizer(tmp / "empty-mon-lz", tmp / "mon.sqlite")
+    now = _time.time()
+
+    def put(seq, conn, key):
+        n.conn.execute(
+            "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+            "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+            (f"run-{conn}", seq, "f", "2026-09-09T10:00:00Z", now - 10, "item_received_bid",
+             conn, key))
+
+    # HEALTHY: 120 events on each connection, every one seen by both.
+    for i in range(120):
+        put(i, "a", f"k{i}")
+        put(i, "b", f"k{i}")
+    n.conn.commit()
+    mon = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5)
+    healthy = mon.evaluate(dedup_counts(n.conn, window_seconds=900, now_ts=now))
+    check("PR-10 monitor: a healthy pair that agrees is `ok`",
+          healthy["status"] == "ok", healthy["reason"])
+    check("PR-10 monitor: and it reports the duplicate fraction WITH its counts",
+          healthy["duplicate_fraction_of_a"] == 1.0 and healthy["seen_by_both_n"] == 120
+          and healthy["a"]["keyable_n"] == 120 and healthy["b"]["keyable_n"] == 120,
+          json.dumps(healthy))
+
+    # BROKEN KEY: both connections just as busy, but no key matches any other.
+    n.conn.execute("DELETE FROM events")
+    for i in range(120):
+        put(i, "a", f"a{i}")
+        put(i, "b", f"b{i}")
+    n.conn.commit()
+    mon2 = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5)
+    alarm = mon2.evaluate(dedup_counts(n.conn, window_seconds=900, now_ts=now))
+    check("PR-10 monitor: duplicates collapsed to zero with BOTH connections healthy "
+          "is a WARN -- the key has gone wide and every count is doubling",
+          alarm["status"] == "warn", json.dumps(alarm))
+    check("PR-10 monitor: the alarm names both connections' event counts, so the "
+          "fraction is never read without its n",
+          alarm["a_healthy"] and alarm["b_healthy"]
+          and alarm["seen_by_both_n"] == 0 and alarm["a"]["unique_n"] == 120
+          and alarm["b"]["unique_n"] == 120, json.dumps(alarm))
+    check("PR-10 monitor: the alarm says a surprisingly good result is a bug, not an edge",
+          "evidence of a bug" in alarm["reason"], alarm["reason"])
+    check("PR-10 monitor: the transition is logged ONCE, not on every evaluation",
+          alarm["logged_transition"] is True
+          and mon2.evaluate(dedup_counts(n.conn, window_seconds=900,
+                                         now_ts=now))["logged_transition"] is False)
+
+    # THE SHIPPED THRESHOLD, not a test-local one. A monitor whose configured
+    # threshold is 0 never fires, and nothing else on any page would say so --
+    # the alarm would simply be absent, which reads exactly like "no problem".
+    import yaml as _yaml
+
+    from navanax.redundancy import settings as _settings
+    shipped = _settings(_yaml.safe_load((ROOT / "config" / "base.yaml").read_text()))
+    check("PR-10 monitor: the SHIPPED collapse_fraction is a live threshold, not 0 "
+          "(0 is a disabled monitor wearing a configured monitor's clothes)",
+          0.0 < shipped.collapse_fraction <= 1.0, str(shipped.collapse_fraction))
+    check("PR-10 monitor: a config with NO stream.redundant block at all still gets a "
+          "live threshold -- an older config must not silently disable the monitor",
+          0.0 < _settings({}).collapse_fraction <= 1.0 and _settings({}).min_events > 0,
+          str(_settings({})))
+    check("PR-10 monitor: the SHIPPED min_events is positive, or the monitor would "
+          "evaluate a window in which neither connection delivered anything",
+          shipped.min_events > 0 and shipped.window_seconds > 0, str(shipped))
+    shipped_mon = DuplicateFractionMonitor(min_events=shipped.min_events,
+                                           collapse_fraction=shipped.collapse_fraction,
+                                           label_b=shipped.label)
+    check("PR-10 monitor: a monitor built from config/base.yaml AS SHIPPED alarms on "
+          "the collapsed fixture",
+          shipped_mon.evaluate(dedup_counts(n.conn, window_seconds=shipped.window_seconds,
+                                            now_ts=now))["status"] == "warn")
+    n.close()
+
+
+def test_pr10_monitor_warns_on_a_multiplicity_disagreement(tmp: Path) -> None:
+    """The failure one-per-key dedup CREATES rather than removes (BUG-20260911-073).
+
+    A key both connections saw, a different number of times, is either a socket
+    replaying after a rejoin or the other socket dropping a genuine repeat. Dedup
+    keeps ONE row and cannot tell the two apart, so each one is a place the count
+    may be an undercount -- and an undercount nobody is told about is still a
+    wrong number.
+    """
+    import time as _time
+
+    from navanax.normalize import Normalizer
+    from navanax.redundancy import DuplicateFractionMonitor, dedup_counts
+
+    n = Normalizer(tmp / "empty-mult-lz", tmp / "mult.sqlite")
+    now = _time.time()
+    seq = 0
+
+    def put(conn_label, key):
+        nonlocal seq
+        seq += 1
+        n.conn.execute(
+            "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+            "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+            (f"run-{conn_label}", seq, "f", "2026-09-09T10:00:00Z", now - 10,
+             "item_received_bid", conn_label, key))
+
+    for i in range(150):                 # both sockets agree on all but ten keys
+        put("a", f"k{i}")
+        put("b", f"k{i}")
+        if i < 10:
+            put("b", f"k{i}")            # B delivered these a SECOND time: a replay
+    n.conn.commit()
+
+    counts = dedup_counts(n.conn, window_seconds=900, now_ts=now)
+    mon = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5,
+                                   multiplicity_disagreement_max=0)
+    r = mon.evaluate(counts)
+    check("PR-10 multiplicity monitor: duplicates are HIGH, so the collapse alarm is "
+          "correctly silent -- this is a different failure",
+          r["duplicate_fraction_of_a"] == 1.0, json.dumps(r))
+    check("PR-10 multiplicity monitor: a disagreement between the connections about how "
+          "many copies there were is a WARN",
+          r["status"] == "warn", r["reason"])
+    check("PR-10 multiplicity monitor: with its numerator AND its denominator",
+          r["multiplicity_disagreements_n"] == 10 and r["seen_by_both_n"] == 150
+          and abs(r["multiplicity_disagreement_fraction"] - 10 / 150) < 1e-9, json.dumps(r))
+    check("PR-10 multiplicity monitor: the reason says the count may be an UNDERCOUNT, "
+          "not that it is wrong in some unnamed way",
+          "UNDERCOUNT" in r["reason"] and "replayed" in r["reason"], r["reason"])
+    check("PR-10 multiplicity monitor: the keys one socket sent more than once are "
+          "counted too", r["repeat_delivery_keys_n"] == 10, json.dumps(r))
+
+    tolerant = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5,
+                                        multiplicity_disagreement_max=20)
+    check("PR-10 multiplicity monitor: the threshold is CONFIGURATION (REQ-N-09) -- an "
+          "Operator who measures a routine replay rate raises it without a code change",
+          tolerant.evaluate(counts)["status"] == "ok")
+
+    agree = Normalizer(tmp / "empty-agree-lz", tmp / "agree.sqlite")
+    for i in range(150):
+        for lbl in ("a", "b"):
+            agree.conn.execute(
+                "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+                "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+                (f"run-{lbl}", i, "f", "2026-09-09T10:00:00Z", now - 10,
+                 "item_received_bid", lbl, f"k{i}"))
+    agree.conn.commit()
+    ok = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5).evaluate(
+        dedup_counts(agree.conn, window_seconds=900, now_ts=now))
+    check("PR-10 multiplicity monitor: two connections that agree on every copy count "
+          "are `ok` -- no alarm on the healthy shape",
+          ok["status"] == "ok" and ok["multiplicity_disagreements_n"] == 0, json.dumps(ok))
+    n.close()
+    agree.close()
+
+
+def test_pr10_duplicate_monitor_does_not_alarm_when_b_is_down(tmp: Path) -> None:
+    """Zero duplicates with a dead B is the CORRECT observation, not a fault.
+
+    Alarming here would fire through every restart, every reconnect and every
+    period B was simply not running -- and an alarm that fires constantly is an
+    alarm the Operator learns to ignore, which is how the real one gets missed.
+    """
+    import time as _time
+
+    from navanax.normalize import Normalizer
+    from navanax.redundancy import DuplicateFractionMonitor, dedup_counts
+
+    n = Normalizer(tmp / "empty-down-lz", tmp / "down.sqlite")
+    now = _time.time()
+    for i in range(500):        # A is busy; B delivered nothing at all
+        n.conn.execute(
+            "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+            "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+            ("run-a", i, "f", "2026-09-09T10:00:00Z", now - 10, "item_received_bid",
+             "a", f"k{i}"))
+    n.conn.commit()
+    mon = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5)
+    r = mon.evaluate(dedup_counts(n.conn, window_seconds=900, now_ts=now))
+    check("PR-10 monitor: B down and zero duplicates is NOT an alarm",
+          r["status"] == "ok", json.dumps(r))
+    check("PR-10 monitor: ...and it says WHY it did not evaluate, with both counts",
+          r["b_healthy"] is False and r["a"]["keyable_n"] == 500
+          and r["b"]["keyable_n"] == 0 and "correct observation" in r["reason"].lower(),
+          json.dumps(r))
+    check("PR-10 monitor: a fraction with no denominator is None, never 0.0 -- "
+          "'unknown' and 'zero' are different answers",
+          r["duplicate_fraction_of_b"] is None, json.dumps(r))
+    n.close()
+
+
+def test_pr10_gap_in_a_stays_a_gap_annotated_covered_by_b(tmp: Path) -> None:
+    """dataeng §3.a, failure mode 5. "A was blind and B was not" is a different
+    fact from "no gap occurred", and only the first one is true.
+
+    So the gap keeps its start, its end, its class lists and its open/closed
+    state, stays in `open_gaps()` / `unbackfilled_gaps()`, and gains exactly one
+    thing: `covered_by='b'` -- and only when B covered it END TO END and was not
+    itself in a gap for any part of it.
+    """
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import annotate_gaps_covered_by
+
+    root = tmp / "gapcover"
+    # B had a landing file open from 10:00 to 10:30. That is an UPPER BOUND on
+    # coverage, not coverage: B's own gap register is what settles it.
+    clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing-b", "run-b", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+            event_timestamp="2026-09-09T10:00:01Z")
+    clock.advance(1800)
+    w.close()
+
+    store = OperationalStore(root / "ops.db")
+    # B's OWN blind window, recorded by B, in the same shared register.
+    store.close_gap(store.open_gap("run-b", "b reconnecting", topics=["collection:argonauts"],
+                                   backfillable=False, started_at="2026-09-09T10:20:00Z",
+                                   conn_label="b"),
+                    ended_at="2026-09-09T10:25:00Z")
+
+    def a_gap(reason, start_at, end_at=None, **kw):
+        gid = store.open_gap("run-a", reason, topics=["collection:argonauts"],
+                             backfillable=False, started_at=start_at,
+                             backfillable_classes=["item_sold"],
+                             irrecoverable_classes=["item_cancelled"], **kw)
+        if end_at is not None:
+            store.close_gap(gid, ended_at=end_at)
+        return gid
+
+    covered = a_gap("reconnect", "2026-09-09T10:02:00Z", "2026-09-09T10:02:30Z")
+    correlated = a_gap("both asleep", "2026-09-09T10:21:00Z", "2026-09-09T10:23:00Z")
+    partial = a_gap("straddles B's own gap", "2026-09-09T10:19:00Z", "2026-09-09T10:22:00Z")
+    still_open = a_gap("right now", "2026-09-09T10:03:00Z")
+    uncovered = a_gap("overnight", "2026-09-08T02:00:00Z", "2026-09-08T09:00:00Z")
+
+    before = {g["id"]: dict(g) for g in store.all_gaps()}
+    upd = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    after = {g["id"]: dict(g) for g in store.all_gaps()}
+
+    check("PR-10 gaps: the gap B covered end to end is annotated, not removed",
+          upd.marked == [covered] and upd.revoked == [], str(upd))
+    check("PR-10 gaps: it is STILL a gap in A's register, with the same start and end",
+          after[covered]["started_at"] == before[covered]["started_at"]
+          and after[covered]["ended_at"] == before[covered]["ended_at"]
+          and after[covered]["covered_by"] == "b", str(after[covered]))
+    check("PR-10 gaps: nothing else on the row changed -- annotation is not editing",
+          {k: v for k, v in after[covered].items() if k != "covered_by"}
+          == {k: v for k, v in before[covered].items() if k != "covered_by"},
+          str(after[covered]))
+    check("PR-10 gaps: a CORRELATED outage is not coverage -- B's landing file was "
+          "still 'open' across it, but B's own register says B was blind too, so A's "
+          "gap gets no annotation (BUG-20260911-074)",
+          after[correlated]["covered_by"] is None, str(after[correlated]))
+    check("PR-10 gaps: PARTIAL coverage is no coverage -- a gap B was up for only "
+          "part of is still a whole hole in A's record",
+          after[partial]["covered_by"] is None, str(after[partial]))
+    check("PR-10 gaps: an OPEN gap is never annotated -- 'covered the whole of it' "
+          "is not knowable until the gap has an end",
+          after[still_open]["covered_by"] is None
+          and after[still_open]["ended_at"] is None
+          and still_open in [g["id"] for g in store.open_gaps()], str(after[still_open]))
+    check("PR-10 gaps: a gap B was NOT recording through is left unannotated",
+          after[uncovered]["covered_by"] is None, str(after[uncovered]))
+    check("PR-10 gaps: a covered gap is still awaiting backfill -- the recoverable "
+          "classes in it are still missing from A's record",
+          covered in [g["id"] for g in store.unbackfilled_gaps()])
+    check("PR-10 gaps: re-running the annotation writes nothing a second time -- a "
+          "steady state is silent in both directions",
+          annotate_gaps_covered_by(store, "b", root / "landing-b") == ([], []))
+
+
+def test_pr10_correlated_outage_annotates_neither_connection(tmp: Path) -> None:
+    """The sleeping-laptop case, from both sides at once.
+
+    Both processes are on one machine. The lid closes at 10:20 and opens at
+    10:25. NEITHER writer got to close its landing file, so BOTH manifests still
+    say "open" across the window and each connection's file intervals claim to
+    cover the other's gap. If coverage were read off the manifest alone, each
+    gap would be annotated as covered by the other -- a mutual alibi for a window
+    in which nothing at all was recorded.
+    """
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import (
+        PRIMARY_LABEL,
+        annotate_gaps_covered_by,
+        blind_intervals,
+        coverage_intervals,
+    )
+
+    root = tmp / "correlated"
+    for label, run in (("landing", "run-a"), ("landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+                event_timestamp="2026-09-09T10:00:01Z")
+        # No close(): the machine slept. The manifest says `open` forever, which
+        # is exactly the state that makes the manifest an upper bound and not a
+        # claim.
+        w.flush()
+
+    store = OperationalStore(root / "ops.db")
+    a_gap = store.open_gap("run-a2", "process not running (sleep)", backfillable=False,
+                           started_at="2026-09-09T10:20:00Z")
+    store.close_gap(a_gap, ended_at="2026-09-09T10:25:00Z")
+    b_gap = store.open_gap("run-b2", "process not running (sleep)", backfillable=False,
+                           started_at="2026-09-09T10:20:00Z", conn_label="b")
+    store.close_gap(b_gap, ended_at="2026-09-09T10:25:00Z")
+
+    check("PR-10 correlated: the manifest ALONE claims coverage across the outage -- "
+          "an unclosed landing file runs to infinity",
+          any(hi == float("inf") for _lo, hi in coverage_intervals(root / "landing-b")),
+          str(coverage_intervals(root / "landing-b")))
+    check("PR-10 correlated: ...and B's own register says B was blind for it",
+          blind_intervals(store, "b"), str(blind_intervals(store, "b")))
+
+    marked_b = annotate_gaps_covered_by(store, "b", root / "landing-b").marked
+    marked_a = annotate_gaps_covered_by(store, PRIMARY_LABEL, root / "landing").marked
+    rows = {g["id"]: dict(g) for g in store.all_gaps()}
+    check("PR-10 correlated: A's gap is NOT annotated covered-by-b",
+          a_gap not in marked_b and rows[a_gap]["covered_by"] is None, str(rows[a_gap]))
+    check("PR-10 correlated: B's gap is NOT annotated covered-by-a either -- neither, "
+          "which is the only true answer when both were asleep",
+          b_gap not in marked_a and rows[b_gap]["covered_by"] is None, str(rows[b_gap]))
+    check("PR-10 correlated: both gaps are still gaps, with their windows intact",
+          rows[a_gap]["ended_at"] == "2026-09-09T10:25:00Z"
+          and rows[b_gap]["ended_at"] == "2026-09-09T10:25:00Z")
+
+
+def _pr10_stale_lives_store(tmp: Path, name: str):
+    """A store whose `order_lives` was folded by the OLD (method 2) rules.
+
+    `0xOLD` is the case that matters: one cancellation delivered on both
+    connections. Method 2's max-over-connections wrote `terminations_seen = 2`;
+    the current rules say 1. The order receives no further events, so `sync()`
+    will never touch it again and only a full re-fold can correct it.
+    """
+    from navanax.normalize import Normalizer, dedup_key, iso_to_ts
+
+    n = Normalizer(tmp / f"empty-{name}", tmp / f"{name}.sqlite")
+    bid_key = dedup_key({"event_type": "item_received_bid", "order_hash": "0xOLD",
+                         "event_timestamp": "2026-09-09T10:00:00Z"})
+    cancel_key = dedup_key({"event_type": "item_cancelled", "order_hash": "0xOLD",
+                            "event_timestamp": "2026-09-09T10:00:10Z"})
+    seq = 0
+    for label in ("a", "b"):
+        for etype, ets, key in (("item_received_bid", "2026-09-09T10:00:00Z", bid_key),
+                                ("item_cancelled", "2026-09-09T10:00:10Z", cancel_key)):
+            seq += 1
+            n.conn.execute(
+                "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, "
+                "valid_ts, event_type, order_hash, conn, dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"run-{label}", seq, "f", ets, 1000.0 + seq, ets, iso_to_ts(ets),
+                 etype, "0xOLD", label, key))
+    # The stale row, exactly as method 2 would have left it: two terminations for
+    # one cancellation, and the stamp that says which rules produced it.
+    n.conn.execute(
+        "INSERT INTO order_lives (order_hash, collection, event_type, t_place, t_term, "
+        " exit_reason, placement_seen, revalidated, terminations_seen, method_version) "
+        "VALUES ('0xOLD','argonauts','item_received_bid',?,?,'cancelled',1,0,2,2)",
+        (iso_to_ts("2026-09-09T10:00:00Z"), iso_to_ts("2026-09-09T10:00:10Z")))
+    n.conn.commit()
+    n.close()
+    return tmp / f"{name}.sqlite"
+
+
+def test_order_lives_refolds_when_the_method_stamp_is_stale(tmp: Path) -> None:
+    """BUG-20260911-076. `ORDER_LIVES_METHOD` was written on every row and read by
+    NOTHING, and the only full re-fold fired when `order_lives` was EMPTY.
+
+    So an existing store upgraded in place kept every row an old fold produced,
+    forever: `sync()` refreshes only the orders a pass TOUCHED, and an order whose
+    last event was yesterday is never touched again. Under method 2 that is a
+    doubled `terminations_seen` on every quiet order -- with the redundant flag
+    off, with nothing in any log, and with no field on any page saying the store
+    was half one thing and half another.
+    """
+    from navanax.normalize import ORDER_LIVES_METHOD, Normalizer, lives_method_state
+
+    db = _pr10_stale_lives_store(tmp, "stale")
+
+    ro = Normalizer(tmp / "unused-ro", db, writer=False)
+    st = lives_method_state(ro.conn)
+    check("lives method: a stale store is detected as MIXED, by the stamp rather than "
+          "by the table being empty",
+          st["mixed"] is True and st["min"] == 2 and st["current"] == ORDER_LIVES_METHOD, str(st))
+    check("lives method: a READ-ONLY opener does not re-fold -- that would be a second "
+          "writer on one store, which is BUG-20260910-067",
+          ro.refold_stats["refolded"] is False
+          and ro.conn.execute("SELECT terminations_seen FROM order_lives "
+                              "WHERE order_hash='0xOLD'").fetchone()[0] == 2)
+    check("lives method: and it did not even ATTEMPT the re-fold -- the reader path "
+          "marks itself, so 'SQLite refused the write' is not what is holding the line "
+          "here. `mode=ro` is the belt; this is the braces",
+          ro.refold_stats.get("reader") is True and "error" not in ro.refold_stats,
+          str(ro.refold_stats))
+    ro.close()
+
+    w = Normalizer(tmp / "unused-w", db, writer=True)
+    check("lives method: the WRITER re-folds the whole table on open",
+          w.refold_stats["refolded"] is True and w.refold_stats["rows"] == 1,
+          str(w.refold_stats))
+    check("lives method: every row is now at the current method_version",
+          lives_method_state(w.conn)["mixed"] is False
+          and w.conn.execute("SELECT MIN(method_version), MAX(method_version) "
+                             "FROM order_lives").fetchone() == (ORDER_LIVES_METHOD,
+                                                                ORDER_LIVES_METHOD))
+    check("lives method: and the STALE COUNT is corrected -- 0xOLD's doubled "
+          "terminations_seen goes 2 -> 1, which is the whole point of noticing",
+          w.conn.execute("SELECT terminations_seen FROM order_lives "
+                         "WHERE order_hash='0xOLD'").fetchone()[0] == 1)
+    check("lives method: the re-fold reports its elapsed time, so a slow one is "
+          "visible rather than felt", isinstance(w.refold_stats["seconds"], float))
+    w.close()
+
+    again = Normalizer(tmp / "unused-w2", db, writer=True)
+    check("lives method: a SECOND open re-folds nothing -- the stamp is current, so "
+          "this is not a re-fold on every start",
+          again.refold_stats["refolded"] is False and again.refold_stats["seconds"] == 0.0,
+          str(again.refold_stats))
+    again.close()
+
+
+def test_order_lives_method_mixed_is_reported_on_health_as_warn(tmp: Path) -> None:
+    """A reader cannot fix it, so it must say so -- with the sentence that names the fix.
+
+    The dashboard opens the store as the folding WRITER, so in normal operation it
+    re-folds on open and this never fires. It fires for a reader: `navanax` opened
+    read-only alongside a running dashboard, or a page serving while another
+    process owns the write side. Serving rows produced by two different fold rules
+    without saying so is the silent-wrongness class.
+    """
+    import shutil as _sh
+
+    import yaml as _yaml
+
+    from navanax.dashboard import Dashboard
+    from navanax.normalize import Normalizer
+
+    db = _pr10_stale_lives_store(tmp, "stale-health")
+
+    reader = Normalizer(tmp / "unused-r", db, writer=False)
+    lm = {"available": True, **reader.lives_method(),
+          "refold_on_open": reader.refold_stats["refolded"]}
+    check("lives method on Health: a reader reports MIXED rather than repairing",
+          lm["mixed"] is True and lm["min"] == 2 and lm["refold_on_open"] is False, str(lm))
+    check("lives method on Health: a mixed store is `warn`, not `ok` -- rows from two "
+          "fold rules are not a cosmetic difference",
+          lm["mixed"] is True)
+    reader.close()
+
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    check("lives method on Health: the response names the fix in a sentence the "
+          "Operator can act on",
+          "Run rebuild-store.command or restart the dashboard." in src)
+    check("lives method on Health: and Health's top-level status goes to warn on it, "
+          "not only the sub-block",
+          'if lives_method.get("mixed")' in src)
+
+    root = tmp / "stalehealth"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    _sh.copy(db, root / cfg["analytical"]["path"])
+
+    dash = Dashboard(root, cfg, ["argonauts"])
+    h = dash.api_health({})
+    check("lives method on Health: the field is on every health response",
+          "lives_method" in h and h["lives_method"]["available"] is True,
+          str(h.get("lives_method")))
+    check("lives method on Health: the dashboard IS the folding writer, so opening it "
+          "repaired the store and the flag is clear",
+          h["lives_method"]["mixed"] is False
+          and h["lives_method"]["refold_on_open"] is True, str(h["lives_method"]))
+    check("lives method on Health: a repaired store's status is not `warn` for this "
+          "reason", h["status"] != "warn" or h["lives_method"]["mixed"] is False)
+    check("lives method on Health: the corrected count is what the page now serves",
+          dash.norm is not None and dash.norm.conn.execute(
+              "SELECT terminations_seen FROM order_lives WHERE order_hash='0xOLD'"
+          ).fetchone()[0] == 1)
+    if dash.norm is not None:
+        dash.norm.close()
+
+
+def test_order_lives_refold_cost_at_200k_lives(tmp: Path) -> None:
+    """How long the open-path re-fold takes on a store the size the Operator will have.
+
+    The measurement decides where the re-fold belongs. Under the budget it can run
+    in the open path, which is simplest and means a repaired store is serving
+    correct numbers from its first request. Over the budget it would have to move
+    into the sync loop, after `serve()` has bound its port, with Health degraded
+    while it runs -- more moving parts, and worth it only if the number says so.
+    """
+    import time as _time
+
+    from navanax.normalize import (
+        REFOLD_BLOCKING_BUDGET_SECONDS,
+        Normalizer,
+        dedup_key,
+        refold_lives_if_stale,
+    )
+
+    n = Normalizer(tmp / "empty-200k", tmp / "cost200k.sqlite")
+    rows, lives = [], []
+    for i in range(200_000):
+        h = f"0x{i:08x}"
+        ets = f"2026-09-09T10:{(i // 60) % 60:02d}:{i % 60:02d}Z"
+        rows.append(("run-a", i, "f", ets, 1000.0 + i, ets, 1.7889e9 + i,
+                     "item_received_bid", h, "a",
+                     dedup_key({"event_type": "item_received_bid", "order_hash": h,
+                                "event_timestamp": ets})))
+        lives.append((h, "argonauts", "item_received_bid", 1.7889e9 + i, None,
+                      "censored", 1, 0, 0, 2))
+    n.conn.executemany(
+        "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, valid_ts, "
+        "event_type, order_hash, conn, dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.executemany(
+        "INSERT INTO order_lives (order_hash, collection, event_type, t_place, t_term, "
+        "exit_reason, placement_seen, revalidated, terminations_seen, method_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)", lives)
+    n.conn.commit()
+
+    t0 = _time.monotonic()
+    res = refold_lives_if_stale(n.conn)
+    took = _time.monotonic() - t0
+    print(f"        MEASURED: full order_lives re-fold, {res['rows']:,} lives, "
+          f"{took:.1f}s (budget {REFOLD_BLOCKING_BUDGET_SECONDS:.0f}s)")
+    check("refold cost: 200,000 lives are all re-folded", res["rows"] == 200_000, str(res["rows"]))
+    check(f"refold cost: it finishes inside the {REFOLD_BLOCKING_BUDGET_SECONDS:.0f}s budget, "
+          f"so the open path is the right place for it "
+          f"(measured {took:.1f}s on this machine)",
+          took <= REFOLD_BLOCKING_BUDGET_SECONDS,
+          f"{took:.1f}s -- over budget, so the re-fold must move into the sync loop "
+          f"after serve() binds, with Health degraded while it runs")
+    check("refold cost: and the store is current afterwards",
+          res["after"]["mixed"] is False)
+    check("refold cost: the budget is a real budget -- a finite number of seconds, not "
+          "one raised until the measurement fits under it",
+          0 < REFOLD_BLOCKING_BUDGET_SECONDS <= 60,
+          str(REFOLD_BLOCKING_BUDGET_SECONDS))
+    n.close()
+
+
+def test_pr10_covered_by_is_revoked_when_the_evidence_changes(tmp: Path) -> None:
+    """BUG-20260911-077, the SIGKILL race.
+
+    `record_downtime_gap` runs on a process's next START, not on its death. So a
+    connection killed without warning leaves, for the seconds or hours until it
+    comes back: an unclosed landing file that looks like coverage, and NO gap in
+    the register to contradict it. A fold in that window annotates A's gap
+    "covered by b" -- honestly, on the evidence it has. When B restarts and
+    records its downtime the evidence changes, and the first version of this code
+    could not take the claim back: `WHERE covered_by IS NULL` made it permanent.
+
+    `gap_register` is in the OPERATIONAL store, which docs/07 §1 calls disposable
+    and reconstructible and which `close_gap` already updates in place. Correcting
+    a derived annotation there is allowed. The invariant that is NOT negotiable is
+    that no coverage logic ever closes, shortens or removes a gap.
+    """
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import annotate_gaps_covered_by
+
+    root = tmp / "revoke"
+    clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing-b", "run-b", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+            event_timestamp="2026-09-09T10:00:01Z")
+    w.flush()      # SIGKILL: no close(), so the manifest says `open` forever
+
+    store = OperationalStore(root / "ops.db")
+    gid = store.open_gap("run-a", "reconnect", topics=["collection:argonauts"],
+                         backfillable=False, started_at="2026-09-09T10:20:00Z",
+                         backfillable_classes=["item_sold"])
+    store.close_gap(gid, ended_at="2026-09-09T10:25:00Z")
+    snapshot = dict(next(g for g in store.all_gaps() if g["id"] == gid))
+
+    first = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    check("PR-10 revoke: with B dead but its gap not yet recorded, the fold annotates "
+          "on the evidence it has -- which is the honest answer at that moment",
+          first.marked == [gid] and first.revoked == [], str(first))
+
+    steady = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    check("PR-10 revoke: a fold that re-derives the SAME answer writes nothing and "
+          "logs nothing -- no flip-flop, no log spam",
+          steady == ([], []), str(steady))
+
+    # B comes back and records the downtime it could not record while it was dead.
+    store.close_gap(store.open_gap("run-b2", "process not running (killed)",
+                                   backfillable=False,
+                                   started_at="2026-09-09T10:18:00Z", conn_label="b"),
+                    ended_at="2026-09-09T10:30:00Z")
+
+    third = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    after = dict(next(g for g in store.all_gaps() if g["id"] == gid))
+    check("PR-10 revoke: the next fold CLEARS the annotation the new evidence no "
+          "longer supports",
+          third.revoked == [gid] and third.marked == [] and after["covered_by"] is None,
+          str(third))
+    check("PR-10 revoke: and clearing is stable -- the fold after it changes nothing",
+          annotate_gaps_covered_by(store, "b", root / "landing-b") == ([], []))
+
+    check("PR-10 revoke: THE INVARIANT -- the gap itself was never closed, shortened "
+          "or removed by any of this; only `covered_by` ever moved",
+          {k: v for k, v in after.items() if k != "covered_by"}
+          == {k: v for k, v in snapshot.items() if k != "covered_by"}, str(after))
+    check("PR-10 revoke: it is still a gap, still closed at the time it always closed, "
+          "and still on the backfill worklist",
+          after["started_at"] == "2026-09-09T10:20:00Z"
+          and after["ended_at"] == "2026-09-09T10:25:00Z"
+          and gid in [g["id"] for g in store.unbackfilled_gaps()])
+
+
+def test_pr10_revocation_is_logged_once_per_transition(tmp: Path) -> None:
+    """Each transition says which gap and why, exactly once. A steady state is silent."""
+    import logging as _logging
+
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import annotate_gaps_covered_by
+
+    root = tmp / "revoke-log"
+    clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing-b", "run-b", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+            event_timestamp="2026-09-09T10:00:01Z")
+    w.flush()
+    store = OperationalStore(root / "ops.db")
+    gid = store.open_gap("run-a", "reconnect", backfillable=False,
+                         started_at="2026-09-09T10:20:00Z")
+    store.close_gap(gid, ended_at="2026-09-09T10:25:00Z")
+
+    records: list[_logging.LogRecord] = []
+
+    class Cap(_logging.Handler):
+        def emit(self, record): records.append(record)
+
+    lg = _logging.getLogger("navanax.redundancy")
+    h = Cap()
+    lg.addHandler(h)
+    old_level = lg.level
+    lg.setLevel(_logging.INFO)
+    try:
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        set_lines = [r for r in records if "annotated covered_by" in r.getMessage()]
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        check("PR-10 revoke log: the annotation is logged ONCE, not on every fold",
+              len([r for r in records if "annotated covered_by" in r.getMessage()]) == 1,
+              str([r.getMessage()[:60] for r in records]))
+        check("PR-10 revoke log: and the line names the gap id",
+              set_lines and f"gap {gid}" in set_lines[0].getMessage(),
+              set_lines[0].getMessage()[:120] if set_lines else "no line")
+        records.clear()
+        store.close_gap(store.open_gap("run-b2", "killed", backfillable=False,
+                                       started_at="2026-09-09T10:18:00Z", conn_label="b"),
+                        ended_at="2026-09-09T10:30:00Z")
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        rev = [r for r in records if "REVOKED" in r.getMessage()]
+        check("PR-10 revoke log: the revocation is logged once, at WARNING",
+              len(rev) == 1 and rev[0].levelno == _logging.WARNING,
+              str([r.getMessage()[:60] for r in records]))
+        check("PR-10 revoke log: and it says the gap is UNCHANGED, so nobody reads a "
+              "revocation as the gap being altered",
+              rev and "UNCHANGED" in rev[0].getMessage(),
+              rev[0].getMessage()[:200] if rev else "no line")
+    finally:
+        lg.removeHandler(h)
+        lg.setLevel(old_level)
+
+
+def test_pr10_health_carries_a_dedup_block(tmp: Path) -> None:
+    """E-W5. `order_criteria`'s primary key is `(run, seq, idx)` -- per-connection
+    by construction -- so with B running, every raw count over it DOUBLES. The
+    COVERS join still resolves correctly, so nothing is wrong; but the first
+    "trait offers by criteria" figure read off it would be 2x.
+
+    `/api/health.dedup` is what stops that number being read raw. It is present
+    whether or not the flag is on, because the day it IS on nothing else on the
+    page would say so.
+    """
+    import shutil as _sh
+
+    import yaml as _yaml
+
+    from navanax.dashboard import Dashboard
+
+    root = tmp / "healthdedup"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+    cfg["stream"]["redundant"]["enabled"] = True
+    (root / "config" / "base.yaml").write_text(_yaml.safe_dump(cfg))
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+
+    offer = _pr10_frame(REAL_TRAIT_OFFER)
+    for label, run in (("data/landing", "run-a"), ("data/landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(offer, topic="collection:argonauts",
+                event_timestamp=json.loads(offer)[4]["payload"]["event_timestamp"])
+        w.close()
+
+    dash = Dashboard(root, cfg, ["argonauts"])
+    dash._sync_once()
+    d = dash.api_health({})["dedup"]
+    check("PR-10 health: /api/health carries a `dedup` block", isinstance(d, dict) and d["enabled"])
+    check("PR-10 health: it names both landing roots",
+          set(d["landing_roots"]) == {"a", "b"}, str(d["landing_roots"]))
+    check("PR-10 health: it spells out the dedup key's fields, so the key is auditable "
+          "without reading the source",
+          "event_timestamp" in d["dedup_key_fields"] and "tx_hash" in d["dedup_key_fields"]
+          and "order_hash" in d["dedup_key_fields"], str(d["dedup_key_fields"]))
+    check("PR-10 health: it warns IN THE PAYLOAD that a raw order_criteria count doubles",
+          "DOUBLE" in d["order_criteria_note"] and "E-W5" in d["order_criteria_note"])
+    check("PR-10 health: the raw criteria count is double and the DE-DUPLICATED one is not",
+          d["criteria_rows_raw_n"] == 2 and d["criteria_rows_deduped_n"] == 1, json.dumps(d))
+    check("PR-10 health: the un-dedupable total is reported separately from rows folded "
+          "before the column existed",
+          "store_undedupable_n" in d and "pre_migration_rows_n" in d, json.dumps(d))
+    check("PR-10 health: the monitor's verdict rides along with it",
+          d["monitor"]["status"] in ("ok", "warn"), json.dumps(d["monitor"]))
+    check("PR-10 health: the dedup block carries the multiplicity disagreement count "
+          "AND its denominator, so the place one-per-key may have undercounted is "
+          "visible on the page rather than inferable from a total",
+          "multiplicity_disagreements_n" in d["monitor"]
+          and "seen_by_both_n" in d["monitor"]
+          and "multiplicity_disagreement_fraction" in d["monitor"], json.dumps(d["monitor"]))
+    check("PR-10 health: and what the order_lives fold actually collapsed, store-wide",
+          "lives_duplicates_merged_n" in d and "lives_multiplicity_disagreements_n" in d,
+          json.dumps({k: v for k, v in d.items() if k.startswith("lives_")}))
+    check("PR-10 health: coverage annotations standing, and how many had to be TAKEN "
+          "BACK -- a revocation means a gap was briefly marked covered on evidence "
+          "that later proved wrong (BUG-20260911-077)",
+          d["covered_by_n"] == 0 and d["covered_by_revoked_since_start_n"] == 0, json.dumps(d))
+    dash.stop() if hasattr(dash, "stop") else None
+    if dash.norm is not None:
+        dash.norm.close()
+
+
+def _pr10_two_conn_store(tmp: Path, name: str):
+    """A store holding the SAME three events on two connections. Returns the engine."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+
+    root = tmp / name
+    for label, run in (("landing", "run-a"), ("landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        if label == "landing-b":
+            clock.advance(0.3)
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        for raw in (REAL_BID, REAL_LISTING, REAL_SALE):
+            frame = _pr10_frame(raw)
+            w.write(frame, topic="collection:argonauts",
+                    event_timestamp=json.loads(frame)[4]["payload"]["event_timestamp"])
+        w.close()
+    n = Normalizer(root / "landing", tmp / f"{name}.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    n.sync()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "UTC")
+    return n, eng
+
+
+def test_pr10_metrics_never_double_count_under_two_connections(tmp: Path) -> None:
+    """Finding 4. `events` holds both connections' rows by design, so every raw
+    COUNT over it doubles the moment a second connection runs.
+
+    Every count in `metrics.py` now keeps ONE row per dedup key when -- and only
+    when -- the store actually holds more than one connection's rows, and every
+    response that prints an n carries `dedup_applied` and `n_undedupable` so the
+    reader can tell a de-duplicated count from a raw one.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n, eng = _pr10_two_conn_store(tmp, "twoconn")
+    rows = n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    check("PR-10 metrics: the store really does hold both connections' rows -- 6 rows "
+          "for 3 events, which is the doubling under test",
+          rows == 6, str(rows))
+    check("PR-10 metrics: the engine detects a multi-connection store",
+          eng.multi_connection() is True)
+
+    start, end = iso_to_ts("2026-09-09T00:00:00Z"), iso_to_ts("2026-09-10T00:00:00Z")
+    mix = {r["event_type"]: r["n"] for r in eng.event_mix("argonauts", start, end)}
+    check("PR-10 metrics: event_mix counts each event ONCE, not twice",
+          mix == {"item_received_bid": 1, "item_listed": 1, "item_sold": 1}, str(mix))
+
+    mk = eng.makers("argonauts", start, end)
+    check("PR-10 metrics: makers' total is de-duplicated",
+          mk["total_events_with_maker"] == 3, str(mk))
+    check("PR-10 metrics: ...and it says so, with the un-dedupable count beside it",
+          mk["basis"]["dedup_applied"] is True and mk["basis"]["n_undedupable"] == 0,
+          str(mk["basis"]))
+
+    ser = eng.series(metric="event_count", collection="argonauts", range_="7d",
+                     interval="1d", now=datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc))
+    check("PR-10 metrics: a COUNT series does not double",
+          sum(v for v in ser["raw"] if v) == 3, str(ser["raw"]))
+    check("PR-10 metrics: and its basis carries dedup_applied and n_undedupable",
+          ser["basis"]["dedup_applied"] is True and ser["basis"]["n_undedupable"] == 0,
+          str({k: ser["basis"][k] for k in ("dedup_applied", "n_undedupable")}))
+
+    led = eng.ledger("argonauts", start=start, end=end)
+    check("PR-10 metrics: the ledger LISTS each event once -- a row shown twice is its "
+          "own lie, separately from any count",
+          len(led["rows"]) == 3 and led["total_estimate"] == 3, str(led["total_estimate"]))
+    check("PR-10 metrics: the ledger basis states the de-duplication in its filter block",
+          led["basis"]["dedup_applied"] is True
+          and led["basis"]["filter"]["dedup"]["applied"] is True, str(led["basis"]["filter"]))
+
+    ch = eng.ledger_chart("argonauts", start=start, end=end)
+    check("PR-10 metrics: the ledger chart plots each event once",
+          sum(ch["counts"].values()) == 3 and ch["basis"]["dedup_applied"] is True, str(ch["counts"]))
+
+    wl = eng.wallets("argonauts", start, end)
+    check("PR-10 metrics: the wallets view does not double its totals",
+          wl["total_events"] == 3 and wl["basis"]["dedup_applied"] is True, str(wl["total_events"]))
+    addr = REAL_BID[4]["payload"]["maker"]["address"]
+    w1 = eng.wallet("argonauts", addr, start, end)
+    check("PR-10 metrics: one wallet card's event count does not double",
+          w1["behaviour"]["events"] == 1, str(w1["behaviour"]["events"]))
+    check("PR-10 metrics: the wallet card says whether dedup was applied, without any "
+          "free-text field (the address-only guard forbids one)",
+          w1["basis"]["dedup_applied"] is True and w1["basis"]["n_undedupable"] == 0,
+          str(w1["basis"]["dedup_applied"]))
+    check("PR-10 metrics: the tape shows each sale once",
+          len(eng.tape("argonauts")) == 1)
+    n.close()
+
+
+def test_pr10_single_connection_metrics_are_byte_identical(tmp: Path) -> None:
+    """The other half of finding 4, and the one that makes it safe to ship.
+
+    On a single-connection store NOTHING may change: not a count, not a query
+    string, not a query plan. `INDEXED BY` on the ledger and on the three
+    lifecycle queries is load-bearing (BUG-20260909-040, BUG-20260910-068), and a
+    dedup filter that appended itself unconditionally would be free to change a
+    plan that took 29 s to get right.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "oneconn"
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing", "run-a", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    for raw in (REAL_BID, REAL_LISTING, REAL_SALE):
+        frame = _pr10_frame(raw)
+        w.write(frame, topic="collection:argonauts",
+                event_timestamp=json.loads(frame)[4]["payload"]["event_timestamp"])
+    w.close()
+    n = Normalizer(root / "landing", tmp / "oneconn.sqlite")
+    n.sync()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "UTC")
+
+    check("PR-10 single-connection: the engine says so", eng.multi_connection() is False)
+    check("PR-10 single-connection: the dedup filter is the EMPTY STRING, so every SQL "
+          "statement in metrics.py is character-for-character what it was",
+          eng.dedup_where("e") == "", repr(eng.dedup_where("e")))
+    q = eng.ledger_query_plan("argonauts", sort="valid_ts", direction="desc")
+    check("PR-10 single-connection: the ledger's page SQL contains no dedup subquery",
+          "dedup_key" not in q["sql"], q["sql"][:200])
+    check("PR-10 single-connection: the plan still uses the named index and has no "
+          "TEMP B-TREE (BUG-20260910-068)",
+          any(q["index"] in line for line in q["plan"])
+          and not any("TEMP B-TREE" in line for line in q["plan"]), str(q["plan"]))
+    led = eng.ledger("argonauts", start=iso_to_ts("2026-09-09T00:00:00Z"),
+                     end=iso_to_ts("2026-09-10T00:00:00Z"))
+    check("PR-10 single-connection: the basis says no de-duplication was applied, and "
+          "the filter block carries no `dedup` key at all",
+          led["basis"]["dedup_applied"] is False and "dedup" not in led["basis"]["filter"],
+          str(led["basis"]["filter"]))
+    check("PR-10 single-connection: n_undedupable is 0, not a count of rows nobody "
+          "de-duplicated", led["basis"]["n_undedupable"] == 0)
+    n.close()
+
+
+def test_pr10_metrics_count_undedupable_rows_per_row_and_say_so(tmp: Path) -> None:
+    """A row with no `event_timestamp` cannot be proved a duplicate, so it is
+    counted PER ROW -- and that is exactly the part of any n a second connection
+    can still inflate. Every multi-connection response names it.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "undedup-metrics"
+    for label, run, sent in (("landing", "run-a", "2026-09-09T10:19:02.375000Z"),
+                             ("landing-b", "run-b", "2026-09-09T10:19:02.981000Z")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        good = _pr10_frame(REAL_BID)
+        w.write(good, topic="collection:argonauts",
+                event_timestamp=json.loads(good)[4]["payload"]["event_timestamp"])
+        bad = json.loads(_pr10_frame(REAL_LISTING, event_timestamp=None))
+        bad[4]["sent_at"] = sent
+        w.write(json.dumps(bad, separators=(",", ":")), topic="collection:argonauts",
+                event_timestamp=None)
+        w.close()
+    n = Normalizer(root / "landing", tmp / "undedup-metrics.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    n.sync()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "UTC")
+    start, end = iso_to_ts("2026-09-09T00:00:00Z"), iso_to_ts("2026-09-10T00:00:00Z")
+    mix = {r["event_type"]: r["n"] for r in eng.event_mix("argonauts", start, end)}
+    check("PR-10 un-dedupable in metrics: the keyable bid counts ONCE, the two "
+          "timestamp-less listings count TWICE -- neither is merged on a guess",
+          mix == {"item_received_bid": 1, "item_listed": 2}, str(mix))
+    b = eng.dedup_basis("argonauts", start, end)
+    check("PR-10 un-dedupable in metrics: n_undedupable names exactly those two rows",
+          b["dedup_applied"] is True and b["n_undedupable"] == 2, str(b))
+    n.close()
+
+
+def test_pr10_stale_launchd_jobs_are_computed_and_removed(tmp: Path) -> None:
+    """Finding 6. Turning the flag back OFF strands `com.navanax.recorder-b`:
+    launchd keeps starting it, `ingest --redundant` refuses with the configuration
+    exit code because the flag is off, and `KeepAlive` restarts it ten seconds
+    later, forever.
+    """
+    import shutil as _sh
+
+    import yaml as _yaml
+    ld = _launchd()
+
+    def proj(name: str, enabled: bool) -> Path:
+        root = tmp / name
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        for f in ("base.yaml", "watchlist.yaml"):
+            _sh.copy(ROOT / "config" / f, root / "config" / f)
+        cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+        cfg["stream"]["redundant"]["enabled"] = enabled
+        (root / "config" / "base.yaml").write_text(_yaml.safe_dump(cfg))
+        return root
+
+    off, on = proj("stale-off", False), proj("stale-on", True)
+    loaded = [ld.RECORDER, ld.RECORDER_B, ld.DASHBOARD, ld.TRAITS, ld.KEEPAWAKE]
+    check("PR-10 stale: with the flag OFF, a loaded recorder-b is stale",
+          ld.stale_labels(off, loaded) == (ld.RECORDER_B,), str(ld.stale_labels(off, loaded)))
+    check("PR-10 stale: with the flag ON, nothing is stale",
+          ld.stale_labels(on, loaded) == (), str(ld.stale_labels(on, loaded)))
+    check("PR-10 stale: the OPT-IN keepawake job is never stale -- removing it would "
+          "undo a deliberate choice about the machine's sleep behaviour",
+          ld.KEEPAWAKE not in ld.stale_labels(off, loaded)
+          and ld.KEEPAWAKE not in ld.stale_labels(on, loaded))
+    check("PR-10 stale: a job of ours this version cannot NAME is reported, never "
+          "booted out -- it is likelier to be a newer version's than rubbish",
+          ld.stale_labels(off, [*loaded, "com.navanax.future"]) == (ld.RECORDER_B,)
+          and ld.unknown_labels([*loaded, "com.navanax.future"]) == ("com.navanax.future",))
+    check("PR-10 stale: someone else's launchd job is never touched",
+          ld.stale_labels(off, ["com.apple.something", "com.example.recorder-b"]) == ()
+          and ld.unknown_labels(["com.apple.something"]) == ())
+    import subprocess as _sp2
+    check("PR-10 stale: the CLI prints the stale labels one per line",
+          _sp2.run([sys.executable, "tools/launchd.py", "stale", "--root", str(off),
+                    *loaded], cwd=ROOT, capture_output=True, text=True
+                   ).stdout.split() == [ld.RECORDER_B])
+
+    inst = (ROOT / "autostart-install.command").read_text()
+    check("PR-10 stale: the installer computes the stale list and boots those jobs out",
+          "tools/launchd.py stale" in inst and "launchctl bootout" in inst
+          and "no longer wants" in inst)
+    check("PR-10 stale: the installer PRINTS what it removed rather than removing "
+          "quietly", "removed $L" in inst)
+    check("PR-10 stale: the installer leaves unknown navanax jobs alone and says so",
+          "LEFT ALONE" in inst)
+
+
+def test_pr10_uninstall_and_status_do_not_hardcode_the_label_list(tmp: Path) -> None:
+    """Finding 5. A hardcoded three-label list cannot stop, and cannot show, a job
+    it has never heard of -- and `com.navanax.recorder-b` is exactly that job. Both
+    launchers take the list from the generator AND from what is actually loaded.
+    """
+    un = (ROOT / "autostart-uninstall.command").read_text()
+    st = (ROOT / "autostart-status.command").read_text()
+    for name, text in (("autostart-uninstall.command", un), ("autostart-status.command", st)):
+        check(f"{name}: asks tools/launchd.py for the label list",
+              "tools/launchd.py all-labels" in text, text[:0])
+        check(f"{name}: ALSO covers every com.navanax.* label currently loaded, so a "
+              f"stranded job it has never heard of is not invisible",
+              "launchctl list" in text and r"com\.navanax\." in text)
+    check("autostart-uninstall.command: says when it is removing a job this version "
+          "does not install -- it is the uninstaller, so it removes it, but not silently",
+          "not one this version installs" in un)
+    check("autostart-status.command: a recorder-b that is not installed reads as the "
+          "flag being off, not as a broken install",
+          "redundant second stream connection is OFF" in st)
+    check("autostart-status.command: is still read-only -- it stops nothing and removes "
+          "nothing",
+          "bootout" not in st and "rm -f" not in st)
+
+
+def test_pr10_launchd_renders_the_b_recorder_only_when_enabled(tmp: Path) -> None:
+    """The launchd half: `tools/launchd.py` READS the flag. With it off there is
+    no B job on the machine at all; with it on there is one, supervised exactly
+    like A and pointed at `--redundant`.
+    """
+    import plistlib
+    import shutil as _sh
+
+    import yaml as _yaml
+    ld = _launchd()
+
+    def proj(name: str, enabled: bool) -> Path:
+        root = tmp / name
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        for f in ("base.yaml", "watchlist.yaml"):
+            _sh.copy(ROOT / "config" / f, root / "config" / f)
+        cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+        cfg["stream"]["redundant"]["enabled"] = enabled
+        (root / "config" / "base.yaml").write_text(_yaml.safe_dump(cfg))
+        return root
+
+    off, on = proj("ld-off", False), proj("ld-on", True)
+    check("PR-10 launchd: flag off -> the three jobs it has always installed",
+          ld.autostart_labels(off) == ld.AUTOSTART_LABELS, str(ld.autostart_labels(off)))
+    check("PR-10 launchd: flag off -> no redundant recorder job is rendered",
+          ld.RECORDER_B not in ld.autostart_labels(off))
+    check("PR-10 launchd: flag on -> the redundant recorder joins the install list",
+          ld.RECORDER_B in ld.autostart_labels(on), str(ld.autostart_labels(on)))
+    check("PR-10 launchd: an unreadable project directory renders NO B job -- a job "
+          "for a connection that refuses to start would restart every 10s forever",
+          not ld.redundant_enabled(tmp / "does-not-exist"))
+
+    b = plistlib.loads(ld.render(ld.RECORDER_B, on, python="/usr/bin/python3"))
+    check("PR-10 launchd: the B job runs `ingest --redundant --supervised`",
+          b["ProgramArguments"][-3:] == ["ingest", "--redundant", "--supervised"],
+          str(b["ProgramArguments"]))
+    check("PR-10 launchd: B is supervised like A -- an hour it did not record cannot "
+          "be bought back either",
+          b["KeepAlive"] is True and b["RunAtLoad"] is True and b["ExitTimeOut"] == 30)
+    check("PR-10 launchd: B writes its own log, so one recorder's restarts can be told "
+          "from the other's",
+          b["StandardOutPath"].endswith("recorder-b.log"))
+    check("PR-10 launchd: no API key is written into B's plist either",
+          "KEY" not in json.dumps(b.get("EnvironmentVariables", {})))
+    inst = (ROOT / "autostart-install.command").read_text()
+    check("PR-10 launchd: the installer asks launchd.py for the label list rather than "
+          "carrying its own copy",
+          "tools/launchd.py labels" in inst)
+
+
+def test_pr10_is_documented_where_an_operator_would_look() -> None:
+    """A flag whose cost is "disk doubles and every raw count over events doubles"
+    has to say so somewhere the Operator reads, not only in a commit message."""
+    d07 = (ROOT / "docs" / "07_STORAGE_AND_RECORDING.md").read_text()
+    check("docs/07 §3 has the redundant-stream subsection",
+          "3.x Redundant stream (PR-10, default off)" in d07)
+    check("docs/07: it states the cost (disk doubles) as well as the benefit",
+          "doubles" in d07.lower() and "landing-b" in d07)
+    check("docs/07: it states what redundancy does NOT buy",
+          "does not buy" in d07.lower())
+    d04 = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    check("docs/04 §8 describes the second launchd job and that it is only installed "
+          "when the flag is on",
+          "com.navanax.recorder-b" in d04 and "stream.redundant.enabled" in d04)
+    import yaml as _yaml
+    asm = _yaml.safe_load((ROOT / "config" / "assumptions.yaml").read_text())
+    ids = {a["id"]: a for a in asm["assumptions"]}
+    check("config/assumptions.yaml registers the dedup key as an assumption",
+          "ASM-030" in ids, str(sorted(ids)))
+    if "ASM-030" in ids:
+        a = ids["ASM-030"]
+        check("ASM-030 names the code it governs and its owner",
+              "normalize.py" in a["code"] and a["owner"] == "data-engineer", str(a.get("code")))
+        check("ASM-030 records that the key is built from event_timestamp and never "
+              "from the coalesced valid_at",
+              "event_timestamp" in json.dumps(a["value"])
+              and "valid_at" in a["rationale"], json.dumps(a["value"]))
+        check("ASM-030 records the CORRECTED multiplicity rule and names the bug that "
+              "changed it, so the superseded reasoning is visible rather than erased",
+              a["value"]["multiplicity"] == "one_row_per_key"
+              and "BUG-20260911-073" in json.dumps(a["value"]), json.dumps(a["value"]))
+        check("ASM-030 records that gap coverage subtracts the other connection's own "
+              "gaps, and annotates whole gaps only",
+              a["value"]["coverage_rule"] == "manifest_intervals_minus_own_gaps"
+              and a["value"]["coverage_extent"] == "whole_gap_only", json.dumps(a["value"]))
+        check("ASM-030 says plainly that the multiplicity-disagreement threshold is "
+              "unmeasured and may prove noisy, rather than presenting 0 as a finding",
+              "unmeasured" in a["rationale"] and "noisy" in a["rationale"])
+    check("docs/07: names one-row-per-key, and the undercount it costs",
+          "one row per dedup key" in d07 and "undercount" in d07.lower())
+    check("docs/07: states that the manifest alone is not coverage",
+          "minus that connection's own rows in the gap register" in d07)
+    check("docs/07: states that the metric layer de-duplicates too, and that a caveat "
+          "on Health was not a fix",
+          "dedup_applied" in d07 and "not a substitute" in d07)
+    check("docs/07: documents the upgrade path -- the writer re-folds a stale "
+          "method_version, a reader reports it, with the measured cost",
+          "method_version" in d07 and "200,000 lives" in d07
+          and "rebuild-store.command or restart the dashboard" in d07)
+    check("docs/07: documents that coverage annotations are REVOCABLE, and restates "
+          "the invariant they may never touch",
+          "revocable" in d07.lower()
+          and "ever closes, shortens or removes a gap" in d07)
+    if "ASM-030" in ids:
+        check("ASM-030 records that coverage is revocable and that a reader never "
+              "re-folds", ids["ASM-030"]["value"]["coverage_revocable"] is True
+              and ids["ASM-030"]["value"]["lives_method_refold_on_open"] == "writer_only")
+    check("docs/04 §8.13: says a flag turned back off REMOVES the job rather than "
+          "leaving it crash-looping",
+          "boots out and deletes" in d04 and "every ten seconds forever" in d04)
+    check("docs/04 §8.13: says the uninstaller and the status window take the label "
+          "list from the generator plus what is loaded",
+          "launchctl list" in d04 and "two sources" in d04)
 
 if __name__ == "__main__":
     raise SystemExit(main())

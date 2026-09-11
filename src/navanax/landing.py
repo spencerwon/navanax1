@@ -174,6 +174,26 @@ class GapRecord:
     # recorded is one interval, and its end is simply not knowable when it
     # starts.
     gap_id: int | None = None
+    # PR-10, both additive and both omitted from the manifest when None, so a
+    # single-connection run's manifest is byte-identical to what it was before
+    # this field existed (see `_OPTIONAL_GAP_FIELDS`).
+    #
+    # `conn_label` is which redundant connection recorded this gap: None for the
+    # primary connection A -- which is every gap ever recorded until the
+    # redundant stream is switched on -- and e.g. "b" for the second one.
+    #
+    # `covered_by` is the label of a DIFFERENT connection that was demonstrably
+    # recording through this window. It NEVER shortens, closes, or removes the
+    # gap: "A was blind and B was not" is a different fact from "no gap
+    # occurred", and only the first is true (dataeng §3.a, failure mode 5).
+    conn_label: str | None = None
+    covered_by: str | None = None
+
+
+#: Gap fields written to the manifest only when they carry a value. Their absence
+#: is their default, so adding one cannot change a single byte of a manifest
+#: written by a run that does not use it.
+_OPTIONAL_GAP_FIELDS = frozenset({"conn_label", "covered_by"})
 
 
 class ManifestWriter:
@@ -274,7 +294,8 @@ class ManifestWriter:
     def record_gap(self, dt: str, gap: GapRecord) -> None:
         with self._exclusive():
             data = self._load(dt)
-            rec = asdict(gap)
+            rec = {k: v for k, v in asdict(gap).items()
+                   if v is not None or k not in _OPTIONAL_GAP_FIELDS}
             if gap.gap_id is not None:
                 # Replace the open record for this gap rather than appending a
                 # second one. Without this, closing a gap would leave both an

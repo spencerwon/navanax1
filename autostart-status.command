@@ -11,6 +11,10 @@
 set -u
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 AGENTS="$HOME/Library/LaunchAgents"
+# Fallback only; replaced below by tools/launchd.py plus whatever is loaded. A
+# hardcoded list cannot SHOW a job it has never heard of, and a stranded
+# com.navanax.recorder-b crash-looping every ten seconds is precisely the job the
+# Operator needs this window to show him.
 LABELS="com.navanax.recorder com.navanax.dashboard com.navanax.traits com.navanax.keepawake"
 
 echo "============================================================"
@@ -26,12 +30,31 @@ fi
 
 DOMAIN="gui/$(id -u)"
 
+PY=""
+for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+  command -v "$c" >/dev/null 2>&1 && { PY="$(command -v "$c")"; break; }
+done
+if [ -n "$PY" ]; then
+  KNOWN="$("$PY" tools/launchd.py all-labels 2>/dev/null | tr '\n' ' ')"
+  [ -n "${KNOWN// /}" ] && LABELS="$KNOWN"
+fi
+for L in $(launchctl list 2>/dev/null | awk '{print $3}' | grep '^com\.navanax\.'); do
+  case " $LABELS " in
+    *" $L "*) ;;
+    *) LABELS="$LABELS $L";;
+  esac
+done
+
 for L in $LABELS; do
   echo
   echo "------------------------------------------------------------"
   if [ ! -f "$AGENTS/$L.plist" ]; then
     case "$L" in
       com.navanax.keepawake) echo "  $L: not installed (optional -- keepawake-install.command)";;
+      com.navanax.recorder-b)
+        echo "  $L: not installed (the redundant second stream connection is OFF --"
+        echo "     set stream.redundant.enabled in config/base.yaml and re-run"
+        echo "     autostart-install.command if you want it; read docs/07 3.x first)";;
       *) echo "  $L: NOT INSTALLED -- run autostart-install.command";;
     esac
     continue
