@@ -66,6 +66,36 @@ if ! "$PY" -c "import zstandard, websockets, yaml" 2>/dev/null; then
           Run start.command once first -- it installs them -- then come back.
           Nothing was changed."
 fi
+# PR-10: the redundant recorder (connection B) is installed ONLY when
+# stream.redundant.enabled is true in config/base.yaml. tools/launchd.py reads
+# that flag; if it cannot be read for any reason we keep the three-job list
+# above, because a job for a connection that refuses to start would restart
+# every ten seconds forever and record nothing.
+LABELS_FROM_CONFIG="$("$PY" tools/launchd.py labels --root "$PROJECT" 2>/dev/null | tr '\n' ' ')"
+[ -n "$LABELS_FROM_CONFIG" ] && LABELS="$LABELS_FROM_CONFIG"
+
+# Turning the redundant flag back OFF leaves com.navanax.recorder-b installed and
+# loaded. launchd keeps starting it, `ingest --redundant` refuses because the flag
+# is off, KeepAlive restarts it ten seconds later, and the loop runs forever in a
+# log nobody is reading. Nothing is damaged -- the refusal happens before anything
+# is recorded -- but a job that cannot succeed should not be left running.
+LOADED="$(launchctl list 2>/dev/null | awk '{print $3}' | grep '^com\.navanax\.' | tr '\n' ' ')"
+STALE="$("$PY" tools/launchd.py stale --root "$PROJECT" $LOADED 2>/dev/null | tr '\n' ' ')"
+UNKNOWN="$("$PY" tools/launchd.py stale --root "$PROJECT" --unknown $LOADED 2>/dev/null | tr '\n' ' ')"
+if [ -n "${STALE// /}" ]; then
+  echo "      Removing background jobs this configuration no longer wants:"
+  for L in $STALE; do
+    launchctl bootout "gui/$(id -u)/$L" >/dev/null 2>&1
+    rm -f "$HOME/Library/LaunchAgents/$L.plist"
+    echo "        removed $L (stopped, and its job file deleted)"
+  done
+fi
+if [ -n "${UNKNOWN// /}" ]; then
+  echo "      NOTE: these navanax jobs are loaded but this version does not know them:"
+  for L in $UNKNOWN; do echo "        $L"; done
+  echo "      They were LEFT ALONE -- they are more likely to belong to a newer"
+  echo "      version of this project than to be rubbish. Nothing was stopped."
+fi
 echo "[3/6] Using $("$PY" -V) at $PY"
 echo "      (the full path is written into the job files, so the jobs do not"
 echo "       depend on your Terminal settings -- background jobs never read them)"

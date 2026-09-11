@@ -36,6 +36,62 @@ rest_budget:
     BACKFILL: 12
     MAINTENANCE: 24
 
+stream:
+  # PR-10. A SECOND, redundant stream connection. DEFAULT OFF, and off means
+  # nothing about this system changes: one process, one landing root, one lock
+  # file, byte-identical landing output.
+  #
+  # What it buys: the reconnect window of one connection, covered by the other.
+  # 1-3 s per clean drop and 21-45 s per silent half-open one -- ~1,900 events at
+  # the measured Argonauts rate, about half of them cancellations that no REST
+  # call can ever fetch back (REQ-D-09a).
+  #
+  # What it costs, stated first: disk DOUBLES (~660 MB/day -> ~1.3 GB/day for one
+  # collection), and every raw count over `events` and `order_criteria` doubles
+  # with it. `order_lives` resolves the duplicates; a raw count over `events`
+  # does not, which is why /api/health carries a `dedup` block.
+  #
+  # What it does NOT buy: anything against a server outage, a sleeping laptop,
+  # or a key expiry. On one laptop the correlated failures dominate.
+  redundant:
+    enabled: false
+    # Connection B's OWN key, in .env. NEVER the same key as A's: free instant
+    # keys expire after 7 days (REQ-D-06), so two processes on one key fail in
+    # the same minute on a known schedule (E-V13) -- which is precisely the
+    # moment redundancy was bought for. B refuses to start if this is missing or
+    # equal to OPENSEA_API_KEY. Create the two keys on different days.
+    key_env: "OPENSEA_API_KEY_2"
+    # Its own landing root and its own lock: one writer per store, two stores.
+    # Two writers on ONE root lose manifest records silently -- measured at 295
+    # of 600 gap records, with the integrity audit reporting clean.
+    landing_root: "data/landing-b"
+    lock_file: "data/landing-b/.ingest.lock"
+    label: "b"
+    monitor:
+      # The duplicate-fraction monitor (dataeng failure mode 3, the S0 one).
+      # Under a healthy pair MOST events are seen twice, so duplicates
+      # COLLAPSING toward zero means the dedup key has gone too wide -- every
+      # count and every rate doubles and the backtest looks wonderful. Alarm,
+      # do not celebrate.
+      window_seconds: 900
+      # Below this many keyable events in the window a connection is not
+      # "healthy" and the monitor does not evaluate: zero duplicates with a dead
+      # B is the CORRECT observation, and alarming on it would fire through
+      # every restart and train the Operator to ignore the real one.
+      min_events: 100
+      # Warn below this observed duplicate fraction. 0.5 is a judgement, not a
+      # measurement -- see config/assumptions.yaml ASM-030.
+      collapse_fraction: 0.5
+      # How many MULTIPLICITY DISAGREEMENTS in the window are tolerated before
+      # the monitor warns. A disagreement is a dedup key both connections saw,
+      # a DIFFERENT number of times -- which is what a rejoin-replay looks like,
+      # and also what a dropped genuine repeat looks like. Dedup keeps one row
+      # and cannot tell them apart, so each one is a place the count may be an
+      # undercount. 0 means any disagreement warns. Raise it from measurement,
+      # not from irritation: see ASM-030, which records that no two-connection
+      # capture exists yet and that this number is therefore unmeasured.
+      multiplicity_disagreement_max: 0
+
 landing:
   root: "data/landing"
   codec: zstd            # gzip is a deliberate fallback, never a silent one

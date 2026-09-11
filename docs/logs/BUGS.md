@@ -951,13 +951,133 @@ probe writes its entry marked **partial** with the seconds it actually ran, inst
 of throwing the evidence away, and `_import_tool` can no longer grade a stale
 `.pyc`.
 
+### Round 23 — the tech-lead blocks PR-10 (the redundant stream)
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260911-073 | S1 | P0 | fixed | The dedup rule was **max over connections**, which doubles on a B rejoin-replay: A × 1 / B × 2 → 2, and one real event is recorded as two |
+| BUG-20260911-074 | S1 | P0 | fixed | `covered_by` was derived from B's landing-file intervals alone, so a **correlated outage** annotated A's gap "covered by b" while B's own register said B was blind for the same minutes |
+| BUG-20260911-075 | S1 | P0 | fixed | Every raw `COUNT` over `events` in `metrics.py` doubles under a second connection — series, makers, wallets, event mix, ledger total and chart |
+
+**073 is the fifth project rule catching its own implementation.** "A duplicate is
+one copy per connection" sounds careful. It is the maximum, over connections, of
+that connection's copy count — and the commonest redundant shape there is is B
+dropping, rejoining, and being **replayed** an event A already had. `max(1, 2) = 2`.
+One cancellation becomes two, the cancel rate doubles, and the market looks busier
+than it is. A surprisingly good result is evidence of a bug.
+
+The premise came from a **fixture, not from the code**. `_lives_store.put` in the
+self-test clones one real frame, pins `valid_at` by column override, and never
+recomputed the dedup key — so its "two cancels on one order" were two rows sharing
+one key, and `terminations_seen == 2` was reading an ambiguity rather than asserting
+a rule. Worse: **max, min and one-row-per-key all passed every one of the 74 checks
+written for PR-10.** The rule that shipped was indistinguishable, under test, from
+the two rules that did not. The new table drives A × 1 / B × 2, A × 2 / B × 1,
+A × 2 / B × 2 and A × 2 / B × 0 — the last two separate one-per-key from *both*
+neighbours — and the fixture now recomputes its key so its two cancels are two
+genuinely distinct events.
+
+The rule is now **one row per dedup key**, and what that discards is written down
+rather than implied: `deliveries_a`, `deliveries_b` and `multiplicity_disagreements`
+on `order_lives`, the same counts in the sync stats and on `/api/health.dedup`, and
+a monitor that warns above a configured threshold. The cost is stated in the
+docstring: a genuine repeat delivery down **one** socket is now recorded as one
+event. That is an undercount, it is the safe direction, and it is unavoidable — two
+rows agreeing on every dedup field are what a duplicate *is*.
+
+**074 is "we were not watching" turning into "the other one was".** Coverage was
+read off `opened_at` / `closed_at` per landing file. But `close()` runs on a *clean*
+stop — not when the machine sleeps, not when the process is killed, not when launchd
+force-restarts it, which are the events that produce gaps in the first place. So the
+manifest's "still open" interval is widest exactly when the connection was least able
+to record, and on one laptop the outage that blinds A blinds B: each one's unclosed
+file vouches for the other. Coverage is now the manifest intervals **minus that
+connection's own rows in the gap register**, and only a *closed* gap contained end to
+end by one covering interval is annotated. The old test staged the failure out of
+existence by calling `close()`; the new one flushes and walks away, which is what a
+sleeping laptop does.
+
+**075 is a caveat mistaken for a fix.** PR-10 resolved duplicates inside
+`order_lives` — correctly, because the lifecycle queries carry `INDEXED BY` and
+SQLite will not accept that against a view — and then stopped, on the reasoning that
+the Health tab's `dedup` block carried the warning. A caveat on one tab does not stop
+a number being read off another. `MetricEngine.dedup_where()` now returns the **empty
+string** on a single-connection store, so every SQL statement is character-for-character
+what it was and no query plan moves, and a one-row-per-key filter otherwise — appended
+at every counting, listing and aggregating site over `events`. Every response that
+prints an `n` carries `dedup_applied` and `n_undedupable`.
+
+Two smaller findings rode along, both S3: `autostart-uninstall.command` and
+`autostart-status.command` carried hardcoded three-label lists, so neither could stop
+or even *show* a stranded `com.navanax.recorder-b`; and turning the flag back off left
+that job loaded and crash-looping on `EXIT_CONFIG` every ten seconds forever. All three
+launchers now take the label list from `tools/launchd.py`, the installer boots out and
+deletes jobs this configuration no longer wants (printing each one), and a
+`com.navanax.*` job this version cannot *name* is reported and left alone — it is
+likelier to belong to a newer version than to be rubbish.
+
+### Round 24 — the tech-lead blocks PR-10 again, on the upgrade path
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260911-076 | S1 | P0 | fixed | `ORDER_LIVES_METHOD` was written on every row and **read by nothing**; the full re-fold fired only when `order_lives` was empty, so an existing store upgraded into a mixture of method 2 and 3 rows |
+| BUG-20260911-077 | S1 | P0 | fixed | A `covered_by` written while B was dead but had **not yet recorded its gap** was permanent — `WHERE covered_by IS NULL` made a claim from incomplete evidence unretractable |
+
+**Both are upgrade-path defects, and neither is visible from a fresh store.** Every
+PR-10 test built its store from scratch, so `order_lives` was always empty at open
+and the emptiness guard always fired; and the 074 fixture staged B's gap as
+*already recorded*, which is the tidy way to write it and is exactly the state the
+race has not reached yet. A suite that only ever creates fresh stores cannot see an
+upgrade-path defect, and every schema or rule change has one.
+
+**076 is a version stamp with no reader.** `ORDER_LIVES_METHOD` was added "so a
+stored row says which rules made it" and nothing ever asked. The one full re-fold
+was guarded on `COUNT(*) == 0`, which answers *has this table ever been built* —
+not *was it built by the rules this code implements*. Those are different questions
+and only the second survives a rule change. So the fix for BUG-20260911-073 would
+have corrected only orders that happened to receive another event: `sync()`
+refreshes what a pass **touched**, and a bid cancelled yesterday is never touched
+again. It would have kept `terminations_seen = 2` for one cancellation for as long
+as the store lived, with the flag off and nothing anywhere saying the store was
+half one rule set and half another.
+
+The folding **writer** now re-folds every row on open when the stamp is stale, inside
+the writer lock, logging the count and the elapsed time — and writes nothing when the
+stamp is current, so this is not a re-fold on every start. A **reader** must not and
+does not: a second writer on one SQLite store is BUG-20260910-067. It reports instead
+— `/api/health.lives_method` carries `mixed` with the min and max versions, the
+top-level `status` goes to `warn`, and the payload names the fix in a sentence.
+**Measured: 6.6–6.7 s for a full re-fold of 200,000 lives**, against a 30 s budget,
+so the open path is the right place for it and it does not need to move behind the
+bind.
+
+**077 is 074 arriving through a narrower door.** 074 fixed the correlated outage by
+subtracting B's own recorded gaps from its coverage. But the subtraction can only
+use gaps that have been **recorded**, and `record_downtime_gap` runs at the start of
+`run()` — a process killed without warning writes nothing until it is alive again.
+For the seconds or hours in between, the register shows no gap for B and B's last
+landing file is still "open", so a fold annotates A's gap "covered by b", honestly,
+on the evidence it has. Then B restarts, records its downtime, and the claim is
+false — and `WHERE covered_by IS NULL` meant nothing could take it back.
+
+The ruling that unblocks it: `gap_register` lives in the **operational** store,
+which `docs/07 §1` calls disposable and reconstructible and which `close_gap` already
+updates in place. It is not the landing zone and not the bitemporal record, so
+correcting a derived annotation there is allowed. The invariant that is *not*
+negotiable — a gap is never closed, shortened or removed by coverage logic — is
+unchanged, and is now asserted by snapshotting the whole row before and after.
+Coverage is recomputed every fold in both directions, each transition logged once
+(INFO to set, WARNING to revoke) with the gap id and the reason, and the revocation
+line says the gap is **UNCHANGED** so nobody reads a revocation as the gap being
+altered. Health carries `covered_by_n` and `covered_by_revoked_since_start_n`.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-71 of 72 logged bugs are fixed.
+76 of 77 logged bugs are fixed.
 
 ### The lesson
 

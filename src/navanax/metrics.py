@@ -1085,11 +1085,122 @@ def cluster_bootstrap(obs_by_cluster: dict[str, list[tuple[float, bool, str | No
 # ---------------------------------------------------------------------------
 # the engine
 # ---------------------------------------------------------------------------
+#: The connection-label a row with no `conn` belongs to. NULL means "folded
+#: before the redundant stream existed", which is the primary connection.
+PRIMARY_CONN = "a"
+
+#: Appended to a WHERE over `events` when, and ONLY when, the store holds rows
+#: from more than one connection. It keeps one row per `dedup_key` -- the lowest
+#: rowid, which is the earliest-folded copy -- and keeps EVERY row whose
+#: dedup_key is NULL, because a row with no `event_timestamp` cannot be proved a
+#: duplicate of anything (E-W3) and is counted per row.
+#:
+#: It is a WHERE fragment rather than a subquery-as-table on purpose. Three
+#: lifecycle queries and the whole ledger carry `INDEXED BY`, which SQLite will
+#: not accept against a subquery or a view (E-W4) -- and, more importantly, when
+#: the store has ONE connection this constant is never used and the SQL string is
+#: byte-identical to what it has always been, so no single-connection query plan
+#: and no single-connection result can move (tech-lead PR-10 re-review, finding 4).
+_DEDUP_WHERE = (" AND ({a}.dedup_key IS NULL OR {a}.rowid = "
+                "(SELECT MIN(_d.rowid) FROM events _d WHERE _d.dedup_key = {a}.dedup_key))")
+
+
 class MetricEngine:
     def __init__(self, conn: sqlite3.Connection, intervals: dict[str, Any], tz_name: str) -> None:
         self.conn = conn
         self.intervals = intervals
         self.tz = tz_name
+        # PR-10. Whether this store holds more than one connection's rows, cached
+        # for the life of a fold (the dashboard invalidates it after every sync).
+        # None = not yet asked.
+        self._multi_conn: bool | None = None
+
+    # -- PR-10: is this store single- or multi-connection? --------------------
+    def invalidate_connection_cache(self) -> None:
+        """Call after every fold. Cheap, and the alternative is a stale answer."""
+        self._multi_conn = None
+
+    def multi_connection(self) -> bool:
+        """Does `events` hold rows from more than one connection label?
+
+        Three index seeks, not a scan. `SELECT DISTINCT conn` over a 4 M-row table
+        on every request is the kind of "small" query that makes a page feel
+        broken, so this asks MIN, MAX and "is there a NULL" against
+        `ix_events_conn` and reasons from the three answers. A NULL `conn` is the
+        primary connection (every row folded before PR-10), so a store of nothing
+        but NULLs is single-connection and a store of NULLs plus 'b' is not.
+
+        Cached until `invalidate_connection_cache()`; the answer can only change
+        when a fold adds rows.
+        """
+        if self._multi_conn is None:
+            try:
+                has_null, lo, hi = self.conn.execute(
+                    "SELECT (SELECT EXISTS(SELECT 1 FROM events WHERE conn IS NULL)),"
+                    "       (SELECT MIN(conn) FROM events),"
+                    "       (SELECT MAX(conn) FROM events)").fetchone()
+            except sqlite3.OperationalError:
+                # A store folded before the column existed. One connection.
+                self._multi_conn = False
+                return self._multi_conn
+            labels = {x for x in (lo, hi) if x is not None}
+            if has_null:
+                labels.add(PRIMARY_CONN)
+            self._multi_conn = len(labels) > 1
+        return self._multi_conn
+
+    def dedup_where(self, alias: str = "e") -> str:
+        """`''` on a single-connection store; the one-row-per-key filter otherwise.
+
+        The empty string is the whole safety argument: with one connection every
+        SQL statement in this module is character-for-character what it was before
+        PR-10, so the `ledger_query_plan` assertions and every `INDEXED BY` keep
+        meaning exactly what they meant.
+        """
+        return _DEDUP_WHERE.format(a=alias) if self.multi_connection() else ""
+
+    def undedupable_events(self, collection: str | None = None,
+                           start: float | None = None, end: float | None = None) -> int:
+        """Rows in scope that carry NO dedup key, and so were counted per row.
+
+        Reported next to every n a multi-connection store produces. A count that
+        is partly de-duplicated and partly not is not a worse count than one that
+        is neither -- but it is a different one, and the reader has to be told
+        which rows are in which half.
+        """
+        where, args = ["dedup_key IS NULL"], []
+        if collection is not None:
+            where.append("collection = ?")
+            args.append(collection)
+        if start is not None:
+            where.append("valid_ts >= ?")
+            args.append(start)
+        if end is not None:
+            where.append("valid_ts < ?")
+            args.append(end)
+        try:
+            return self.conn.execute(
+                f"SELECT COUNT(*) FROM events WHERE {' AND '.join(where)}", args).fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0
+
+    def dedup_basis(self, collection: str | None = None, start: float | None = None,
+                    end: float | None = None) -> dict[str, Any]:
+        """The two fields every metric that prints an `n` must carry (finding 4)."""
+        multi = self.multi_connection()
+        return {
+            "dedup_applied": multi,
+            "n_undedupable": self.undedupable_events(collection, start, end) if multi else 0,
+            "dedup_note": (
+                "this store holds rows from MORE THAN ONE stream connection, so every count "
+                "here keeps one row per dedup_key (PR-10). `n_undedupable` is the rows in "
+                "scope that carry no `event_timestamp` and therefore cannot be proved "
+                "duplicates -- those are counted PER ROW and are the only part of any n here "
+                "that a second connection can inflate."
+                if multi else
+                "single connection: no de-duplication was applied or needed, and every query "
+                "on this page is byte-identical to its single-connection form."),
+        }
 
     def _bucketed(self, metric: str, collection: str, denom: str, start: float, end: float,
                   interval: dict[str, Any], traits: dict[str, list[str]] | None = None) -> dict[float, float]:
@@ -1134,7 +1245,11 @@ class MetricEngine:
                          f" OR ({clauses}))")
             args.extend(cargs)
             args.extend(targs)
-        sql = f"SELECT e.valid_ts, e.{col} FROM events e WHERE {' AND '.join(where)} ORDER BY e.valid_ts"
+        # PR-10: with two connections, every event both sockets saw is two rows,
+        # and COUNT/SUM/MEDIAN over them would double. Empty string when there is
+        # one connection, so the SQL is unchanged.
+        sql = (f"SELECT e.valid_ts, e.{col} FROM events e WHERE {' AND '.join(where)}"
+               f"{self.dedup_where('e')} ORDER BY e.valid_ts")
         groups: dict[float, list[float]] = {}
         for ts, v in self.conn.execute(sql, args):
             b = bucket_of(ts, interval, self.tz)
@@ -1836,6 +1951,10 @@ class MetricEngine:
             "bucket_alignment": ("UTC" if "duration" in ispec and int(ispec["duration"]) < 86400
                                  else f"local midnight ({self.tz})"),
         })
+        # PR-10, finding 4. Every series that aggregates a COUNT or a SUM doubles
+        # under a second connection unless the rows are de-duplicated first, and
+        # the reader has to be able to see which of the two he is looking at.
+        basis.update(self.dedup_basis(collection, start, end))
         basis["empty_token_set"] = no_tokens
         basis["token_set_universe"] = "tokens"
         basis["empty_token_set_note"] = ((
@@ -1921,7 +2040,7 @@ class MetricEngine:
                           (SELECT ol.quantity FROM order_lives ol WHERE ol.order_hash = e.order_hash)
                    FROM events e
                    WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL
-                     AND {standing}"""
+                     AND {standing}{self.dedup_where('e')}"""
         tf, targs = token_filter_sql(collection, traits or {})
 
         def rows(etype: str, order: str) -> list[dict[str, Any]]:
@@ -1946,23 +2065,28 @@ class MetricEngine:
         cur = self.conn.execute(
             f"""SELECT e.valid_at, e.token_id, e.price_eth, e.price_usd, e.maker, e.taker, e.tx_hash
                FROM events e WHERE e.collection = ? AND e.event_type = 'item_sold'{tf}
+               {self.dedup_where('e')}
                ORDER BY e.valid_ts DESC LIMIT ?""", (collection, *targs, limit))
         return [dict(zip(("valid_at", "token_id", "price_eth", "price_usd", "maker", "taker", "tx_hash"), r, strict=True))
                 for r in cur]
 
     def makers(self, collection: str, start: float, end: float, limit: int = 10) -> dict[str, Any]:
+        dq = self.dedup_where("e")
         total = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? AND maker IS NOT NULL",
+            "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? "
+            "AND e.maker IS NOT NULL" + dq,
             (collection, start, end)).fetchone()[0]
         cur = self.conn.execute(
-            """SELECT maker, COUNT(*) n,
-                      SUM(event_type='item_received_bid') bids,
-                      SUM(event_type='item_cancelled') cancels,
-                      SUM(event_type='item_listed') listings
-               FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? AND maker IS NOT NULL
-               GROUP BY maker ORDER BY n DESC LIMIT ?""", (collection, start, end, limit))
+            """SELECT e.maker, COUNT(*) n,
+                      SUM(e.event_type='item_received_bid') bids,
+                      SUM(e.event_type='item_cancelled') cancels,
+                      SUM(e.event_type='item_listed') listings
+               FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<?
+                 AND e.maker IS NOT NULL""" + dq + """
+               GROUP BY e.maker ORDER BY n DESC LIMIT ?""", (collection, start, end, limit))
         rows = [dict(zip(("maker", "events", "bids", "cancels", "listings"), r, strict=True)) for r in cur]
-        return {"total_events_with_maker": total, "top": rows}
+        return {"total_events_with_maker": total, "top": rows,
+                "basis": self.dedup_basis(collection, start, end)}
 
     def bid_lifetimes(self, collection: str, start: float, end: float,
                       kind: str = "item_received_bid") -> dict[str, Any]:
@@ -2529,9 +2653,11 @@ class MetricEngine:
             crit_by_order.setdefault((run, seq), []).append((t, v))
 
         for run, seq, oh, price, qty, cn, cnn in self.conn.execute(
-                """SELECT run, seq, order_hash, price_eth, quantity, criteria_n, criteria_numeric_n
-                   FROM events WHERE collection = ? AND event_type = 'trait_offer'
-                     AND valid_ts >= ? AND valid_ts < ?""", (collection, start, end)):
+                """SELECT e.run, e.seq, e.order_hash, e.price_eth, e.quantity, e.criteria_n,
+                          e.criteria_numeric_n
+                   FROM events e WHERE e.collection = ? AND e.event_type = 'trait_offer'
+                     AND e.valid_ts >= ? AND e.valid_ts < ?""" + self.dedup_where("e"),
+                (collection, start, end)):
             if cn is None or cn == 0:
                 unparsed += 1                       # the loud-failure marker: matches nothing
                 continue
@@ -2587,13 +2713,15 @@ class MetricEngine:
         standing, sargs = standing_sql("e", now_ts)      # one definition, shared with live_book
         live = f"""SELECT e.token_id, MIN(e.{col}), MAX(e.{col}) FROM events e
                    WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL AND e.token_id IS NOT NULL
-                     AND {standing} GROUP BY e.token_id"""
+                     AND {standing}{self.dedup_where('e')} GROUP BY e.token_id"""
         ask = {t: lo for t, lo, _ in self.conn.execute(live, (collection, "item_listed", *sargs))}
         bid = {t: hi for t, _, hi in self.conn.execute(live, (collection, "item_received_bid", *sargs))}
         last_sale: dict[str, tuple[float, str]] = {}
         for t, p, at in self.conn.execute(
-                f"""SELECT token_id, {col}, valid_at FROM events WHERE collection = ? AND event_type = 'item_sold'
-                    AND token_id IS NOT NULL ORDER BY valid_ts ASC""", (collection,)):
+                f"""SELECT e.token_id, e.{col}, e.valid_at FROM events e
+                    WHERE e.collection = ? AND e.event_type = 'item_sold'
+                    AND e.token_id IS NOT NULL{self.dedup_where('e')}
+                    ORDER BY e.valid_ts ASC""", (collection,)):
             last_sale[t] = (p, at)
         rows = []
         for tid, name, img in toks:
@@ -2638,7 +2766,8 @@ class MetricEngine:
         where = "valid_ts>=? AND valid_ts<?" + (" AND collection=?" if collection else "")
         args: list[Any] = [start, end] + ([collection] if collection else [])
         cur = self.conn.execute(
-            f"SELECT event_type, COUNT(*) FROM events WHERE {where} GROUP BY event_type ORDER BY 2 DESC", args)
+            f"SELECT e.event_type, COUNT(*) FROM events e WHERE {where}{self.dedup_where('e')}"
+            f" GROUP BY e.event_type ORDER BY 2 DESC", args)
         return [{"event_type": t, "n": n} for t, n in cur]
 
     # -- PR-9: the Event Ledger (design §8.1) ---------------------------------
@@ -2755,6 +2884,21 @@ class MetricEngine:
             where.append(tf.removeprefix(" AND "))
             args += targs
             applied["traits"] = traits
+        # PR-10. Appended LAST and only when the store holds two connections'
+        # rows, so a single-connection ledger string, fingerprint, cursor and
+        # query plan are all byte-identical to what they were. On a
+        # multi-connection store it is a filter like any other: it changes the
+        # fingerprint, so an old cursor is refused rather than silently
+        # interleaving a de-duplicated page with a doubled one.
+        dq = self.dedup_where("e")
+        if dq:
+            where.append(dq.removeprefix(" AND "))
+            applied["dedup"] = {
+                "applied": True,
+                "note": "this store holds rows from more than one stream connection; the "
+                        "ledger shows ONE row per event. Rows with no `event_timestamp` "
+                        "cannot be proved duplicates and are all shown (E-W3).",
+            }
         return " AND ".join(where), args, applied
 
     def _ledger_page_sql(self, collection: str, *, sort: str, direction: str,
@@ -2886,6 +3030,7 @@ class MetricEngine:
             "total_estimate": n if exact else LEDGER_COUNT_CAP, "exact": exact,
             "count_cap": LEDGER_COUNT_CAP,
             "basis": {
+                **self.dedup_basis(collection),
                 "filter": q["applied"], "index": q["index"], "index_forced": True,
                 "pagination": ("keyset over (" + ", ".join(
                     c.removeprefix("e.") for c in q["order_cols"]) + "), which is "
@@ -2970,6 +3115,7 @@ class MetricEngine:
             "matched": matched, "matched_exact": matched_exact, "count_cap": LEDGER_COUNT_CAP,
             "counts": {k: len(v["t"]) for k, v in series.items()},
             "basis": {
+                **self.dedup_basis(collection),
                 "filter": applied, "wash_filter": "raw", "timezone": self.tz,
                 "cap_note": (f"charting the {len(raw):,} most recent of {of} chartable rows "
                              "-- narrow the filter" if capped else None),
@@ -2993,23 +3139,26 @@ class MetricEngine:
         `wallet()`'s `chain` block, which says "not collected yet" rather than
         rendering a zero.
         """
+        dq = self.dedup_where("e")
         total = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<?",
+            "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<?"
+            + dq,
             (collection, start, end)).fetchone()[0]
         with_maker = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? "
-            "AND maker IS NOT NULL", (collection, start, end)).fetchone()[0]
+            "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? "
+            "AND e.maker IS NOT NULL" + dq, (collection, start, end)).fetchone()[0]
         cur = self.conn.execute(
-            """SELECT maker, COUNT(*) n,
-                      SUM(event_type='item_received_bid') bids,
-                      SUM(event_type='item_cancelled') cancels,
-                      SUM(event_type='item_listed') listings,
-                      SUM(event_type='item_sold') sold,
-                      SUM(event_type='collection_offer') coll_offers,
-                      SUM(event_type='trait_offer') trait_offers,
-                      MIN(valid_at), MAX(valid_at)
-               FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? AND maker IS NOT NULL
-               GROUP BY maker HAVING n >= ? ORDER BY n DESC, maker ASC LIMIT ?""",
+            """SELECT e.maker, COUNT(*) n,
+                      SUM(e.event_type='item_received_bid') bids,
+                      SUM(e.event_type='item_cancelled') cancels,
+                      SUM(e.event_type='item_listed') listings,
+                      SUM(e.event_type='item_sold') sold,
+                      SUM(e.event_type='collection_offer') coll_offers,
+                      SUM(e.event_type='trait_offer') trait_offers,
+                      MIN(e.valid_at), MAX(e.valid_at)
+               FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<?
+                 AND e.maker IS NOT NULL""" + dq + """
+               GROUP BY e.maker HAVING n >= ? ORDER BY n DESC, e.maker ASC LIMIT ?""",
             (collection, start, end, max(0, int(min_events)), max(1, min(500, int(limit)))))
         rows = []
         for (addr, n, bids, cancels, listings, sold, co, to, first, last) in cur:
@@ -3019,11 +3168,13 @@ class MetricEngine:
                          "sales_as_maker": sold or 0, "collection_offers": co or 0,
                          "trait_offers": to or 0, "first_at": first, "last_at": last})
         distinct = self.conn.execute(
-            "SELECT COUNT(DISTINCT maker) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? "
-            "AND maker IS NOT NULL", (collection, start, end)).fetchone()[0]
+            "SELECT COUNT(DISTINCT e.maker) FROM events e WHERE e.collection=? AND e.valid_ts>=? "
+            "AND e.valid_ts<? AND e.maker IS NOT NULL" + dq,
+            (collection, start, end)).fetchone()[0]
         return {"rows": rows, "distinct_addresses": distinct,
                 "total_events": total, "total_events_with_maker": with_maker,
-                "basis": {"source": "events (landing-zone derived); no REST, no chain read",
+                "basis": {**self.dedup_basis(collection, start, end),
+                          "source": "events (landing-zone derived); no REST, no chain read",
                           "share_denominator": "events in this window that carry a maker address",
                           "window": {"start_ts": start, "end_ts": end}, "wash_filter": "raw",
                           "timezone": self.tz}}
@@ -3038,10 +3189,10 @@ class MetricEngine:
         with the truncation printed, never silently.
         """
         pairs = self.conn.execute(
-            """SELECT maker, taker, COUNT(*) FROM events
-               WHERE collection=? AND event_type='item_sold' AND valid_ts>=? AND valid_ts<?
-                 AND maker IS NOT NULL AND taker IS NOT NULL
-               GROUP BY maker, taker""", (collection, start, end)).fetchall()
+            """SELECT e.maker, e.taker, COUNT(*) FROM events e
+               WHERE e.collection=? AND e.event_type='item_sold' AND e.valid_ts>=? AND e.valid_ts<?
+                 AND e.maker IS NOT NULL AND e.taker IS NOT NULL""" + self.dedup_where("e") + """
+               GROUP BY e.maker, e.taker""", (collection, start, end)).fetchall()
         vol: dict[str, int] = {}
         for a, b, n in pairs:
             vol[a] = vol.get(a, 0) + n
@@ -3057,7 +3208,8 @@ class MetricEngine:
                 "trades": sum(n for _, _, n in pairs),
                 "truncation_note": (f"showing {len(shown)} of {len(ordered)} addresses, by trade volume"
                                     if len(ordered) > len(shown) else None),
-                "basis": {"cell": "count of item_sold rows with this maker (seller) and this taker (buyer)",
+                "basis": {**self.dedup_basis(collection, start, end),
+                          "cell": "count of item_sold rows with this maker (seller) and this taker (buyer)",
                           "scale": "sequential single hue -- counts have no meaningful midpoint",
                           "window": {"start_ts": start, "end_ts": end}, "wash_filter": "raw"}}
 
@@ -3078,21 +3230,23 @@ class MetricEngine:
         (`_assert_address_only`) before it is returned, so the schema -- not the
         rendering code -- is what a reviewer checks.
         """
+        dq = self.dedup_where("e")
         totals = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE collection=? AND valid_ts>=? AND valid_ts<? "
-            "AND maker IS NOT NULL", (collection, start, end)).fetchone()[0]
+            "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? "
+            "AND e.maker IS NOT NULL" + dq, (collection, start, end)).fetchone()[0]
         row = self.conn.execute(
             """SELECT COUNT(*),
-                      SUM(event_type='item_received_bid'), SUM(event_type='item_cancelled'),
-                      SUM(event_type='item_listed'), SUM(event_type='item_sold'),
-                      SUM(event_type='collection_offer'), SUM(event_type='trait_offer'),
-                      MIN(valid_at), MAX(valid_at), COUNT(DISTINCT token_id)
-               FROM events WHERE collection=? AND maker=? AND valid_ts>=? AND valid_ts<?""",
-            (collection, address, start, end)).fetchone()
+                      SUM(e.event_type='item_received_bid'), SUM(e.event_type='item_cancelled'),
+                      SUM(e.event_type='item_listed'), SUM(e.event_type='item_sold'),
+                      SUM(e.event_type='collection_offer'), SUM(e.event_type='trait_offer'),
+                      MIN(e.valid_at), MAX(e.valid_at), COUNT(DISTINCT e.token_id)
+               FROM events e WHERE e.collection=? AND e.maker=? AND e.valid_ts>=? AND e.valid_ts<?"""
+            + dq, (collection, address, start, end)).fetchone()
         (n, bids, cancels, listings, sold, coll_offers, trait_offers, first, last, tokens) = row
         bought = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE collection=? AND taker=? AND event_type='item_sold' "
-            "AND valid_ts>=? AND valid_ts<?", (collection, address, start, end)).fetchone()[0]
+            "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.taker=? "
+            "AND e.event_type='item_sold' AND e.valid_ts>=? AND e.valid_ts<?" + dq,
+            (collection, address, start, end)).fetchone()[0]
 
         # median bid life, with n and n_eff. n_eff is maker-episode clusters, the
         # unit the survival estimator already treats as independent (metrics §4d).
@@ -3119,15 +3273,17 @@ class MetricEngine:
 
         cps = self.conn.execute(
             """SELECT other, SUM(as_maker), SUM(as_taker), SUM(n), MIN(f), MAX(l) FROM (
-                   SELECT taker other, COUNT(*) n, COUNT(*) as_maker, 0 as_taker,
-                          MIN(valid_at) f, MAX(valid_at) l
-                   FROM events WHERE collection=? AND event_type='item_sold' AND maker=?
-                     AND taker IS NOT NULL AND valid_ts>=? AND valid_ts<? GROUP BY taker
+                   SELECT e.taker other, COUNT(*) n, COUNT(*) as_maker, 0 as_taker,
+                          MIN(e.valid_at) f, MAX(e.valid_at) l
+                   FROM events e WHERE e.collection=? AND e.event_type='item_sold' AND e.maker=?
+                     AND e.taker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<?""" + dq + """
+                   GROUP BY e.taker
                    UNION ALL
-                   SELECT maker other, COUNT(*) n, 0 as_maker, COUNT(*) as_taker,
-                          MIN(valid_at) f, MAX(valid_at) l
-                   FROM events WHERE collection=? AND event_type='item_sold' AND taker=?
-                     AND maker IS NOT NULL AND valid_ts>=? AND valid_ts<? GROUP BY maker)
+                   SELECT e.maker other, COUNT(*) n, 0 as_maker, COUNT(*) as_taker,
+                          MIN(e.valid_at) f, MAX(e.valid_at) l
+                   FROM events e WHERE e.collection=? AND e.event_type='item_sold' AND e.taker=?
+                     AND e.maker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<?""" + dq + """
+                   GROUP BY e.maker)
                GROUP BY other ORDER BY SUM(n) DESC, other ASC LIMIT 20""",
             (collection, address, start, end, collection, address, start, end)).fetchall()
         trades_total = sum(r[3] for r in cps)
@@ -3192,6 +3348,16 @@ class MetricEngine:
             },
             "flags": [],
             "basis": {
+                # PR-10. Every n on this card is a count over `events`, so it doubles the
+                # moment a second connection is running unless it is de-duplicated.
+                # `dedup_applied` says whether it was; `n_undedupable` is the rows in
+                # scope that carry no `event_timestamp` and were therefore counted per
+                # row. Named without the word "note" because `_assert_address_only`
+                # refuses free text anywhere on an address profile -- correctly: that is
+                # where an off-chain identity arrives.
+                "dedup_applied": self.multi_connection(),
+                "n_undedupable": (self.undedupable_events(collection, start, end)
+                                  if self.multi_connection() else 0),
                 "source": "events + order_lives (landing-zone derived); no REST, no chain read",
                 "flags_rule": "a flag renders only if its rows can be listed in the ledger. No "
                               "pattern detector has been built and validated yet, so there are "

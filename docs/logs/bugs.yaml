@@ -2661,3 +2661,337 @@ bugs:
     data file) rather than against what the code does, which stays green for
     whatever the text does not mention.
   pr: 10
+
+- id: BUG-20260911-073
+  summary: >-
+    PR-10's dedup rule was "a duplicate is one copy per CONNECTION" -- the maximum over
+    connections of that connection's copy count. In the commonest redundant shape there is
+    (B drops, rejoins, and is replayed an event A already had) that is max(1, 2) = 2, and one
+    real event is recorded as two. Every count over it doubles, in the flattering direction
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-11T06:40:00-05:00"
+  occurred_at: "2026-09-11T04:30:00-05:00"
+  resolved_at: "2026-09-11T06:55:00-05:00"
+  detected_by: tech-lead, PR-10 review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/normalize.py
+      line: 839
+    - file: src/navanax/normalize.py
+      line: 340
+  requirement: REQ-D-07
+  data_impact: >-
+    None on any stored row -- the landing zone is untouched and the analytical store is
+    derived, so the remedy was a re-fold and not a repair. The damage was to every COUNT
+    the store would have produced the moment the redundant flag was turned on: a rejoin
+    replay is not an exotic case, it is what OpenSea does to a subscriber that rejoins, so
+    the doubling would have arrived on the first reconnect and looked exactly like a busier
+    market. `order_lives.terminations_seen` was the visible instance (finding 2): a keyable
+    row could inflate it, which directly contradicted the schema comment sitting next to it.
+    The flag shipped default-off and was never enabled on the Operator's machine, so no
+    recorded number was ever wrong.
+  root_cause: >-
+    The rule was chosen to preserve a single-connection behaviour that turned out not to
+    exist. The reasoning was: "if one socket delivers the same cancellation twice, that is
+    two deliveries and the old fold counted two, so taking the maximum keeps single-
+    connection semantics identical." The premise was inherited from a FIXTURE, not from the
+    code: `_lives_store.put` in the self-test clones one real frame, pins `valid_at` by
+    column override, and never recomputes the dedup key -- so its "two cancels on one order"
+    were two rows sharing one dedup key, and the assertion `terminations_seen == 2` was
+    reading an ambiguity rather than a rule. A max over connections then doubles whenever
+    the connections disagree about multiplicity, which is precisely what a replay produces.
+    The deeper failure is that the rule was UNPINNED: max, min and one-row-per-key all
+    passed every one of the 74 checks written for PR-10, so no test distinguished the rule
+    that shipped from the two rules that did not.
+  resolution: >-
+    `_dedupe_life_rows` now keeps ONE row per `dedup_key`, full stop, and returns a
+    `DedupOutcome` naming everything it discarded: `merged`, `undedupable`, per-connection
+    `deliveries`, and `disagreements` (keys at least two connections saw a DIFFERENT number
+    of times). `order_lives` gains `deliveries_a`, `deliveries_b` and
+    `multiplicity_disagreements` as additive columns, `ORDER_LIVES_METHOD` goes to 3, and
+    the sync stats and `/api/health.dedup` both carry the disagreement count with its
+    denominator. The monitor warns above `stream.redundant.monitor.multiplicity_disagreement_max`
+    (default 0, configuration per REQ-N-09). The cost is stated rather than hidden: one
+    genuine repeat delivery down ONE socket is now recorded as one event, which is an
+    UNDERCOUNT, which is the safe direction, and which is unavoidable because two rows
+    agreeing on every dedup field are what a duplicate IS. The self-test fixture was
+    corrected at the same time -- `put` recomputes the dedup key from the row as pinned --
+    so its two cancels are two genuinely distinct events and the existing
+    `terminations_seen == 2` assertion still holds, on rows that now mean what it says.
+  regression_test:
+    - tests/selftest.py::test_pr10_dedup_is_one_row_per_key_not_max_over_connections
+    - tests/selftest.py::test_pr10_terminations_seen_is_not_inflatable_by_a_keyable_row
+    - tests/selftest.py::test_pr10_monitor_warns_on_a_multiplicity_disagreement
+    - tests/selftest.py::test_pr10_two_distinct_events_across_connections_are_not_merged
+  monitor_gap: >-
+    Seventy-four checks and not one of them could tell the three candidate rules apart,
+    because every fixture used A x 1 / B x 1, where max, min and one-per-key all answer 1.
+    The new table drives A x 1 / B x 2, A x 2 / B x 1, A x 2 / B x 2 and A x 2 / B x 0 --
+    the last two separate one-per-key from BOTH of the others -- and the mutation runs
+    (max -> min, max -> one-per-key) now fail. The general lesson is the one the fixture
+    taught: a test whose inputs cannot distinguish the rule under test from its plausible
+    neighbours is not a test of that rule, and a fixture that builds two rows from one
+    frame will produce those inputs by accident.
+  pr: 10
+
+- id: BUG-20260911-074
+  summary: >-
+    A gap in connection A was annotated `covered_by: b` from B's landing-file intervals
+    alone. The writer only closes a file on a clean stop, so after a correlated outage --
+    both processes on one sleeping laptop -- B's manifest still said "open" across the
+    window and A's gap was marked covered while B's own register said B was blind for the
+    same minutes
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-11T06:40:00-05:00"
+  occurred_at: "2026-09-11T04:30:00-05:00"
+  resolved_at: "2026-09-11T06:55:00-05:00"
+  detected_by: tech-lead, PR-10 review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/redundancy.py
+      line: 243
+    - file: src/navanax/redundancy.py
+      line: 328
+  requirement: REQ-D-14
+  data_impact: >-
+    No row was changed: `annotate_gap` only ever writes `covered_by` over a NULL and the
+    gap keeps its start, its end, its classes and its open/closed state. The damage is to
+    what the gap MEANS to a reader. An annotation saying another connection was recording
+    through a window is the difference between "we were not watching" and "the other one
+    was", and the second is the single most dangerous claim this system can make, because
+    downstream it turns an absence of events into a quiet market. The flag shipped
+    default-off and no gap on the Operator's machine was ever annotated.
+  root_cause: >-
+    Coverage was read off the manifest's `opened_at` / `closed_at` per landing file, which
+    is an upper bound and not a claim. `LandingZoneWriter.close()` runs on a clean stop; it
+    does not run when the machine sleeps, when the process is killed, or when launchd
+    force-restarts it -- and those are the events that produce the gaps in the first place.
+    So the manifest's "still open" interval is widest exactly when the connection was least
+    able to record. The failure is correlated by construction: on one laptop, the outage
+    that blinds A blinds B, and each one's unclosed file then vouches for the other.
+    A second, smaller error rode along: a gap only PARTLY covered was annotated the same
+    way as one covered end to end, and every consumer of the register treats a gap as a unit.
+  resolution: >-
+    `effective_coverage` = `coverage_intervals` (had a file open) MINUS `blind_intervals`
+    (that connection's own rows in the shared gap register, with an unclosed gap running to
+    +inf). `annotate_gaps_covered_by` takes the landing ROOT rather than a precomputed
+    interval list, so a caller cannot forget the subtraction; it annotates only a CLOSED gap
+    that one merged covering interval contains END TO END (`covers_whole`); and it still
+    refuses to annotate a gap the same connection recorded. Intervals are compared as epoch
+    numbers rather than as ISO text, because the manifest and the register are written by
+    different code paths and nothing holds them to one string format.
+  regression_test:
+    - tests/selftest.py::test_pr10_correlated_outage_annotates_neither_connection
+    - tests/selftest.py::test_pr10_gap_in_a_stays_a_gap_annotated_covered_by_b
+  monitor_gap: >-
+    The original test staged B's landing file with a FakeClock and called `close()` on it,
+    so the file was closed, the interval was finite, and the whole failure mode was
+    staged out of existence. The replacement never calls `close()` -- it flushes and walks
+    away, which is what a sleeping laptop does -- and asserts from both sides at once that
+    NEITHER gap is annotated. The lesson is that a fixture which tidies up after itself
+    cannot test a code path whose trigger is not tidying up.
+  pr: 10
+
+- id: BUG-20260911-075
+  summary: >-
+    Every raw COUNT over `events` in metrics.py doubles under a second stream connection --
+    the series aggregates, the maker and wallet tables, the event mix, the ledger's total
+    and its chart. `events` is a faithful fold of two append-only landing zones by design,
+    so the doubling is in the query layer and not in the store
+  severity: S1
+  priority: P0
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-11T06:40:00-05:00"
+  occurred_at: "2026-09-11T04:30:00-05:00"
+  resolved_at: "2026-09-11T07:10:00-05:00"
+  detected_by: tech-lead, PR-10 review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/metrics.py
+      line: 1104
+    - file: src/navanax/metrics.py
+      line: 1123
+  requirement: REQ-N-05
+  data_impact: >-
+    None stored; every affected number is computed at request time. The exposure was the
+    whole analysis surface the moment the flag was turned on: a doubled event rate, a
+    doubled cancel count, a doubled maker ranking denominator and a doubled ledger total,
+    all of them plausible and none of them flagged. PR-10 shipped with a `dedup` block on
+    Health that said the doubling existed, which is not the same thing as not doubling: a
+    caveat on one tab does not stop a number being read off another.
+  root_cause: >-
+    PR-10 resolved duplicates inside `order_lives` -- correctly, because the lifecycle
+    queries carry `INDEXED BY` and SQLite will not accept that against a view (E-W4) -- and
+    then stopped. Everything that counts rows in `events` directly was left alone, on the
+    reasoning that Health would carry the caveat. The reasoning is the error: "documented
+    somewhere" is not a property of the number the Operator reads.
+  resolution: >-
+    `MetricEngine.multi_connection()` answers, in three index seeks against a new
+    `ix_events_conn` and cached for the life of a fold, whether the store holds rows from
+    more than one connection. `dedup_where(alias)` returns the EMPTY STRING when it does
+    not -- so on a single-connection store every SQL statement in metrics.py is
+    character-for-character what it was, and no query plan, no `INDEXED BY` and no ledger
+    cursor fingerprint moves -- and a one-row-per-dedup_key filter when it does. That
+    filter is appended at every counting, listing and aggregating site over `events`:
+    `_bucketed`, `live_book`, `tape`, `makers`, `event_mix`, the screener, the trait-offer
+    verdicts, `_ledger_where` (which the page, the count and the chart all share),
+    `wallets`, `counterparty_adjacency` and `wallet`. Every response that prints an n now
+    carries `dedup_applied` and `n_undedupable` in its basis, the second being the rows in
+    scope with no `event_timestamp`, which are counted per row because they cannot be
+    proved duplicates and are the only part of any n a second connection can still inflate.
+    The dashboard invalidates the cached answer after every fold.
+  regression_test:
+    - tests/selftest.py::test_pr10_metrics_never_double_count_under_two_connections
+    - tests/selftest.py::test_pr10_single_connection_metrics_are_byte_identical
+    - tests/selftest.py::test_pr10_metrics_count_undedupable_rows_per_row_and_say_so
+  monitor_gap: >-
+    PR-10 tested the fold and tested Health, and nothing tested a metric. The new
+    two-connection fixture folds the same three frames through two landing roots and
+    asserts a count of 3 rather than 6 on every route that prints one, with a mirror test
+    asserting that the single-connection query plan still names its index and still has no
+    TEMP B-TREE. A restored raw COUNT now fails under the two-connection fixture. The
+    general gap: a feature that changes what is IN a table needs a test on every consumer
+    of that table, not only on the writer.
+  pr: 10
+
+- id: BUG-20260911-076
+  summary: >-
+    `ORDER_LIVES_METHOD` was stamped on every `order_lives` row and READ by nothing, and the
+    only full re-fold fired when the table was EMPTY. An existing store therefore upgraded in
+    place into a mixture of method_version 2 and 3 rows: `sync()` refreshes only the orders a
+    pass touched, so every order with no further events kept the OLD rules' counts -- a doubled
+    `terminations_seen` -- permanently, with the redundant flag off and no signal anywhere
+  severity: S1
+  priority: P0
+  error_class: NRM
+  status: fixed
+  logged_at: "2026-09-11T08:05:00-05:00"
+  occurred_at: "2026-09-11T07:00:00-05:00"
+  resolved_at: "2026-09-11T08:20:00-05:00"
+  detected_by: tech-lead, PR-10 re-review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/normalize.py
+      line: 1002
+    - file: src/navanax/normalize.py
+      line: 1135
+  requirement: REQ-D-07
+  data_impact: >-
+    Nothing stored was wrong at the moment it was written and the landing zone is untouched;
+    `order_lives` is DERIVED, so the remedy is a recomputation. The exposure is the UPGRADE:
+    the Operator's store already holds lives folded by method 2, and the fix for
+    BUG-20260911-073 would have corrected only the orders that happened to receive another
+    event. A bid cancelled yesterday and never touched again would have kept
+    `terminations_seen = 2` for one cancellation for as long as the store lived, and every
+    metric reading that column would have been reading a mixture of two rule sets with no
+    field, log line or count anywhere saying so. This is the same silent-wrongness shape as
+    073 arriving through the upgrade path instead of the fold.
+  root_cause: >-
+    The stamp was added for exactly this purpose -- "so a stored row says which rules made it"
+    -- and then nothing ever asked the question. The one full re-fold in the open path was
+    guarded on `COUNT(*) == 0`, which answers "has this table ever been built", not "was it
+    built by the rules this code implements". Those are different questions and only the
+    second one survives a rule change. The deeper error is a version stamp with no reader:
+    it looks like a migration mechanism and is a comment.
+  resolution: >-
+    `lives_method_state()` reports `{rows, min, max, null_rows, mixed, current}`, where mixed
+    means any row predates `ORDER_LIVES_METHOD` (a NULL stamp counts as older).
+    `refold_lives_if_stale()` re-folds EVERY row from `events` when it does, inside the
+    writer lock, logging the row count and the elapsed time, and returns `refolded: False`
+    without writing when the table is already current -- so this is not a re-fold on every
+    start. The folding writer calls it on open; a READ-ONLY opener must not and does not,
+    because a second writer on one SQLite store is BUG-20260910-067. A reader instead reports
+    it: `/api/health.lives_method` carries `mixed` with the min and max versions, Health's
+    top-level `status` goes to `warn`, and the payload names the fix in a sentence -- "Run
+    rebuild-store.command or restart the dashboard." MEASURED on a 200,000-life synthetic
+    fixture, the full re-fold takes 6.6-6.7 s against a 30 s budget, so the open path is the
+    right place for it and it does not need to move into the sync loop behind the bind.
+  regression_test:
+    - tests/selftest.py::test_order_lives_refolds_when_the_method_stamp_is_stale
+    - tests/selftest.py::test_order_lives_method_mixed_is_reported_on_health_as_warn
+    - tests/selftest.py::test_order_lives_refold_cost_at_200k_lives
+  monitor_gap: >-
+    Every PR-10 test built its store from scratch, so `order_lives` was always empty at open
+    and the emptiness guard always fired. Not one test upgraded an EXISTING store, which is
+    the only situation in which the defect exists. The new fixture writes a method-2 row whose
+    order receives no further events -- the case `sync()` can never reach -- and asserts the
+    count is corrected 2 -> 1 by the open, that a reader leaves it alone and flags it, and
+    that a second open re-folds nothing. The general lesson: a test suite that only ever
+    creates fresh stores cannot see any upgrade-path defect, and every schema or rule change
+    has one.
+  pr: 10
+
+- id: BUG-20260911-077
+  summary: >-
+    A `covered_by` annotation written while connection B was dead but had not yet recorded its
+    gap was PERMANENT -- `annotate_gap` guarded with `WHERE covered_by IS NULL`. B records its
+    downtime on the next START, not on its death, so the fold in that window annotates A's gap
+    "covered by b" on incomplete evidence and nothing could ever take the claim back
+  severity: S1
+  priority: P0
+  error_class: ING
+  status: fixed
+  logged_at: "2026-09-11T08:05:00-05:00"
+  occurred_at: "2026-09-11T07:00:00-05:00"
+  resolved_at: "2026-09-11T08:20:00-05:00"
+  detected_by: tech-lead, PR-10 re-review
+  detection_channel: tech-lead
+  branch: pr-10-redundant-stream
+  locations:
+    - file: src/navanax/redundancy.py
+      line: 330
+    - file: src/navanax/opstore.py
+      line: 224
+  requirement: REQ-D-14
+  data_impact: >-
+    No gap was ever closed, shortened or removed -- that invariant held and still holds. The
+    damage is to what a gap MEANS. `covered_by` says another connection was recording through
+    this window, and downstream that is the difference between "we were not watching" and "the
+    other one was". BUG-20260911-074 fixed the correlated-outage case by subtracting B's own
+    recorded gaps from its coverage; this is the same failure through a narrower door, because
+    the subtraction can only use gaps that have been RECORDED, and a SIGKILLed process has
+    recorded nothing yet. The flag shipped default-off and no gap on the Operator's machine
+    was ever annotated.
+  root_cause: >-
+    `WHERE covered_by IS NULL` was written to enforce "an annotation never edits the gap", and
+    it enforced something stronger and wrong: that a DERIVED claim could not be corrected when
+    the evidence behind it changed. Coverage evidence arrives late by construction --
+    `record_downtime_gap` is called at the start of `run()`, so the interval a process was
+    dead is written only once it is alive again. Any fold inside that window is deciding on a
+    register that does not yet contain the fact that would change its mind.
+  resolution: >-
+    The ruling that unblocks it: `gap_register` lives in the OPERATIONAL store, which docs/07
+    §1 classifies as disposable, reconstructible bookkeeping and which `close_gap` already
+    updates in place. It is not the landing zone and not the bitemporal record, so correcting a
+    derived annotation there is allowed. The invariant that is NOT negotiable -- a gap is never
+    closed, shortened or removed by coverage logic -- is unchanged and is now asserted by
+    snapshotting the whole row before and after. `annotate_gap` takes `covered_by: str | None`
+    and writes only on a real change (`WHERE covered_by IS NOT ?`), so a steady state touches
+    nothing. `annotate_gaps_covered_by` recomputes effective coverage for every closed gap on
+    every fold and returns a `CoverageUpdate(marked, revoked)`; each transition is logged once
+    -- at INFO when set, at WARNING when revoked -- naming the gap id and why, and the
+    revocation line says the gap is UNCHANGED so nobody reads a revocation as the gap being
+    altered. `/api/health.dedup` carries `covered_by_n` and `covered_by_revoked_n`.
+  regression_test:
+    - tests/selftest.py::test_pr10_covered_by_is_revoked_when_the_evidence_changes
+    - tests/selftest.py::test_pr10_revocation_is_logged_once_per_transition
+    - tests/selftest.py::test_pr10_correlated_outage_annotates_neither_connection
+  monitor_gap: >-
+    The 074 fixture staged B's gap as ALREADY RECORDED, because that is the tidy way to write
+    it, and the whole defect lives in the interval before it is recorded. The new fixture
+    drives the sequence in time -- annotate, then B records its downtime, then fold again --
+    and asserts the annotation is taken back, that the fold after that changes nothing, and
+    that the gap row is byte-identical apart from `covered_by`. The general lesson is the one
+    074 also taught: a fixture that sets up the end state cannot test the race that reaches it.
+  pr: 10

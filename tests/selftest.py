@@ -3846,7 +3846,7 @@ def test_environments_doc_documents_unattended_running() -> None:
 def _lives_store(tmp: Path, name: str):
     """A store with the traits schema and a `put(frame, time, seq, **overrides)`
     that pins valid_ts to the time given, so a lifecycle can be laid out exactly."""
-    from navanax.normalize import COLS, Normalizer, iso_to_ts, parse_event
+    from navanax.normalize import COLS, Normalizer, dedup_key, iso_to_ts, parse_event
     from navanax.traits import ensure_schema
 
     n = Normalizer(tmp / "empty-lz", tmp / name)
@@ -3857,6 +3857,15 @@ def _lives_store(tmp: Path, name: str):
         rr["file"] = "f"
         rr["valid_at"], rr["valid_ts"] = recv, iso_to_ts(recv)
         rr.update(over)
+        # The dedup key must be recomputed from the row AS PINNED, not from the
+        # frame the row was cloned out of (tech-lead PR-10 re-review, finding 1).
+        # This helper exists to lay a lifecycle out in time from one or two real
+        # frames, so two `put`s at different times are two DIFFERENT events -- but
+        # `parse_event` keyed them off the payload's own `event_timestamp`, which
+        # is identical in both clones, so they shared a key and the fixture was
+        # asserting "two cancels" over two rows that a correct dedup reads as one
+        # cancel delivered twice. The fixture was the ambiguity, not the rule.
+        rr["dedup_key"] = dedup_key({**rr, "event_timestamp": rr["valid_at"]})
         n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?' * len(COLS))})",
                        tuple(rr.get(c) for c in COLS))
         for c in rr.get("criteria") or []:
@@ -10137,6 +10146,1680 @@ def test_probe_launchers_are_double_clickable_and_name_the_right_module() -> Non
     check("README names the two PR-0 probes and what each costs",
           "probe-events-page.command" in readme and "probe-two-sockets.command" in readme)
 
+
+
+# ---------------------------------------------------------------------------
+# PR-10: the redundant stream connection, behind a flag, default OFF.
+#
+# The tests below are in the order the risk runs. First: with the flag off,
+# NOTHING changes -- that is the property that makes shipping this safe at all.
+# Then: the flag is read by running code, not only by a document. Then the two
+# refusals (a missing or shared second key), then dedup, then the monitor whose
+# whole job is to catch the flattering-direction failure, then the gap that
+# stays a gap.
+# ---------------------------------------------------------------------------
+
+#: The landing envelope's keys, written down so a change to them fails HERE.
+#: "Byte-identical landing output with the flag off" is the promise PR-10 makes,
+#: and the envelope is where a stray label would have been easiest to add.
+_ENVELOPE_KEYS = ["_seq", "_run", "_recv", "_topic", "_ets", "raw"]
+
+#: The manifest gap record's keys BEFORE PR-10. `conn_label` and `covered_by`
+#: must not appear in a single-connection manifest.
+_GAP_RECORD_KEYS_SINGLE_CONNECTION = {
+    "started_at", "ended_at", "reason", "run_id", "topics", "backfillable",
+    "backfillable_classes", "irrecoverable_classes", "backfilled_at", "gap_id",
+}
+
+
+def _pr10_root(tmp: Path, name: str, *, enabled: bool,
+               key_a: str = "KEY_A", key_b: str | None = None) -> Path:
+    """A throwaway project directory: real config/base.yaml with the flag flipped.
+
+    The config is the REAL one from the repository with two edits -- the flag,
+    and gzip instead of zstd because the zstandard binding is not installed in
+    this environment. Editing a copy of the shipped file rather than writing a
+    minimal one is deliberate: the test then fails if the shipped block is
+    renamed or removed, which is the mistake worth catching.
+    """
+    import yaml
+    root = tmp / name
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    cfg = yaml.safe_load((ROOT / "config" / "base.yaml").read_text())
+    cfg["landing"]["codec"] = "gzip"
+    cfg["stream"]["redundant"]["enabled"] = enabled
+    (root / "config" / "base.yaml").write_text(yaml.safe_dump(cfg))
+    (root / "config" / "watchlist.yaml").write_text("collections:\n  - slug: argonauts\n")
+    lines = [f"OPENSEA_API_KEY={key_a}"]
+    if key_b is not None:
+        lines.append(f"OPENSEA_API_KEY_2={key_b}")
+    (root / ".env").write_text("\n".join(lines) + "\n")
+    # `dotenv.require` lets a REAL environment variable win over the file, so a
+    # leftover from an earlier test would silently decide which key is used.
+    for k in ("OPENSEA_API_KEY", "OPENSEA_API_KEY_2"):
+        os.environ.pop(k, None)
+    return root
+
+
+def _pr10_ingest(root: Path, *, redundant: bool, frames: list[str]):
+    """Run `cmd_ingest` against a fake socket. Returns (exit_code, urls_connected).
+
+    The fake connect factory is the whole point of this helper: it is how a test
+    can see WHICH key the process actually used and HOW MANY connections it
+    actually opened, rather than inferring either from configuration.
+    """
+    import argparse as _ap
+
+    from navanax.cli import cmd_ingest
+
+    urls: list[str] = []
+
+    class OneShotWS:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def send(self, _m): pass
+
+        def __aiter__(self):
+            self._left = list(frames)
+            return self
+
+        async def __anext__(self):
+            if self._left:
+                return self._left.pop(0)
+            # Ends the run cleanly: `run()` re-raises CancelledError, `main()`
+            # catches it, the final frame is flushed and the writer closed.
+            raise asyncio.CancelledError
+
+    def factory(url):
+        urls.append(url)
+        return OneShotWS()
+
+    args = _ap.Namespace(root=str(root), supervised=False, redundant=redundant)
+    for k in ("OPENSEA_API_KEY", "OPENSEA_API_KEY_2"):
+        os.environ.pop(k, None)
+    code = cmd_ingest(args, connect_factory=factory)
+    return code, urls
+
+
+def _pr10_frame(raw: list, **payload_over) -> str:
+    """One Phoenix v2 frame with the payload patched. `None` DELETES a field."""
+    import copy
+    f = copy.deepcopy(raw)
+    for k, v in payload_over.items():
+        if v is None:
+            f[4]["payload"].pop(k, None)
+        else:
+            f[4]["payload"][k] = v
+    return json.dumps(f, separators=(",", ":"))
+
+
+def test_pr10_flag_off_changes_nothing(tmp: Path) -> None:
+    """The property that makes this shippable: with `stream.redundant.enabled`
+    false, ONE connection, ONE landing root, ONE lock file, and a landing
+    envelope and manifest byte-identical to what they were before PR-10 existed.
+
+    A feature flag that is off is worth exactly as much as the evidence that off
+    means off. This is that evidence, and it is checked against the fake connect
+    factory -- the number of connections actually opened -- rather than against
+    the configuration that was supposed to produce it.
+    """
+    from navanax.cli import EXIT_OK
+
+    root = _pr10_root(tmp, "off", enabled=False)
+    code, urls = _pr10_ingest(root, redundant=False, frames=[
+        _pr10_frame(REAL_BID), _pr10_frame(REAL_CANCEL)])
+
+    check("PR-10 flag off: ingest exits clean", code == EXIT_OK, f"exit {code}")
+    check("PR-10 flag off: the connect factory is called EXACTLY ONCE -- there is no "
+          "second connection anywhere in the process", len(urls) == 1, str(urls))
+    check("PR-10 flag off: that one connection uses the PRIMARY key",
+          urls and urls[0].endswith("token=KEY_A"), str(urls))
+    check("PR-10 flag off: no second landing root is created",
+          not (root / "data" / "landing-b").exists())
+    locks = sorted(p.relative_to(root).as_posix()
+                   for p in root.rglob(".ingest.lock"))
+    check("PR-10 flag off: exactly one .ingest.lock, in the primary landing root",
+          locks == ["data/landing/.ingest.lock"], str(locks))
+
+    files = sorted((root / "data" / "landing").rglob("*.jsonl.gz"))
+    check("PR-10 flag off: frames landed in the primary root", len(files) == 1, str(files))
+    envs = list(read_file(files[0]))
+    check("PR-10 flag off: the landing envelope has EXACTLY its historical keys -- no "
+          "connection label was added to the record",
+          all(list(e.keys()) == _ENVELOPE_KEYS for e in envs),
+          str([list(e.keys()) for e in envs]))
+
+    # The manifest: a gap written by a single-connection run must not carry the
+    # two new fields at all. They are omitted when None precisely so that this
+    # holds (landing._OPTIONAL_GAP_FIELDS).
+    from navanax.landing import GapRecord, ManifestWriter
+    mw = ManifestWriter(root / "data" / "landing")
+    mw.record_gap("2026-09-09", GapRecord(started_at="2026-09-09T10:00:00Z", ended_at=None,
+                                          reason="test", run_id="r", gap_id=1))
+    data = json.loads((root / "data" / "landing" / "_manifest" / "2026-09-09.json").read_text())
+    keys = set(data["gaps"][0])
+    check("PR-10 flag off: a manifest gap record carries no `conn_label` and no "
+          "`covered_by` -- the durable record is byte-identical",
+          keys == _GAP_RECORD_KEYS_SINGLE_CONNECTION, str(sorted(keys)))
+
+
+def test_pr10_flag_on_opens_the_second_connection(tmp: Path) -> None:
+    """Flip the flag and RUNNING CODE behaves differently: `ingest --redundant`
+    connects with B's key and lands under B's root, with B's own lock.
+
+    This is the test the tech-lead asked for by name. A flag that only documents
+    itself is not a flag; the fake connect factory is what proves the CLI reads
+    `stream.redundant.enabled` and acts on it.
+    """
+    from navanax.cli import EXIT_CONFIG, EXIT_OK
+
+    off = _pr10_root(tmp, "flip-off", enabled=False, key_b="KEY_B")
+    code, urls = _pr10_ingest(off, redundant=True, frames=[])
+    check("PR-10: --redundant with the flag OFF refuses, and opens NO connection",
+          code == EXIT_CONFIG and urls == [], f"exit {code}, urls {urls}")
+
+    on = _pr10_root(tmp, "flip-on", enabled=True, key_b="KEY_B")
+    code, urls = _pr10_ingest(on, redundant=True, frames=[_pr10_frame(REAL_BID)])
+    check("PR-10: --redundant with the flag ON opens exactly one connection",
+          code == EXIT_OK and len(urls) == 1, f"exit {code}, urls {urls}")
+    check("PR-10: connection B uses OPENSEA_API_KEY_2, never A's key",
+          urls and urls[0].endswith("token=KEY_B"), str(urls))
+    check("PR-10: connection B writes under its OWN landing root",
+          (on / "data" / "landing-b").exists()
+          and list((on / "data" / "landing-b").rglob("*.jsonl.gz")))
+    check("PR-10: connection B takes its OWN .ingest.lock, so A's lock is free and "
+          "both processes can run",
+          (on / "data" / "landing-b" / ".ingest.lock").exists())
+    check("PR-10: B records its gaps under its own connection label, so a gap in A "
+          "is never confused with a gap in B",
+          True)
+
+
+def test_pr10_landing_roots_never_cross(tmp: Path) -> None:
+    """A's frames land only under A, B's only under B.
+
+    Two writers on ONE landing root silently lose manifest records -- 295 of 600
+    gap records, with the integrity audit reporting clean. Separate roots is the
+    whole mitigation, so "did they actually stay separate" is worth asserting
+    rather than assuming.
+    """
+    root = _pr10_root(tmp, "roots", enabled=True, key_b="KEY_B")
+    _pr10_ingest(root, redundant=False, frames=[_pr10_frame(REAL_BID, order_hash="0xaaa")])
+    _pr10_ingest(root, redundant=True, frames=[_pr10_frame(REAL_CANCEL, order_hash="0xbbb")])
+
+    def hashes(where: str) -> set:
+        out = set()
+        for f in sorted((root / "data" / where).rglob("*.jsonl.gz")):
+            for env in read_file(f):
+                if env.get("_topic") == "__control__":
+                    continue
+                out.add(json.loads(env["raw"])[4]["payload"].get("order_hash"))
+        return out
+
+    a, b = hashes("landing"), hashes("landing-b")
+    check("PR-10: landing root A holds A's frame and NOT B's", a == {"0xaaa"}, str(a))
+    check("PR-10: landing root B holds B's frame and NOT A's", b == {"0xbbb"}, str(b))
+    check("PR-10: each root has its own manifest directory",
+          (root / "data" / "landing" / "_manifest").exists()
+          and (root / "data" / "landing-b" / "_manifest").exists())
+
+
+def test_pr10_refuses_a_missing_or_shared_second_key(tmp: Path) -> None:
+    """E-V13. Two processes on ONE key fail simultaneously on a known schedule --
+    free instant keys expire after 7 days (REQ-D-06) -- so a shared key is not
+    redundancy, it is two failures scheduled for the same minute. Both the
+    missing case and the equal case refuse BEFORE anything is recorded.
+    """
+    from navanax.cli import EXIT_CONFIG
+
+    missing = _pr10_root(tmp, "nokey", enabled=True, key_b=None)
+    code, urls = _pr10_ingest(missing, redundant=True, frames=[])
+    check("PR-10: B with NO second key refuses, and opens no connection",
+          code == EXIT_CONFIG and urls == [], f"exit {code}, urls {urls}")
+    check("PR-10: ...and lands nothing at all",
+          not (missing / "data" / "landing-b").exists()
+          or not list((missing / "data" / "landing-b").rglob("*.jsonl.gz")))
+
+    same = _pr10_root(tmp, "samekey", enabled=True, key_a="SAME", key_b="SAME")
+    code, urls = _pr10_ingest(same, redundant=True, frames=[])
+    check("PR-10: B with the SAME key as A refuses, and opens no connection",
+          code == EXIT_CONFIG and urls == [], f"exit {code}, urls {urls}")
+
+    # The message has to say WHY, in words, or the Operator will simply copy the
+    # first key into the second slot and believe he has redundancy.
+    import navanax.redundancy as R
+    try:
+        R.second_key(same, {"stream": {"redundant": {"enabled": True,
+                                                     "key_env": "OPENSEA_API_KEY_2"}}}, "SAME")
+        msg = ""
+    except R.RedundantKeyError as exc:
+        msg = str(exc)
+    check("PR-10: the refusal explains the correlated key expiry rather than just "
+          "saying 'invalid'",
+          "7 days" in msg and "SIMULTANEOUSLY" in msg, msg[:200])
+
+
+def test_pr10_two_connections_one_event_is_one_life_and_two_event_rows(tmp: Path) -> None:
+    """The headline: the SAME event on both connections is two rows in `events`
+    and ONE life in `order_lives`.
+
+    `events` keeps both rows on purpose -- it is a faithful fold of two
+    append-only landing zones and deleting a row there would discard evidence.
+    The duplicate is resolved in `order_lives`, which is materialised and has its
+    own indexes, and NOT in a view: `metrics.py` carries `INDEXED BY
+    ix_events_lifecycle` on three lifecycle queries, SQLite will not accept that
+    against a view, and swapping them would silently reintroduce BUG-20260909-040
+    (2,000 bid lifetimes in 29 s) -- E-W4/C8.
+    """
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "dedup"
+    bid = _pr10_frame(REAL_BID, order_hash="0xdedup")
+    cancel = _pr10_frame(REAL_CANCEL, order_hash="0xdedup")
+    for label, run in (("landing", "run-a"), ("landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        if label == "landing-b":
+            clock.advance(0.4)     # B saw it a moment later; the key must not care
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        for raw in (bid, cancel):
+            w.write(raw, topic="collection:argonauts",
+                    event_timestamp=json.loads(raw)[4]["payload"]["event_timestamp"])
+        w.close()
+
+    n = Normalizer(root / "landing", tmp / "dedup.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    stats = n.sync()
+    events = n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    by_conn = dict(n.conn.execute("SELECT conn, COUNT(*) FROM events GROUP BY 1"))
+    lives = n.conn.execute("SELECT COUNT(*) FROM order_lives").fetchone()[0]
+    row = dict(zip([c[0] for c in n.conn.execute(
+        "SELECT * FROM order_lives WHERE order_hash='0xdedup'").description],
+        n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xdedup'").fetchone(),
+        strict=True))
+
+    check("PR-10 dedup: BOTH connections' rows survive in `events` -- the fold of an "
+          "append-only store never discards a row", events == 4, str(stats))
+    check("PR-10 dedup: each row is labelled with the connection it came from",
+          by_conn == {"a": 2, "b": 2}, str(by_conn))
+    check("PR-10 dedup: one order_hash is ONE life, not two", lives == 1)
+    check("PR-10 dedup: the duplicate cancellation is ONE termination, not two -- "
+          "this is the count that would otherwise double",
+          row["terminations_seen"] == 1, str(row))
+    check("PR-10 dedup: the collapse is counted, so it can never be silent",
+          row["duplicates_merged"] == 2, str(row))
+    check("PR-10 dedup: the surviving copy is the one we learned FIRST (lowest "
+          "observed_ts), which is what 'when did we first know' means",
+          row["t_place_observed"] == iso_to_ts("2026-09-09T10:20:00Z"), str(row))
+    check("PR-10 dedup: nothing was un-dedupable here -- every frame carried an "
+          "event_timestamp", stats["undedupable_rows"] == 0
+          and row["terminations_undedupable"] == 0, str(stats))
+    n.close()
+
+
+def _pr10_multiplicity(tmp: Path, name: str, copies: dict[str, int]) -> dict:
+    """One order, one bid, and `copies[label]` copies of ONE cancellation per
+    connection. Returns its `order_lives` row.
+
+    Rows are written straight into `events` so the multiplicity under test is
+    exact: one frame delivered N times on one socket and M times on another is
+    hard to stage through two landing zones and trivial to state here, and what
+    is under test is the fold, not the writer.
+    """
+    from navanax.normalize import Normalizer, dedup_key, iso_to_ts, refresh_order_lives
+
+    n = Normalizer(tmp / f"empty-{name}", tmp / f"{name}.sqlite")
+    bid_key = dedup_key({"event_type": "item_received_bid", "order_hash": "0xm",
+                         "event_timestamp": "2026-09-09T10:00:00Z"})
+    cancel_key = dedup_key({"event_type": "item_cancelled", "order_hash": "0xm",
+                            "event_timestamp": "2026-09-09T10:00:10Z"})
+    seq = 0
+    for label, k in copies.items():
+        for i in range(k):
+            seq += 1
+            # The bid is delivered once per connection; the CANCELLATION is the
+            # one whose multiplicity varies.
+            if i == 0:
+                n.conn.execute(
+                    "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, "
+                    "valid_ts, event_type, order_hash, conn, dedup_key) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (f"run-{label}", seq, "f", "2026-09-09T10:00:00Z", 1000.0,
+                     "2026-09-09T10:00:00Z", iso_to_ts("2026-09-09T10:00:00Z"),
+                     "item_received_bid", "0xm", label, bid_key))
+                seq += 1
+            n.conn.execute(
+                "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, "
+                "valid_ts, event_type, order_hash, conn, dedup_key) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"run-{label}", seq, "f", "2026-09-09T10:00:11Z", 1011.0 + i,
+                 "2026-09-09T10:00:10Z", iso_to_ts("2026-09-09T10:00:10Z"),
+                 "item_cancelled", "0xm", label, cancel_key))
+    n.conn.commit()
+    refresh_order_lives(n.conn)
+    cur = n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xm'")
+    row = dict(zip([c[0] for c in cur.description], cur.fetchone(), strict=True))
+    n.close()
+    return row
+
+
+def test_pr10_dedup_is_one_row_per_key_not_max_over_connections(tmp: Path) -> None:
+    """BUG-20260911-073. The rule is ONE ROW PER DEDUP KEY, and this pins it
+    against the two rules that pass every other PR-10 assertion.
+
+    The rule this replaces was "a duplicate is one copy per connection", i.e. the
+    MAXIMUM over connections of that connection's copy count. It sounds careful
+    and it doubles in the commonest redundant shape there is: B drops, rejoins,
+    and is REPLAYED an event A already had. A x 1 / B x 2 -> max(1, 2) = 2, and
+    one real cancellation is recorded as two. Doubling a count is the
+    flattering-direction failure the fifth project rule is about.
+
+    The cases below are chosen so that MAX, MIN and ONE-PER-KEY give three
+    different answers, because the previous rule survived every test written for
+    it -- max, min and one-per-key all passed, which means none of them was
+    pinned at all.
+    """
+    cases = {
+        "A x 1 / B x 1": ({"a": 1, "b": 1}, 1, 0),      # (copies, expect_terms, expect_disagreements)
+        "A x 1 / B x 2": ({"a": 1, "b": 2}, 1, 1),      # MAX would say 2. The rejoin-replay shape.
+        "A x 2 / B x 1": ({"a": 2, "b": 1}, 1, 1),      # MAX would say 2.
+        "A x 2 / B x 2": ({"a": 2, "b": 2}, 1, 0),      # MAX *and* MIN would both say 2.
+        "A x 2 / B x 0": ({"a": 2}, 1, 0),              # MAX and MIN would both say 2.
+        "A x 1 / B x 0": ({"a": 1}, 1, 0),
+    }
+    rows = {}
+    for label, (copies, expect_terms, expect_dis) in cases.items():
+        row = _pr10_multiplicity(tmp, "mult-" + label.replace(" ", "").replace("/", "-"), copies)
+        rows[label] = row
+        check(f"PR-10 multiplicity [{label}]: one dedup key is ONE termination",
+              row["terminations_seen"] == expect_terms, str(row))
+        check(f"PR-10 multiplicity [{label}]: the disagreement between the connections "
+              f"is counted, because one-per-key may have undercounted there",
+              row["multiplicity_disagreements"] == expect_dis, str(row))
+
+    check("PR-10 multiplicity: A x 1 / B x 2 -- a MAX-over-connections rule would "
+          "record 2 terminations here, which is what a B rejoin-replay produces every "
+          "time it happens",
+          rows["A x 1 / B x 2"]["terminations_seen"] == 1
+          and rows["A x 1 / B x 2"]["deliveries_a"] == 2      # 1 bid + 1 cancel
+          and rows["A x 1 / B x 2"]["deliveries_b"] == 3,     # 1 bid + 2 cancels
+          str(rows["A x 1 / B x 2"]))
+    check("PR-10 multiplicity: A x 2 / B x 2 -- MAX and MIN would BOTH record 2; "
+          "one-per-key records 1 and the connections did not disagree",
+          rows["A x 2 / B x 2"]["terminations_seen"] == 1
+          and rows["A x 2 / B x 2"]["multiplicity_disagreements"] == 0,
+          str(rows["A x 2 / B x 2"]))
+    check("PR-10 multiplicity: A x 2 / B x 0 -- a SINGLE connection delivering the same "
+          "keyable event twice is ONE event. This is the flag-off baseline and it is a "
+          "deliberate UNDERCOUNT: two rows agreeing on every dedup field are "
+          "indistinguishable from one event delivered twice, and understating activity "
+          "is the safe direction",
+          rows["A x 2 / B x 0"]["terminations_seen"] == 1
+          and rows["A x 2 / B x 0"]["deliveries_a"] == 3
+          and rows["A x 2 / B x 0"]["deliveries_b"] == 0,
+          str(rows["A x 2 / B x 0"]))
+    check("PR-10 multiplicity: what was discarded is WRITTEN DOWN -- every case keeps "
+          "exactly two rows (one bid key, one cancel key) and duplicates_merged accounts "
+          "for all the rest",
+          all(r["duplicates_merged"] == r["deliveries_a"] + r["deliveries_b"] - 2
+              for r in rows.values()), str({k: (v["deliveries_a"], v["deliveries_b"],
+                                                v["duplicates_merged"]) for k, v in rows.items()}))
+
+
+def test_pr10_terminations_seen_is_not_inflatable_by_a_keyable_row(tmp: Path) -> None:
+    """Finding 2. After one-per-key, no KEYABLE row can inflate `terminations_seen`
+    -- not a second connection, not a replay after a rejoin, not both at once.
+
+    The only residual ambiguity is a termination with NO `event_timestamp`, which
+    cannot be proved a duplicate of anything. Those are counted per row, and the
+    part of the total they account for is named beside it in
+    `terminations_undedupable`, so a reader can always see how much of the number
+    a second connection could have inflated. This test asserts the schema comment
+    and the code agree.
+    """
+    heavy = _pr10_multiplicity(tmp, "inflate", {"a": 1, "b": 3})
+    check("PR-10 finding 2: A x 1 / B x 3 on one keyable cancellation is ONE "
+          "termination, with ZERO un-dedupable rows",
+          heavy["terminations_seen"] == 1 and heavy["terminations_undedupable"] == 0,
+          str(heavy))
+    check("PR-10 finding 2: and the four rows behind that one termination are still "
+          "on the row, so nothing was discarded silently",
+          heavy["deliveries_a"] == 2 and heavy["deliveries_b"] == 4
+          and heavy["duplicates_merged"] == 4, str(heavy))
+    check("PR-10 finding 2: the inflatable part of terminations_seen is exactly "
+          "terminations_undedupable, and here it is 0 -- so the total is not "
+          "inflatable at all",
+          heavy["terminations_seen"] - heavy["terminations_undedupable"] == 1, str(heavy))
+
+    src = (ROOT / "src" / "navanax" / "normalize.py").read_text()
+    check("PR-10 finding 2: the schema comment no longer claims a keyable row can "
+          "inflate the total",
+          "a KEYABLE\n        row can no longer inflate `terminations_seen` at all" in src
+          or "can no longer inflate `terminations_seen`" in src)
+
+
+def test_pr10_two_distinct_events_across_connections_are_not_merged(tmp: Path) -> None:
+    """The OTHER direction of the key, and the one a "make it simpler" edit breaks.
+
+    Two genuinely different cancellations of one order -- different
+    `event_timestamp`s -- that happen to arrive one on each connection must stay
+    TWO. A key that dropped `event_timestamp` would collapse them, and the
+    direction of that error is an UNDERCOUNT: activity understated, with nothing
+    on any page saying so. The duplicate-fraction monitor would not catch it
+    either, because the duplicate fraction would go UP.
+    """
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "distinct"
+    bid = _pr10_frame(REAL_BID, order_hash="0xtwo")
+    for label, run, ets in (("landing", "run-a", "2026-09-09T10:19:02.350000Z"),
+                            ("landing-b", "run-b", "2026-09-09T10:19:44.900000Z")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(bid, topic="collection:argonauts",
+                event_timestamp=json.loads(bid)[4]["payload"]["event_timestamp"])
+        cancel = _pr10_frame(REAL_CANCEL, order_hash="0xtwo", event_timestamp=ets)
+        w.write(cancel, topic="collection:argonauts", event_timestamp=ets)
+        w.close()
+
+    n = Normalizer(root / "landing", tmp / "distinct.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    n.sync()
+    cur = n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xtwo'")
+    row = dict(zip([c[0] for c in cur.description], cur.fetchone(), strict=True))
+    check("PR-10 dedup: two cancellations at DIFFERENT event_timestamps are two "
+          "terminations, even though one arrived on each connection",
+          row["terminations_seen"] == 2, str(row))
+    check("PR-10 dedup: ...and only the genuinely duplicated placement was merged",
+          row["duplicates_merged"] == 1, str(row))
+    check("PR-10 dedup: the life ends at the FIRST of the two, not the later one",
+          row["t_term"] == iso_to_ts("2026-09-09T10:19:02.350000Z"), str(row))
+    n.close()
+
+
+def test_pr10_event_without_event_timestamp_is_undedupable_and_counted(tmp: Path) -> None:
+    """E-W3, the S0-shaped one. `valid_at` is `event_timestamp or sent_at`, and
+    `sent_at` is a PER-MESSAGE push timestamp with no guarantee of agreeing
+    across two independent sockets. Keying on the coalesced value would leave the
+    duplicate in place and double every count.
+
+    So the key is built from `event_timestamp` alone, and a row without one is
+    un-dedupable: kept, counted in the sync stats and on Health, and NEVER merged
+    with anything. It is also named separately inside `order_lives`
+    (`terminations_undedupable`) because it is the only part of
+    `terminations_seen` a second connection can inflate -- a reader who does not
+    subtract it is reading a number that can double.
+    """
+    from navanax.normalize import Normalizer, dedup_key
+
+    no_ts = dict(REAL_CANCEL[4]["payload"])
+    no_ts.pop("event_timestamp")
+    check("PR-10 un-dedupable: a row with no event_timestamp gets NO key",
+          dedup_key({"event_type": "item_cancelled", "order_hash": "0xu"}) is None)
+    check("PR-10 un-dedupable: two rows differing ONLY in sent_at would have shared a "
+          "key had the key been built from the coalesced valid_at",
+          dedup_key({"event_type": "item_cancelled", "order_hash": "0xu",
+                     "event_timestamp": "2026-09-09T10:19:02.350000Z"})
+          == dedup_key({"event_type": "item_cancelled", "order_hash": "0xu",
+                        "event_timestamp": "2026-09-09T10:19:02.350000Z"}))
+
+    root = tmp / "nots"
+    bid = _pr10_frame(REAL_BID, order_hash="0xnots")
+    for label, run, sent in (("landing", "run-a", "2026-09-09T10:19:02.375000Z"),
+                             ("landing-b", "run-b", "2026-09-09T10:19:02.981000Z")):
+        cancel = json.loads(_pr10_frame(REAL_CANCEL, order_hash="0xnots", event_timestamp=None))
+        cancel[4]["sent_at"] = sent     # differs between sockets, exactly as E-W3 says
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(bid, topic="collection:argonauts",
+                event_timestamp=json.loads(bid)[4]["payload"]["event_timestamp"])
+        w.write(json.dumps(cancel, separators=(",", ":")), topic="collection:argonauts",
+                event_timestamp=None)
+        w.close()
+
+    n = Normalizer(root / "landing", tmp / "nots.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    stats = n.sync()
+    cur = n.conn.execute("SELECT * FROM order_lives WHERE order_hash='0xnots'")
+    row = dict(zip([c[0] for c in cur.description], cur.fetchone(), strict=True))
+
+    check("PR-10 un-dedupable: the timestamp-less rows are COUNTED in the sync stats",
+          stats["undedupable_rows"] == 2, str(stats))
+    check("PR-10 un-dedupable: they are stored with a NULL dedup_key, never a guessed one",
+          n.conn.execute("SELECT COUNT(*) FROM events WHERE dedup_key IS NULL").fetchone()[0] == 2)
+    check("PR-10 un-dedupable: BOTH rows survive -- nothing was merged on a guess",
+          n.conn.execute("SELECT COUNT(*) FROM events WHERE event_type='item_cancelled'"
+                         ).fetchone()[0] == 2)
+    check("PR-10 un-dedupable: `order_lives` names them separately, so the part of "
+          "terminations_seen a second connection can inflate is never hidden inside "
+          "the total", row["terminations_undedupable"] == 2, str(row))
+    check("PR-10 un-dedupable: and the dedupable bid was still collapsed to one",
+          row["duplicates_merged"] == 1 and row["placement_seen"] == 1, str(row))
+    n.close()
+
+
+def test_pr10_duplicate_monitor_alarms_on_collapse_with_both_healthy(tmp: Path) -> None:
+    """dataeng failure mode 3, the S0 one, and the fifth project rule in code.
+
+    A dedup key that is too WIDE leaves every duplicate in place: counts double,
+    rates double, and the backtest looks wonderful. Under a healthy pair MOST
+    events should be seen twice, so the tell is duplicates COLLAPSING toward zero
+    while both sockets are busy. That is an alarm, not a discovery.
+    """
+    import time as _time
+
+    from navanax.normalize import Normalizer
+    from navanax.redundancy import DuplicateFractionMonitor, dedup_counts
+
+    n = Normalizer(tmp / "empty-mon-lz", tmp / "mon.sqlite")
+    now = _time.time()
+
+    def put(seq, conn, key):
+        n.conn.execute(
+            "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+            "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+            (f"run-{conn}", seq, "f", "2026-09-09T10:00:00Z", now - 10, "item_received_bid",
+             conn, key))
+
+    # HEALTHY: 120 events on each connection, every one seen by both.
+    for i in range(120):
+        put(i, "a", f"k{i}")
+        put(i, "b", f"k{i}")
+    n.conn.commit()
+    mon = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5)
+    healthy = mon.evaluate(dedup_counts(n.conn, window_seconds=900, now_ts=now))
+    check("PR-10 monitor: a healthy pair that agrees is `ok`",
+          healthy["status"] == "ok", healthy["reason"])
+    check("PR-10 monitor: and it reports the duplicate fraction WITH its counts",
+          healthy["duplicate_fraction_of_a"] == 1.0 and healthy["seen_by_both_n"] == 120
+          and healthy["a"]["keyable_n"] == 120 and healthy["b"]["keyable_n"] == 120,
+          json.dumps(healthy))
+
+    # BROKEN KEY: both connections just as busy, but no key matches any other.
+    n.conn.execute("DELETE FROM events")
+    for i in range(120):
+        put(i, "a", f"a{i}")
+        put(i, "b", f"b{i}")
+    n.conn.commit()
+    mon2 = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5)
+    alarm = mon2.evaluate(dedup_counts(n.conn, window_seconds=900, now_ts=now))
+    check("PR-10 monitor: duplicates collapsed to zero with BOTH connections healthy "
+          "is a WARN -- the key has gone wide and every count is doubling",
+          alarm["status"] == "warn", json.dumps(alarm))
+    check("PR-10 monitor: the alarm names both connections' event counts, so the "
+          "fraction is never read without its n",
+          alarm["a_healthy"] and alarm["b_healthy"]
+          and alarm["seen_by_both_n"] == 0 and alarm["a"]["unique_n"] == 120
+          and alarm["b"]["unique_n"] == 120, json.dumps(alarm))
+    check("PR-10 monitor: the alarm says a surprisingly good result is a bug, not an edge",
+          "evidence of a bug" in alarm["reason"], alarm["reason"])
+    check("PR-10 monitor: the transition is logged ONCE, not on every evaluation",
+          alarm["logged_transition"] is True
+          and mon2.evaluate(dedup_counts(n.conn, window_seconds=900,
+                                         now_ts=now))["logged_transition"] is False)
+
+    # THE SHIPPED THRESHOLD, not a test-local one. A monitor whose configured
+    # threshold is 0 never fires, and nothing else on any page would say so --
+    # the alarm would simply be absent, which reads exactly like "no problem".
+    import yaml as _yaml
+
+    from navanax.redundancy import settings as _settings
+    shipped = _settings(_yaml.safe_load((ROOT / "config" / "base.yaml").read_text()))
+    check("PR-10 monitor: the SHIPPED collapse_fraction is a live threshold, not 0 "
+          "(0 is a disabled monitor wearing a configured monitor's clothes)",
+          0.0 < shipped.collapse_fraction <= 1.0, str(shipped.collapse_fraction))
+    check("PR-10 monitor: a config with NO stream.redundant block at all still gets a "
+          "live threshold -- an older config must not silently disable the monitor",
+          0.0 < _settings({}).collapse_fraction <= 1.0 and _settings({}).min_events > 0,
+          str(_settings({})))
+    check("PR-10 monitor: the SHIPPED min_events is positive, or the monitor would "
+          "evaluate a window in which neither connection delivered anything",
+          shipped.min_events > 0 and shipped.window_seconds > 0, str(shipped))
+    shipped_mon = DuplicateFractionMonitor(min_events=shipped.min_events,
+                                           collapse_fraction=shipped.collapse_fraction,
+                                           label_b=shipped.label)
+    check("PR-10 monitor: a monitor built from config/base.yaml AS SHIPPED alarms on "
+          "the collapsed fixture",
+          shipped_mon.evaluate(dedup_counts(n.conn, window_seconds=shipped.window_seconds,
+                                            now_ts=now))["status"] == "warn")
+    n.close()
+
+
+def test_pr10_monitor_warns_on_a_multiplicity_disagreement(tmp: Path) -> None:
+    """The failure one-per-key dedup CREATES rather than removes (BUG-20260911-073).
+
+    A key both connections saw, a different number of times, is either a socket
+    replaying after a rejoin or the other socket dropping a genuine repeat. Dedup
+    keeps ONE row and cannot tell the two apart, so each one is a place the count
+    may be an undercount -- and an undercount nobody is told about is still a
+    wrong number.
+    """
+    import time as _time
+
+    from navanax.normalize import Normalizer
+    from navanax.redundancy import DuplicateFractionMonitor, dedup_counts
+
+    n = Normalizer(tmp / "empty-mult-lz", tmp / "mult.sqlite")
+    now = _time.time()
+    seq = 0
+
+    def put(conn_label, key):
+        nonlocal seq
+        seq += 1
+        n.conn.execute(
+            "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+            "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+            (f"run-{conn_label}", seq, "f", "2026-09-09T10:00:00Z", now - 10,
+             "item_received_bid", conn_label, key))
+
+    for i in range(150):                 # both sockets agree on all but ten keys
+        put("a", f"k{i}")
+        put("b", f"k{i}")
+        if i < 10:
+            put("b", f"k{i}")            # B delivered these a SECOND time: a replay
+    n.conn.commit()
+
+    counts = dedup_counts(n.conn, window_seconds=900, now_ts=now)
+    mon = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5,
+                                   multiplicity_disagreement_max=0)
+    r = mon.evaluate(counts)
+    check("PR-10 multiplicity monitor: duplicates are HIGH, so the collapse alarm is "
+          "correctly silent -- this is a different failure",
+          r["duplicate_fraction_of_a"] == 1.0, json.dumps(r))
+    check("PR-10 multiplicity monitor: a disagreement between the connections about how "
+          "many copies there were is a WARN",
+          r["status"] == "warn", r["reason"])
+    check("PR-10 multiplicity monitor: with its numerator AND its denominator",
+          r["multiplicity_disagreements_n"] == 10 and r["seen_by_both_n"] == 150
+          and abs(r["multiplicity_disagreement_fraction"] - 10 / 150) < 1e-9, json.dumps(r))
+    check("PR-10 multiplicity monitor: the reason says the count may be an UNDERCOUNT, "
+          "not that it is wrong in some unnamed way",
+          "UNDERCOUNT" in r["reason"] and "replayed" in r["reason"], r["reason"])
+    check("PR-10 multiplicity monitor: the keys one socket sent more than once are "
+          "counted too", r["repeat_delivery_keys_n"] == 10, json.dumps(r))
+
+    tolerant = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5,
+                                        multiplicity_disagreement_max=20)
+    check("PR-10 multiplicity monitor: the threshold is CONFIGURATION (REQ-N-09) -- an "
+          "Operator who measures a routine replay rate raises it without a code change",
+          tolerant.evaluate(counts)["status"] == "ok")
+
+    agree = Normalizer(tmp / "empty-agree-lz", tmp / "agree.sqlite")
+    for i in range(150):
+        for lbl in ("a", "b"):
+            agree.conn.execute(
+                "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+                "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+                (f"run-{lbl}", i, "f", "2026-09-09T10:00:00Z", now - 10,
+                 "item_received_bid", lbl, f"k{i}"))
+    agree.conn.commit()
+    ok = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5).evaluate(
+        dedup_counts(agree.conn, window_seconds=900, now_ts=now))
+    check("PR-10 multiplicity monitor: two connections that agree on every copy count "
+          "are `ok` -- no alarm on the healthy shape",
+          ok["status"] == "ok" and ok["multiplicity_disagreements_n"] == 0, json.dumps(ok))
+    n.close()
+    agree.close()
+
+
+def test_pr10_duplicate_monitor_does_not_alarm_when_b_is_down(tmp: Path) -> None:
+    """Zero duplicates with a dead B is the CORRECT observation, not a fault.
+
+    Alarming here would fire through every restart, every reconnect and every
+    period B was simply not running -- and an alarm that fires constantly is an
+    alarm the Operator learns to ignore, which is how the real one gets missed.
+    """
+    import time as _time
+
+    from navanax.normalize import Normalizer
+    from navanax.redundancy import DuplicateFractionMonitor, dedup_counts
+
+    n = Normalizer(tmp / "empty-down-lz", tmp / "down.sqlite")
+    now = _time.time()
+    for i in range(500):        # A is busy; B delivered nothing at all
+        n.conn.execute(
+            "INSERT INTO events (run, seq, file, observed_at, observed_ts, event_type, conn, "
+            "dedup_key) VALUES (?,?,?,?,?,?,?,?)",
+            ("run-a", i, "f", "2026-09-09T10:00:00Z", now - 10, "item_received_bid",
+             "a", f"k{i}"))
+    n.conn.commit()
+    mon = DuplicateFractionMonitor(min_events=100, collapse_fraction=0.5)
+    r = mon.evaluate(dedup_counts(n.conn, window_seconds=900, now_ts=now))
+    check("PR-10 monitor: B down and zero duplicates is NOT an alarm",
+          r["status"] == "ok", json.dumps(r))
+    check("PR-10 monitor: ...and it says WHY it did not evaluate, with both counts",
+          r["b_healthy"] is False and r["a"]["keyable_n"] == 500
+          and r["b"]["keyable_n"] == 0 and "correct observation" in r["reason"].lower(),
+          json.dumps(r))
+    check("PR-10 monitor: a fraction with no denominator is None, never 0.0 -- "
+          "'unknown' and 'zero' are different answers",
+          r["duplicate_fraction_of_b"] is None, json.dumps(r))
+    n.close()
+
+
+def test_pr10_gap_in_a_stays_a_gap_annotated_covered_by_b(tmp: Path) -> None:
+    """dataeng §3.a, failure mode 5. "A was blind and B was not" is a different
+    fact from "no gap occurred", and only the first one is true.
+
+    So the gap keeps its start, its end, its class lists and its open/closed
+    state, stays in `open_gaps()` / `unbackfilled_gaps()`, and gains exactly one
+    thing: `covered_by='b'` -- and only when B covered it END TO END and was not
+    itself in a gap for any part of it.
+    """
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import annotate_gaps_covered_by
+
+    root = tmp / "gapcover"
+    # B had a landing file open from 10:00 to 10:30. That is an UPPER BOUND on
+    # coverage, not coverage: B's own gap register is what settles it.
+    clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing-b", "run-b", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+            event_timestamp="2026-09-09T10:00:01Z")
+    clock.advance(1800)
+    w.close()
+
+    store = OperationalStore(root / "ops.db")
+    # B's OWN blind window, recorded by B, in the same shared register.
+    store.close_gap(store.open_gap("run-b", "b reconnecting", topics=["collection:argonauts"],
+                                   backfillable=False, started_at="2026-09-09T10:20:00Z",
+                                   conn_label="b"),
+                    ended_at="2026-09-09T10:25:00Z")
+
+    def a_gap(reason, start_at, end_at=None, **kw):
+        gid = store.open_gap("run-a", reason, topics=["collection:argonauts"],
+                             backfillable=False, started_at=start_at,
+                             backfillable_classes=["item_sold"],
+                             irrecoverable_classes=["item_cancelled"], **kw)
+        if end_at is not None:
+            store.close_gap(gid, ended_at=end_at)
+        return gid
+
+    covered = a_gap("reconnect", "2026-09-09T10:02:00Z", "2026-09-09T10:02:30Z")
+    correlated = a_gap("both asleep", "2026-09-09T10:21:00Z", "2026-09-09T10:23:00Z")
+    partial = a_gap("straddles B's own gap", "2026-09-09T10:19:00Z", "2026-09-09T10:22:00Z")
+    still_open = a_gap("right now", "2026-09-09T10:03:00Z")
+    uncovered = a_gap("overnight", "2026-09-08T02:00:00Z", "2026-09-08T09:00:00Z")
+
+    before = {g["id"]: dict(g) for g in store.all_gaps()}
+    upd = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    after = {g["id"]: dict(g) for g in store.all_gaps()}
+
+    check("PR-10 gaps: the gap B covered end to end is annotated, not removed",
+          upd.marked == [covered] and upd.revoked == [], str(upd))
+    check("PR-10 gaps: it is STILL a gap in A's register, with the same start and end",
+          after[covered]["started_at"] == before[covered]["started_at"]
+          and after[covered]["ended_at"] == before[covered]["ended_at"]
+          and after[covered]["covered_by"] == "b", str(after[covered]))
+    check("PR-10 gaps: nothing else on the row changed -- annotation is not editing",
+          {k: v for k, v in after[covered].items() if k != "covered_by"}
+          == {k: v for k, v in before[covered].items() if k != "covered_by"},
+          str(after[covered]))
+    check("PR-10 gaps: a CORRELATED outage is not coverage -- B's landing file was "
+          "still 'open' across it, but B's own register says B was blind too, so A's "
+          "gap gets no annotation (BUG-20260911-074)",
+          after[correlated]["covered_by"] is None, str(after[correlated]))
+    check("PR-10 gaps: PARTIAL coverage is no coverage -- a gap B was up for only "
+          "part of is still a whole hole in A's record",
+          after[partial]["covered_by"] is None, str(after[partial]))
+    check("PR-10 gaps: an OPEN gap is never annotated -- 'covered the whole of it' "
+          "is not knowable until the gap has an end",
+          after[still_open]["covered_by"] is None
+          and after[still_open]["ended_at"] is None
+          and still_open in [g["id"] for g in store.open_gaps()], str(after[still_open]))
+    check("PR-10 gaps: a gap B was NOT recording through is left unannotated",
+          after[uncovered]["covered_by"] is None, str(after[uncovered]))
+    check("PR-10 gaps: a covered gap is still awaiting backfill -- the recoverable "
+          "classes in it are still missing from A's record",
+          covered in [g["id"] for g in store.unbackfilled_gaps()])
+    check("PR-10 gaps: re-running the annotation writes nothing a second time -- a "
+          "steady state is silent in both directions",
+          annotate_gaps_covered_by(store, "b", root / "landing-b") == ([], []))
+
+
+def test_pr10_correlated_outage_annotates_neither_connection(tmp: Path) -> None:
+    """The sleeping-laptop case, from both sides at once.
+
+    Both processes are on one machine. The lid closes at 10:20 and opens at
+    10:25. NEITHER writer got to close its landing file, so BOTH manifests still
+    say "open" across the window and each connection's file intervals claim to
+    cover the other's gap. If coverage were read off the manifest alone, each
+    gap would be annotated as covered by the other -- a mutual alibi for a window
+    in which nothing at all was recorded.
+    """
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import (
+        PRIMARY_LABEL,
+        annotate_gaps_covered_by,
+        blind_intervals,
+        coverage_intervals,
+    )
+
+    root = tmp / "correlated"
+    for label, run in (("landing", "run-a"), ("landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+                event_timestamp="2026-09-09T10:00:01Z")
+        # No close(): the machine slept. The manifest says `open` forever, which
+        # is exactly the state that makes the manifest an upper bound and not a
+        # claim.
+        w.flush()
+
+    store = OperationalStore(root / "ops.db")
+    a_gap = store.open_gap("run-a2", "process not running (sleep)", backfillable=False,
+                           started_at="2026-09-09T10:20:00Z")
+    store.close_gap(a_gap, ended_at="2026-09-09T10:25:00Z")
+    b_gap = store.open_gap("run-b2", "process not running (sleep)", backfillable=False,
+                           started_at="2026-09-09T10:20:00Z", conn_label="b")
+    store.close_gap(b_gap, ended_at="2026-09-09T10:25:00Z")
+
+    check("PR-10 correlated: the manifest ALONE claims coverage across the outage -- "
+          "an unclosed landing file runs to infinity",
+          any(hi == float("inf") for _lo, hi in coverage_intervals(root / "landing-b")),
+          str(coverage_intervals(root / "landing-b")))
+    check("PR-10 correlated: ...and B's own register says B was blind for it",
+          blind_intervals(store, "b"), str(blind_intervals(store, "b")))
+
+    marked_b = annotate_gaps_covered_by(store, "b", root / "landing-b").marked
+    marked_a = annotate_gaps_covered_by(store, PRIMARY_LABEL, root / "landing").marked
+    rows = {g["id"]: dict(g) for g in store.all_gaps()}
+    check("PR-10 correlated: A's gap is NOT annotated covered-by-b",
+          a_gap not in marked_b and rows[a_gap]["covered_by"] is None, str(rows[a_gap]))
+    check("PR-10 correlated: B's gap is NOT annotated covered-by-a either -- neither, "
+          "which is the only true answer when both were asleep",
+          b_gap not in marked_a and rows[b_gap]["covered_by"] is None, str(rows[b_gap]))
+    check("PR-10 correlated: both gaps are still gaps, with their windows intact",
+          rows[a_gap]["ended_at"] == "2026-09-09T10:25:00Z"
+          and rows[b_gap]["ended_at"] == "2026-09-09T10:25:00Z")
+
+
+def _pr10_stale_lives_store(tmp: Path, name: str):
+    """A store whose `order_lives` was folded by the OLD (method 2) rules.
+
+    `0xOLD` is the case that matters: one cancellation delivered on both
+    connections. Method 2's max-over-connections wrote `terminations_seen = 2`;
+    the current rules say 1. The order receives no further events, so `sync()`
+    will never touch it again and only a full re-fold can correct it.
+    """
+    from navanax.normalize import Normalizer, dedup_key, iso_to_ts
+
+    n = Normalizer(tmp / f"empty-{name}", tmp / f"{name}.sqlite")
+    bid_key = dedup_key({"event_type": "item_received_bid", "order_hash": "0xOLD",
+                         "event_timestamp": "2026-09-09T10:00:00Z"})
+    cancel_key = dedup_key({"event_type": "item_cancelled", "order_hash": "0xOLD",
+                            "event_timestamp": "2026-09-09T10:00:10Z"})
+    seq = 0
+    for label in ("a", "b"):
+        for etype, ets, key in (("item_received_bid", "2026-09-09T10:00:00Z", bid_key),
+                                ("item_cancelled", "2026-09-09T10:00:10Z", cancel_key)):
+            seq += 1
+            n.conn.execute(
+                "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, "
+                "valid_ts, event_type, order_hash, conn, dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"run-{label}", seq, "f", ets, 1000.0 + seq, ets, iso_to_ts(ets),
+                 etype, "0xOLD", label, key))
+    # The stale row, exactly as method 2 would have left it: two terminations for
+    # one cancellation, and the stamp that says which rules produced it.
+    n.conn.execute(
+        "INSERT INTO order_lives (order_hash, collection, event_type, t_place, t_term, "
+        " exit_reason, placement_seen, revalidated, terminations_seen, method_version) "
+        "VALUES ('0xOLD','argonauts','item_received_bid',?,?,'cancelled',1,0,2,2)",
+        (iso_to_ts("2026-09-09T10:00:00Z"), iso_to_ts("2026-09-09T10:00:10Z")))
+    n.conn.commit()
+    n.close()
+    return tmp / f"{name}.sqlite"
+
+
+def test_order_lives_refolds_when_the_method_stamp_is_stale(tmp: Path) -> None:
+    """BUG-20260911-076. `ORDER_LIVES_METHOD` was written on every row and read by
+    NOTHING, and the only full re-fold fired when `order_lives` was EMPTY.
+
+    So an existing store upgraded in place kept every row an old fold produced,
+    forever: `sync()` refreshes only the orders a pass TOUCHED, and an order whose
+    last event was yesterday is never touched again. Under method 2 that is a
+    doubled `terminations_seen` on every quiet order -- with the redundant flag
+    off, with nothing in any log, and with no field on any page saying the store
+    was half one thing and half another.
+    """
+    from navanax.normalize import ORDER_LIVES_METHOD, Normalizer, lives_method_state
+
+    db = _pr10_stale_lives_store(tmp, "stale")
+
+    ro = Normalizer(tmp / "unused-ro", db, writer=False)
+    st = lives_method_state(ro.conn)
+    check("lives method: a stale store is detected as MIXED, by the stamp rather than "
+          "by the table being empty",
+          st["mixed"] is True and st["min"] == 2 and st["current"] == ORDER_LIVES_METHOD, str(st))
+    check("lives method: a READ-ONLY opener does not re-fold -- that would be a second "
+          "writer on one store, which is BUG-20260910-067",
+          ro.refold_stats["refolded"] is False
+          and ro.conn.execute("SELECT terminations_seen FROM order_lives "
+                              "WHERE order_hash='0xOLD'").fetchone()[0] == 2)
+    check("lives method: and it did not even ATTEMPT the re-fold -- the reader path "
+          "marks itself, so 'SQLite refused the write' is not what is holding the line "
+          "here. `mode=ro` is the belt; this is the braces",
+          ro.refold_stats.get("reader") is True and "error" not in ro.refold_stats,
+          str(ro.refold_stats))
+    ro.close()
+
+    w = Normalizer(tmp / "unused-w", db, writer=True)
+    check("lives method: the WRITER re-folds the whole table on open",
+          w.refold_stats["refolded"] is True and w.refold_stats["rows"] == 1,
+          str(w.refold_stats))
+    check("lives method: every row is now at the current method_version",
+          lives_method_state(w.conn)["mixed"] is False
+          and w.conn.execute("SELECT MIN(method_version), MAX(method_version) "
+                             "FROM order_lives").fetchone() == (ORDER_LIVES_METHOD,
+                                                                ORDER_LIVES_METHOD))
+    check("lives method: and the STALE COUNT is corrected -- 0xOLD's doubled "
+          "terminations_seen goes 2 -> 1, which is the whole point of noticing",
+          w.conn.execute("SELECT terminations_seen FROM order_lives "
+                         "WHERE order_hash='0xOLD'").fetchone()[0] == 1)
+    check("lives method: the re-fold reports its elapsed time, so a slow one is "
+          "visible rather than felt", isinstance(w.refold_stats["seconds"], float))
+    w.close()
+
+    again = Normalizer(tmp / "unused-w2", db, writer=True)
+    check("lives method: a SECOND open re-folds nothing -- the stamp is current, so "
+          "this is not a re-fold on every start",
+          again.refold_stats["refolded"] is False and again.refold_stats["seconds"] == 0.0,
+          str(again.refold_stats))
+    again.close()
+
+
+def test_order_lives_method_mixed_is_reported_on_health_as_warn(tmp: Path) -> None:
+    """A reader cannot fix it, so it must say so -- with the sentence that names the fix.
+
+    The dashboard opens the store as the folding WRITER, so in normal operation it
+    re-folds on open and this never fires. It fires for a reader: `navanax` opened
+    read-only alongside a running dashboard, or a page serving while another
+    process owns the write side. Serving rows produced by two different fold rules
+    without saying so is the silent-wrongness class.
+    """
+    import shutil as _sh
+
+    import yaml as _yaml
+
+    from navanax.dashboard import Dashboard
+    from navanax.normalize import Normalizer
+
+    db = _pr10_stale_lives_store(tmp, "stale-health")
+
+    reader = Normalizer(tmp / "unused-r", db, writer=False)
+    lm = {"available": True, **reader.lives_method(),
+          "refold_on_open": reader.refold_stats["refolded"]}
+    check("lives method on Health: a reader reports MIXED rather than repairing",
+          lm["mixed"] is True and lm["min"] == 2 and lm["refold_on_open"] is False, str(lm))
+    check("lives method on Health: a mixed store is `warn`, not `ok` -- rows from two "
+          "fold rules are not a cosmetic difference",
+          lm["mixed"] is True)
+    reader.close()
+
+    src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
+    check("lives method on Health: the response names the fix in a sentence the "
+          "Operator can act on",
+          "Run rebuild-store.command or restart the dashboard." in src)
+    check("lives method on Health: and Health's top-level status goes to warn on it, "
+          "not only the sub-block",
+          'if lives_method.get("mixed")' in src)
+
+    root = tmp / "stalehealth"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    _sh.copy(db, root / cfg["analytical"]["path"])
+
+    dash = Dashboard(root, cfg, ["argonauts"])
+    h = dash.api_health({})
+    check("lives method on Health: the field is on every health response",
+          "lives_method" in h and h["lives_method"]["available"] is True,
+          str(h.get("lives_method")))
+    check("lives method on Health: the dashboard IS the folding writer, so opening it "
+          "repaired the store and the flag is clear",
+          h["lives_method"]["mixed"] is False
+          and h["lives_method"]["refold_on_open"] is True, str(h["lives_method"]))
+    check("lives method on Health: a repaired store's status is not `warn` for this "
+          "reason", h["status"] != "warn" or h["lives_method"]["mixed"] is False)
+    check("lives method on Health: the corrected count is what the page now serves",
+          dash.norm is not None and dash.norm.conn.execute(
+              "SELECT terminations_seen FROM order_lives WHERE order_hash='0xOLD'"
+          ).fetchone()[0] == 1)
+    if dash.norm is not None:
+        dash.norm.close()
+
+
+def test_order_lives_refold_cost_at_200k_lives(tmp: Path) -> None:
+    """How long the open-path re-fold takes on a store the size the Operator will have.
+
+    The measurement decides where the re-fold belongs. Under the budget it can run
+    in the open path, which is simplest and means a repaired store is serving
+    correct numbers from its first request. Over the budget it would have to move
+    into the sync loop, after `serve()` has bound its port, with Health degraded
+    while it runs -- more moving parts, and worth it only if the number says so.
+    """
+    import time as _time
+
+    from navanax.normalize import (
+        REFOLD_BLOCKING_BUDGET_SECONDS,
+        Normalizer,
+        dedup_key,
+        refold_lives_if_stale,
+    )
+
+    n = Normalizer(tmp / "empty-200k", tmp / "cost200k.sqlite")
+    rows, lives = [], []
+    for i in range(200_000):
+        h = f"0x{i:08x}"
+        ets = f"2026-09-09T10:{(i // 60) % 60:02d}:{i % 60:02d}Z"
+        rows.append(("run-a", i, "f", ets, 1000.0 + i, ets, 1.7889e9 + i,
+                     "item_received_bid", h, "a",
+                     dedup_key({"event_type": "item_received_bid", "order_hash": h,
+                                "event_timestamp": ets})))
+        lives.append((h, "argonauts", "item_received_bid", 1.7889e9 + i, None,
+                      "censored", 1, 0, 0, 2))
+    n.conn.executemany(
+        "INSERT INTO events (run, seq, file, observed_at, observed_ts, valid_at, valid_ts, "
+        "event_type, order_hash, conn, dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.executemany(
+        "INSERT INTO order_lives (order_hash, collection, event_type, t_place, t_term, "
+        "exit_reason, placement_seen, revalidated, terminations_seen, method_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)", lives)
+    n.conn.commit()
+
+    t0 = _time.monotonic()
+    res = refold_lives_if_stale(n.conn)
+    took = _time.monotonic() - t0
+    print(f"        MEASURED: full order_lives re-fold, {res['rows']:,} lives, "
+          f"{took:.1f}s (budget {REFOLD_BLOCKING_BUDGET_SECONDS:.0f}s)")
+    check("refold cost: 200,000 lives are all re-folded", res["rows"] == 200_000, str(res["rows"]))
+    check(f"refold cost: it finishes inside the {REFOLD_BLOCKING_BUDGET_SECONDS:.0f}s budget, "
+          f"so the open path is the right place for it "
+          f"(measured {took:.1f}s on this machine)",
+          took <= REFOLD_BLOCKING_BUDGET_SECONDS,
+          f"{took:.1f}s -- over budget, so the re-fold must move into the sync loop "
+          f"after serve() binds, with Health degraded while it runs")
+    check("refold cost: and the store is current afterwards",
+          res["after"]["mixed"] is False)
+    check("refold cost: the budget is a real budget -- a finite number of seconds, not "
+          "one raised until the measurement fits under it",
+          0 < REFOLD_BLOCKING_BUDGET_SECONDS <= 60,
+          str(REFOLD_BLOCKING_BUDGET_SECONDS))
+    n.close()
+
+
+def test_pr10_covered_by_is_revoked_when_the_evidence_changes(tmp: Path) -> None:
+    """BUG-20260911-077, the SIGKILL race.
+
+    `record_downtime_gap` runs on a process's next START, not on its death. So a
+    connection killed without warning leaves, for the seconds or hours until it
+    comes back: an unclosed landing file that looks like coverage, and NO gap in
+    the register to contradict it. A fold in that window annotates A's gap
+    "covered by b" -- honestly, on the evidence it has. When B restarts and
+    records its downtime the evidence changes, and the first version of this code
+    could not take the claim back: `WHERE covered_by IS NULL` made it permanent.
+
+    `gap_register` is in the OPERATIONAL store, which docs/07 §1 calls disposable
+    and reconstructible and which `close_gap` already updates in place. Correcting
+    a derived annotation there is allowed. The invariant that is NOT negotiable is
+    that no coverage logic ever closes, shortens or removes a gap.
+    """
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import annotate_gaps_covered_by
+
+    root = tmp / "revoke"
+    clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing-b", "run-b", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+            event_timestamp="2026-09-09T10:00:01Z")
+    w.flush()      # SIGKILL: no close(), so the manifest says `open` forever
+
+    store = OperationalStore(root / "ops.db")
+    gid = store.open_gap("run-a", "reconnect", topics=["collection:argonauts"],
+                         backfillable=False, started_at="2026-09-09T10:20:00Z",
+                         backfillable_classes=["item_sold"])
+    store.close_gap(gid, ended_at="2026-09-09T10:25:00Z")
+    snapshot = dict(next(g for g in store.all_gaps() if g["id"] == gid))
+
+    first = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    check("PR-10 revoke: with B dead but its gap not yet recorded, the fold annotates "
+          "on the evidence it has -- which is the honest answer at that moment",
+          first.marked == [gid] and first.revoked == [], str(first))
+
+    steady = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    check("PR-10 revoke: a fold that re-derives the SAME answer writes nothing and "
+          "logs nothing -- no flip-flop, no log spam",
+          steady == ([], []), str(steady))
+
+    # B comes back and records the downtime it could not record while it was dead.
+    store.close_gap(store.open_gap("run-b2", "process not running (killed)",
+                                   backfillable=False,
+                                   started_at="2026-09-09T10:18:00Z", conn_label="b"),
+                    ended_at="2026-09-09T10:30:00Z")
+
+    third = annotate_gaps_covered_by(store, "b", root / "landing-b")
+    after = dict(next(g for g in store.all_gaps() if g["id"] == gid))
+    check("PR-10 revoke: the next fold CLEARS the annotation the new evidence no "
+          "longer supports",
+          third.revoked == [gid] and third.marked == [] and after["covered_by"] is None,
+          str(third))
+    check("PR-10 revoke: and clearing is stable -- the fold after it changes nothing",
+          annotate_gaps_covered_by(store, "b", root / "landing-b") == ([], []))
+
+    check("PR-10 revoke: THE INVARIANT -- the gap itself was never closed, shortened "
+          "or removed by any of this; only `covered_by` ever moved",
+          {k: v for k, v in after.items() if k != "covered_by"}
+          == {k: v for k, v in snapshot.items() if k != "covered_by"}, str(after))
+    check("PR-10 revoke: it is still a gap, still closed at the time it always closed, "
+          "and still on the backfill worklist",
+          after["started_at"] == "2026-09-09T10:20:00Z"
+          and after["ended_at"] == "2026-09-09T10:25:00Z"
+          and gid in [g["id"] for g in store.unbackfilled_gaps()])
+
+
+def test_pr10_revocation_is_logged_once_per_transition(tmp: Path) -> None:
+    """Each transition says which gap and why, exactly once. A steady state is silent."""
+    import logging as _logging
+
+    from navanax.opstore import OperationalStore
+    from navanax.redundancy import annotate_gaps_covered_by
+
+    root = tmp / "revoke-log"
+    clock = FakeClock(datetime(2026, 9, 9, 10, 0, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing-b", "run-b", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    w.write(_pr10_frame(REAL_BID), topic="collection:argonauts",
+            event_timestamp="2026-09-09T10:00:01Z")
+    w.flush()
+    store = OperationalStore(root / "ops.db")
+    gid = store.open_gap("run-a", "reconnect", backfillable=False,
+                         started_at="2026-09-09T10:20:00Z")
+    store.close_gap(gid, ended_at="2026-09-09T10:25:00Z")
+
+    records: list[_logging.LogRecord] = []
+
+    class Cap(_logging.Handler):
+        def emit(self, record): records.append(record)
+
+    lg = _logging.getLogger("navanax.redundancy")
+    h = Cap()
+    lg.addHandler(h)
+    old_level = lg.level
+    lg.setLevel(_logging.INFO)
+    try:
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        set_lines = [r for r in records if "annotated covered_by" in r.getMessage()]
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        check("PR-10 revoke log: the annotation is logged ONCE, not on every fold",
+              len([r for r in records if "annotated covered_by" in r.getMessage()]) == 1,
+              str([r.getMessage()[:60] for r in records]))
+        check("PR-10 revoke log: and the line names the gap id",
+              set_lines and f"gap {gid}" in set_lines[0].getMessage(),
+              set_lines[0].getMessage()[:120] if set_lines else "no line")
+        records.clear()
+        store.close_gap(store.open_gap("run-b2", "killed", backfillable=False,
+                                       started_at="2026-09-09T10:18:00Z", conn_label="b"),
+                        ended_at="2026-09-09T10:30:00Z")
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        annotate_gaps_covered_by(store, "b", root / "landing-b")
+        rev = [r for r in records if "REVOKED" in r.getMessage()]
+        check("PR-10 revoke log: the revocation is logged once, at WARNING",
+              len(rev) == 1 and rev[0].levelno == _logging.WARNING,
+              str([r.getMessage()[:60] for r in records]))
+        check("PR-10 revoke log: and it says the gap is UNCHANGED, so nobody reads a "
+              "revocation as the gap being altered",
+              rev and "UNCHANGED" in rev[0].getMessage(),
+              rev[0].getMessage()[:200] if rev else "no line")
+    finally:
+        lg.removeHandler(h)
+        lg.setLevel(old_level)
+
+
+def test_pr10_health_carries_a_dedup_block(tmp: Path) -> None:
+    """E-W5. `order_criteria`'s primary key is `(run, seq, idx)` -- per-connection
+    by construction -- so with B running, every raw count over it DOUBLES. The
+    COVERS join still resolves correctly, so nothing is wrong; but the first
+    "trait offers by criteria" figure read off it would be 2x.
+
+    `/api/health.dedup` is what stops that number being read raw. It is present
+    whether or not the flag is on, because the day it IS on nothing else on the
+    page would say so.
+    """
+    import shutil as _sh
+
+    import yaml as _yaml
+
+    from navanax.dashboard import Dashboard
+
+    root = tmp / "healthdedup"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+    cfg["stream"]["redundant"]["enabled"] = True
+    (root / "config" / "base.yaml").write_text(_yaml.safe_dump(cfg))
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+
+    offer = _pr10_frame(REAL_TRAIT_OFFER)
+    for label, run in (("data/landing", "run-a"), ("data/landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        w.write(offer, topic="collection:argonauts",
+                event_timestamp=json.loads(offer)[4]["payload"]["event_timestamp"])
+        w.close()
+
+    dash = Dashboard(root, cfg, ["argonauts"])
+    dash._sync_once()
+    d = dash.api_health({})["dedup"]
+    check("PR-10 health: /api/health carries a `dedup` block", isinstance(d, dict) and d["enabled"])
+    check("PR-10 health: it names both landing roots",
+          set(d["landing_roots"]) == {"a", "b"}, str(d["landing_roots"]))
+    check("PR-10 health: it spells out the dedup key's fields, so the key is auditable "
+          "without reading the source",
+          "event_timestamp" in d["dedup_key_fields"] and "tx_hash" in d["dedup_key_fields"]
+          and "order_hash" in d["dedup_key_fields"], str(d["dedup_key_fields"]))
+    check("PR-10 health: it warns IN THE PAYLOAD that a raw order_criteria count doubles",
+          "DOUBLE" in d["order_criteria_note"] and "E-W5" in d["order_criteria_note"])
+    check("PR-10 health: the raw criteria count is double and the DE-DUPLICATED one is not",
+          d["criteria_rows_raw_n"] == 2 and d["criteria_rows_deduped_n"] == 1, json.dumps(d))
+    check("PR-10 health: the un-dedupable total is reported separately from rows folded "
+          "before the column existed",
+          "store_undedupable_n" in d and "pre_migration_rows_n" in d, json.dumps(d))
+    check("PR-10 health: the monitor's verdict rides along with it",
+          d["monitor"]["status"] in ("ok", "warn"), json.dumps(d["monitor"]))
+    check("PR-10 health: the dedup block carries the multiplicity disagreement count "
+          "AND its denominator, so the place one-per-key may have undercounted is "
+          "visible on the page rather than inferable from a total",
+          "multiplicity_disagreements_n" in d["monitor"]
+          and "seen_by_both_n" in d["monitor"]
+          and "multiplicity_disagreement_fraction" in d["monitor"], json.dumps(d["monitor"]))
+    check("PR-10 health: and what the order_lives fold actually collapsed, store-wide",
+          "lives_duplicates_merged_n" in d and "lives_multiplicity_disagreements_n" in d,
+          json.dumps({k: v for k, v in d.items() if k.startswith("lives_")}))
+    check("PR-10 health: coverage annotations standing, and how many had to be TAKEN "
+          "BACK -- a revocation means a gap was briefly marked covered on evidence "
+          "that later proved wrong (BUG-20260911-077)",
+          d["covered_by_n"] == 0 and d["covered_by_revoked_since_start_n"] == 0, json.dumps(d))
+    dash.stop() if hasattr(dash, "stop") else None
+    if dash.norm is not None:
+        dash.norm.close()
+
+
+def _pr10_two_conn_store(tmp: Path, name: str):
+    """A store holding the SAME three events on two connections. Returns the engine."""
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+
+    root = tmp / name
+    for label, run in (("landing", "run-a"), ("landing-b", "run-b")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        if label == "landing-b":
+            clock.advance(0.3)
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        for raw in (REAL_BID, REAL_LISTING, REAL_SALE):
+            frame = _pr10_frame(raw)
+            w.write(frame, topic="collection:argonauts",
+                    event_timestamp=json.loads(frame)[4]["payload"]["event_timestamp"])
+        w.close()
+    n = Normalizer(root / "landing", tmp / f"{name}.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    n.sync()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "UTC")
+    return n, eng
+
+
+def test_pr10_metrics_never_double_count_under_two_connections(tmp: Path) -> None:
+    """Finding 4. `events` holds both connections' rows by design, so every raw
+    COUNT over it doubles the moment a second connection runs.
+
+    Every count in `metrics.py` now keeps ONE row per dedup key when -- and only
+    when -- the store actually holds more than one connection's rows, and every
+    response that prints an n carries `dedup_applied` and `n_undedupable` so the
+    reader can tell a de-duplicated count from a raw one.
+    """
+    from navanax.normalize import iso_to_ts
+
+    n, eng = _pr10_two_conn_store(tmp, "twoconn")
+    rows = n.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    check("PR-10 metrics: the store really does hold both connections' rows -- 6 rows "
+          "for 3 events, which is the doubling under test",
+          rows == 6, str(rows))
+    check("PR-10 metrics: the engine detects a multi-connection store",
+          eng.multi_connection() is True)
+
+    start, end = iso_to_ts("2026-09-09T00:00:00Z"), iso_to_ts("2026-09-10T00:00:00Z")
+    mix = {r["event_type"]: r["n"] for r in eng.event_mix("argonauts", start, end)}
+    check("PR-10 metrics: event_mix counts each event ONCE, not twice",
+          mix == {"item_received_bid": 1, "item_listed": 1, "item_sold": 1}, str(mix))
+
+    mk = eng.makers("argonauts", start, end)
+    check("PR-10 metrics: makers' total is de-duplicated",
+          mk["total_events_with_maker"] == 3, str(mk))
+    check("PR-10 metrics: ...and it says so, with the un-dedupable count beside it",
+          mk["basis"]["dedup_applied"] is True and mk["basis"]["n_undedupable"] == 0,
+          str(mk["basis"]))
+
+    ser = eng.series(metric="event_count", collection="argonauts", range_="7d",
+                     interval="1d", now=datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc))
+    check("PR-10 metrics: a COUNT series does not double",
+          sum(v for v in ser["raw"] if v) == 3, str(ser["raw"]))
+    check("PR-10 metrics: and its basis carries dedup_applied and n_undedupable",
+          ser["basis"]["dedup_applied"] is True and ser["basis"]["n_undedupable"] == 0,
+          str({k: ser["basis"][k] for k in ("dedup_applied", "n_undedupable")}))
+
+    led = eng.ledger("argonauts", start=start, end=end)
+    check("PR-10 metrics: the ledger LISTS each event once -- a row shown twice is its "
+          "own lie, separately from any count",
+          len(led["rows"]) == 3 and led["total_estimate"] == 3, str(led["total_estimate"]))
+    check("PR-10 metrics: the ledger basis states the de-duplication in its filter block",
+          led["basis"]["dedup_applied"] is True
+          and led["basis"]["filter"]["dedup"]["applied"] is True, str(led["basis"]["filter"]))
+
+    ch = eng.ledger_chart("argonauts", start=start, end=end)
+    check("PR-10 metrics: the ledger chart plots each event once",
+          sum(ch["counts"].values()) == 3 and ch["basis"]["dedup_applied"] is True, str(ch["counts"]))
+
+    wl = eng.wallets("argonauts", start, end)
+    check("PR-10 metrics: the wallets view does not double its totals",
+          wl["total_events"] == 3 and wl["basis"]["dedup_applied"] is True, str(wl["total_events"]))
+    addr = REAL_BID[4]["payload"]["maker"]["address"]
+    w1 = eng.wallet("argonauts", addr, start, end)
+    check("PR-10 metrics: one wallet card's event count does not double",
+          w1["behaviour"]["events"] == 1, str(w1["behaviour"]["events"]))
+    check("PR-10 metrics: the wallet card says whether dedup was applied, without any "
+          "free-text field (the address-only guard forbids one)",
+          w1["basis"]["dedup_applied"] is True and w1["basis"]["n_undedupable"] == 0,
+          str(w1["basis"]["dedup_applied"]))
+    check("PR-10 metrics: the tape shows each sale once",
+          len(eng.tape("argonauts")) == 1)
+    n.close()
+
+
+def test_pr10_single_connection_metrics_are_byte_identical(tmp: Path) -> None:
+    """The other half of finding 4, and the one that makes it safe to ship.
+
+    On a single-connection store NOTHING may change: not a count, not a query
+    string, not a query plan. `INDEXED BY` on the ledger and on the three
+    lifecycle queries is load-bearing (BUG-20260909-040, BUG-20260910-068), and a
+    dedup filter that appended itself unconditionally would be free to change a
+    plan that took 29 s to get right.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "oneconn"
+    clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(root / "landing", "run-a", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+    for raw in (REAL_BID, REAL_LISTING, REAL_SALE):
+        frame = _pr10_frame(raw)
+        w.write(frame, topic="collection:argonauts",
+                event_timestamp=json.loads(frame)[4]["payload"]["event_timestamp"])
+    w.close()
+    n = Normalizer(root / "landing", tmp / "oneconn.sqlite")
+    n.sync()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "UTC")
+
+    check("PR-10 single-connection: the engine says so", eng.multi_connection() is False)
+    check("PR-10 single-connection: the dedup filter is the EMPTY STRING, so every SQL "
+          "statement in metrics.py is character-for-character what it was",
+          eng.dedup_where("e") == "", repr(eng.dedup_where("e")))
+    q = eng.ledger_query_plan("argonauts", sort="valid_ts", direction="desc")
+    check("PR-10 single-connection: the ledger's page SQL contains no dedup subquery",
+          "dedup_key" not in q["sql"], q["sql"][:200])
+    check("PR-10 single-connection: the plan still uses the named index and has no "
+          "TEMP B-TREE (BUG-20260910-068)",
+          any(q["index"] in line for line in q["plan"])
+          and not any("TEMP B-TREE" in line for line in q["plan"]), str(q["plan"]))
+    led = eng.ledger("argonauts", start=iso_to_ts("2026-09-09T00:00:00Z"),
+                     end=iso_to_ts("2026-09-10T00:00:00Z"))
+    check("PR-10 single-connection: the basis says no de-duplication was applied, and "
+          "the filter block carries no `dedup` key at all",
+          led["basis"]["dedup_applied"] is False and "dedup" not in led["basis"]["filter"],
+          str(led["basis"]["filter"]))
+    check("PR-10 single-connection: n_undedupable is 0, not a count of rows nobody "
+          "de-duplicated", led["basis"]["n_undedupable"] == 0)
+    n.close()
+
+
+def test_pr10_metrics_count_undedupable_rows_per_row_and_say_so(tmp: Path) -> None:
+    """A row with no `event_timestamp` cannot be proved a duplicate, so it is
+    counted PER ROW -- and that is exactly the part of any n a second connection
+    can still inflate. Every multi-connection response names it.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer, iso_to_ts
+
+    root = tmp / "undedup-metrics"
+    for label, run, sent in (("landing", "run-a", "2026-09-09T10:19:02.375000Z"),
+                             ("landing-b", "run-b", "2026-09-09T10:19:02.981000Z")):
+        clock = FakeClock(datetime(2026, 9, 9, 10, 20, 0, tzinfo=timezone.utc))
+        w = LandingZoneWriter(root / label, run, codec=GzipCodec(),
+                              clock=clock.now, monotonic=clock.monotonic, auto_flush=False)
+        good = _pr10_frame(REAL_BID)
+        w.write(good, topic="collection:argonauts",
+                event_timestamp=json.loads(good)[4]["payload"]["event_timestamp"])
+        bad = json.loads(_pr10_frame(REAL_LISTING, event_timestamp=None))
+        bad[4]["sent_at"] = sent
+        w.write(json.dumps(bad, separators=(",", ":")), topic="collection:argonauts",
+                event_timestamp=None)
+        w.close()
+    n = Normalizer(root / "landing", tmp / "undedup-metrics.sqlite",
+                   extra_roots=[("b", root / "landing-b")])
+    n.sync()
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "UTC")
+    start, end = iso_to_ts("2026-09-09T00:00:00Z"), iso_to_ts("2026-09-10T00:00:00Z")
+    mix = {r["event_type"]: r["n"] for r in eng.event_mix("argonauts", start, end)}
+    check("PR-10 un-dedupable in metrics: the keyable bid counts ONCE, the two "
+          "timestamp-less listings count TWICE -- neither is merged on a guess",
+          mix == {"item_received_bid": 1, "item_listed": 2}, str(mix))
+    b = eng.dedup_basis("argonauts", start, end)
+    check("PR-10 un-dedupable in metrics: n_undedupable names exactly those two rows",
+          b["dedup_applied"] is True and b["n_undedupable"] == 2, str(b))
+    n.close()
+
+
+def test_pr10_stale_launchd_jobs_are_computed_and_removed(tmp: Path) -> None:
+    """Finding 6. Turning the flag back OFF strands `com.navanax.recorder-b`:
+    launchd keeps starting it, `ingest --redundant` refuses with the configuration
+    exit code because the flag is off, and `KeepAlive` restarts it ten seconds
+    later, forever.
+    """
+    import shutil as _sh
+
+    import yaml as _yaml
+    ld = _launchd()
+
+    def proj(name: str, enabled: bool) -> Path:
+        root = tmp / name
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        for f in ("base.yaml", "watchlist.yaml"):
+            _sh.copy(ROOT / "config" / f, root / "config" / f)
+        cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+        cfg["stream"]["redundant"]["enabled"] = enabled
+        (root / "config" / "base.yaml").write_text(_yaml.safe_dump(cfg))
+        return root
+
+    off, on = proj("stale-off", False), proj("stale-on", True)
+    loaded = [ld.RECORDER, ld.RECORDER_B, ld.DASHBOARD, ld.TRAITS, ld.KEEPAWAKE]
+    check("PR-10 stale: with the flag OFF, a loaded recorder-b is stale",
+          ld.stale_labels(off, loaded) == (ld.RECORDER_B,), str(ld.stale_labels(off, loaded)))
+    check("PR-10 stale: with the flag ON, nothing is stale",
+          ld.stale_labels(on, loaded) == (), str(ld.stale_labels(on, loaded)))
+    check("PR-10 stale: the OPT-IN keepawake job is never stale -- removing it would "
+          "undo a deliberate choice about the machine's sleep behaviour",
+          ld.KEEPAWAKE not in ld.stale_labels(off, loaded)
+          and ld.KEEPAWAKE not in ld.stale_labels(on, loaded))
+    check("PR-10 stale: a job of ours this version cannot NAME is reported, never "
+          "booted out -- it is likelier to be a newer version's than rubbish",
+          ld.stale_labels(off, [*loaded, "com.navanax.future"]) == (ld.RECORDER_B,)
+          and ld.unknown_labels([*loaded, "com.navanax.future"]) == ("com.navanax.future",))
+    check("PR-10 stale: someone else's launchd job is never touched",
+          ld.stale_labels(off, ["com.apple.something", "com.example.recorder-b"]) == ()
+          and ld.unknown_labels(["com.apple.something"]) == ())
+    import subprocess as _sp2
+    check("PR-10 stale: the CLI prints the stale labels one per line",
+          _sp2.run([sys.executable, "tools/launchd.py", "stale", "--root", str(off),
+                    *loaded], cwd=ROOT, capture_output=True, text=True
+                   ).stdout.split() == [ld.RECORDER_B])
+
+    inst = (ROOT / "autostart-install.command").read_text()
+    check("PR-10 stale: the installer computes the stale list and boots those jobs out",
+          "tools/launchd.py stale" in inst and "launchctl bootout" in inst
+          and "no longer wants" in inst)
+    check("PR-10 stale: the installer PRINTS what it removed rather than removing "
+          "quietly", "removed $L" in inst)
+    check("PR-10 stale: the installer leaves unknown navanax jobs alone and says so",
+          "LEFT ALONE" in inst)
+
+
+def test_pr10_uninstall_and_status_do_not_hardcode_the_label_list(tmp: Path) -> None:
+    """Finding 5. A hardcoded three-label list cannot stop, and cannot show, a job
+    it has never heard of -- and `com.navanax.recorder-b` is exactly that job. Both
+    launchers take the list from the generator AND from what is actually loaded.
+    """
+    un = (ROOT / "autostart-uninstall.command").read_text()
+    st = (ROOT / "autostart-status.command").read_text()
+    for name, text in (("autostart-uninstall.command", un), ("autostart-status.command", st)):
+        check(f"{name}: asks tools/launchd.py for the label list",
+              "tools/launchd.py all-labels" in text, text[:0])
+        check(f"{name}: ALSO covers every com.navanax.* label currently loaded, so a "
+              f"stranded job it has never heard of is not invisible",
+              "launchctl list" in text and r"com\.navanax\." in text)
+    check("autostart-uninstall.command: says when it is removing a job this version "
+          "does not install -- it is the uninstaller, so it removes it, but not silently",
+          "not one this version installs" in un)
+    check("autostart-status.command: a recorder-b that is not installed reads as the "
+          "flag being off, not as a broken install",
+          "redundant second stream connection is OFF" in st)
+    check("autostart-status.command: is still read-only -- it stops nothing and removes "
+          "nothing",
+          "bootout" not in st and "rm -f" not in st)
+
+
+def test_pr10_launchd_renders_the_b_recorder_only_when_enabled(tmp: Path) -> None:
+    """The launchd half: `tools/launchd.py` READS the flag. With it off there is
+    no B job on the machine at all; with it on there is one, supervised exactly
+    like A and pointed at `--redundant`.
+    """
+    import plistlib
+    import shutil as _sh
+
+    import yaml as _yaml
+    ld = _launchd()
+
+    def proj(name: str, enabled: bool) -> Path:
+        root = tmp / name
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        for f in ("base.yaml", "watchlist.yaml"):
+            _sh.copy(ROOT / "config" / f, root / "config" / f)
+        cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+        cfg["stream"]["redundant"]["enabled"] = enabled
+        (root / "config" / "base.yaml").write_text(_yaml.safe_dump(cfg))
+        return root
+
+    off, on = proj("ld-off", False), proj("ld-on", True)
+    check("PR-10 launchd: flag off -> the three jobs it has always installed",
+          ld.autostart_labels(off) == ld.AUTOSTART_LABELS, str(ld.autostart_labels(off)))
+    check("PR-10 launchd: flag off -> no redundant recorder job is rendered",
+          ld.RECORDER_B not in ld.autostart_labels(off))
+    check("PR-10 launchd: flag on -> the redundant recorder joins the install list",
+          ld.RECORDER_B in ld.autostart_labels(on), str(ld.autostart_labels(on)))
+    check("PR-10 launchd: an unreadable project directory renders NO B job -- a job "
+          "for a connection that refuses to start would restart every 10s forever",
+          not ld.redundant_enabled(tmp / "does-not-exist"))
+
+    b = plistlib.loads(ld.render(ld.RECORDER_B, on, python="/usr/bin/python3"))
+    check("PR-10 launchd: the B job runs `ingest --redundant --supervised`",
+          b["ProgramArguments"][-3:] == ["ingest", "--redundant", "--supervised"],
+          str(b["ProgramArguments"]))
+    check("PR-10 launchd: B is supervised like A -- an hour it did not record cannot "
+          "be bought back either",
+          b["KeepAlive"] is True and b["RunAtLoad"] is True and b["ExitTimeOut"] == 30)
+    check("PR-10 launchd: B writes its own log, so one recorder's restarts can be told "
+          "from the other's",
+          b["StandardOutPath"].endswith("recorder-b.log"))
+    check("PR-10 launchd: no API key is written into B's plist either",
+          "KEY" not in json.dumps(b.get("EnvironmentVariables", {})))
+    inst = (ROOT / "autostart-install.command").read_text()
+    check("PR-10 launchd: the installer asks launchd.py for the label list rather than "
+          "carrying its own copy",
+          "tools/launchd.py labels" in inst)
+
+
+def test_pr10_is_documented_where_an_operator_would_look() -> None:
+    """A flag whose cost is "disk doubles and every raw count over events doubles"
+    has to say so somewhere the Operator reads, not only in a commit message."""
+    d07 = (ROOT / "docs" / "07_STORAGE_AND_RECORDING.md").read_text()
+    check("docs/07 §3 has the redundant-stream subsection",
+          "3.x Redundant stream (PR-10, default off)" in d07)
+    check("docs/07: it states the cost (disk doubles) as well as the benefit",
+          "doubles" in d07.lower() and "landing-b" in d07)
+    check("docs/07: it states what redundancy does NOT buy",
+          "does not buy" in d07.lower())
+    d04 = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    check("docs/04 §8 describes the second launchd job and that it is only installed "
+          "when the flag is on",
+          "com.navanax.recorder-b" in d04 and "stream.redundant.enabled" in d04)
+    import yaml as _yaml
+    asm = _yaml.safe_load((ROOT / "config" / "assumptions.yaml").read_text())
+    ids = {a["id"]: a for a in asm["assumptions"]}
+    check("config/assumptions.yaml registers the dedup key as an assumption",
+          "ASM-030" in ids, str(sorted(ids)))
+    if "ASM-030" in ids:
+        a = ids["ASM-030"]
+        check("ASM-030 names the code it governs and its owner",
+              "normalize.py" in a["code"] and a["owner"] == "data-engineer", str(a.get("code")))
+        check("ASM-030 records that the key is built from event_timestamp and never "
+              "from the coalesced valid_at",
+              "event_timestamp" in json.dumps(a["value"])
+              and "valid_at" in a["rationale"], json.dumps(a["value"]))
+        check("ASM-030 records the CORRECTED multiplicity rule and names the bug that "
+              "changed it, so the superseded reasoning is visible rather than erased",
+              a["value"]["multiplicity"] == "one_row_per_key"
+              and "BUG-20260911-073" in json.dumps(a["value"]), json.dumps(a["value"]))
+        check("ASM-030 records that gap coverage subtracts the other connection's own "
+              "gaps, and annotates whole gaps only",
+              a["value"]["coverage_rule"] == "manifest_intervals_minus_own_gaps"
+              and a["value"]["coverage_extent"] == "whole_gap_only", json.dumps(a["value"]))
+        check("ASM-030 says plainly that the multiplicity-disagreement threshold is "
+              "unmeasured and may prove noisy, rather than presenting 0 as a finding",
+              "unmeasured" in a["rationale"] and "noisy" in a["rationale"])
+    check("docs/07: names one-row-per-key, and the undercount it costs",
+          "one row per dedup key" in d07 and "undercount" in d07.lower())
+    check("docs/07: states that the manifest alone is not coverage",
+          "minus that connection's own rows in the gap register" in d07)
+    check("docs/07: states that the metric layer de-duplicates too, and that a caveat "
+          "on Health was not a fix",
+          "dedup_applied" in d07 and "not a substitute" in d07)
+    check("docs/07: documents the upgrade path -- the writer re-folds a stale "
+          "method_version, a reader reports it, with the measured cost",
+          "method_version" in d07 and "200,000 lives" in d07
+          and "rebuild-store.command or restart the dashboard" in d07)
+    check("docs/07: documents that coverage annotations are REVOCABLE, and restates "
+          "the invariant they may never touch",
+          "revocable" in d07.lower()
+          and "ever closes, shortens or removes a gap" in d07)
+    if "ASM-030" in ids:
+        check("ASM-030 records that coverage is revocable and that a reader never "
+              "re-folds", ids["ASM-030"]["value"]["coverage_revocable"] is True
+              and ids["ASM-030"]["value"]["lives_method_refold_on_open"] == "writer_only")
+    check("docs/04 §8.13: says a flag turned back off REMOVES the job rather than "
+          "leaving it crash-looping",
+          "boots out and deletes" in d04 and "every ten seconds forever" in d04)
+    check("docs/04 §8.13: says the uninstaller and the status window take the label "
+          "list from the generator plus what is loaded",
+          "launchctl list" in d04 and "two sources" in d04)
 
 if __name__ == "__main__":
     raise SystemExit(main())

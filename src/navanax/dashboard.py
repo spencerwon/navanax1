@@ -33,9 +33,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from . import redundancy
 from .landing import is_integrity_failure, verify_manifest
 from .metrics import METRICS, MetricEngine, load_intervals, parse_range, parse_trait_filter
-from .normalize import Normalizer, iso_to_ts, rebuild_recipe, store_writer_info
+from .normalize import (
+    DEDUP_KEY_FIELDS,
+    Normalizer,
+    iso_to_ts,
+    rebuild_recipe,
+    store_writer_info,
+)
 from .opstore import OperationalStore
 from .traits import ensure_schema as ensure_traits_schema
 from .traits import trait_values
@@ -71,6 +78,17 @@ class Dashboard:
         self.cfg = cfg
         self.slugs = slugs
         self.landing = root / cfg["landing"]["root"]
+        # PR-10. Every landing root the normalizer folds, as (label, path). With
+        # `stream.redundant.enabled` false -- the default -- this is exactly one
+        # entry and everything below behaves as it always has. `self.landing`
+        # stays the PRIMARY root: the recorder-liveness check, the disk figure and
+        # the manifest-driven gap list are about connection A.
+        self.redundant = redundancy.settings(cfg)
+        self.landing_roots = redundancy.landing_roots(root, cfg)
+        self.dup_monitor = redundancy.DuplicateFractionMonitor(
+            min_events=self.redundant.min_events,
+            collapse_fraction=self.redundant.collapse_fraction,
+            label_b=self.redundant.label)
         self.tz = (cfg.get("display") or {}).get("timezone", "UTC")
         self.intervals = load_intervals(root / "config" / "intervals.yaml")
         self.db_path = root / cfg["analytical"]["path"]
@@ -78,6 +96,8 @@ class Dashboard:
         self.lock = threading.Lock()
         self.refresh = float((cfg.get("dashboard") or {}).get("refresh_seconds", 5))
         self.last_sync: dict[str, Any] = {"at": None, "stats": None, "error": None, "took_ms": None}
+        #: `covered_by` annotations this process has had to RETRACT (BUG-20260911-077).
+        self.covered_by_revoked = 0
         self._quick_check: dict[str, Any] | None = None
         self._quick_check_mono: float = 0.0
         # DEGRADED MODE (BUG-20260910-067, tech-lead B1). `norm` is None and
@@ -116,7 +136,9 @@ class Dashboard:
         must exit 4 rather than serve a page with no data behind it.
         """
         try:
-            norm = Normalizer(self.landing, self.db_path, writer=True)
+            norm = Normalizer(self.landing_roots[0][1], self.db_path, writer=True,
+                              label=self.landing_roots[0][0],
+                              extra_roots=self.landing_roots[1:])
             ensure_traits_schema(norm.conn)
         except sqlite3.DatabaseError as exc:
             self.norm = self.engine = None
@@ -238,12 +260,55 @@ class Dashboard:
         try:
             with self.lock:
                 stats = self.norm.sync()
+            stats = {**stats, "gaps_annotated_covered": self.annotate_covered_gaps()}
+            # PR-10. A fold can be the one that first brings a second connection's
+            # rows into the store, and every count in `metrics` branches on that
+            # answer. Cached per fold, invalidated here -- the alternative is a
+            # page that keeps printing doubled counts until the next restart.
+            if self.engine is not None:
+                self.engine.invalidate_connection_cache()
             self.last_sync = {"at": _now_iso(), "stats": stats, "error": None,
                               "took_ms": round((time.monotonic() - t0) * 1000)}
         except Exception as exc:  # noqa: BLE001 - the page must keep serving
             log.exception("normalizer sync failed")
             self.last_sync = {"at": _now_iso(), "stats": None, "error": f"{type(exc).__name__}: {exc}",
                               "took_ms": round((time.monotonic() - t0) * 1000)}
+
+    def annotate_covered_gaps(self) -> int:
+        """Mark A's gaps that B was demonstrably recording through. Returns the count.
+
+        NOTHING IS SUPPRESSED. The gap keeps its start, its end, its class lists
+        and its open/closed state, and it is still counted by `open_gaps()` and by
+        `unbackfilled_gaps()`. All that is added is `covered_by='b'`, on a column
+        that was NULL. "A was blind and B was not" is a different fact from
+        "no gap occurred", and silently promoting the first into the second is
+        exactly the confusion this project cannot afford (dataeng §3.a, failure
+        mode 5).
+
+        Both directions: it also CLEARS an annotation the current evidence no
+        longer supports (BUG-20260911-077), because coverage is derived from
+        evidence that arrives late and a claim made on incomplete evidence must be
+        retractable. The gap itself is never closed, shortened or removed.
+
+        A no-op with the flag off: there is no second connection to have covered
+        anything, and this returns 0 without touching the register.
+
+        Coverage is the other connection's open-file windows MINUS its own
+        recorded gaps (BUG-20260911-074), and only a gap covered END TO END is
+        annotated.
+        """
+        if not self.redundant.enabled:
+            return 0
+        marked = 0
+        for label, lroot in self.landing_roots[1:]:
+            upd = redundancy.annotate_gaps_covered_by(self.store, label, lroot)
+            marked += len(upd.marked)
+            # Revocations are counted for the life of this process and surfaced on
+            # Health. A claim that had to be taken back is worth more attention
+            # than one that stood, and a count that only ever appeared in a log
+            # line is a count nobody reads (BUG-20260911-077).
+            self.covered_by_revoked += len(upd.revoked)
+        return marked
 
     # -- API ------------------------------------------------------------------
     def _recorder_state(self) -> dict[str, Any]:
@@ -723,9 +788,122 @@ class Dashboard:
                       "events_last_60s": None},
             "store_writer": store_writer_info(self.db_path),
             "quick_check": self.store_quick_check(),
+            "dedup": self.api_dedup(),
+            "lives_method": self.api_lives_method(),
+            "status": "warn",
             "ethusd": {"rate": None, "at": None,
                        "provider": "not readable: the analytical store is unreadable"},
         }
+
+    def api_dedup(self) -> dict[str, Any]:
+        """The redundant stream's duplicate picture. Always present, flag or no flag.
+
+        WHY THIS EXISTS AT ALL (E-W5). `events` is a faithful fold of BOTH
+        append-only landing zones, so under a redundant stream the same event is
+        two rows there, and the same trait offer is two sets of rows in
+        `order_criteria` -- whose primary key is `(run, seq, idx)`, which is
+        per-connection by construction. The COVERS join still resolves correctly,
+        so nothing is WRONG; but any raw count over `order_criteria` DOUBLES, and
+        the first "trait offers by criteria" figure read off it would be 2x. This
+        block is what stops that number being read raw: it says whether a second
+        connection is on, how many rows each connection contributed, and what the
+        de-duplicated criteria count is.
+
+        Dedup itself is resolved in `order_lives`, not here and not in a view
+        (E-W4/C8) -- this endpoint only MEASURES it.
+
+        Every fraction below carries its numerator and its denominator, and is
+        None rather than 0.0 when there is nothing to divide by.
+        """
+        s = self.redundant
+        out: dict[str, Any] = {
+            "enabled": s.enabled,
+            "label_b": s.label,
+            "landing_roots": {lbl: str(p) for lbl, p in self.landing_roots},
+            "dedup_key_fields": list(DEDUP_KEY_FIELDS),
+            "order_criteria_note":
+                ("`order_criteria` has a PER-CONNECTION primary key (run, seq, idx), so with a "
+                 "second connection running every criteria count over it is DOUBLE. Read "
+                 "`criteria_rows_deduped` below, never a raw COUNT(*) over order_criteria "
+                 "(E-W5)."),
+        }
+        if self.norm is None:
+            return {**out, "available": False,
+                    "note": "the analytical store is unreadable; no duplicate measurement is possible"}
+        with self.lock:
+            c = self.norm.conn
+            counts = redundancy.dedup_counts(
+                c, window_seconds=s.window_seconds, now_ts=time.time(), label_b=s.label)
+            out["monitor"] = self.dup_monitor.evaluate(counts)
+            row = c.execute(
+                "SELECT COUNT(*), SUM(dedup_key IS NULL) FROM events").fetchone()
+            out["store_total_events_n"] = row[0] or 0
+            out["store_undedupable_n"] = row[1] or 0
+            # A row folded before PR-10 existed has no dedup_key and no `conn`,
+            # and `valid_at` was ALREADY coalesced with `sent_at`, so it cannot
+            # say whether it carried an `event_timestamp`. Those rows are counted
+            # separately: adding them to the un-dedupable rate would report a
+            # migration as a property of the market.
+            out["pre_migration_rows_n"] = c.execute(
+                "SELECT COUNT(*) FROM events WHERE conn IS NULL").fetchone()[0]
+            out["criteria_rows_raw_n"] = c.execute(
+                "SELECT COUNT(*) FROM order_criteria").fetchone()[0]
+            out["criteria_rows_deduped_n"] = c.execute(
+                "SELECT COUNT(*) FROM (SELECT DISTINCT e.dedup_key, oc.idx "
+                "  FROM order_criteria oc JOIN events e ON e.run=oc.run AND e.seq=oc.seq "
+                " WHERE e.dedup_key IS NOT NULL) "
+            ).fetchone()[0] + c.execute(
+                "SELECT COUNT(*) FROM order_criteria oc JOIN events e "
+                "  ON e.run=oc.run AND e.seq=oc.seq WHERE e.dedup_key IS NULL").fetchone()[0]
+            out["lives_duplicates_merged_n"] = c.execute(
+                "SELECT COALESCE(SUM(duplicates_merged), 0) FROM order_lives").fetchone()[0]
+            out["lives_terminations_undedupable_n"] = c.execute(
+                "SELECT COALESCE(SUM(terminations_undedupable), 0) FROM order_lives").fetchone()[0]
+            # Where the one-row-per-key fold could not tell a duplicate from a
+            # repeat delivery, store-wide (BUG-20260911-073). The windowed figure
+            # is in `monitor`; this is the running total, which is the one that
+            # answers "how much of this store is affected at all".
+            out["lives_multiplicity_disagreements_n"] = c.execute(
+                "SELECT COALESCE(SUM(multiplicity_disagreements), 0) FROM order_lives").fetchone()[0]
+        # Coverage annotations currently standing, and how many this process has had
+        # to TAKE BACK. A revocation means a gap was briefly marked "the other
+        # connection covered this" on evidence that later proved wrong -- the
+        # SIGKILL race in BUG-20260911-077. A non-zero count here is not an error;
+        # it is the correction working, and it is worth seeing.
+        out["covered_by_n"] = len([g for g in self.store.all_gaps() if g.get("covered_by")])
+        out["covered_by_revoked_since_start_n"] = self.covered_by_revoked
+        out["covered_by_revoked_scope"] = "this dashboard process; not persisted, resets on restart"
+        out["available"] = True
+        return out
+
+    def api_lives_method(self) -> dict[str, Any]:
+        """Which fold rules produced the rows in `order_lives` (BUG-20260911-076).
+
+        `ORDER_LIVES_METHOD` was written on every row and read by nothing, so a
+        store upgraded in place carried rows from two different folds with no
+        signal anywhere. The folding WRITER re-folds on open. A READER cannot --
+        a second writer on one SQLite store is how `analytics.sqlite` became
+        "database disk image is malformed" on 2026-09-10 -- so it reports instead,
+        and Health goes to `warn` with a sentence naming the fix.
+        """
+        if self.norm is None:
+            return {"available": False, "mixed": False,
+                    "note": "the analytical store is unreadable; the fold's method version "
+                            "cannot be read either"}
+        with self.lock:
+            st = self.norm.lives_method()
+        out = {"available": True, **st,
+               "refold_on_open": self.norm.refold_stats.get("refolded", False),
+               "refold_seconds": self.norm.refold_stats.get("seconds", 0.0)}
+        if st["mixed"]:
+            out["action_required"] = (
+                f"order_lives holds rows folded by method_version "
+                f"{st['min'] if not st['null_rows'] else 'NULL'}-{st['max']} and this build "
+                f"writes {st['current']}. Rows from the older rules can carry counts the "
+                f"current rules would not produce -- under method 2, a doubled "
+                f"terminations_seen on any order with no further events. "
+                f"Run rebuild-store.command or restart the dashboard.")
+        return out
 
     def api_health(self, q: dict[str, str]) -> dict[str, Any]:
         """Everything the Health view asks: can I trust the other tabs?
@@ -754,6 +932,8 @@ class Dashboard:
             if p.exists():
                 store_bytes += p.stat().st_size
         crossed = audit.get("crossed_book") or {}
+        dedup = self.api_dedup()
+        lives_method = self.api_lives_method()
         with self.lock:
             counts = {t: self.norm.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
                       for t in ("events", "order_lives", "order_criteria", "unparsed",
@@ -796,6 +976,19 @@ class Dashboard:
             # suspected, and a quick_check buried in `store` is a check nobody reads.
             "store_writer": self.norm.writer_info(),
             "quick_check": self.store_quick_check(),
+            # BUG-20260911-076. `order_lives` rows are stamped with the fold rules
+            # that made them. A store opened READ-ONLY cannot re-fold -- that would
+            # be a second writer (BUG-20260910-067) -- so when it finds rows from an
+            # older rule set it has to SAY so rather than serve them silently. Under
+            # method 2 a stale row carries a doubled `terminations_seen`.
+            "lives_method": lives_method,
+            "dedup": dedup,
+            # count over `events` or `order_criteria` doubles the moment it IS on
+            # and nothing else on this page would say so (E-W5). `status` is
+            # 'warn' when duplicates have collapsed while both connections are
+            # healthy -- the flattering-direction failure (dataeng failure mode 3).
+            "status": ("warn" if lives_method.get("mixed")
+                       else (dedup.get("monitor") or {}).get("status", "ok")),
             "ethusd": status["ethusd"],
         }
 

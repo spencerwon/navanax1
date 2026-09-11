@@ -126,3 +126,106 @@ assumptions:
       its own. Both choices are defensible; this one widens the band, and
       widening is the direction that cannot manufacture an edge.
     applies_to: [survival, survival_drill, bid_lifetime_panel]
+
+  - id: ASM-030
+    name: redundant_stream_dedup_key
+    layer: derivation
+    decided: 2026-09-11
+    decided_by: tech-lead (TECHLEAD_2026-09-09_factcheck E-W3/E-U3/E-W4, PR-10); implemented by data-engineer
+    owner: data-engineer
+    review: 2026-12-01
+    code: src/navanax/normalize.py::dedup_key, src/navanax/normalize.py::_dedupe_life_rows
+    value:
+      key_fields: [event_type, order_hash, event_timestamp, tx_hash, contract,
+                   token_id, maker, price_wei, quantity]
+      separator: "0x1F"                    # no field value can contain it, so none can forge a boundary
+      excluded_fields: [observed_at, _recv, _seq, run, sent_at]
+      timestamp_field: event_timestamp     # NEVER the coalesced valid_at
+      no_event_timestamp: undedupable      # kept, counted, never merged
+      multiplicity: one_row_per_key        # NOT max-over-connections: that doubled on a B replay
+      # The superseded rule and the bug that retired it, as DATA rather than as a
+      # comment: a reader loading this file gets the history, not just the answer.
+      multiplicity_superseded: max_over_connections
+      multiplicity_changed_by: BUG-20260911-073
+      coverage_changed_by: BUG-20260911-074
+      discarded_multiplicity: counted      # order_lives.deliveries_a / deliveries_b / multiplicity_disagreements
+      monitor_multiplicity_disagreement_max: 0
+      coverage_rule: manifest_intervals_minus_own_gaps   # BUG-20260911-074
+      coverage_extent: whole_gap_only      # a partly covered gap gets no annotation
+      coverage_revocable: true             # cleared when the evidence stops supporting it
+      coverage_revocable_changed_by: BUG-20260911-077
+      lives_method_refold_on_open: writer_only   # a reader reports; it never re-folds
+      lives_method_changed_by: BUG-20260911-076
+      resolved_in: order_lives             # materialised; never a view (INDEXED BY, BUG-20260909-040)
+      events_table: keeps_both_rows        # a fold of two append-only stores discards nothing
+      monitor_collapse_fraction: 0.5       # warn below this observed duplicate fraction
+      monitor_window_seconds: 900
+      monitor_min_events: 100              # per connection, before the monitor evaluates at all
+    rationale: >
+      Two independent sockets agree on exactly one clock: the server-assigned
+      `event_timestamp`. They do not agree on `sent_at` (a per-message Phoenix
+      push timestamp), on `observed_at`, or on `(run, seq)`, and including any of
+      those makes the key useless and doubles every count. The code's `valid_at`
+      is `event_timestamp or sent_at`, so keying on it would have failed exactly
+      where it matters -- E-W3, which the source proposal itself classes S0. The
+      key is therefore built from `event_timestamp` alone, and a row lacking it
+      is marked un-dedupable and COUNTED rather than merged on a guess.
+      The key is widened past the requested
+      (event_type, order_hash, event_timestamp) because `order_hash` is NULL for
+      item_transferred, for some item_sold shapes and for item_metadata_updated
+      (E-U3), so the bare triple would merge two genuinely distinct transfers in
+      the same second; `tx_hash` is the natural disambiguator for exactly those
+      types and was already parsed and stored.
+      Two reasonable people could disagree about three things here, which is why
+      this is an assumption and not a fact.
+      (1) WIDTH. Too narrow and distinct events collapse -- an undercount, which
+      understates activity. Too wide and duplicates survive -- every count and
+      every rate doubles and a backtest looks wonderful, which is the S0
+      direction and the one the fifth project rule names. The width chosen errs
+      wide-ish in the fields it includes and is watched by the duplicate-fraction
+      monitor rather than trusted.
+      (2) MULTIPLICITY. The first version of this entry said the opposite: that
+      taking the MAXIMUM over connections was "the reading that cannot double",
+      because one-per-key would erase a genuine repeat delivery down one socket.
+      That was wrong and it was wrong in the expensive direction. A rejoin replay
+      is not exotic -- it is what OpenSea does to a subscriber that rejoins -- and
+      A x 1 / B x 2 under a maximum is 2, so one real event becomes two and every
+      count over it doubles (BUG-20260911-073). One-per-key is now the rule. Its
+      cost is real and is an UNDERCOUNT: a genuine repeat down one socket is
+      recorded as one event, because two rows agreeing on every field in the key
+      are indistinguishable from one event delivered twice. Understating activity
+      is the safe direction; the discarded multiplicity is written down per
+      connection and the disagreements are counted, so the size of the ambiguity
+      is auditable rather than assumed away.
+      (3) THE MONITOR'S 0.5. This has NOT been measured. No two-connection
+      capture exists yet, so the expected duplicate fraction under a healthy pair
+      is unknown -- the argument for "high" is structural (both sockets are
+      subscribed to the same topics) rather than observational. 0.5 is a
+      deliberately loose floor chosen so the alarm fires on a collapse and not on
+      ordinary loss. Replace it with the trough of the measured distribution as
+      soon as one exists; until then the number carries whatever error that
+      guess has, and the review date is short for that reason.
+      (4) THE MULTIPLICITY-DISAGREEMENT THRESHOLD of 0 -- any disagreement warns --
+      is ALSO unmeasured, and it is the one most likely to prove noisy: if
+      rejoin-replay is routine, this alarms routinely, and an alarm that fires
+      routinely is one the Operator learns to ignore. It is 0 because no
+      two-connection capture exists to derive a baseline from, and an alarm that
+      is too loud is recoverable where one that is too quiet is not. Raise it from
+      a measured replay rate, not from irritation.
+      (5a) GAP COVERAGE IS REVOCABLE. A connection killed without warning records
+      its gap on the next START, not on the death, so a fold in between annotates
+      on evidence that is incomplete and later wrong. The annotation is therefore
+      cleared when the evidence stops supporting it, and each transition is logged
+      once. Two reasonable people could disagree about whether a derived
+      annotation in the operational store may be rewritten at all; the ruling is
+      that it may, because gap_register is disposable and reconstructible (docs/07
+      §1) and close_gap already updates it in place, while the invariant that a gap
+      is never closed, shortened or removed is untouched and asserted.
+      (5) GAP COVERAGE is subtracted, not read: the landing manifest only closes a
+      file on a CLEAN stop, so after a sleep or a kill it claims coverage through
+      the window in which the connection recorded nothing, and on one laptop both
+      connections make that claim about the same window. Coverage is therefore the
+      manifest intervals minus that connection's own gap register, and only a gap
+      covered END TO END is annotated. Partial coverage is deliberately not
+      representable: every consumer of the register treats a gap as a unit.
+    applies_to: [order_lives, health_dedup, redundant_stream, metrics_counts, gap_register]

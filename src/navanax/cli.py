@@ -25,12 +25,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import redundancy
 from .codec import get_codec, verify_codec_roundtrip
 from .dotenv import DotenvError, require
 from .landing import LandingZoneWriter, is_integrity_failure, verify_manifest
 from .normalize import LOCK_UNSUPPORTED_ERRNOS, StoreWriterBusyError
 from .opstore import OperationalStore
-from .stream import StreamConsumer, new_run_id
+from .stream import STREAM_KEY, StreamConsumer, new_run_id
 
 log = logging.getLogger("navanax")
 
@@ -206,7 +207,19 @@ def _supervised_setup() -> None:
     print("=" * 70)
 
 
-def cmd_ingest(args) -> int:
+def cmd_ingest(args, *, connect_factory=None) -> int:
+    """Run one stream recorder.
+
+    `--redundant` runs CONNECTION B (PR-10): its own landing root, its own
+    `.ingest.lock`, its own API key, its own run id, its own checkpoint. It is a
+    second PROCESS, not a second socket inside this one -- two writers on one
+    landing root silently lose manifest records (BUG-006/007), and two stores
+    with one writer each is the shape that does not.
+
+    `connect_factory` is injectable so a test can observe what this function
+    actually connects to. It is the proof that `stream.redundant.enabled` is read
+    by RUNNING CODE rather than only by a document.
+    """
     if getattr(args, "supervised", False):
         _supervised_setup()
     root = Path(args.root)
@@ -226,6 +239,32 @@ def cmd_ingest(args) -> int:
     run_id = new_run_id()
     lz = cfg["landing"]
 
+    # -- PR-10: which connection is this? ------------------------------------
+    red = redundancy.settings(cfg)
+    conn_label: str | None = None
+    checkpoint_key = STREAM_KEY
+    landing_dir = root / lz["root"]
+    lock_file = landing_dir / ".ingest.lock"
+    if getattr(args, "redundant", False):
+        if not red.enabled:
+            print("REFUSING TO INGEST\n\n"
+                  "  --redundant asks for connection B, and `stream.redundant.enabled` is "
+                  "false in config/base.yaml.\n"
+                  "  The flag is the switch, not this argument: set it to true (and read "
+                  "docs/07 §3.x first -- B doubles disk and doubles every raw count over "
+                  "`events`), then start B again.\n"
+                  "  Nothing was recorded. Connection A is unaffected.", file=sys.stderr)
+            return EXIT_CONFIG
+        try:
+            key = redundancy.second_key(root, cfg, key)
+        except redundancy.RedundantKeyError as exc:
+            print(f"REFUSING TO INGEST\n\n{exc}", file=sys.stderr)
+            return EXIT_CONFIG
+        conn_label = red.label
+        checkpoint_key = f"{STREAM_KEY}:{red.label}"
+        landing_dir = red.root(root)
+        lock_file = red.lock(root)
+
     # Prove the crash-safety property on THIS machine before recording anything
     # that cannot be re-fetched. Costs microseconds; the alternative is trusting
     # that whichever `zstandard` version pip installed reads multi-frame files.
@@ -236,7 +275,7 @@ def cmd_ingest(args) -> int:
         return EXIT_CODEC
 
     writer = LandingZoneWriter(
-        root / lz["root"], run_id,
+        landing_dir, run_id,
         codec=lz.get("codec", "zstd"), codec_level=lz.get("codec_level"),
         roll_bytes=lz.get("roll_bytes", 64 << 20),
         flush_seconds=lz.get("flush_seconds", 5),
@@ -247,11 +286,16 @@ def cmd_ingest(args) -> int:
         url=cfg["opensea"]["stream_url"],
         heartbeat_seconds=cfg["opensea"].get("heartbeat_seconds", 30),
         max_backoff=cfg["opensea"].get("max_backoff_seconds", 60),
-        run_id=run_id)
+        run_id=run_id,
+        connect_factory=connect_factory,
+        conn_label=conn_label,
+        checkpoint_key=checkpoint_key)
 
     print(f"run_id      {run_id}")
+    print(f"connection  {conn_label or redundancy.PRIMARY_LABEL}"
+          + ("  (REDUNDANT: a second recorder; see docs/07 §3.x)" if conn_label else ""))
     print(f"collections {', '.join(slugs)}")
-    print(f"landing     {root / lz['root']}  codec={lz.get('codec')}")
+    print(f"landing     {landing_dir}  codec={lz.get('codec')}")
     print("ctrl-c to stop cleanly (the current frame is flushed on exit)\n")
 
     async def main() -> None:
@@ -263,7 +307,7 @@ def cmd_ingest(args) -> int:
             pass
 
     try:
-        with _single_instance(root / lz["root"] / ".ingest.lock"):
+        with _single_instance(lock_file):
             try:
                 asyncio.run(main())
             except KeyboardInterrupt:
@@ -314,8 +358,10 @@ def cmd_status(args) -> int:
 def cmd_verify(args) -> int:
     root = Path(args.root)
     cfg, _ = _config(root)
-    problems = verify_manifest(root / cfg["landing"]["root"],
-                               deep=not getattr(args, "shallow", False))
+    problems = []
+    for label, lroot in redundancy.landing_roots(root, cfg):
+        for p in verify_manifest(lroot, deep=not getattr(args, "shallow", False)):
+            problems.append(p if label == redundancy.PRIMARY_LABEL else f"[{label}] {p}")
     if getattr(args, "shallow", False):
         print("NOTE  --shallow: checksums only. A file whose bytes are intact but "
               "whose DECODER returns a prefix (BUG-20260909-010) is NOT detected "
@@ -342,8 +388,26 @@ def cmd_normalize(args) -> int:
     from .normalize import Normalizer
     root = Path(args.root)
     cfg, _ = _config(root)
-    n = Normalizer(root / cfg["landing"]["root"], root / cfg["analytical"]["path"])
+    # PR-10: fold EVERY landing root. With the flag off that is the one root it
+    # has always been; with it on, the second connection's frames land in their
+    # own append-only store and are folded into the same analytical store, where
+    # `order_lives` resolves the duplicates.
+    roots = redundancy.landing_roots(root, cfg)
+    n = Normalizer(roots[0][1], root / cfg["analytical"]["path"],
+                   label=roots[0][0], extra_roots=roots[1:])
     stats = n.sync()
+    # A gap in A that B covered stays a gap in A, annotated -- never closed,
+    # never shortened, never suppressed (dataeng §3.a, failure mode 5).
+    marked = 0
+    if len(roots) > 1:
+        store = OperationalStore(root / cfg["opstore"]["path"])
+        revoked = 0
+        for label, lroot in roots[1:]:
+            upd = redundancy.annotate_gaps_covered_by(store, label, lroot)
+            marked += len(upd.marked)
+            revoked += len(upd.revoked)
+        stats = {**stats, "gaps_covered_by_revoked": revoked}
+    stats = {**stats, "gaps_annotated_covered": marked}
     print(json.dumps(stats, indent=2))
     n.close()
     return 0
@@ -678,6 +742,12 @@ def main(argv=None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("ingest")
+    i.add_argument("--redundant", action="store_true",
+                   help="run CONNECTION B (PR-10): a second recorder, on its own API "
+                        "key, writing to its own landing root with its own lock. "
+                        "Refuses unless stream.redundant.enabled is true in "
+                        "config/base.yaml, and refuses if B's key is missing or is "
+                        "the same key as A's")
     i.add_argument("--supervised", action="store_true",
                    help="running under launchd or another supervisor: line-buffer the "
                         "output so the log file is live, and print a run banner so one "
