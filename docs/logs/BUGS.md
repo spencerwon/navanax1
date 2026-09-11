@@ -1071,13 +1071,63 @@ Coverage is recomputed every fold in both directions, each transition logged onc
 line says the gap is **UNCHANGED** so nobody reads a revocation as the gap being
 altered. Health carries `covered_by_n` and `covered_by_revoked_since_start_n`.
 
+### Round 25 — the gates had not run on any branch since 2026-09-09
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260911-078 | S2 | P0 | fixed | CI's first step runs `tests/selftest.py` **before `pip install`**, and 79 of 187 tests transitively `import yaml`. The job died on step one with `ModuleNotFoundError` and every later step was skipped — on every branch, `main` included |
+
+**No data was lost; two days of verification were.** The steps that never ran
+include the bug-ledger consistency gate, the secret scan (REQ-N-11), the
+transaction-capability check (REQ-N-14), the `DataIntegrityError` re-raise check,
+lint, and the *only* place python-zstandard's real multi-frame behaviour is ever
+exercised — which is the entire point of BUG-20260909-010. Every merge in that
+window was made against a pipeline that had proven nothing.
+
+**"Standard library only" was documentation, never a test.** It was true when the
+file was written and nothing enforced it afterwards.
+`test_metric_engine_contract` calls `metrics.load_intervals(config/intervals.yaml)`,
+which does `import yaml`; 78 more reach PyYAML the same way — through
+`load_intervals`, through `navanax.cli`, or by reading `config/assumptions.yaml`
+directly. Locally the suite passes, because PyYAML is installed. The claim could
+therefore decay silently for as long as it liked, and the one environment that
+would have noticed — a machine with no dependencies — is the one that only CI ever
+runs. A bare `ModuleNotFoundError` out of a test aborts the runner, so the failure
+was total rather than partial, and GitHub Actions skips every subsequent step of a
+failed job: one missing module silenced eleven gates.
+
+**A skip is a first-class outcome now, and it is loud.** `@needs("yaml")` at the
+definition site declares what a test cannot run without (a list kept anywhere else
+is the drift `BUG-20260909-038` removed from discovery); `missing_modules` answers
+by actually importing it. A test whose module is absent is printed as `SKIP` where
+it would have run, **listed by name** above the summary, and counted in its own
+column — never added to `PASS`. The summary line reads
+`187 test functions, 806 passed, 0 failed, 79 skipped (needs: yaml)`.
+
+**The guard that keeps the skips honest is the part that matters.** A skip is still
+a test that did not run, so `--no-skips` refuses to exit 0 if anything was skipped
+at all. `tools/gates.py` runs the suite that way — this machine has the
+dependencies, so a skip here means a test stopped running and the developer would
+otherwise never learn it — and a **new CI step after `Install`** runs it that way
+too, so those 79 tests are genuinely executed on every push and cannot quietly
+disappear. The stdlib-only step is unchanged and now passes, with skips. No
+existing test was weakened, deleted, or had an assertion changed.
+
+Both halves are mutation-checked by the regression tests: making a skip count as a
+pass fails them, and making strict mode ignore skips fails them.
+
+**The monitor gap is the uncomfortable one.** Every gate in this repo checks the
+code; nothing checked that the thing running the gates was still running. A red
+pipeline on `main` for two days produced no alert, because the only consumer of
+that signal was a human opening the Actions tab.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-76 of 77 logged bugs are fixed.
+77 of 78 logged bugs are fixed.
 
 ### The lesson
 

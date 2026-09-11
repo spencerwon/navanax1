@@ -179,6 +179,23 @@ Analytical code receives a distinct review focused on statistical correctness, n
 - Is the denominator correct? (ETH vs USD, filtered vs raw, supply vs circulating)
 - Does the function fail loudly on insufficient data, or return a number anyway?
 
+### 4.6 The stdlib-only floor, and what a missing dependency does
+
+`tests/selftest.py` is the real suite. It is a plain script — no pytest, no runner to install — and CI runs it as its **first** step, before `pip install`, deliberately: a suite that cannot run until the environment is built cannot tell you the environment is broken.
+
+**"Runs on the standard library alone" is a promise about the runner, not about every test in it.** Parts of the suite exercise code that genuinely reads `config/*.yaml` through PyYAML — `load_intervals`, the assumptions registry, the CLI — and those tests cannot run before the dependency exists. As of 2026-09-11, 79 of 187 test functions are in that position; the other 108 need nothing but Python.
+
+**What happens when a dependency is missing is exactly this:**
+
+1. A test that needs a third-party module declares it at its definition site: `@needs("yaml")`. The declaration is a decorator, not a list kept somewhere else, for the reason `BUG-20260909-038` records — a list maintained separately drifts within a day.
+2. When the module cannot be imported, the runner records the test as **SKIPPED**. It prints `SKIP <name> -- needs yaml` where the test would have run, **lists every skipped test by name** above the summary, and counts skips in their own column: `187 test functions, 806 passed, 0 failed, 79 skipped (needs: yaml)`.
+3. **A skipped test is never counted as passed.** The exit code is 0 only when `failed == 0`, and a skip does not inflate the pass count.
+4. A test whose declared module *is* importable is not skipped — it runs exactly as it always did.
+
+**A skip is still a test that did not run, so the mode that matters is `--no-skips`.** `python3 tests/selftest.py --no-skips` exits non-zero if anything at all was skipped. That is the mode `tools/gates.py` runs, because the Mac and the container both have the dependencies and a skip there means a test has stopped running and nobody would find out. CI runs **both**: the stdlib-only step first (green, with skips, proving the floor holds with nothing installed), and a second step *after* `Install` with `--no-skips`, which is where the 79 dependency-needing tests are genuinely executed. Neither step may be removed. The first one alone lets a test disappear behind a skip; the second one alone lets the floor rot unnoticed, which is precisely `BUG-20260911-078` — CI red on every branch for two days because step one died on `import yaml` and every gate after it was skipped.
+
+**Never widen a `@needs` declaration to make a red test go away.** A test that fails with the dependency installed is a failing test; `@needs` is for a test that cannot execute at all without the module, and the strict run is what proves the difference.
+
 ---
 
 ## 5. Statistical Validation Protocol

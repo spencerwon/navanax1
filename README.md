@@ -25,7 +25,8 @@ Other commands:
 ```bash
 python -m navanax.cli status    # ingestion health, gaps, onboarding progress
 python -m navanax.cli verify    # re-verify landing-zone checksums (S0a on mismatch)
-python3 tests/selftest.py       # stdlib-only self-test, no dependencies needed
+python3 tests/selftest.py       # self-test; runs with no dependencies (yaml tests are SKIPPED and listed)
+python3 tests/selftest.py --no-skips   # strict: a skip is a failure. What gates.py and CI-after-install run
 ```
 
 **Viewing the dashboard:** double-click `open-dashboard.command` (or the `Navanax Dashboard.webloc` bookmark). Neither ever starts a dashboard — the background job does that; `dashboard.command` is only for a machine without the background job and refuses if one is already running.
@@ -53,7 +54,7 @@ docs/         the contract: requirements, methodology, agents, validation,
               environments, bug taxonomy, time/units, storage
 .claude/      agent definitions (11), with model tiering for cost control
 src/navanax/  errors · codec · landing · governor · opstore · stream · cli
-tests/        selftest.py runs with zero third-party dependencies
+tests/        selftest.py runs with zero third-party deps; tests that need one skip loudly
 data/         landing zone + stores (gitignored -- irreplaceable, back up separately)
 ```
 
@@ -71,4 +72,6 @@ Start at [`docs/README.md`](docs/README.md). Any new agent session reads docs 00
 
 ## Testing
 
-`tests/selftest.py` runs on the standard library alone and covers the logic that is genuinely tricky: frame-flush crash recovery, manifest integrity and tamper detection, event-time range resolution across arrival-hour partitions, budget arithmetic, priority starvation, and out-of-order stream handling. It is the first thing CI runs, before any dependency is installed.
+`tests/selftest.py` is the real suite and covers the logic that is genuinely tricky: frame-flush crash recovery, manifest integrity and tamper detection, event-time range resolution across arrival-hour partitions, budget arithmetic, priority starvation, and out-of-order stream handling. It is the first thing CI runs, before any dependency is installed.
+
+The *runner* needs only the standard library; some tests do not. 79 of 187 test functions read `config/*.yaml` through PyYAML, declare it with `@needs("yaml")`, and are reported as **SKIPPED** — printed by name, counted in their own column, never counted as passed — when the module is absent. Run with `--no-skips` and a skip becomes a failure: that is the mode `tools/gates.py` uses, and the mode of the CI step that runs *after* `pip install`, so those 79 tests are genuinely executed on every push. Details and the rule against widening a `@needs` declaration: [`docs/03_VALIDATION_AND_TESTING.md` §4.6](docs/03_VALIDATION_AND_TESTING.md).

@@ -1,7 +1,9 @@
 """One command, every gate. `python3 tools/gates.py [--corpus LANDING DB]`
 
 Runs, in order, and stops at the first failure with a non-zero exit:
-  1. tests/selftest.py            (discovery-based; count printed)
+  1. tests/selftest.py --no-skips  (discovery-based; count printed. Strict: a test
+                                    skipped for a missing dependency FAILS here,
+                                    because this machine has the dependencies)
   2. ruff check src tests tools
   3. tools/buglog.py --check       (every fixed bug names a test that exists)
   4. tools/secrets_check.py
@@ -108,7 +110,11 @@ def main() -> int:
     a = ap.parse_args()
     py = sys.executable
     if not a.skip_tests:
-        out = run("selftest", [py, "tests/selftest.py"])
+        # BUG-20260911-078: --no-skips. A test that needs PyYAML is SKIPPED (never
+        # passed) on a machine that lacks it, so CI's pre-install step can be green.
+        # This machine HAS the dependencies, so a skip here means a test stopped
+        # running and the developer would otherwise never find out.
+        out = run("selftest", [py, "tests/selftest.py", "--no-skips"])
         line = next((ln for ln in out.splitlines() if "test functions" in ln), "")
         print(f"    {line.strip()}")
     run("ruff", ["ruff", "check", "src", "tests", "tools"], optional=True)   # lint; CI is the hard gate

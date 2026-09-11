@@ -2995,3 +2995,79 @@ bugs:
     that the gap row is byte-identical apart from `covered_by`. The general lesson is the one
     074 also taught: a fixture that sets up the end state cannot test the race that reaches it.
   pr: 10
+
+- id: BUG-20260911-078
+  summary: >-
+    CI's first step -- `python3 tests/selftest.py`, run before `pip install` because docs/03
+    promises the suite runs on the standard library alone -- died with
+    `ModuleNotFoundError: No module named 'yaml'`, so EVERY later step was skipped and CI was
+    red on every branch, main included, from 2026-09-09. 79 of 187 test functions transitively
+    import PyYAML; the promise had been false since the metric engine landed
+  severity: S2
+  priority: P0
+  error_class: INF
+  status: fixed
+  logged_at: "2026-09-11T16:10:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  resolved_at: "2026-09-11T17:05:00-05:00"
+  detected_by: platform-engineer, reading the GitHub Actions log
+  detection_channel: ci
+  branch: tester
+  locations:
+    - file: tests/selftest.py
+      line: 58
+    - file: tests/selftest.py
+      line: 1825
+    - file: .github/workflows/ci.yml
+      line: 24
+    - file: tools/gates.py
+      line: 117
+  requirement: REQ-N-16
+  data_impact: >-
+    No data was lost or altered -- this is a loss of VERIFICATION, not of records. What was
+    lost is every automated check for two days on every branch: the bug-ledger consistency
+    gate, the secret scan (REQ-N-11), the transaction-capability check (REQ-N-14), the
+    DataIntegrityError re-raise check, lint, and the only place python-zstandard's real
+    multi-frame behaviour is ever exercised (BUG-20260909-010's whole point). Every merge in
+    that window was made against a pipeline that had proven nothing. It is logged S2 because
+    the thing that was lost was recoverable and is now recovered by re-running, not because
+    anything in the landing zone or the bitemporal store moved.
+  root_cause: >-
+    "Standard library only" was a property of the suite when it was written and was never
+    enforced by anything. `test_metric_engine_contract` calls
+    `metrics.load_intervals(config/intervals.yaml)`, which does `import yaml`, and 78 more
+    tests reach PyYAML the same way -- through `load_intervals`, through `navanax.cli`, or by
+    reading `config/assumptions.yaml` directly. Locally the suite passes because PyYAML is
+    installed, so the divergence was invisible to every developer and visible only in the one
+    environment that has no dependencies: CI's first step. A bare `ModuleNotFoundError` out of
+    a test aborts the runner, so the failure was total rather than partial, and GitHub Actions
+    skips every subsequent step of a failed job -- one missing module silenced eleven gates.
+  resolution: >-
+    A first-class skip. `needs("yaml")` is a decorator at the definition site (a list kept
+    elsewhere is the drift BUG-20260909-038 removed) that records the modules a test cannot run
+    without; `missing_modules` answers by actually importing, and `run_suite` records the test
+    in SKIPPED -- printed by name at the point it would have run, listed by name above the
+    summary, counted in its own column, never added to PASS. The summary line is now
+    `187 test functions, 806 passed, 0 failed, 79 skipped (needs: yaml)` with the module named,
+    and the exit code is 0 only when nothing FAILED. The guard that keeps that honest is
+    `--no-skips`: it exits non-zero if anything was skipped at all. `tools/gates.py` runs the
+    suite that way, so a developer on a machine with the dependencies can never see a skip and
+    read it as fine, and a NEW CI step after `Install` runs it that way too, so the 79 tests
+    are genuinely executed on every push and cannot quietly disappear. The stdlib-only step is
+    unchanged and now passes with skips; no existing test was weakened, deleted, or had an
+    assertion changed.
+  regression_test:
+    - tests/selftest.py::test_runner_records_a_skip_as_skipped_and_never_as_a_pass
+    - tests/selftest.py::test_no_skips_mode_refuses_to_exit_zero_when_anything_was_skipped
+    - tests/selftest.py::test_a_declared_module_that_is_present_does_not_skip_the_test
+  monitor_gap: >-
+    Nothing watched CI's own colour. Every gate in this repo checks the code; none checked that
+    the thing running the gates was still running. A red pipeline on main for two days
+    generated no alert because the only consumer of that signal was a human opening the Actions
+    tab. The narrower gap is that the stdlib-only claim was documentation, not a test: no run
+    anywhere executed the suite with the dependencies actually absent, so the claim could
+    decay silently for as long as it liked. The skip mechanism does not fix that by itself --
+    a skip is still a test that did not run -- which is why `--no-skips` exists in gates and in
+    CI, and why the regression tests mutation-check both halves: making a skip count as a pass
+    fails them, and making strict mode ignore skips fails them.
+  pr: 11

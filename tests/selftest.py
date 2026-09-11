@@ -8,11 +8,21 @@ stand-in for zstd's behaviour.
 
 The zstd and websockets bindings are thin wrappers around this logic; the logic
 is what is worth testing here.
+
+BUG-20260911-078. "Standard library only" is a promise about the RUNNER, not
+about every test in it. Parts of the suite exercise code that genuinely reads
+`config/*.yaml` through PyYAML, and those tests cannot run before `pip install`.
+They are declared with `@needs("yaml")` and are SKIPPED -- printed by name,
+counted separately, never counted as passed -- when the module is absent.
+`--no-skips` refuses to exit 0 if anything was skipped; that is the mode
+`tools/gates.py` and the post-install CI step run, so a skip can never become a
+quiet hole. See docs/03 §4.6.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
@@ -42,6 +52,51 @@ from navanax.stream import StreamConsumer, normalize_frame  # noqa: E402
 
 PASS: list[str] = []
 FAIL: list[str] = []
+SKIPPED: list[tuple[str, tuple[str, ...]]] = []   # (test name, the modules that were missing)
+
+
+def needs(*modules: str):
+    """Declare the third-party modules a test cannot run without.
+
+    BUG-20260911-078. CI's first step runs this file before `pip install`, so a
+    test that reaches `import yaml` used to abort the whole process with
+    ModuleNotFoundError and every later CI step was skipped. A declared test is
+    now recorded as SKIPPED when the module is absent -- by name, with the module
+    named -- and is run for real by the strict-mode step after Install.
+
+    The declaration is a decorator at the definition site on purpose: a
+    hand-maintained list somewhere else is exactly the drift BUG-20260909-038
+    removed from discovery.
+    """
+    if not modules:
+        raise ValueError("needs() requires at least one module name")
+
+    def deco(fn):
+        prior = getattr(fn, "needs_modules", ())
+        fn.needs_modules = tuple(dict.fromkeys(prior + tuple(modules)))
+        return fn
+
+    return deco
+
+
+_IMPORTABLE: dict[str, bool] = {}
+
+
+def module_available(name: str) -> bool:
+    """True if `name` can actually be imported here. Importing is the only honest
+    test: `find_spec` answers a different question and lies about broken builds."""
+    if name not in _IMPORTABLE:
+        try:
+            importlib.import_module(name)
+            _IMPORTABLE[name] = True
+        except ImportError:
+            _IMPORTABLE[name] = False
+    return _IMPORTABLE[name]
+
+
+def missing_modules(fn) -> tuple[str, ...]:
+    """The modules `fn` declared that are not importable here. Empty tuple = run it."""
+    return tuple(m for m in getattr(fn, "needs_modules", ()) if not module_available(m))
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -1721,8 +1776,8 @@ def test_error_hierarchy() -> None:
           "tok-1" in str(e) and "ETH" in str(e), str(e))
 
 
-def main() -> int:
-    """Run every `test_*` function in this module, in definition order.
+def discover() -> list[tuple[str, Any]]:
+    """Every `test_*` function in this module, in definition order.
 
     BUG-20260909-038. The suite used to run from a HAND-MAINTAINED list of
     function names. Three times in one day a test was written, passed a
@@ -1733,31 +1788,88 @@ def main() -> int:
     """
     import inspect
 
+    tests = [(name, fn) for name, fn in globals().items()
+             if name.startswith("test_") and callable(fn)]
+    tests.sort(key=lambda nf: inspect.getsourcelines(nf[1])[1])
+    return tests
+
+
+def exit_code(n_failed: int, n_skipped: int, *, strict: bool) -> int:
+    """BUG-20260911-078. Exit 0 only when nothing FAILED -- and, under `--no-skips`,
+    only when nothing was skipped either. A skip is never a pass, in either mode."""
+    if n_failed:
+        return 1
+    if strict and n_skipped:
+        return 2
+    return 0
+
+
+def summary_lines(n_tests: int, n_passed: int, n_failed: int,
+                  skipped: list[tuple[str, tuple[str, ...]]]) -> list[str]:
+    """The end-of-run report. Skipped tests are LISTED by name above the counts --
+    a number alone is a thing nobody reads, and the whole point is that a skip is
+    visible."""
+    lines: list[str] = []
+    if skipped:
+        lines.append(f"SKIPPED ({len(skipped)}) -- not run here; `--no-skips` (gates + the "
+                     "post-Install CI step) runs them for real:")
+        for name, mods in skipped:
+            lines.append(f"  {name}  (needs: {', '.join(mods)})")
+        lines.append("")
+    mods = sorted({m for _, ms in skipped for m in ms})
+    tail = f", {len(skipped)} skipped (needs: {', '.join(mods)})" if skipped else ", 0 skipped"
+    lines.append(f"{n_tests} test functions, {n_passed} passed, {n_failed} failed{tail}")
+    return lines
+
+
+def run_suite(tests: list[tuple[str, Any]], *, strict: bool = False) -> int:
+    """Run `tests` in order, print the report, return the process exit code."""
+    import inspect
+
     tmp = Path(tempfile.mkdtemp(prefix="navanax-selftest-"))
     try:
-        print("=" * 72)
-        print("NAVANAX PHASE 0 SELF-TEST  (stdlib only: gzip codec stands in for zstd)")
-        print("=" * 72)
-        g = globals()
-        tests = [(name, fn) for name, fn in g.items()
-                 if name.startswith("test_") and callable(fn)]
-        tests.sort(key=lambda nf: inspect.getsourcelines(nf[1])[1])
         for name, fn in tests:
+            missing = missing_modules(fn)
+            if missing:
+                SKIPPED.append((name, missing))
+                print(f"\n--- {name} ---")
+                print(f"SKIP  {name} -- needs {', '.join(missing)}, not importable here")
+                continue
             print(f"\n--- {name} ---")
             if inspect.signature(fn).parameters:
                 fn(tmp)
             else:
                 fn()
         print("\n" + "=" * 72)
-        print(f"{len(tests)} test functions, {len(PASS)} passed, {len(FAIL)} failed")
+        for line in summary_lines(len(tests), len(PASS), len(FAIL), SKIPPED):
+            print(line)
         if FAIL:
             print("\nFAILURES:")
             for f in FAIL:
                 print("  " + f)
+        if strict and SKIPPED:
+            print("\n--no-skips: a skipped test is a test that did not run. Install the "
+                  f"missing module(s) -- {', '.join(sorted({m for _, ms in SKIPPED for m in ms}))} "
+                  "-- and run again.")
         print("=" * 72)
-        return 1 if FAIL else 0
+        return exit_code(len(FAIL), len(SKIPPED), strict=strict)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--no-skips", action="store_true",
+                    help="fail if ANY test was skipped for a missing module "
+                         "(the mode gates.py and the post-Install CI step use)")
+    a = ap.parse_args(argv)
+    print("=" * 72)
+    print("NAVANAX PHASE 0 SELF-TEST  (stdlib only: gzip codec stands in for zstd)"
+          + ("  [--no-skips]" if a.no_skips else ""))
+    print("=" * 72)
+    return run_suite(discover(), strict=a.no_skips)
 
 
 
@@ -1955,6 +2067,7 @@ def test_normalizer_is_incremental(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_metric_engine_contract(tmp: Path) -> None:
     """The MetricRequest tuple (docs/06 §3): intervals from config, transforms,
     immediacy undefined when either side is missing, basis on every response."""
@@ -2071,6 +2184,7 @@ def test_metric_engine_contract(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_top_item_bid_declares_the_book_it_has(tmp: Path) -> None:
     """Tech-lead re-review 2026-09-10, T3. `top_item_bid` carried no `book` key,
     and three separate untruths followed from that one omission:
@@ -2167,6 +2281,7 @@ def test_top_item_bid_declares_the_book_it_has(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_min_n_for_percentiles_cannot_drift_from_assumptions_yaml() -> None:
     """Tech-lead re-review 2026-09-10, item 3. `min_n_for_percentiles: 30` is written
     twice -- once in config/assumptions.yaml (ASM-021, where the Operator and the
@@ -2202,6 +2317,7 @@ def test_min_n_for_percentiles_cannot_drift_from_assumptions_yaml() -> None:
           f"assumptions.yaml says {hits} · metrics.MIN_N_FOR_PERCENTILES is {MIN_N_FOR_PERCENTILES}")
 
 
+@needs("yaml")
 def test_dashboard_serves_localhost_only(tmp: Path) -> None:
     """REQ-N-13, and a smoke test of every API route over real HTTP."""
     import http.client
@@ -2460,6 +2576,7 @@ def test_list_pass_keeps_traits_it_is_given(tmp: Path) -> None:
     conn.close()
 
 
+@needs("yaml")
 def test_import_explorer_cache(tmp: Path) -> None:
     """`navanax import-traits`: zero REST, observation time = the cache's generated
     time, never overwrites, diffs what it cannot write, exact counts, idempotent."""
@@ -2667,6 +2784,7 @@ def test_import_reconciliation_uses_resolved_token_ids(tmp: Path) -> None:
     conn.close()
 
 
+@needs("yaml")
 def test_import_cli_refuses_an_impossible_generated_timestamp(tmp: Path) -> None:
     """B4. `--generated` (and summary.json's `generated`) took any float. A future
     epoch was written straight into `traits_at` -- a bitemporal lie the store has
@@ -2711,6 +2829,7 @@ def test_import_cli_refuses_an_impossible_generated_timestamp(tmp: Path) -> None
     check("generated: a plausible epoch still imports cleanly", run() == 0)
 
 
+@needs("yaml")
 def test_config_assumptions_registry_exists(tmp: Path) -> None:
     """B5. `config/assumptions.yaml` is the assumptions registry docs/06 §4.4
     requires -- the one file that lists every judgement the code embodies. It was
@@ -2908,6 +3027,7 @@ def test_import_traits_command_finds_its_cache_without_asking(tmp: Path) -> None
           and "opensea_nft_list" in (ROOT / "traits.command").read_text())
 
 
+@needs("yaml")
 def test_trait_filtered_metrics(tmp: Path) -> None:
     """Under a trait filter: item bids on matching tokens count, collection offers
     count (they bid on every token), trait offers do NOT (criteria unknown), and
@@ -2994,6 +3114,7 @@ def test_rest_client_accounting(tmp: Path) -> None:
     check("rest: the governor saw the 429", gov.stats["denied_429"] == 1)
 
 
+@needs("yaml")
 def test_series_gap_masking(tmp: Path) -> None:
     """REQ-F-15: a bucket inside an ingestion gap is undefined for EVERY metric,
     counts included -- zero sales while we were not listening is not a fact."""
@@ -3022,6 +3143,7 @@ def test_series_gap_masking(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_screener_sort_and_filter(tmp: Path) -> None:
     """REQ-F-07: single and multi-trait filters (AND across types, OR within a type),
     every column sortable, nulls last, live prices from the store."""
@@ -3876,6 +3998,7 @@ def _lives_store(tmp: Path, name: str):
     return n, put
 
 
+@needs("yaml")
 def test_order_lives_primitive(tmp: Path) -> None:
     """One row per order_hash, one definition of "ended" (quant §1.0, tech-lead PR-2).
 
@@ -3968,6 +4091,7 @@ def test_order_lives_primitive(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_bid_lifetimes_censoring_and_orphans(tmp: Path) -> None:
     """BUG-049: the old estimator's `n` was a count of bid x cancel PAIRS."""
     from navanax.metrics import MetricEngine, load_intervals
@@ -4005,6 +4129,7 @@ def test_bid_lifetimes_censoring_and_orphans(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_order_criteria_parsing_and_migration(tmp: Path) -> None:
     """PR-4: the criteria a trait offer carries, parsed, stored, migrated, re-foldable."""
     import copy
@@ -4136,6 +4261,7 @@ def test_order_criteria_parsing_and_migration(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_trait_offer_matching_rule(tmp: Path) -> None:
     """BUG-051: the blanket exclusion becomes an evidence-based verdict, with a guard.
 
@@ -4267,6 +4393,7 @@ def _standing_engine(tmp: Path, name: str, rows: list[tuple], fold_at: str = "20
     return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
 
 
+@needs("yaml")
 def test_standing_series_is_time_weighted_over_the_bucket(tmp: Path) -> None:
     """A floor is what is STANDING, for as long as it stood (Operator, 2026-09-10).
 
@@ -4334,6 +4461,7 @@ def test_standing_series_is_time_weighted_over_the_bucket(tmp: Path) -> None:
     n2.close()
 
 
+@needs("yaml")
 def test_immediacy_cost_is_a_standing_book_spread(tmp: Path) -> None:
     """REQ-F-13a / docs/01 §3.2: the spread between legs that COEXISTED.
 
@@ -4403,6 +4531,7 @@ def test_immediacy_cost_is_a_standing_book_spread(tmp: Path) -> None:
     n3.close()
 
 
+@needs("yaml")
 def test_crossed_book_alarm_relogs_for_a_new_bucket(tmp: Path) -> None:
     """Tech-lead re-review 2026-09-10, item 5 (second half). The alarm was deduped
     on `(collection, interval, denomination)` for the LIFE OF THE PROCESS.
@@ -4477,6 +4606,7 @@ def test_crossed_book_alarm_relogs_for_a_new_bucket(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_audit_surfaces_crossed_books_for_every_watched_collection(tmp: Path) -> None:
     """Tech-lead re-review 2026-09-10, item 5 (first half). A crossed standing book
     was visible in exactly two places, neither of which an operator looks at: a
@@ -4549,6 +4679,7 @@ def test_audit_surfaces_crossed_books_for_every_watched_collection(tmp: Path) ->
     n2.close()
 
 
+@needs("yaml")
 def test_percentiles_are_withheld_below_min_n(tmp: Path) -> None:
     """REQ-F-19 / Q-V3: below the minimum n a percentile is REFUSED, not flagged.
 
@@ -4608,6 +4739,7 @@ def test_percentiles_are_withheld_below_min_n(tmp: Path) -> None:
     n3.close()
 
 
+@needs("yaml")
 def test_expiry_is_never_in_the_future(tmp: Path) -> None:
     """Tech-lead PR-2 review, S1: an order whose expiration has NOT arrived is
     censored (still standing), never 'expired'. Recording a future end is
@@ -4641,6 +4773,7 @@ def test_expiry_is_never_in_the_future(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_orphan_open_gaps_are_closed_by_the_successor(tmp: Path) -> None:
     """Tech-lead PR-1 review, S1: a gap left open by a run that died is closed by
     the next run at the dead run's last checkpoint -- otherwise one stale open
@@ -4893,6 +5026,7 @@ def _win(tmp_engine, traits, tmp=None):
         "1h", "ETH", H11)
 
 
+@needs("yaml")
 def test_trait_set_series_bid_leg_is_a_union_that_names_its_winner(tmp: Path) -> None:
     """The Operator's single-clause chart: one bid line, three legs, each with its own n.
 
@@ -4937,6 +5071,7 @@ def test_trait_set_series_bid_leg_is_a_union_that_names_its_winner(tmp: Path) ->
     n.close()
 
 
+@needs("yaml")
 def test_trait_set_series_collection_offer_covers_every_filter(tmp: Path) -> None:
     """`C = {}` is a subset of every token's traits, so a collection offer is bid
     depth for EVERY filter -- not by a special branch, but because that is what an
@@ -4961,6 +5096,7 @@ def test_trait_set_series_collection_offer_covers_every_filter(tmp: Path) -> Non
     n.close()
 
 
+@needs("yaml")
 def test_trait_set_series_partial_offers_are_counted_never_summed(tmp: Path) -> None:
     """PARTIAL is a verdict, not a fraction of depth (dataeng §4.3, project rule 4).
 
@@ -4988,6 +5124,7 @@ def test_trait_set_series_partial_offers_are_counted_never_summed(tmp: Path) -> 
     n.close()
 
 
+@needs("yaml")
 def test_trait_set_series_empty_and_set_is_null_never_zero(tmp: Path) -> None:
     """A bucket where the AND-set has no standing ask is a HOLE.
 
@@ -5040,6 +5177,7 @@ def test_trait_set_series_empty_and_set_is_null_never_zero(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_filtered_counts_are_null_when_the_filter_selects_no_token(tmp: Path) -> None:
     """BUG-20260910-060: a bid on every token is not a bid on any token of an empty set.
 
@@ -5143,6 +5281,7 @@ def test_filtered_counts_are_null_when_the_filter_selects_no_token(tmp: Path) ->
     n.close()
 
 
+@needs("yaml")
 def test_trait_offer_verdicts_query_count_is_o_distinct_pairs(tmp: Path) -> None:
     """B1 (tech-lead, S1): the reach of a criterion is a property of the TRAIT TABLE,
     not of the offer that names it, so it must be looked up once per distinct
@@ -5224,6 +5363,7 @@ def test_trait_offer_verdicts_query_count_is_o_distinct_pairs(tmp: Path) -> None
     n.close()
 
 
+@needs("yaml")
 def test_partial_detail_is_capped_but_the_count_never_is(tmp: Path) -> None:
     """F3 (tech-lead, S2): an uncapped `partial` list reached 4.1 MB on the fixture.
 
@@ -5313,6 +5453,7 @@ def _disagreeing_store(tmp: Path, name: str):
     return n, MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
 
 
+@needs("yaml")
 def test_empty_token_set_guard_holds_on_the_standing_branches_too(tmp: Path) -> None:
     """B2/F4 (tech-lead, S1): the guard was only on the `_bucketed` branch.
 
@@ -5414,6 +5555,7 @@ def test_empty_token_set_guard_holds_on_the_standing_branches_too(tmp: Path) -> 
     n.close()
 
 
+@needs("yaml")
 def test_trait_series_endpoint_refuses_an_unknown_interval(tmp: Path) -> None:
     """F6 (tech-lead, S3): an unknown interval reached the page as a bare 500.
 
@@ -5453,6 +5595,7 @@ def test_trait_series_endpoint_refuses_an_unknown_interval(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_trait_set_series_combined_floor_bounds_every_single_clause_floor(tmp: Path) -> None:
     """THE PROPERTY, and note its DIRECTION -- the intuitive one is backwards.
 
@@ -5498,6 +5641,7 @@ def test_trait_set_series_combined_floor_bounds_every_single_clause_floor(tmp: P
     n.close()
 
 
+@needs("yaml")
 def test_trait_set_series_baseline_is_present_and_unfiltered(tmp: Path) -> None:
     """The pale dotted line underneath is the COLLECTION floor, not a filtered one.
 
@@ -5520,6 +5664,7 @@ def test_trait_set_series_baseline_is_present_and_unfiltered(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_trait_series_endpoint_passes_the_filter_through(tmp: Path) -> None:
     """PR-6's endpoint: `/api/trait_series`, minimal, engine-owned.
 
@@ -5579,6 +5724,7 @@ def test_trait_series_endpoint_passes_the_filter_through(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_trait_set_series_ordering_survives_a_duplicated_traits_row(tmp: Path) -> None:
     """The ordering property, on the shape that would break it (tech-lead gate, PR-5).
 
@@ -5670,6 +5816,7 @@ def test_trait_set_series_ordering_survives_a_duplicated_traits_row(tmp: Path) -
     n.close()
 
 
+@needs("yaml")
 def test_merge_leg_maxima_reports_a_tie_as_every_leg_that_holds_it(tmp: Path) -> None:
     """A tie names BOTH legs. Nothing tested this (tech-lead gate, PR-5).
 
@@ -5786,6 +5933,7 @@ def _survival_engine(n):
     return MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
 
 
+@needs("yaml")
 def test_survival_kaplan_meier_matches_a_hand_computed_fixture(tmp: Path) -> None:
     """PR-8, quant §3.2. Every number here was computed by hand before the code ran.
 
@@ -5882,6 +6030,7 @@ def test_survival_kaplan_meier_matches_a_hand_computed_fixture(tmp: Path) -> Non
     n.close()
 
 
+@needs("yaml")
 def test_survival_censors_a_life_that_ended_after_as_of(tmp: Path) -> None:
     """`exit_reason` is stored AS OF THE FOLD. The estimator must re-read it against
     the `as_of` it was asked about, or it learns the future.
@@ -5923,6 +6072,7 @@ def test_survival_censors_a_life_that_ended_after_as_of(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_survival_n_eff_is_maker_episodes_not_orders(tmp: Path) -> None:
     """n_eff = maker-episode clusters (quant §2.1, §3.3). One maker requoting the
     same token three times inside epsilon is ONE observation of independence, not
@@ -5969,6 +6119,7 @@ def test_survival_n_eff_is_maker_episodes_not_orders(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_survival_below_the_cluster_minimum_refuses_percentiles_and_strips(tmp: Path) -> None:
     """REQ-F-19 as quant §3.3 sharpens it: the binding minimum is 30 maker-episode
     CLUSTERS, not 30 orders. Below it the panel draws every observation and the
@@ -6004,6 +6155,7 @@ def test_survival_below_the_cluster_minimum_refuses_percentiles_and_strips(tmp: 
     n.close()
 
 
+@needs("yaml")
 def test_survival_cluster_bootstrap_is_deterministic_and_wider_than_greenwood(tmp: Path) -> None:
     """The band the panel draws is a maker-episode cluster bootstrap (factcheck D-W5),
     and it is reproducible: `random.Random(seed)` and nothing else.
@@ -6086,6 +6238,7 @@ def test_survival_cluster_bootstrap_is_deterministic_and_wider_than_greenwood(tm
     n.close()
 
 
+@needs("yaml")
 def test_survival_filters_compose(tmp: Path) -> None:
     """trait AND maker AND price band -- an intersection, not three separate views.
 
@@ -6129,6 +6282,7 @@ def test_survival_filters_compose(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_survival_drill_carries_both_clocks_and_the_distance_to_floor(tmp: Path) -> None:
     """The drill list (design §4.3). Both timestamps ride along deliberately:
     `observed_at - valid_at` is our stream lag, and a bid whose whole life is
@@ -6184,6 +6338,7 @@ def test_survival_drill_carries_both_clocks_and_the_distance_to_floor(tmp: Path)
     n.close()
 
 
+@needs("yaml")
 def test_survival_constants_cannot_drift_from_assumptions_yaml() -> None:
     """Same device as ASM-021's: the register is the artifact a reviewer trusts, so
     it must not be able to disagree with the code it describes. epsilon, B, the
@@ -6313,6 +6468,7 @@ def test_docs_palette_table_matches_the_root_block() -> None:
           "line:{width:2,color:C.surface}" in html and "surface:tok('--surface')" in html)
 
 
+@needs("yaml")
 def test_survival_drill_episode_is_a_real_cluster_id(tmp: Path) -> None:
     """N2. `survival_drill` shipped `episode: None` on every row: the id was assigned
     in `survival()` after `_survival_rows` returned, so the drill -- which calls
@@ -6353,6 +6509,7 @@ def test_survival_drill_episode_is_a_real_cluster_id(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_survival_response_stays_small_at_forty_thousand_lives(tmp: Path) -> None:
     """BUG-20260910-064. The response carried seven arrays one entry per distinct
     event time. At 40,000 lives that measured **2.29 MB** of JSON for a panel about
@@ -6503,6 +6660,7 @@ def _lwin():
     return {"start": iso_to_ts(_LEDGER_WINDOW[0]), "end": iso_to_ts(_LEDGER_WINDOW[1])}
 
 
+@needs("yaml")
 def test_ledger_keyset_pages_are_stable_under_inserts(tmp: Path) -> None:
     """design §8.1.2. Offset pagination over a table an append-only writer is
     adding 48 rows/s to skips and repeats rows: everything shifts down by however
@@ -6567,6 +6725,7 @@ def test_ledger_keyset_pages_are_stable_under_inserts(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_ledger_refuses_a_sort_it_has_no_index_for(tmp: Path) -> None:
     """design §8.1.2: "a sort on a non-indexed column is refused with a message
     naming the indexed ones -- not silently slow". A four-million-row full scan
@@ -6607,6 +6766,7 @@ def test_ledger_refuses_a_sort_it_has_no_index_for(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_ledger_token_number_sorts_numerically(tmp: Path) -> None:
     """The Operator asked for this by name: `#10` sorts AFTER `#9`, not before it.
     `token_id` is TEXT in the store, so a lexical sort is the wrong answer that
@@ -6675,6 +6835,7 @@ def test_ledger_token_number_sorts_numerically(tmp: Path) -> None:
     ln.close()
 
 
+@needs("yaml")
 def test_ledger_chart_states_its_cap_and_never_samples_silently(tmp: Path) -> None:
     """design §8.1.3. "Chart this selection" caps at 5,000 rows and prints
     `charting the 5,000 most recent of 41,208`. A silent sample is a chart whose
@@ -6703,6 +6864,7 @@ def test_ledger_chart_states_its_cap_and_never_samples_silently(tmp: Path) -> No
     n.close()
 
 
+@needs("yaml")
 def test_wallet_card_percentages_carry_their_counts(tmp: Path) -> None:
     """Project rule 4, and design §8.2.1: "every percentage carries its count, in
     the card, not in a tooltip". `61.4%` is not a number anyone can check;
@@ -6760,6 +6922,7 @@ def test_wallet_card_percentages_carry_their_counts(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_wallet_profile_has_no_field_for_an_off_chain_identity(tmp: Path) -> None:
     """The charter boundary, enforced by the SCHEMA rather than by discipline
     (.claude/agents/market-analyst.md; design §8.2.1): the wallet profile object
@@ -6827,6 +6990,7 @@ def test_wallet_profile_has_no_field_for_an_off_chain_identity(tmp: Path) -> Non
     n.close()
 
 
+@needs("yaml")
 def test_health_surfaces_the_alarms_nothing_else_does(tmp: Path) -> None:
     """The Health view answers "can I trust the other tabs?" -- so the three
     numbers that mean the answer is NO must be on it, in one response:
@@ -7144,6 +7308,7 @@ def _dash_root(tmp: Path, name: str):
     return root, cfg
 
 
+@needs("yaml")
 def test_dashboard_binds_before_it_opens_the_store(tmp: Path) -> None:
     """The ordering fix. A dashboard that cannot bind must never touch the store.
 
@@ -7405,6 +7570,7 @@ def test_launchd_dashboard_cannot_retry_every_ten_seconds(tmp: Path) -> None:
           f"doc={'ThrottleInterval: 30' in doc} cmd={'30 seconds' in cmd}")
 
 
+@needs("yaml")
 def test_health_names_the_store_writer_and_caches_quick_check(tmp: Path) -> None:
     """Health has to say the store is still READABLE, and who owns its write side.
 
@@ -7510,6 +7676,7 @@ def _ledger_plan_store(tmp: Path, name: str, n_rows: int = 0):
     return n, eng
 
 
+@needs("yaml")
 def test_ledger_page_uses_its_index_under_a_time_window(tmp: Path) -> None:
     """A1 (S1). `dashboard._window` is UNCONDITIONAL -- every ledger request the page
     makes carries `valid_ts >= ? AND valid_ts < ?`. Given that range predicate,
@@ -7626,6 +7793,7 @@ def test_ledger_page_uses_its_index_under_a_time_window(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_ledger_keyset_walks_nulls_and_ties_on_every_sort(tmp: Path) -> None:
     """A3 / A4 (S2). Two branches of the keyset carried the whole correctness of
     pagination and neither had a test:
@@ -7733,6 +7901,7 @@ def test_ledger_keyset_walks_nulls_and_ties_on_every_sort(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_ledger_chart_caption_counts_what_it_draws(tmp: Path) -> None:
     """A2 (S1). The caption said `charting the 5,000 most recent of N` where N was
     (a) counted WITHOUT the price predicate the chart itself applies, so it named
@@ -7787,6 +7956,7 @@ def test_ledger_chart_caption_counts_what_it_draws(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_wallet_identity_guard_matches_the_markers_it_claims(tmp: Path) -> None:
     """A6 (S4). The guard's comment promised to catch a field that could hold an
     off-chain identity; the marker list did not contain the words a leak would most
@@ -7896,6 +8066,7 @@ def test_writer_info_enforced_is_not_a_lie_on_a_reader(tmp: Path) -> None:
     w.close()
 
 
+@needs("yaml")
 def test_buglog_check_fails_on_a_duplicate_bug_id(tmp: Path) -> None:
     """C1 (S3). `--check` collected ids into a SET, so two entries sharing an id
     collapsed into one and the gate stayed green. The ledger is the source of
@@ -8145,6 +8316,7 @@ def _serving(dash: Any):
     return port, httpd, get
 
 
+@needs("yaml")
 def test_dashboard_serves_degraded_on_a_malformed_store(tmp: Path) -> None:
     """A corrupt store must not take the page down: it is where the recipe lives.
 
@@ -8230,6 +8402,7 @@ def test_dashboard_serves_degraded_on_a_malformed_store(tmp: Path) -> None:
         dash.stop()
 
 
+@needs("yaml")
 def test_dashboard_picks_up_a_rebuilt_store_without_a_restart(tmp: Path) -> None:
     """The recipe has to be ONE step. Move the corrupt file aside; the running
     dashboard folds a fresh store on its next probe. If the Operator also had to
@@ -8277,6 +8450,7 @@ def test_dashboard_picks_up_a_rebuilt_store_without_a_restart(tmp: Path) -> None
             dash.norm.close()
 
 
+@needs("yaml")
 def test_cmd_dashboard_maps_an_unreadable_store_to_a_documented_exit_code(tmp: Path) -> None:
     """The belt to the degradation's braces. A `sqlite3.DatabaseError` that
     somehow still escapes `serve()` must be a NAMED exit code and a sentence, not
@@ -8326,6 +8500,7 @@ def test_cmd_dashboard_maps_an_unreadable_store_to_a_documented_exit_code(tmp: P
           [c for c in sorted(codes) if f"| `{c}` |" not in block])
 
 
+@needs("yaml")
 def test_serve_releases_the_writer_lock_when_startup_fails_late(tmp: Path) -> None:
     """tech-lead B2. `serve()`'s failure path closed the socket and nothing else.
 
@@ -8369,6 +8544,7 @@ def test_serve_releases_the_writer_lock_when_startup_fails_late(tmp: Path) -> No
           freed, "" if freed else detail)
 
 
+@needs("yaml")
 def test_rebuild_store_command_moves_aside_and_refuses_a_live_writer(tmp: Path) -> None:
     """The double-click. It must be safe in the one case that matters -- a
     dashboard is running and has the file open -- and it must never delete."""
@@ -8419,6 +8595,7 @@ def test_rebuild_store_command_moves_aside_and_refuses_a_live_writer(tmp: Path) 
           "corrupt file in place", "recover" not in r2.stdout.lower())
 
 
+@needs("yaml")
 def test_quick_check_reports_a_malformed_store_instead_of_raising(tmp: Path) -> None:
     """`store_quick_check` has to work in the degraded case, where there is no
     connection to ask. It opens a throwaway read-only one and lets it fail, which
@@ -8487,6 +8664,7 @@ def test_degraded_page_and_docs_carry_the_rebuild_recipe(tmp: Path) -> None:
 
 
 
+@needs("yaml")
 def test_degraded_reopen_probe_is_not_throttled_by_refresh_seconds(tmp: Path) -> None:
     """R2-5. The reopen probe ran on the FOLD tick, so `refresh_seconds` capped it.
 
@@ -10253,6 +10431,7 @@ def _pr10_frame(raw: list, **payload_over) -> str:
     return json.dumps(f, separators=(",", ":"))
 
 
+@needs("yaml")
 def test_pr10_flag_off_changes_nothing(tmp: Path) -> None:
     """The property that makes this shippable: with `stream.redundant.enabled`
     false, ONE connection, ONE landing root, ONE lock file, and a landing
@@ -10303,6 +10482,7 @@ def test_pr10_flag_off_changes_nothing(tmp: Path) -> None:
           keys == _GAP_RECORD_KEYS_SINGLE_CONNECTION, str(sorted(keys)))
 
 
+@needs("yaml")
 def test_pr10_flag_on_opens_the_second_connection(tmp: Path) -> None:
     """Flip the flag and RUNNING CODE behaves differently: `ingest --redundant`
     connects with B's key and lands under B's root, with B's own lock.
@@ -10335,6 +10515,7 @@ def test_pr10_flag_on_opens_the_second_connection(tmp: Path) -> None:
           True)
 
 
+@needs("yaml")
 def test_pr10_landing_roots_never_cross(tmp: Path) -> None:
     """A's frames land only under A, B's only under B.
 
@@ -10364,6 +10545,7 @@ def test_pr10_landing_roots_never_cross(tmp: Path) -> None:
           and (root / "data" / "landing-b" / "_manifest").exists())
 
 
+@needs("yaml")
 def test_pr10_refuses_a_missing_or_shared_second_key(tmp: Path) -> None:
     """E-V13. Two processes on ONE key fail simultaneously on a known schedule --
     free instant keys expire after 7 days (REQ-D-06) -- so a shared key is not
@@ -10700,6 +10882,7 @@ def test_pr10_event_without_event_timestamp_is_undedupable_and_counted(tmp: Path
     n.close()
 
 
+@needs("yaml")
 def test_pr10_duplicate_monitor_alarms_on_collapse_with_both_healthy(tmp: Path) -> None:
     """dataeng failure mode 3, the S0 one, and the fifth project rule in code.
 
@@ -11132,6 +11315,7 @@ def test_order_lives_refolds_when_the_method_stamp_is_stale(tmp: Path) -> None:
     again.close()
 
 
+@needs("yaml")
 def test_order_lives_method_mixed_is_reported_on_health_as_warn(tmp: Path) -> None:
     """A reader cannot fix it, so it must say so -- with the sentence that names the fix.
 
@@ -11383,6 +11567,7 @@ def test_pr10_revocation_is_logged_once_per_transition(tmp: Path) -> None:
         lg.setLevel(old_level)
 
 
+@needs("yaml")
 def test_pr10_health_carries_a_dedup_block(tmp: Path) -> None:
     """E-W5. `order_criteria`'s primary key is `(run, seq, idx)` -- per-connection
     by construction -- so with B running, every raw count over it DOUBLES. The
@@ -11478,6 +11663,7 @@ def _pr10_two_conn_store(tmp: Path, name: str):
     return n, eng
 
 
+@needs("yaml")
 def test_pr10_metrics_never_double_count_under_two_connections(tmp: Path) -> None:
     """Finding 4. `events` holds both connections' rows by design, so every raw
     COUNT over it doubles the moment a second connection runs.
@@ -11545,6 +11731,7 @@ def test_pr10_metrics_never_double_count_under_two_connections(tmp: Path) -> Non
     n.close()
 
 
+@needs("yaml")
 def test_pr10_single_connection_metrics_are_byte_identical(tmp: Path) -> None:
     """The other half of finding 4, and the one that makes it safe to ship.
 
@@ -11592,6 +11779,7 @@ def test_pr10_single_connection_metrics_are_byte_identical(tmp: Path) -> None:
     n.close()
 
 
+@needs("yaml")
 def test_pr10_metrics_count_undedupable_rows_per_row_and_say_so(tmp: Path) -> None:
     """A row with no `event_timestamp` cannot be proved a duplicate, so it is
     counted PER ROW -- and that is exactly the part of any n a second connection
@@ -11629,6 +11817,7 @@ def test_pr10_metrics_count_undedupable_rows_per_row_and_say_so(tmp: Path) -> No
     n.close()
 
 
+@needs("yaml")
 def test_pr10_stale_launchd_jobs_are_computed_and_removed(tmp: Path) -> None:
     """Finding 6. Turning the flag back OFF strands `com.navanax.recorder-b`:
     launchd keeps starting it, `ingest --redundant` refuses with the configuration
@@ -11707,6 +11896,7 @@ def test_pr10_uninstall_and_status_do_not_hardcode_the_label_list(tmp: Path) -> 
           "bootout" not in st and "rm -f" not in st)
 
 
+@needs("yaml")
 def test_pr10_launchd_renders_the_b_recorder_only_when_enabled(tmp: Path) -> None:
     """The launchd half: `tools/launchd.py` READS the flag. With it off there is
     no B job on the machine at all; with it on there is one, supervised exactly
@@ -11757,6 +11947,7 @@ def test_pr10_launchd_renders_the_b_recorder_only_when_enabled(tmp: Path) -> Non
           "tools/launchd.py labels" in inst)
 
 
+@needs("yaml")
 def test_pr10_is_documented_where_an_operator_would_look() -> None:
     """A flag whose cost is "disk doubles and every raw count over events doubles"
     has to say so somewhere the Operator reads, not only in a commit message."""
@@ -11820,6 +12011,159 @@ def test_pr10_is_documented_where_an_operator_would_look() -> None:
     check("docs/04 §8.13: says the uninstaller and the status window take the label "
           "list from the generator plus what is loaded",
           "launchctl list" in d04 and "two sources" in d04)
+
+# ===========================================================================
+# BUG-20260911-078. The skip mechanism itself. CI's FIRST step runs this file
+# before `pip install`, so a test that reaches `import yaml` used to abort the
+# whole process and every later step was skipped -- CI was red on every branch,
+# main included, for two days. The fix is a declared, counted, LISTED skip; the
+# risk the fix introduces is that a skip quietly becomes a hole. These three
+# tests are what stop that: a skip is never a pass, `--no-skips` refuses to
+# exit 0 when anything was skipped, and a declared module that IS importable
+# does not skip anything.
+# ===========================================================================
+def _skip_harness(tmp: Path) -> Path:
+    """A throwaway three-test suite driven through the REAL `run_suite`.
+
+    Driving the mechanism in-process would append to this run's own PASS /
+    FAIL / SKIPPED and corrupt the totals being tested, so it runs in a
+    subprocess and the parent reads the exit code and the summary it printed.
+    """
+    h = tmp / "skip_harness.py"
+    h.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'tests')!r})\n"
+        "import selftest as st\n"
+        "\n"
+        '@st.needs("navanax_module_that_does_not_exist")\n'
+        "def t_absent():\n"
+        '    st.check("the body of a skipped test must never run", False,\n'
+        '             "a skipped test executed its body")\n'
+        "\n"
+        '@st.needs("json")   # stdlib: importable everywhere, so it must NOT skip\n'
+        "def t_present():\n"
+        '    st.check("a declared module that IS importable runs normally", True)\n'
+        "\n"
+        "def t_plain():\n"
+        '    st.check("an undeclared test still runs", True)\n'
+        "\n"
+        'code = st.run_suite([("t_absent", t_absent), ("t_present", t_present),\n'
+        '                     ("t_plain", t_plain)],\n'
+        '                    strict="--no-skips" in sys.argv)\n'
+        'print("HARNESS", "exit", code, "passed", len(st.PASS), "failed", len(st.FAIL),\n'
+        '      "skipped", len(st.SKIPPED))\n'
+        "sys.exit(code)\n"
+    )
+    return h
+
+
+def _run_harness(h: Path, *args: str) -> tuple[int, str]:
+    import subprocess as _sp
+    p = _sp.run([sys.executable, str(h), *args], capture_output=True, text=True, cwd=ROOT)
+    return p.returncode, p.stdout + p.stderr
+
+
+def test_runner_records_a_skip_as_skipped_and_never_as_a_pass(tmp: Path) -> None:
+    """(a) A test whose declared module is absent is SKIPPED: its body does not
+    run, it does not land in PASS, the summary counts it in its own column and
+    names both the test and the module it needed."""
+    rc, out = _run_harness(_skip_harness(tmp))
+    tail = next((ln for ln in out.splitlines() if ln.startswith("HARNESS")), "")
+    check("skip: the runner reports exactly one skip out of three tests",
+          "skipped 1" in tail, tail or out[-400:])
+    check("skip: the two runnable tests DID run -- a skip mechanism that skips "
+          "everything would also report 0 failures",
+          "passed 2" in tail and "failed 0" in tail, tail or out[-400:])
+    check("skip: the skipped test is NOT counted as passed (2 passed, not 3)",
+          "passed 3" not in tail, tail or out[-400:])
+    check("skip: the body of the skipped test never ran",
+          "the body of a skipped test must never run" not in out, out[-600:])
+    check("skip: the summary LISTS the skipped test by name above the counts",
+          "t_absent" in out and "SKIPPED (1)" in out, out[-600:])
+    check("skip: the summary names the module that was missing",
+          "navanax_module_that_does_not_exist" in out, out[-600:])
+    check("skip: the summary line carries the skip count and the module list",
+          "3 test functions, 2 passed, 0 failed, 1 skipped "
+          "(needs: navanax_module_that_does_not_exist)" in out, out[-600:])
+    check("skip: without --no-skips a skip alone still exits 0 -- the stdlib-only "
+          "CI step is allowed to skip", rc == 0, f"rc={rc}")
+
+
+def test_no_skips_mode_refuses_to_exit_zero_when_anything_was_skipped(tmp: Path) -> None:
+    """(b) The guard that keeps the skips honest. `--no-skips` is what
+    tools/gates.py and the post-Install CI step run, so a test that quietly
+    stopped running anywhere that HAS the dependency is a red build."""
+    rc, out = _run_harness(_skip_harness(tmp), "--no-skips")
+    check("--no-skips: a run with a skip in it exits non-zero", rc != 0, f"rc={rc}")
+    check("--no-skips: it says which module has to be installed",
+          "navanax_module_that_does_not_exist" in out, out[-600:])
+    check("exit code: failures alone are a failure in either mode",
+          exit_code(1, 0, strict=False) == 1 and exit_code(1, 0, strict=True) == 1)
+    check("exit code: a skip is tolerated only when strict is off",
+          exit_code(0, 1, strict=False) == 0 and exit_code(0, 1, strict=True) != 0)
+    check("exit code: a clean run is 0 in both modes",
+          exit_code(0, 0, strict=False) == 0 and exit_code(0, 0, strict=True) == 0)
+    gates = (ROOT / "tools" / "gates.py").read_text()
+    check("gates.py runs the suite in strict mode, so a developer never sees a skip "
+          "locally and reads it as fine",
+          '"--no-skips"' in gates, gates[:0])
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    check("ci.yml keeps the stdlib-only step BEFORE Install",
+          ci.index("Self-test (stdlib only)") < ci.index("name: Install"))
+    check("ci.yml adds a strict run AFTER Install, so the skipped tests are actually "
+          "executed in CI",
+          "--no-skips" in ci and ci.index("name: Install") < ci.index("--no-skips"))
+
+
+def test_a_declared_module_that_is_present_does_not_skip_the_test(tmp: Path) -> None:
+    """(c) The mechanism must not be a blanket off-switch. A test declaring a
+    module that IS importable runs exactly as before, and `missing_modules`
+    reports nothing for it."""
+    @needs("json")
+    def declares_stdlib() -> None:
+        ...
+
+    @needs("navanax_module_that_does_not_exist")
+    def declares_absent() -> None:
+        ...
+
+    def declares_nothing() -> None:
+        ...
+
+    check("needs: a declared module that imports here leaves the test runnable",
+          missing_modules(declares_stdlib) == (), str(missing_modules(declares_stdlib)))
+    check("needs: a declared module that does not import is reported by name",
+          missing_modules(declares_absent) == ("navanax_module_that_does_not_exist",),
+          str(missing_modules(declares_absent)))
+    check("needs: an undeclared test is never skipped",
+          missing_modules(declares_nothing) == ())
+    check("needs: the declaration is readable off the function, so discovery order "
+          "and the function itself are untouched",
+          declares_stdlib.needs_modules == ("json",)
+          and declares_stdlib.__name__ == "declares_stdlib")
+    check("needs: an empty declaration is a mistake, and is refused rather than "
+          "silently meaning 'needs nothing'",
+          _raises(lambda: needs()), "needs() with no module accepted")
+    check("module_available: honest about the stdlib and about what is not there",
+          module_available("json") is True
+          and module_available("navanax_module_that_does_not_exist") is False)
+    rc, out = _run_harness(_skip_harness(tmp))
+    check("needs: the present-module test really executed in the harness run",
+          "a declared module that IS importable runs normally" in out, out[-400:])
+    check("needs: every test this file declares names a module the project actually "
+          "depends on -- a typo would skip a test forever and nothing would say so",
+          all(m in {"yaml", "zstandard"} for _, fn in discover()
+              for m in getattr(fn, "needs_modules", ())),
+          str(sorted({m for _, fn in discover() for m in getattr(fn, "needs_modules", ())})))
+
+
+def _raises(fn) -> bool:
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 - the refusal is the point; its type is not
+        return True
+    return False
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
