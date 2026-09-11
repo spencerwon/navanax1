@@ -37,6 +37,14 @@ class RestClient:
         # Every ATTEMPT, retries included -- the number the budget actually saw.
         # Callers report this, never their own count of calls (tech-lead F5).
         self.requests_made = 0
+        # The response headers and status of the LAST attempt. The governor
+        # consumes headers internally and then they were gone, so a caller that
+        # wants to REPORT the rate-limit headers -- rather than merely obey them
+        # -- had no way to see them. `tools/probe_events_page.py` exists to
+        # print exactly those, and a probe that cannot show its evidence is not
+        # a measurement. Read-only for callers; overwritten on every attempt.
+        self.last_headers: dict[str, str] = {}
+        self.last_status: int | None = None
 
     def _do(self, path: str, params: dict[str, Any] | None) -> tuple[int, dict[str, str], Any]:
         url = self.base + path + (("?" + urllib.parse.urlencode(params)) if params else "")
@@ -68,6 +76,7 @@ class RestClient:
             async with self.gov.slot(priority):
                 self.requests_made += 1
                 status, headers, body = await loop.run_in_executor(None, self._do, path, params)
+                self.last_headers, self.last_status = headers, status
                 self.gov.observe_response(status, headers)
             if self.ledger is not None:
                 try:

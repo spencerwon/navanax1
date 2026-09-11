@@ -334,3 +334,18 @@ Once the jobs above are installed, **the dashboard is already running** and the 
 | `autostart-uninstall.command` | Stops the three jobs and deletes their plists (§8.8) | No |
 | `dashboard.command` | Runs a dashboard in a window, for a machine with no background job; refuses if one is listening | Yes — one process |
 | `rebuild-store.command` | Moves a malformed analytical store aside so it re-folds from the landing zone | No |
+| `probe-events-page.command` | PR-0.1: one governed REST read of the events endpoint at `limit=200`, to settle whether REQ-D-13's "up to 200 per page" is true. Appends the answer to `docs/measurements/2026-09-11_events_page_size.md` | No — one read, then it exits |
+| `probe-two-sockets.command` | PR-0.2: opens two stream connections on one key for ten minutes (`probe-two-sockets.command 120` for a shorter run) and reports whether both connected, whether both received, any 4xx or close code on the second, and how many events each saw that the other missed. Appends to `docs/measurements/2026-09-11_two_sockets.md` | Two temporary WebSocket connections, **in addition to** the recorder's |
+
+### 8.12 The two PR-0 probes
+
+*Added 2026-09-11. `docs/proposals/TECHLEAD_2026-09-09_factcheck.md` §3 PR-0 asks for two measurements before any of the backfill or redundant-stream design work is sized. Both are launchers because the key lives on the Operator's machine and nowhere else.*
+
+The rule both obey: **a probe spends exactly what its own window says it spends, and it never writes to the historical record.** Neither opens `data/landing/` and neither opens `data/analytics.sqlite`.
+
+- `probe-events-page.command` spends **one** REST read out of the measured 120/hour, at INTERACTIVE priority with retries switched off — so a 429 costs one read and returns as the answer, rather than becoming four reads and a retry story. It goes through `RestClient`, so the spend appears in `data/ops.db`'s `rest_ledger` like any other read. If the governor reports fewer than five tokens available it **refuses and calls nothing** (exit 6): the recorder's backfill reserve is worth more than a measurement that can be taken an hour later. Do not run it in the same minute as `traits.command`, which shares the same bucket.
+- `probe-two-sockets.command` spends **zero** REST reads; the stream is unmetered. Its cost is two extra simultaneous connections on the key. **Leave the recorder running** — that is part of the test, not a hazard to work around. The key will be carrying at least three connections at once (recorder, probe A, probe B), and four if anything else of yours is connected. If `data/logs/recorder.log` gains a disconnect line inside the probe window, **that is the finding**: the account will not hold what PR-10 wants, and the cost of learning it was paid out of the irreplaceable record. The probe reads that log itself, read-only, and prints what appeared.
+
+The second probe keeps the raw frames it captured in `data/probes/two_sockets_<timestamp>.jsonl` for later inspection. That file is **not** part of the record: `data/` is gitignored whole, and the file has no manifest, no checksums and no sequence numbers, so nothing may ever be folded from it into the store (`docs/07 §2`). It is evidence of what the probe saw and of nothing else.
+
+Both write one dated, append-only entry per run under `docs/measurements/`. A later run never edits an earlier one — corrections supersede, they do not overwrite (`docs/01_METHODOLOGY.md`) — so a re-run against a busier hour sits below the first rather than replacing it.

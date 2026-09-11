@@ -32,6 +32,8 @@ python3 tests/selftest.py       # stdlib-only self-test, no dependencies needed
 
 **Deploying merged code:** double-click `update.command`. It fast-forwards `main`, reinstalls only if `pyproject.toml` moved, restarts the three background jobs, and prints the dashboard's own health reading. It refuses — changing nothing — on uncommitted edits, on a checkout that is not on `main` (it prints a sentence to send Claude; it never switches branches itself), or when the pull would not be a fast-forward. It never touches `data/`.
 
+**Settling two assumptions (PR-0):** double-click `probe-events-page.command` — it spends exactly **one** REST read to find out how many events the endpoint really returns for `limit=200`, and refuses if the budget is low — or `probe-two-sockets.command`, which spends **zero** reads and holds two stream connections on one key for ten minutes to find out whether that is permitted and how much a single socket drops. Neither writes to the landing zone or the stores; each appends a dated entry under `docs/measurements/`. See [`docs/04_ENVIRONMENTS.md` §8.12](docs/04_ENVIRONMENTS.md#812-the-two-pr-0-probes).
+
 **Running unattended (macOS):** double-click `autostart-install.command` and the recorder, dashboard and daily trait job start at login and restart themselves after a crash — see [`docs/04_ENVIRONMENTS.md` §8](docs/04_ENVIRONMENTS.md#8-running-unattended) for what it installs, where the logs go, the exit-code contract, and the sleep caveat launchd cannot fix.
 
 ## The six things that shape every decision here

@@ -194,11 +194,25 @@ if command -v launchctl >/dev/null 2>&1; then
     fi
     launchctl bootout "$DOMAIN/$L" >/dev/null 2>&1
     launchctl enable "$DOMAIN/$L" >/dev/null 2>&1
-    if launchctl bootstrap "$DOMAIN" "$AGENTS/$L.plist" >/dev/null 2>&1; then
+    # ONE bootstrap, output captured, branch on the status. It used to run
+    # bootstrap a second time to get the error text, which meant the failure
+    # path loaded the job TWICE: the first call can succeed-then-fail (or fail
+    # then succeed), and a job bootstrapped twice is the two-writers shape that
+    # corrupted the store on 2026-09-10 (BUG-20260910-067). The second call also
+    # reported ITS OWN status, so "already loaded" from the retry got printed as
+    # the reason the first one failed.
+    BOOT_OUT="$(launchctl bootstrap "$DOMAIN" "$AGENTS/$L.plist" 2>&1)"; BOOT_RC=$?
+    if [ "$BOOT_RC" -eq 0 ]; then
       echo "      $L: restarted."
+    elif [ -n "$BOOT_OUT" ]; then
+      echo "      $L: PROBLEM -- macOS refused to load it (exit $BOOT_RC):"
+      printf '%s\n' "$BOOT_OUT" | sed 's/^/              /'
     else
-      echo "      $L: PROBLEM -- macOS refused to load it:"
-      launchctl bootstrap "$DOMAIN" "$AGENTS/$L.plist" 2>&1 | sed 's/^/              /'
+      # Never an empty PROBLEM block. launchctl exits non-zero and says nothing
+      # when the job is ALREADY loaded and running, and a blank block under the
+      # word PROBLEM reads as a fault nobody can act on.
+      echo "      $L: bootstrap exited $BOOT_RC and printed nothing -- usually the job"
+      echo "              is already loaded. The state line below is the answer."
     fi
   done
   echo "      Waiting 5 s for them to come up."

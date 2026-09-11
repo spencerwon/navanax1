@@ -898,13 +898,66 @@ instead of silently keeping one of the two meanings. **068–071 carry the same
 risk** and the same rule: they were allocated on this branch while another was
 open, so if that branch reached 068+ too, whichever merges second renumbers.
 
+### Round 22 — the tech-lead blocks PR-0.2 (the two-socket probe) and the deploy scripts
+
+| ID | Sev | Pri | Status | Summary |
+|---|---|---|---|---|
+| BUG-20260911-072 | S1 | P1 | fixed | `probe_two_sockets` decided window membership from each socket's **own** first-sight time, so an event A saw before the window and B was **replayed** inside it counted as a unique for B — fake drops, inflating the measured case for PR-10 |
+
+**This is the flattering-number failure, in the one place it does the most damage.**
+The per-connection unique count is the *entire* measured justification for PR-10's
+redundant stream. The two sockets are opened five seconds apart by design and
+OpenSea replays recent events to a joining subscriber, so on any real run B is
+handed events A already had — and every one of those was being counted as "an event
+a single connection dropped". Nothing crashed. The number was plausible, and it
+pointed at the conclusion the PR wanted.
+
+`common_window`'s settle margin existed to handle exactly this and could not,
+because membership was still evaluated one socket's clock at a time. Membership in
+the common window is not a per-socket property: an event belongs to it only if
+**neither** socket had already seen it when the window opened. `window_sets()` now
+computes both window sets and then drops every key whose minimum first-sight
+**across both sockets** precedes `t0` — returning the dropped keys rather than
+discarding them, because how much the server replays after a join is itself a
+measurement, and it now appears in the table, the dict and the verdict as
+`n_excluded_pre_window`.
+
+`verdict()` could also reach "**a single socket demonstrably drops events**" from
+any non-empty union, with no guard that the window existed or had length. It now
+returns early unless the window exists, has non-zero length, *and* the union is
+non-empty, and the drop sentence carries its numerator and denominator beside the
+percentage rather than a bare `40.0%`.
+
+**Why nothing caught it.** The suite *did* have a stagger test, and it passed — but
+in its fixture B never saw the early event at all, so the key was absent from B's
+set for the trivial reason. The case that matters is the one where B **does** see
+it, late. The test read like it covered the ground, which is why nobody wrote the
+one that mattered.
+
+**Four smaller findings ride along, and three are the same shape:** a property
+asserted against the *text* of a file instead of against what the code does.
+"Never reconnects" was a grep of the probe's own docstring — now a counting connect
+factory against a peer that closes early, asserting exactly one connect per socket.
+"open-dashboard never starts anything" was one string (`navanax.cli`) — now a scan
+of every executed line for another `.command`, a file handed to a shell, or any
+launchctl verb but `print`. "update touches nothing under data/" was one file —
+now a snapshot of the whole subtree (paths, sizes, mtimes) plus a static scan that
+`data/` is never in a write position. The fourth is behavioural: `update.command`
+called `launchctl bootstrap` a second time just to capture the error text, which
+loaded the job twice on the failure path — BUG-20260910-067's two-writers shape —
+and printed the *second* call's message as the reason the first one failed. One
+call now, captured, branched on, and never an empty `PROBLEM` block. Ctrl+C on the
+probe writes its entry marked **partial** with the seconds it actually ran, instead
+of throwing the evidence away, and `_import_tool` can no longer grade a stale
+`.pyc`.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-66 of 67 logged bugs are fixed.
+71 of 72 logged bugs are fixed.
 
 ### The lesson
 

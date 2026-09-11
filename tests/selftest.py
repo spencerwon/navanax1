@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -8571,6 +8572,101 @@ def test_degraded_reopen_probe_is_not_throttled_by_refresh_seconds(tmp: Path) ->
 #       the real dashboard happens to be up, and nothing here can reach it.
 # ===========================================================================
 
+def _action_lines(text: str) -> list[tuple[int, str]]:
+    """The lines of a shell script that DO something, as (line number, text).
+
+    Comments and prose are dropped, because every rule below is about what the
+    script executes and every one of these scripts legitimately says the
+    forbidden words in its own explanation of why it does not do them. A check
+    that forbade the words would forbid the promise along with the breach.
+
+    Dropped: blank lines, `#` comments, `echo`/`printf` of prose, the `read -r
+    -p` prompt, and `case` labels, whose bodies are their own lines.
+    """
+    out: list[tuple[int, str]] = []
+    for n, raw in enumerate(text.splitlines(), start=1):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s in ("echo", "fi", "esac", "done", "else", "then", "exit 0", "exit 1"):
+            continue
+        # An `echo`/`printf` is prose ONLY while it goes to the screen. The
+        # moment it carries a redirect it is a write, and `echo x > data/...`
+        # is precisely the write this must not be able to hide behind.
+        if s.startswith(("echo ", "printf ", "read -r -p", "read -p")) and ">" not in s:
+            continue
+        out.append((n, raw))
+    return out
+
+
+# Anything that would hand a file to a shell, rather than merely naming it.
+_RUNS_A_FILE = re.compile(
+    r"(?:^|[|;&(]|\&\&|\|\|)\s*(?:sudo\s+|exec\s+|nohup\s+)*"
+    r"(?:bash|sh|zsh|ksh|source|\.)\s+[^\s;|&]+")
+_LAUNCHCTL_VERB = re.compile(r"launchctl(?:-[a-z-]+)?\s+([a-z][a-z-]*)")
+# launchd verbs that START or LOAD something. `print` is the only one a viewer
+# may use: it answers a question and changes nothing.
+_LAUNCHCTL_ALLOWED = {"print"}
+_STARTING_WORDS = re.compile(
+    r"\b(kickstart|bootstrap|bootout|load|unload|start|stop|submit|enable|disable)\b")
+
+
+def _viewer_violations(text: str) -> list[str]:
+    """Every way `open-dashboard.command` could stop being a viewer.
+
+    BUG-20260910-067: a second dashboard started by hand beside the background
+    one gave two writers on one SQLite store and left it malformed. The test
+    used to check one string -- that `navanax.cli` is absent -- which forbids
+    exactly one of the many ways this file could start something. It could still
+    have run another `.command`, or `launchctl kickstart`ed the job, and stayed
+    green.
+    """
+    bad: list[str] = []
+    for n, raw in _action_lines(text):
+        if ".command" in raw:
+            bad.append(f"L{n}: executes or names another .command file: {raw.strip()}")
+        if _RUNS_A_FILE.search(raw):
+            bad.append(f"L{n}: hands a file to a shell: {raw.strip()}")
+        for verb in _LAUNCHCTL_VERB.findall(raw):
+            if verb not in _LAUNCHCTL_ALLOWED:
+                bad.append(f"L{n}: launchctl {verb} -- only `print` asks without acting: "
+                           f"{raw.strip()}")
+        m = _STARTING_WORDS.search(raw)
+        if m and "launchctl" not in raw:
+            bad.append(f"L{n}: `{m.group(1)}` in an executed line: {raw.strip()}")
+        if "navanax.cli" in raw or "navanax dashboard" in raw:
+            bad.append(f"L{n}: invokes the CLI: {raw.strip()}")
+    return bad
+
+
+_DATA_WRITE_VERBS = ("rm", "rmdir", "mv", "cp", "tee", "mkdir", "touch", "truncate",
+                     "dd", "ln", "install", "chmod", "chown", "shred", "unlink")
+_DATA_REDIRECT = re.compile(r">>?\s*[\"']?(?:\$\{?PWD\}?/|\$ROOT/|\./)?data/")
+_DATA_VERB = re.compile(r"\b(" + "|".join(_DATA_WRITE_VERBS) + r")\b[^<>]*?(?<![\w./-])data/")
+
+
+def _data_write_violations(text: str) -> list[str]:
+    """Any executed line that puts `data/` in a WRITE position.
+
+    `data/` holds the landing zone, which is append-only and irreplaceable
+    (docs/07 §4). An update changes code. The behavioural test snapshots the
+    whole subtree and compares it, which catches a write that happens; this
+    catches a write that is merely now possible -- a line added today whose
+    branch nothing in the suite reaches.
+    """
+    bad: list[str] = []
+    for n, raw in _action_lines(text):
+        for seg in re.split(r"\|\||&&|[|;]", raw):
+            if "data/" not in seg:
+                continue
+            if _DATA_REDIRECT.search(seg):
+                bad.append(f"L{n}: redirects into a data/ path: {seg.strip()}")
+            m = _DATA_VERB.search(seg)
+            if m:
+                bad.append(f"L{n}: `{m.group(1)}` with a data/ path: {seg.strip()}")
+    return bad
+
+
 _GIT_ID = ("-c", "user.email=selftest@navanax.local",
            "-c", "user.name=Navanax Selftest",
            "-c", "commit.gpgsign=false")
@@ -8599,15 +8695,22 @@ def _fake_home_env(home: Path) -> dict:
     return env
 
 
-def _sandbox_script(name: str, dest: Path, port: int) -> str:
+def _sandbox_script(name: str, dest: Path, port: int,
+                    launchctl_name: str = "launchctl-not-on-this-machine") -> str:
     """Copy the REAL .command file, rewriting `launchctl` and the port.
 
     Returns the rewritten text. See the block comment above for why these two
     substitutions exist; everything else -- every branch, every refusal, every
     message -- is the shipped file's own.
+
+    `launchctl_name` defaults to a name that is on no PATH, which is what makes
+    the "not a Mac" branch run everywhere. A test that wants the RESTART branch
+    passes a name it has put a stub under -- still never the real `launchctl`,
+    because a suite that boots out the Operator's live recorder costs hours of
+    record that cannot be bought back (docs/04 §8.1).
     """
     text = (ROOT / name).read_text()
-    text = text.replace("launchctl", "launchctl-not-on-this-machine")
+    text = text.replace("launchctl", launchctl_name)
     text = text.replace("8765", str(port))
     dest.write_text(text)
     dest.chmod(0o755)
@@ -8622,7 +8725,9 @@ def _init_repo(path: Path, env: dict) -> None:
         _git(path, env, "symbolic-ref", "HEAD", "refs/heads/main")
 
 
-def _update_sandbox(tmp: Path, name: str, port: int) -> tuple[Path, Path, dict]:
+def _update_sandbox(tmp: Path, name: str, port: int,
+                    launchctl_name: str = "launchctl-not-on-this-machine"
+                    ) -> tuple[Path, Path, dict]:
     """A fake origin with two commits on main, and a clone of it at commit one.
 
     The clone is what update.command runs in, so `git pull --ff-only` has a real
@@ -8639,7 +8744,8 @@ def _update_sandbox(tmp: Path, name: str, port: int) -> tuple[Path, Path, dict]:
     _init_repo(origin, env)
     (origin / ".gitignore").write_text("data/\n")
     (origin / "README.md").write_text("# Sandbox\n")
-    _sandbox_script("update.command", origin / "update.command", port)
+    _sandbox_script("update.command", origin / "update.command", port,
+                    launchctl_name=launchctl_name)
     _git(origin, env, "add", "-A")
     _git(origin, env, "commit", "-q", "-m", "initial commit")
 
@@ -8670,13 +8776,57 @@ def test_update_command_refuses_a_dirty_tree_and_a_branch_that_is_not_main(tmp: 
     check("update.command: exists and is executable",
           script.exists() and os.access(script, os.X_OK))
     text = script.read_text()
-    check("update.command: never switches, merges or resets the branch itself -- the only "
-          "git command that moves this checkout is a fast-forward pull",
-          "git checkout" not in text and "git switch" not in text
-          and "git merge" not in text and "git reset" not in text
-          and "--ff-only" in text)
+    # Every git verb that MOVES or DISCARDS work in this checkout. `checkout`,
+    # `switch` and `reset` were already here; `stash`, `clean`, `rebase`,
+    # `restore` and `merge` are the rest of the same class and were not
+    # (BUG-20260911-072). `clean` is the worst of them: it deletes untracked
+    # files, and in this repo the untracked files under data/ are the landing
+    # zone. A deploy script has no business running any of the eight.
+    for verb in ("checkout", "switch", "merge", "reset", "stash", "clean",
+                 "rebase", "restore", "cherry-pick", "revert"):
+        check(f"update.command: never runs `git {verb}` -- the only git command that moves "
+              f"this checkout is a fast-forward pull",
+              f"git {verb}" not in text)
+    check("update.command: ...and the pull it does run is --ff-only", "--ff-only" in text)
     check("update.command: guards launchctl, which does not exist off macOS",
           "command -v launchctl" in text)
+
+    # BUG-20260911-072: one launchctl bootstrap per job, captured, branched on.
+    check("update.command: calls `launchctl bootstrap` exactly ONCE in the whole file -- it "
+          "used to call it a second time just to get the error text, which loaded the job "
+          "twice on the failure path (BUG-20260910-067's two-writers shape)",
+          text.count("launchctl bootstrap") == 1, text.count("launchctl bootstrap"))
+    check("update.command: ...capturing its output into a variable and branching on the exit "
+          "status, rather than re-running it",
+          "BOOT_OUT=\"$(launchctl bootstrap" in text and "BOOT_RC=$?" in text
+          and '[ "$BOOT_RC" -eq 0 ]' in text)
+    check("update.command: ...and never printing an empty PROBLEM block -- launchctl exits "
+          "non-zero and says nothing when the job is already loaded and running",
+          '[ -n "$BOOT_OUT" ]' in text and "printed nothing" in text)
+
+    # data/ must not be reachable as a write target from any executed line.
+    # The behavioural test below proves no write HAPPENS; this proves none is
+    # even expressible, which is the half that survives a new branch nobody
+    # exercised.
+    data_bad = _data_write_violations(text)
+    check("update.command: no executed line puts a data/ path in a write position -- no "
+          "redirect into it, no rm/mv/cp/tee/mkdir/touch on it. An update changes code; the "
+          "record is the one thing here that cannot be recreated (docs/07 §4)",
+          data_bad == [], "; ".join(data_bad))
+    for mutation in ("rm -f data/analytics.sqlite",
+                     "mv data/landing data/landing.old",
+                     "mkdir -p data/logs",
+                     "echo rebuilt > data/ops.db"):
+        mutated = text.replace('echo "      Clean."', f'  {mutation}', 1)
+        check(f"update.command scan: `{mutation}` inserted into the real file is caught as a "
+              f"write to the record",
+              _data_write_violations(mutated) != [],
+              repr(_data_write_violations(mutated)))
+    prose = text.replace('echo "      Clean."',
+                         '  echo "      Nothing under data/ was touched."', 1)
+    check("update.command scan: it does not fire on a line that merely MENTIONS data/ on "
+          "screen -- a check that forbade the word would forbid the promise too",
+          _data_write_violations(prose) == [], repr(_data_write_violations(prose)))
 
     if shutil.which("git") is None:
         check("update.command: refusals exercised", True, "skipped: no git on this machine")
@@ -8763,11 +8913,48 @@ def test_update_command_fast_forwards_prints_the_range_and_reads_health(tmp: Pat
 
         # The irreplaceable half of the project, in the sandbox. gitignored, so
         # it does not make the tree dirty -- exactly as data/ is in the real one.
-        landing = live / "data" / "landing"
-        landing.mkdir(parents=True, exist_ok=True)
-        frame = landing / "2026-09-11T00.jsonl.zst"
-        frame.write_bytes(b"an irreplaceable frame")
-        before = (frame.read_bytes(), frame.stat().st_mtime_ns)
+        #
+        # BUG-20260911-072: this used to be ONE file, and one file is not the
+        # claim. The claim on screen is "Nothing under data/ was read, written
+        # or moved", and a script that left the landing zone alone while
+        # truncating a log, deleting a probe scratch file or re-creating
+        # analytics.sqlite would satisfy the old check exactly. So the whole
+        # subtree is snapshotted -- every relative path, its size, its mtime --
+        # and compared afterwards.
+        data = live / "data"
+        for rel, payload in (
+            ("landing/2026-09-11T00.jsonl.zst", b"an irreplaceable frame"),
+            ("landing/manifest.json", b'{"files": 1}'),
+            ("landing/.hidden-sidecar", b"hidden files count too"),
+            ("logs/recorder.log", b"the recorder said something\n"),
+            ("logs/dashboard.log", b"the dashboard said something\n"),
+            ("analytics.sqlite", b"SQLite format 3\x00 not really, but named like it"),
+            ("ops.db", b"operational store"),
+            ("probes/two_sockets_20260911T000000Z.jsonl", b'{"conn": "A"}\n'),
+        ):
+            p = data / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(payload)
+        (data / "empty-dir").mkdir(parents=True, exist_ok=True)
+
+        def _snapshot(root: Path) -> dict:
+            """Relative path -> (kind, size, mtime_ns) for every entry beneath."""
+            snap: dict[str, tuple] = {}
+            for p in sorted(root.rglob("*")):
+                rel = p.relative_to(root).as_posix()
+                if p.is_dir():
+                    snap[rel + "/"] = ("dir", None, None)
+                else:
+                    st = p.lstat()
+                    snap[rel] = ("file", st.st_size, st.st_mtime_ns)
+            return snap
+
+        before = _snapshot(data)
+        frame = data / "landing" / "2026-09-11T00.jsonl.zst"
+        frame_bytes = frame.read_bytes()
+        check("update sandbox: the data/ subtree under test is more than one file -- a landing "
+              "zone, two logs, both stores, a probe scratch file and an empty directory",
+              len(before) >= 12, f"{len(before)} entries: {sorted(before)}")
 
         old = _git(live, env, "rev-parse", "--short", "HEAD").stdout.strip()
         r = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
@@ -8800,9 +8987,19 @@ def test_update_command_fast_forwards_prints_the_range_and_reads_health(tmp: Pat
               "pyproject.toml unchanged" in out, out[-600:])
         check("update: tools/launchd.py did not change either, so no plist was re-rendered",
               "Generator unchanged" in out, out[-600:])
-        check("update: the landing zone under data/ is byte-for-byte untouched, including its "
-              "mtime -- an update changes code, never the record",
-              frame.exists() and (frame.read_bytes(), frame.stat().st_mtime_ns) == before)
+        after = _snapshot(data)
+        check("update: the WHOLE data/ subtree is identical afterwards -- same paths, same "
+              "sizes, same mtimes. An update changes code; the record is the one thing in this "
+              "project that cannot be recreated (docs/07 §4)",
+              after == before,
+              f"added={sorted(set(after) - set(before))} "
+              f"removed={sorted(set(before) - set(after))} "
+              f"changed={sorted(k for k in set(after) & set(before) if after[k] != before[k])}")
+        check("update: ...and nothing was deleted or created under data/, which a size-and-"
+              "mtime comparison of surviving files alone would miss",
+              set(after) == set(before))
+        check("update: ...and the landing frame is byte-for-byte what it was",
+              frame.exists() and frame.read_bytes() == frame_bytes)
 
         # The stub above answers with the field names update.command asks for. That
         # proves the script reads them; it does not prove the dashboard still emits
@@ -8817,6 +9014,149 @@ def test_update_command_fast_forwards_prints_the_range_and_reads_health(tmp: Pat
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_update_command_bootstraps_each_job_once_and_prints_no_empty_problem_block(
+        tmp: Path) -> None:
+    """BUG-20260911-072. The restart step used to call `launchctl bootstrap`
+    once to test it and a SECOND time to get the error text.
+
+    Two things wrong with that. A job that bootstraps successfully on the retry
+    after failing the first call ends up loaded twice, which is the two-writers
+    shape that corrupted the analytical store on 2026-09-10
+    (BUG-20260910-067). And the text printed under `PROBLEM` was the SECOND
+    call's output, not the first's -- so the usual second-call message ("service
+    already loaded") got printed as the reason the first one failed. When
+    launchctl said nothing at all, the Operator got the word PROBLEM over an
+    empty block.
+
+    The stub here is never the real `launchctl`: the sandbox copy is rewritten
+    to a name this test owns, so there is no path by which the suite reaches the
+    Operator's live jobs.
+    """
+    import subprocess
+
+    if shutil.which("git") is None:
+        check("update.command: bootstrap-once exercised", True, "skipped: no git on this machine")
+        return
+
+    fake = "navanax-selftest-launchctl"
+    base = tmp / "update-bootstrap"
+    base.mkdir(parents=True, exist_ok=True)
+    binhome = base / "bin"
+    binhome.mkdir(parents=True, exist_ok=True)
+    calls = base / "launchctl-calls.txt"
+    stub = binhome / fake
+    stub.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        'case "$1" in\n'
+        # bootstrap FAILS and says nothing -- what launchctl does when the job
+        # is already loaded, and the exact case that produced an empty block.
+        '  bootstrap) exit 37 ;;\n'
+        '  print) echo "    state = running"; echo "    pid = 4242"; exit 0 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n')
+    stub.chmod(0o755)
+
+    live, _origin, env = _update_sandbox(tmp, "update-bootstrap-repo", 9, launchctl_name=fake)
+    env["PATH"] = f"{binhome}{os.pathsep}{env.get('PATH', '')}"
+
+    agents = Path(env["HOME"]) / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    labels = ["com.navanax.recorder", "com.navanax.dashboard", "com.navanax.traits"]
+    for label in labels:
+        (agents / f"{label}.plist").write_text("<plist/>\n")
+
+    r = subprocess.run(["bash", str(live / "update.command")], input="\n", env=env,
+                       capture_output=True, text=True, timeout=300)
+    out = r.stdout + r.stderr
+    log = calls.read_text() if calls.exists() else ""
+    bootstraps = [ln for ln in log.splitlines() if ln.startswith("bootstrap ")]
+
+    check("update restart: bootstrap ran EXACTLY ONCE per job even though every one of them "
+          "failed -- the failure path used to run it a second time, loading the job twice "
+          "(BUG-20260910-067's two-writers shape)",
+          len(bootstraps) == len(labels), f"{len(bootstraps)} bootstraps: {bootstraps}")
+    check("update restart: ...once for each of the three jobs, not three calls to one",
+          len({ln.split()[-1] for ln in bootstraps}) == len(labels), repr(bootstraps))
+    check("update restart: the failure is reported with the exit status it actually got",
+          "37" in out, out[-800:])
+    check("update restart: a bootstrap that fails SILENTLY does not print the word PROBLEM "
+          "over an empty block -- it says launchctl printed nothing and points at the state "
+          "line instead",
+          "printed nothing" in out and "PROBLEM" not in out, out[-900:])
+    check("update restart: ...and the state line is still printed, so the Operator can see "
+          "whether the job is in fact running",
+          "state" in out and "4242" in out, out[-900:])
+    check("update restart: the run still finishes -- a job that refuses to reload is reported, "
+          "not turned into 'the update broke'",
+          r.returncode == 0 and "UPDATE DONE" in out, f"rc={r.returncode} {out[-400:]}")
+
+    # ------------------------------------------------------------------
+    # The other half of the branch. The stub above fails SILENTLY, so only the
+    # "printed nothing" path ran and the path that actually prints a PROBLEM
+    # block -- the one the duplicate bootstrap used to live in -- was never
+    # exercised at all. This stub fails WITH TEXT, which is what launchctl does
+    # for a malformed plist or a domain it will not accept.
+    # ------------------------------------------------------------------
+    verbose = "navanax-selftest-launchctl-verbose"
+    vcalls = base / "launchctl-calls-verbose.txt"
+    vstub = binhome / verbose
+    vstub.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" >> "{vcalls}"\n'
+        'case "$1" in\n'
+        # Two lines, on stderr, the way launchctl reports a refusal. If the
+        # script ran bootstrap a second time to capture this, the count below
+        # would be six rather than three.
+        '  bootstrap) echo "Bootstrap failed: 5: Input/output error" >&2;\n'
+        '             echo "Try re-running as root" >&2; exit 5 ;;\n'
+        '  print) echo "    state = not running"; exit 0 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n')
+    vstub.chmod(0o755)
+
+    vlive, _vorigin, venv = _update_sandbox(tmp, "update-bootstrap-verbose", 9,
+                                            launchctl_name=verbose)
+    venv["PATH"] = f"{binhome}{os.pathsep}{venv.get('PATH', '')}"
+    vagents = Path(venv["HOME"]) / "Library" / "LaunchAgents"
+    vagents.mkdir(parents=True, exist_ok=True)
+    for label in labels:
+        (vagents / f"{label}.plist").write_text("<plist/>\n")
+
+    rv = subprocess.run(["bash", str(vlive / "update.command")], input="\n", env=venv,
+                        capture_output=True, text=True, timeout=300)
+    vout = rv.stdout + rv.stderr
+    vlog = vcalls.read_text() if vcalls.exists() else ""
+    vboots = [ln for ln in vlog.splitlines() if ln.startswith("bootstrap ")]
+
+    check("update restart (with output): bootstrap ran EXACTLY THREE times for three jobs -- "
+          "once each. This is the branch the duplicate call lived in, so six here would mean "
+          "every failing job was loaded twice (BUG-20260910-067's two-writers shape)",
+          len(vboots) == len(labels), f"{len(vboots)} bootstraps: {vboots}")
+    check("update restart (with output): ...one per label, not three attempts at one job",
+          sorted({ln.split()[-1].rsplit('/', 1)[-1] for ln in vboots})
+          == sorted(f"{label}.plist" for label in labels), repr(vboots))
+    check("update restart (with output): a bootstrap that fails WITH text prints the PROBLEM "
+          "block, once per job",
+          vout.count("PROBLEM -- macOS refused to load it") == len(labels),
+          vout[-1200:])
+    check("update restart (with output): ...and every PROBLEM block CARRIES launchctl's own "
+          "text -- it used to carry the SECOND call's message, which is a different claim from "
+          "the reason the first one failed",
+          vout.count("Bootstrap failed: 5: Input/output error") == len(labels)
+          and vout.count("Try re-running as root") == len(labels), vout[-1200:])
+    check("update restart (with output): ...with the exit status beside it, so a silent "
+          "launchctl and a talkative one are told apart on screen",
+          vout.count("(exit 5)") == len(labels), vout[-1200:])
+    check("update restart (with output): no PROBLEM block is empty -- every one is followed by "
+          "the text that explains it",
+          "printed nothing" not in vout, vout[-1200:])
+    check("update restart (with output): the update still finishes and reports the state it "
+          "found, rather than failing the whole deploy",
+          rv.returncode == 0 and "UPDATE DONE" in vout and "not running" in vout,
+          f"rc={rv.returncode} {vout[-500:]}")
 
 
 def test_open_dashboard_command_looks_and_never_starts_a_dashboard(tmp: Path) -> None:
@@ -8839,6 +9179,41 @@ def test_open_dashboard_command_looks_and_never_starts_a_dashboard(tmp: Path) ->
     check("open-dashboard.command: never starts a dashboard -- it does not invoke the CLI at "
           "all, so there is no path through it that becomes a second writer (BUG-20260910-067)",
           "navanax.cli dashboard" not in text and "navanax.cli" not in text)
+
+    # BUG-20260911-072. `navanax.cli` is ONE of the ways this file could start
+    # something, and checking only for it left every other way green: run
+    # another .command, hand a file to bash, `launchctl kickstart` the job. The
+    # scan below rules out the class rather than the one instance, over the
+    # lines the script actually executes -- the file is entitled to SAY the
+    # forbidden words in its own explanation of why it does not do them.
+    viewer_bad = _viewer_violations(text)
+    check("open-dashboard.command: no executed line starts, loads or kickstarts anything, runs "
+          "another .command, or hands a file to a shell -- the viewer LOOKS, and the deploy "
+          "step is update.command (BUG-20260910-067)",
+          viewer_bad == [], "; ".join(viewer_bad))
+    check("open-dashboard.command: the only launchctl verb it uses is `print`, which asks and "
+          "changes nothing",
+          all(v in {"print"} for v in _LAUNCHCTL_VERB.findall(
+              "\n".join(ln for _n, ln in _action_lines(text)))),
+          repr(_LAUNCHCTL_VERB.findall("\n".join(ln for _n, ln in _action_lines(text)))))
+
+    # The scan is only worth having if it FAILS on the two mutations that matter.
+    # These are the shapes a future edit would take, asserted here so the rule
+    # cannot quietly stop catching them.
+    mutated = text.replace(
+        "LISTENING=no",
+        'LISTENING=no\nbash dashboard.command &\n'
+        'launchctl kickstart "gui/$(id -u)/com.navanax.dashboard"')
+    mut_bad = " ".join(_viewer_violations(mutated))
+    check("open-dashboard scan: `bash dashboard.command &` inserted into the real file is "
+          "caught -- both as a .command and as a file handed to a shell",
+          "bash dashboard.command" in mut_bad and "hands a file to a shell" in mut_bad,
+          mut_bad)
+    check("open-dashboard scan: `launchctl kickstart` inserted into the real file is caught",
+          "launchctl kickstart" in mut_bad, mut_bad)
+    check("open-dashboard scan: it does not fire on prose -- the mutated copy's only "
+          "complaints are the two lines that were added",
+          len(_viewer_violations(mutated)) == 3, repr(_viewer_violations(mutated)))
 
     sandbox = tmp / "opendash"
     (sandbox / "bin").mkdir(parents=True, exist_ok=True)
@@ -8920,6 +9295,847 @@ def test_readme_and_docs_name_the_files_the_operator_double_clicks() -> None:
           "Viewing vs running" in doc and "open-dashboard.command" in doc)
     check("docs/04 §8 documents the update step, including that it never switches branches",
           "Updating" in doc and "update.command" in doc)
+
+
+# ===========================================================================
+# PR-0: the two measurements. `docs/proposals/TECHLEAD_2026-09-09_factcheck.md`
+# §3 calls these "facts, not code" and asks for no tests. The probes ARE code,
+# and a probe that miscounts is worse than no probe: it produces a number that
+# gets written into a document and quoted for months. So the arithmetic and the
+# refusal are tested; the network calls are not, because they are the fact.
+# ===========================================================================
+def _import_tool(name: str):
+    """Import a module from tools/, which is deliberately not a package.
+
+    Always from SOURCE, never from a cached bytecode file. `tools/` is imported
+    by path here, and a stale `__pycache__/*.pyc` beside a tool would be graded
+    instead of the file in the working tree -- a green suite against code that
+    is not the code under review. Three things together make that impossible:
+    `sys.dont_write_bytecode` so this run leaves no cache behind,
+    `invalidate_caches()` so a file written since the interpreter started is
+    seen, and `spec_from_file_location`, which loads the `.py` itself.
+    """
+    import importlib
+    import importlib.util
+
+    sys.dont_write_bytecode = True
+    importlib.invalidate_caches()
+    modname = f"navanax_tool_{name}"
+    sys.modules.pop(modname, None)
+    source = ROOT / "tools" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(modname, source)
+    mod = importlib.util.module_from_spec(spec)
+    # Registered BEFORE exec: @dataclass resolves its annotations through
+    # sys.modules[cls.__module__] and raises an opaque AttributeError if the
+    # module it is being defined in is not there yet.
+    sys.modules[modname] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_import_tool_loads_from_source_and_can_never_grade_stale_bytecode() -> None:
+    """The loader the two probe tests run through, tested on its own.
+
+    A `.pyc` that is newer than the suite's idea of the world is not a
+    hypothetical: `tools/` is not a package, it is imported by path, and every
+    assertion about a probe is really an assertion about whatever object this
+    function returned. If that object came from a cache, the suite is grading a
+    file nobody edited.
+    """
+    import importlib.util as _ilu
+
+    cache = Path(_ilu.cache_from_source(str(ROOT / "tools" / "probe_two_sockets.py")))
+    # Whatever is there now is somebody else's; what matters is that importing
+    # does not ADD to it and does not READ from it.
+    stamp = cache.stat().st_mtime_ns if cache.exists() else None
+
+    pts = _import_tool("probe_two_sockets")
+    check("_import_tool: importing a tool writes no bytecode cache -- a .pyc this run left "
+          "behind is a .pyc the next run could be graded against",
+          (cache.stat().st_mtime_ns if cache.exists() else None) == stamp,
+          f"{cache} changed")
+    check("_import_tool: ...and the module it loaded is not the cached one, even when a stale "
+          "cache is sitting right beside the source",
+          getattr(pts, "__cached__", None) in (None, str(cache))
+          and type(pts.__loader__).__name__ == "SourceFileLoader",
+          f"__cached__={getattr(pts, '__cached__', None)!r} "
+          f"loader={type(pts.__loader__).__name__}")
+    check("_import_tool: the module it returns is the .py file in tools/, not a cached "
+          "bytecode artefact",
+          Path(pts.__file__) == (ROOT / "tools" / "probe_two_sockets.py").resolve()
+          or Path(pts.__file__) == (ROOT / "tools" / "probe_two_sockets.py"),
+          pts.__file__)
+    check("_import_tool: it turns bytecode writing OFF, so a run of this suite cannot leave a "
+          "__pycache__ behind for the next one to grade",
+          sys.dont_write_bytecode is True)
+    check("_import_tool: the loader is a SOURCE file loader -- spec_from_file_location on the "
+          ".py, never SourcelessFileLoader",
+          type(pts.__loader__).__name__ == "SourceFileLoader", type(pts.__loader__).__name__)
+
+    # Re-importing re-executes the file rather than handing back the first
+    # object: a tool edited mid-suite must be seen, and a module left in
+    # sys.modules from an earlier call would hide the edit.
+    again = _import_tool("probe_two_sockets")
+    check("_import_tool: a second import re-executes the source rather than returning the "
+          "object the first call left in sys.modules",
+          again is not pts)
+
+
+class _FakeBucket:
+    def __init__(self, tokens: float) -> None:
+        self._tokens = tokens
+        self.state = type("S", (), {"refill_per_second": 120 / 3600.0,
+                                    "capacity": 120.0, "capacity_source": "config"})()
+
+    def available(self) -> float:
+        return self._tokens
+
+
+class _FakeRestClient:
+    """Records every call. The point of the test is that there is exactly one."""
+
+    def __init__(self, tokens: float = 100.0, *, status: int = 200,
+                 body: Any = None, headers: dict | None = None) -> None:
+        self.gov = type("G", (), {"bucket": _FakeBucket(tokens)})()
+        self.calls: list[tuple] = []
+        self.requests_made = 0
+        self.last_headers = headers or {}
+        self._status = status
+        self._body = body if body is not None else {"asset_events": [], "next": None}
+
+    async def get(self, path, params=None, *, priority=None, retries=3):
+        self.calls.append((path, dict(params or {}), priority, retries))
+        self.requests_made += 1
+        return self._status, self._body
+
+
+def test_probe_events_page_spends_one_read_refuses_when_poor_and_records_the_answer(
+        tmp: Path) -> None:
+    """PR-0.1. Settles E-U1: does `limit=200` really return 200?
+
+    Three properties. It spends ONE read (not one-plus-retries: a 429 that
+    silently becomes four attempts turns a one-token measurement into a
+    four-token one, and the ledger would be right while the docstring lied). It
+    REFUSES below five tokens rather than taking the recorder's backfill
+    reserve. And it writes an entry that states the number AND what it means,
+    because REQ-D-13's unverified "up to 200 per page" is exactly what an
+    unsourced number in a document looks like.
+    """
+    from navanax.governor import Priority
+
+    pep = _import_tool("probe_events_page")
+
+    # -- one call, INTERACTIVE, no retries ---------------------------------
+    events = [{"event_type": "sale", "i": i} for i in range(50)]
+    rest = _FakeRestClient(100.0, body={"asset_events": events, "next": "cursor-abc-123456789012"},
+                           headers={"x-ratelimit-limit": "120", "x-ratelimit-remaining": "118",
+                                    "cf-cache-status": "MISS", "server": "cloudflare"})
+    r = asyncio.run(pep.probe(rest, slug="argonauts", limit=200))
+    check("probe-events-page: exactly ONE request was made",
+          len(rest.calls) == 1, f"{len(rest.calls)} calls: {rest.calls}")
+    path, params, priority, retries = rest.calls[0]
+    check("probe-events-page: it asks the events endpoint for the collection at limit=200",
+          path == "/events/collection/argonauts" and params == {"limit": 200},
+          f"{path} {params}")
+    check("probe-events-page: at INTERACTIVE priority -- the Operator is watching the window",
+          priority == Priority.INTERACTIVE, repr(priority))
+    check("probe-events-page: with retries=0, so one read means one read even on a 429",
+          retries == 0, repr(retries))
+
+    check("probe-events-page: it counts the returned array",
+          r["items_returned"] == 50 and r["items_key"] == "asset_events", repr(r)[:300])
+    check("probe-events-page: it reports whether a `next` cursor came back",
+          r["next_present"] is True)
+    check("probe-events-page: it carries the rate-limit headers back out of the governor",
+          r["headers"]["x-ratelimit-limit"] == "120"
+          and r["headers"]["x-ratelimit-remaining"] == "118", repr(r["headers"]))
+
+    # -- the entry format --------------------------------------------------
+    entry = pep.render_entry(r)
+    check("probe-events-page entry: dated heading naming the exact request",
+          entry.startswith("## ") and "GET /events/collection/argonauts?limit=200" in entry
+          and r["at"] in entry, entry[:200])
+    for row in ("| Requested `limit` | `200` |", "| HTTP status | 200 |",
+                "| Items returned | 50 |", "| `next` cursor present | yes |",
+                "| `x-ratelimit-limit` | `120` |", "| `x-ratelimit-reset` | (absent) |"):
+        check(f"probe-events-page entry: has the row {row!r}", row in entry, entry)
+    check("probe-events-page entry: an absent header is written as absent, not as a blank cell "
+          "that reads like a zero",
+          "(absent)" in entry)
+    check("probe-events-page entry: names the ledger the spend was recorded in",
+          "rest_ledger" in entry)
+    check("probe-events-page entry: the verdict states the measured number and that 200 was "
+          "NOT honoured, with the factor every backfill estimate is now wrong by",
+          "**Answer: 50 items for `limit=200`.**" in entry and "4.0x" in entry, entry)
+
+    # A page that IS 200 must not be reported as a cap.
+    full = asyncio.run(pep.probe(
+        _FakeRestClient(100.0, body={"asset_events": [{} for _ in range(200)], "next": "c"}),
+        slug="argonauts", limit=200))
+    check("probe-events-page: 200 returned for limit=200 is reported as the assumption holding",
+          "**Answer: 200 items for `limit=200`.**" in pep.render_entry(full)
+          and "honoured" in pep.render_entry(full))
+
+    # Short page with NO cursor is the end of history, not a measured cap --
+    # the difference matters and the wrong reading would understate the budget.
+    short = asyncio.run(pep.probe(
+        _FakeRestClient(100.0, body={"asset_events": [{}, {}], "next": None}),
+        slug="argonauts", limit=200))
+    check("probe-events-page: a short page with no `next` is called the end of history, not a "
+          "page cap -- the ceiling stays unmeasured and the entry says so",
+          "end of the available history" in pep.render_entry(short))
+
+    # A non-200 must not silently become 'zero items'.
+    bad = asyncio.run(pep.probe(_FakeRestClient(100.0, status=429, body={"detail": "slow down"}),
+                                slug="argonauts", limit=200))
+    check("probe-events-page: a 429 is recorded as NO ANSWER, never as a page size of 0",
+          "No answer" in pep.render_entry(bad) and "still unverified" in pep.render_entry(bad))
+
+    # -- the refusal -------------------------------------------------------
+    poor = _FakeRestClient(4.0)
+    try:
+        asyncio.run(pep.probe(poor, slug="argonauts", limit=200))
+        refused = False
+    except pep.BudgetRefusal as exc:
+        refused = True
+        msg = str(exc)
+    check("probe-events-page: REFUSES below 5 tokens", refused)
+    if refused:
+        check("probe-events-page: ...and spends nothing when it refuses -- no call was made",
+              len(poor.calls) == 0, repr(poor.calls))
+        check("probe-events-page: ...and the refusal says how many tokens there were and that "
+              "waiting is the fix",
+              "4.0 tokens" in msg and "reads/hour" in msg, msg)
+    edge = _FakeRestClient(5.0)
+    asyncio.run(pep.probe(edge, slug="argonauts", limit=200))
+    check("probe-events-page: exactly 5 tokens is enough -- the floor is >=, not >",
+          len(edge.calls) == 1)
+
+    # -- the file ----------------------------------------------------------
+    p = tmp / "measurements" / "2026-09-11_events_page_size.md"
+    pep.append_entry(p, entry)
+    first = p.read_text()
+    check("probe-events-page: creates docs/measurements/ and writes the header on first run",
+          p.exists() and "Settles E-U1" in first and "REQ-D-13" in first, first[:200])
+    pep.append_entry(p, pep.render_entry(full))
+    second = p.read_text()
+    check("probe-events-page: a second run APPENDS -- the earlier measurement is evidence and "
+          "is not edited or replaced (docs/01: corrections supersede, they never edit)",
+          second.startswith(first) and "**Answer: 200 items" in second)
+
+
+def _probe_frame(event: str, order_hash: str, ts: str, slug: str = "argonauts") -> str:
+    """A stream frame in the v2 array shape OpenSea actually sends."""
+    return json.dumps([
+        "1", None, f"collection:{slug}", event,
+        {"event_type": event, "payload": {"collection": {"slug": slug},
+                                          "order_hash": order_hash, "event_timestamp": ts}},
+    ])
+
+
+def test_probe_two_sockets_overlap_arithmetic_on_synthetic_frames(tmp: Path) -> None:
+    """PR-0.2's counter. The number this produces gates PR-10, so it is tested
+    on frames whose answer is known by construction.
+
+    The failure this guards against is the flattering one named in the dataeng
+    proposal's failure mode 3: an overlap that collapses toward a comfortable
+    number because the counter is wrong rather than because the stream is good.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+    a.connected_at, b.connected_at = 0.0, 0.0
+    # A sees 1,2,3,4 · B sees 2,3,4,5. Union 5, both 3, one unique each.
+    for i in (1, 2, 3, 4):
+        a.observe(_probe_frame("item_listed", f"0xh{i}", f"2026-09-11T00:00:0{i}Z"), 100.0 + i)
+    for i in (2, 3, 4, 5):
+        b.observe(_probe_frame("item_listed", f"0xh{i}", f"2026-09-11T00:00:0{i}Z"), 100.0 + i)
+    a.last_frame_at = b.last_frame_at = 105.0
+    ov = pts.overlap_report(a, b, (0.0, 200.0))
+    check("two-sockets: union is the distinct count across both connections",
+          ov["n_union"] == 5, repr(ov))
+    check("two-sockets: intersection counts only events BOTH saw",
+          ov["n_intersection"] == 3, repr(ov))
+    check("two-sockets: per-connection unique counts -- this is the measurement of what a "
+          "single socket drops",
+          (ov["only_a"], ov["only_b"]) == (1, 1), repr(ov))
+    check("two-sockets: the overlap ratio is |A n B| / |A u B|",
+          abs(ov["jaccard"] - 0.6) < 1e-9, repr(ov["jaccard"]))
+    check("two-sockets: each directional share is reported with its own denominator",
+          abs(ov["share_of_a_also_in_b"] - 0.75) < 1e-9
+          and abs(ov["share_of_b_also_in_a"] - 0.75) < 1e-9, repr(ov))
+
+    # A duplicate inside ONE connection is the same event, not a second one.
+    a2 = pts.SocketTally("A")
+    f = _probe_frame("item_listed", "0xdup", "2026-09-11T00:00:09Z")
+    a2.observe(f, 10.0)
+    a2.observe(f, 11.0)
+    check("two-sockets: the same event twice on one socket is one distinct event, and the "
+          "FIRST arrival time is the one kept",
+          len(a2.keys) == 1 and a2.keyed == 2 and list(a2.keys.values()) == [10.0],
+          f"{a2.keys} keyed={a2.keyed}")
+
+    # The empty case. A ratio over nothing is None -- never 1.0.
+    empty = pts.overlap_report(pts.SocketTally("A"), pts.SocketTally("B"), (0.0, 10.0))
+    check("two-sockets: with no events the overlap ratio is None, not 1.0 -- '100% agreement' "
+          "reads identically on n=900 and n=0 and only one of those is evidence",
+          empty["jaccard"] is None and empty["n_union"] == 0, repr(empty))
+
+    # Frames that arrived before the second socket joined must not be counted
+    # as "missed by B" -- that manufactures uniques out of the stagger.
+    early_a, late_b = pts.SocketTally("A"), pts.SocketTally("B")
+    early_a.connected_at, late_b.connected_at = 0.0, 100.0
+    early_a.observe(_probe_frame("item_listed", "0xearly", "2026-09-11T00:00:00Z"), 10.0)
+    shared = _probe_frame("item_sold", "0xshared", "2026-09-11T00:02:00Z")
+    early_a.observe(shared, 120.0)
+    late_b.observe(shared, 120.5)
+    early_a.last_frame_at = late_b.last_frame_at = 121.0
+    win = pts.common_window(early_a, late_b, settle=5.0)
+    check("two-sockets: the overlap window starts after the LATER join plus a settling margin",
+          win is not None and abs(win[0] - 105.0) < 1e-9, repr(win))
+    ov2 = pts.overlap_report(early_a, late_b, win)
+    check("two-sockets: an event A saw before B was even connected is excluded from the "
+          "comparison rather than counted as a drop by B",
+          (ov2["n_a"], ov2["n_b"], ov2["only_a"], ov2["only_b"], ov2["n_union"])
+          == (1, 1, 0, 0, 1), repr(ov2))
+
+    # Un-keyable frames are counted, never guessed at and never dropped quietly.
+    u = pts.SocketTally("A")
+    u.observe(json.dumps(["1", None, "collection:argonauts", "item_metadata_updated",
+                          {"event_type": "item_metadata_updated", "payload": {"item": {}}}]), 1.0)
+    check("two-sockets: a market frame with no (event_type, order_hash, event_timestamp) key is "
+          "counted as un-keyable -- PR-10 cannot dedup these and needs the number",
+          u.market_frames == 1 and u.unkeyable == 1 and u.keyed == 0, u.as_dict())
+
+    # Protocol frames are not market events.
+    p = pts.SocketTally("A")
+    p.observe(json.dumps(["1", "1", "collection:argonauts", "phx_reply",
+                          {"status": "ok", "response": {}}]), 1.0)
+    p.observe(json.dumps(["1", "9", "phoenix", "phx_reply", {"status": "ok", "response": {}}]), 2.0)
+    check("two-sockets: a join reply is recorded as a JOIN, not as a market event",
+          p.join_ok and p.market_frames == 0, p.as_dict())
+    check("two-sockets: a heartbeat reply on the `phoenix` topic is counted as a heartbeat -- "
+          "the same mistake V9 caught in stream.py",
+          p.heartbeat_replies == 1, p.as_dict())
+    rej = pts.SocketTally("B")
+    rej.observe(json.dumps(["1", "1", "collection:argonauts", "phx_reply",
+                            {"status": "error", "response": {"reason": "unauthorized"}}]), 1.0)
+    check("two-sockets: a REFUSED join is recorded as an error, not silently ignored",
+          rej.join_ok is False and "unauthorized" in (rej.join_error or ""), rej.join_error)
+
+    # -- the verdict has to name the failure modes, not just the happy one --
+    mute = pts.SocketTally("B")
+    mute.connected_at = 0.0
+    v = " ".join(pts.verdict(a, mute, pts.overlap_report(a, mute, (0.0, 200.0))))
+    check("two-sockets verdict: a second socket that connects and receives NOTHING is called "
+          "out as the dangerous case, not reported as a quiet market",
+          "MUTE" in v and "two connections are not permitted" in v, v)
+
+    refused = pts.SocketTally("B")
+    refused.http_status = 403
+    refused.error = "InvalidStatus: HTTP 403"
+    v2 = " ".join(pts.verdict(a, refused, pts.overlap_report(a, refused, None)))
+    check("two-sockets verdict: a second socket refused at the handshake reports the HTTP "
+          "status and sends PR-10 to two keys",
+          "NOT established" in v2 and "403" in v2 and "two keys" in v2, v2)
+
+    both = pts.SocketTally("B")
+    both.connected_at = 0.0
+    for i in (1, 2, 3, 4):
+        both.observe(_probe_frame("item_listed", f"0xh{i}", f"2026-09-11T00:00:0{i}Z"), 100.0 + i)
+    v3 = " ".join(pts.verdict(a, both, pts.overlap_report(a, both, (0.0, 200.0))))
+    check("two-sockets verdict: zero uniques on both sides is reported as 'no loss OBSERVED at "
+          "this n', with the n -- not as 'the stream is lossless'",
+          "no loss observed" in v3 and "n=4" in v3 and "probe bug looks like" in v3, v3)
+    v4 = " ".join(pts.verdict(a, b, ov))
+    check("two-sockets verdict: a real drop is stated as counts first and the percentage second, "
+          "with the n it came from",
+          "1 was seen only by A" in v4 and "n=5" in v4 and "40.0%" in v4, v4)
+
+    # -- the recorder's log is read, and a disconnect in the window is the finding
+    log = tmp / "recorder.log"
+    log.write_text("old line\n")
+    off = pts.log_size(log)
+    with log.open("a") as fh:
+        fh.write("WARNING stream error (ConnectionClosed)\nWARNING reconnecting in 2.0s\nidle\n")
+    lines = pts.disconnect_lines(pts.read_log_tail(log, off))
+    check("two-sockets: it reads only what the recorder appended DURING the probe, and finds "
+          "the disconnect lines stream.py actually writes",
+          len(lines) == 2 and "reconnecting in 2.0s" in lines[1], repr(lines))
+    check("two-sockets: a missing recorder log is not an error -- the Operator may be running "
+          "the recorder in a window rather than under launchd",
+          pts.log_size(tmp / "nope.log") == 0 and pts.read_log_tail(tmp / "nope.log", 0) == "")
+
+
+def test_probe_two_sockets_excludes_a_replay_of_an_event_seen_before_the_window() -> None:
+    """BUG-20260911-072. The membership test used to be per-socket, and that
+    manufactures uniques in the one direction that flatters PR-10.
+
+    A connects first and sees `0xPRE` long before the two sockets overlap. B
+    joins later and the server REPLAYS `0xPRE` to it a few seconds inside the
+    common window. By B's own first-sight clock that is an in-window event; by
+    A's it is not. Counted per-socket it becomes "B saw an event A missed" --
+    which is the exact number that would be written into PR-10 as the measured
+    value of a second stream.
+
+    The rule that fixes it: an event belongs to the window only if NEITHER
+    socket had already seen it when the window opened.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+    a.connected_at, b.connected_at = 0.0, 100.0
+    pre = _probe_frame("item_listed", "0xPRE", "2026-09-11T00:00:00Z")
+    a.observe(pre, 10.0)            # before the window: A's own first sight
+    b.observe(pre, 118.0)           # inside the window: B's replay of the SAME event
+    live = _probe_frame("item_sold", "0xLIVE", "2026-09-11T00:02:00Z")
+    a.observe(live, 120.0)
+    b.observe(live, 120.4)
+    a.last_frame_at = b.last_frame_at = 125.0
+
+    win = pts.common_window(a, b, settle=5.0)
+    check("two-sockets replay: the window opens at the later join plus the settle margin",
+          win is not None and abs(win[0] - 105.0) < 1e-9, repr(win))
+    ov = pts.overlap_report(a, b, win)
+    check("two-sockets replay: an event A had ALREADY SEEN before the window, replayed to B "
+          "inside it, is NOT a unique for B -- only_b is 0, not 1",
+          ov["only_b"] == 0, repr(ov))
+    check("two-sockets replay: ...and it is excluded from the union entirely, so the drop rate "
+          "has the right denominator too",
+          ov["n_union"] == 1 and ov["n_a"] == 1 and ov["n_b"] == 1
+          and ov["only_a"] == 0 and ov["n_intersection"] == 1, repr(ov))
+    check("two-sockets replay: the exclusion is COUNTED and reported, not done silently -- how "
+          "much the server replays after a join is itself a measurement",
+          ov["n_excluded_pre_window"] == 1, repr(ov))
+    _ka, _kb, excluded = pts.window_sets(a, b, win[0], win[1])
+    check("two-sockets replay: window_sets names which key it dropped",
+          {k[1] for k in excluded} == {"0xPRE"}, repr(excluded))
+
+    v = " ".join(pts.verdict(a, b, ov))
+    check("two-sockets replay: with the replay excluded the verdict does NOT claim a drop",
+          "demonstrably drops" not in v, v)
+    check("two-sockets replay: ...and it says out loud that events were excluded as pre-window, "
+          "so the n in the table can be reconciled with the raw counts",
+          "excluded from the comparison" in v, v)
+    check("two-sockets replay: the sentence agrees with itself at n=1 -- `1 event WAS excluded`, "
+          "not `1 event were excluded`",
+          "1 event was excluded from the comparison" in v, v)
+
+    # ...and the plural at n>1, so the singular is not just a hard-coded string.
+    e, f = pts.SocketTally("A"), pts.SocketTally("B")
+    e.connected_at, f.connected_at = 0.0, 100.0
+    for i in (1, 2):
+        early = _probe_frame("item_listed", f"0xPRE{i}", f"2026-09-11T00:00:0{i}Z")
+        e.observe(early, 10.0 + i)
+        f.observe(early, 118.0 + i)
+    e.last_frame_at = f.last_frame_at = 125.0
+    ov_two = pts.overlap_report(e, f, pts.common_window(e, f, settle=5.0))
+    v_two = " ".join(pts.verdict(e, f, ov_two))
+    check("two-sockets replay: ...and `2 events WERE excluded` at n=2",
+          ov_two["n_excluded_pre_window"] == 2
+          and "2 events were excluded from the comparison" in v_two, v_two)
+    check("two-sockets replay: the exclusion is stated BEFORE the empty-window sentence -- when "
+          "every event in the window was a replay, the exclusion is WHY the window is empty, "
+          "and 'no keyable events fell inside the window' alone reads as a quiet market",
+          v_two.index("were excluded from the comparison")
+          < v_two.index("No keyable events fell inside"), v_two)
+
+    # The mirror case: a genuine drop must still be counted. The fix must not
+    # be a blanket "ignore anything one socket saw first".
+    c, d = pts.SocketTally("A"), pts.SocketTally("B")
+    c.connected_at, d.connected_at = 0.0, 100.0
+    only_a_frame = _probe_frame("item_listed", "0xDROP", "2026-09-11T00:03:00Z")
+    c.observe(only_a_frame, 110.0)      # inside the window, A only -- a real drop by B
+    c.observe(live, 120.0)
+    d.observe(live, 120.4)
+    c.last_frame_at = d.last_frame_at = 125.0
+    ov2 = pts.overlap_report(c, d, pts.common_window(c, d, settle=5.0))
+    check("two-sockets replay: an event first seen INSIDE the window by one socket and never by "
+          "the other is still a real unique -- the fix excludes replays, not drops",
+          (ov2["only_a"], ov2["only_b"], ov2["n_union"], ov2["n_excluded_pre_window"])
+          == (1, 0, 2, 0), repr(ov2))
+
+
+def test_probe_two_sockets_verdict_refuses_to_claim_a_drop_from_an_empty_window() -> None:
+    """A percentage needs a denominator. "A single socket demonstrably drops
+    events" must be unreachable from a window of zero length or zero events --
+    those are absences of evidence, and this project's standing rule is that a
+    surprisingly strong result is a bug until proven otherwise.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+    a.connected_at, b.connected_at = 0.0, 0.0
+    for i in (1, 2):
+        a.observe(_probe_frame("item_listed", f"0xq{i}", f"2026-09-11T00:00:0{i}Z"), 1.0 + i)
+        b.observe(_probe_frame("item_listed", f"0xq{i}", f"2026-09-11T00:00:0{i}Z"), 1.0 + i)
+
+    # 1. No common window at all (B never connected long enough to overlap).
+    none_ov = pts.overlap_report(a, b, None)
+    v = " ".join(pts.verdict(a, b, none_ov))
+    check("two-sockets verdict: with NO common window it says there was none and stops, rather "
+          "than reporting a rate",
+          "no common window" in v.lower() and "demonstrably drops" not in v, v)
+    check("two-sockets verdict: ...and reports the empty window with its n, not as a bare "
+          "sentence",
+          "n=0" in v, v)
+
+    # 2. A window with length but nothing keyable in it.
+    empty = pts.overlap_report(pts.SocketTally("A"), pts.SocketTally("B"), (0.0, 60.0))
+    ea, eb = pts.SocketTally("A"), pts.SocketTally("B")
+    ea.connected_at = eb.connected_at = 0.0
+    ea.market_frames = eb.market_frames = 3       # frames arrived, none of them keyable
+    v2 = " ".join(pts.verdict(ea, eb, empty))
+    check("two-sockets verdict: an empty window is reported as unanswered, and explicitly NOT "
+          "as zero loss",
+          "unanswered by this run" in v2 and "not a measurement of zero loss" in v2, v2)
+    check("two-sockets verdict: ...and never as a drop",
+          "demonstrably drops" not in v2, v2)
+
+    # 3. A zero-length window that somehow carries counts -- the arithmetic path
+    #    that would divide a real numerator by a window nobody was measuring in.
+    bogus = dict(pts.overlap_report(a, b, (0.0, 60.0)))
+    bogus.update({"window_seconds": 0.0, "only_a": 5, "only_b": 5, "n_union": 10})
+    v3 = " ".join(pts.verdict(a, b, bogus))
+    check("two-sockets verdict: a zero-length window cannot produce a drop claim even when the "
+          "counts in the dict are non-zero",
+          "demonstrably drops" not in v3 and "no common window" in v3.lower(), v3)
+
+    # And the positive control: a real drop in a real window still reads as one,
+    # with the counts leading and the percentage carrying its n.
+    real_a, real_b = pts.SocketTally("A"), pts.SocketTally("B")
+    real_a.connected_at = real_b.connected_at = 0.0
+    for i in (1, 2, 3, 4):
+        real_a.observe(_probe_frame("item_listed", f"0xr{i}",
+                                    f"2026-09-11T00:00:0{i}Z"), 10.0 + i)
+    for i in (2, 3, 4, 5):
+        real_b.observe(_probe_frame("item_listed", f"0xr{i}",
+                                    f"2026-09-11T00:00:0{i}Z"), 10.0 + i)
+    real_a.last_frame_at = real_b.last_frame_at = 20.0
+    ov = pts.overlap_report(real_a, real_b, pts.common_window(real_a, real_b, settle=0.0))
+    v4 = " ".join(pts.verdict(real_a, real_b, ov))
+    check("two-sockets verdict: a genuine drop in a real window IS still stated as one",
+          "demonstrably drops" in v4, v4)
+    check("two-sockets verdict: ...with the numerator and denominator beside the percentage, "
+          "never a bare percentage",
+          "2 of the 5 events in the union" in v4 and "40.0%" in v4 and "n=5" in v4, v4)
+
+
+def test_probe_two_sockets_never_reconnects_after_the_peer_closes() -> None:
+    """BUG-20260911-072. "Never reconnects" used to be tested by grepping the
+    probe's own docstring for the words, which tests the comment and not the
+    code: delete the retry loop's absence and the string stays true.
+
+    This connects both sockets through a factory that COUNTS its invocations
+    and hands back a peer that closes immediately. A silent reconnect would turn
+    "the server closed our second connection" into "the second connection worked
+    fine" -- and that is the entire fact PR-0.2 exists to establish.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    frames = [_probe_frame("item_listed", "0xa1", "2026-09-11T00:00:01Z"),
+              _probe_frame("item_listed", "0xa2", "2026-09-11T00:00:02Z")]
+
+    class _ClosingPeer:
+        """Two frames, then end of iteration -- what a peer hanging up looks like."""
+
+        close_code = 1006
+        close_reason = "peer closed early"
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, text: str) -> None:
+            self.sent.append(text)
+
+        def __aiter__(self):
+            return self._frames()
+
+        async def _frames(self):
+            for f in frames:
+                yield f
+
+    class _CountingFactory:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+            self.peers: list[_ClosingPeer] = []
+
+        def __call__(self, url: str):
+            self.urls.append(url)
+            peer = _ClosingPeer()
+            self.peers.append(peer)
+
+            class _CM:
+                async def __aenter__(_self):
+                    return peer
+
+                async def __aexit__(_self, *exc):
+                    return False
+            return _CM()
+
+    fa, fb = _CountingFactory(), _CountingFactory()
+    a, b = pts.SocketTally("A"), pts.SocketTally("B")
+
+    # Both sockets go through a counting factory. Leaving either as None would
+    # reach for the real StreamConsumer connect, and the network.
+    async def drive_both() -> None:
+        stop = asyncio.Event()
+        await asyncio.gather(
+            pts.run_socket("A", "wss://fake/socket", "argonauts", a, stop, None,
+                           api_key="k", heartbeat_seconds=0.05, connect_factory=fa),
+            pts.run_socket("B", "wss://fake/socket", "argonauts", b, stop, None,
+                           api_key="k", heartbeat_seconds=0.05, connect_factory=fb),
+        )
+
+    asyncio.run(drive_both())
+
+    check("two-sockets: each socket connects EXACTLY ONCE -- a peer that closes early does not "
+          "get a second connection, because a silent reconnect would erase the refusal this "
+          "probe exists to measure",
+          (len(fa.urls), len(fb.urls)) == (1, 1), f"A={fa.urls} B={fb.urls}")
+    check("two-sockets: two sockets means two connects in total, not two plus retries",
+          len(fa.urls) + len(fb.urls) == 2)
+    check("two-sockets: the key rides in the query string of the URL it connected to, exactly "
+          "as the recorder does it",
+          all(u == "wss://fake/socket?token=k" for u in fa.urls + fb.urls),
+          repr(fa.urls + fb.urls))
+    check("two-sockets: each connection subscribed once, with the recorder's join frame",
+          [p.sent[0] for p in fa.peers + fb.peers]
+          == [pts.join_frame("argonauts", "1")] * 2,
+          repr([p.sent for p in fa.peers + fb.peers]))
+    check("two-sockets: the frames the closing peer did send were still tallied -- an early "
+          "close loses the connection, not the evidence",
+          (a.frames, b.frames) == (2, 2) and len(a.keys) == 2 and len(b.keys) == 2,
+          f"{a.as_dict()} {b.as_dict()}")
+    check("two-sockets: the peer's close code is recorded, so 'it closed on us' is in the "
+          "measurement rather than in nobody's memory",
+          (a.close_code, b.close_code) == (1006, 1006), f"{a.close_code} {b.close_code}")
+    check("two-sockets: a socket that ended is marked closed, so the common window ends where "
+          "the connection did",
+          a.closed_at is not None and b.closed_at is not None)
+
+
+def test_probe_two_sockets_ctrl_c_writes_a_partial_entry_and_every_string_says_so(
+        tmp: Path) -> None:
+    """Ctrl+C used to print "nothing was written" while the screen two lines
+    above promised it "still writes what it saw", and the launcher said the same
+    thing a third time.
+
+    A short run is evidence with a small n. Throwing it away was never the
+    honest option -- and neither is writing it as though it were the ten-minute
+    run that was asked for, so the entry is labelled with the seconds it
+    actually ran (BUG-20260911-072).
+    """
+    import inspect
+
+    pts = _import_tool("probe_two_sockets")
+
+    # The fix that makes a partial entry possible at all: the tallies are owned
+    # by the caller, so an interrupt unwinding out of asyncio.run leaves them
+    # holding what they saw. A tally created inside the coroutine went with it.
+    params = list(inspect.signature(pts._run).parameters)
+    check("two-sockets Ctrl+C: the tallies are passed INTO the run rather than created inside "
+          "it, so an interrupt cannot take the evidence with it",
+          params[-2:] == ["a", "b"], repr(params))
+
+    frames = [_probe_frame("item_listed", "0xz1", "2026-09-11T00:00:01Z"),
+              _probe_frame("item_listed", "0xz2", "2026-09-11T00:00:02Z")]
+
+    class _InterruptedPeer:
+        close_code = None
+        close_reason = ""
+
+        async def send(self, text: str) -> None:
+            pass
+
+        def __aiter__(self):
+            return self._frames()
+
+        async def _frames(self):
+            for f in frames:
+                yield f
+            raise KeyboardInterrupt        # the Operator's Ctrl+C, mid-stream
+
+    def _factory(url: str):
+        class _CM:
+            async def __aenter__(_s):
+                return _InterruptedPeer()
+
+            async def __aexit__(_s, *exc):
+                return False
+        return _CM()
+
+    a = pts.SocketTally("A")
+
+    async def drive() -> None:
+        stop = asyncio.Event()
+        await pts.run_socket("A", "wss://fake/socket", "argonauts", a, stop, None,
+                             api_key="k", heartbeat_seconds=0.05, connect_factory=_factory)
+
+    interrupted = False
+    try:
+        asyncio.run(drive())
+    except KeyboardInterrupt:
+        interrupted = True
+
+    check("two-sockets Ctrl+C: the interrupt is not swallowed -- run_socket catches Exception, "
+          "and KeyboardInterrupt is not one",
+          interrupted)
+    check("two-sockets Ctrl+C: the frames seen before the interrupt are still in the tally",
+          a.frames == 2 and len(a.keys) == 2, a.as_dict())
+    check("two-sockets Ctrl+C: the socket is marked closed at the interrupt, so the common "
+          "window ends where the Operator stopped it rather than at the last event",
+          a.closed_at is not None)
+
+    # The entry itself. Partial is stated in the heading, not only in prose
+    # nobody reads, and it carries BOTH numbers: what ran and what was asked for.
+    b = pts.SocketTally("B")
+    b.connected_at = 0.0
+    ov = pts.overlap_report(a, b, None)
+    meta = {"started": "2026-09-11T04:00:00Z", "seconds": 600.0, "slug": "argonauts",
+            "interrupted": True, "elapsed_seconds": 42.0, "sink": "data/probes/x.jsonl",
+            "recorder_log": "data/logs/recorder.log", "recorder_disconnects": []}
+    entry = pts.render_entry(a, b, ov, meta)
+    head = entry.splitlines()[0]
+    check("two-sockets Ctrl+C: the entry's HEADING says it was interrupted and how long it ran",
+          head.startswith("## ") and "interrupted after 42 s" in head and "partial" in head,
+          head)
+    check("two-sockets Ctrl+C: ...and names the duration that was ASKED for, so the shortfall "
+          "is visible without arithmetic",
+          "600s requested" in head or "of 600s requested" in head, head)
+    check("two-sockets Ctrl+C: ...and the body says to read it as a lower bound, not as a "
+          "completed measurement",
+          "PARTIAL" in entry and "lower bound" in entry, entry[:600])
+
+    full = pts.render_entry(a, b, ov, dict(meta, interrupted=False))
+    check("two-sockets Ctrl+C: a COMPLETED run is not labelled partial -- the label has to "
+          "mean something",
+          "partial" not in full.splitlines()[0] and "PARTIAL" not in full)
+
+    out = tmp / "measure.md"
+    pts.append_entry(out, entry)
+    pts.append_entry(out, entry)
+    check("two-sockets Ctrl+C: the partial entry is APPENDED like any other -- the measurement "
+          "file is append-only and a second run never edits the first",
+          out.read_text().count("interrupted after 42 s") == 2)
+
+    # All three places that speak about Ctrl+C have to agree, because they are
+    # read in sequence: the screen before the run, the screen after it, and the
+    # launcher's exit-code table.
+    src = (ROOT / "tools" / "probe_two_sockets.py").read_text()
+    launcher = (ROOT / "probe-two-sockets.command").read_text()
+    printed = [ln for ln in src.splitlines() if "print(" in ln]
+    check("two-sockets Ctrl+C: no line the probe PRINTS tells the Operator nothing was "
+          "written (the source may still describe the old behaviour in a comment; what it "
+          "puts on screen is the thing that has to be true)",
+          not any("nothing was written" in ln.lower() for ln in printed),
+          repr([ln for ln in printed if "nothing was written" in ln.lower()]))
+    check("two-sockets Ctrl+C: the launcher's exit-130 message no longer says nothing was "
+          "written either",
+          "nothing was written" not in launcher.lower(), launcher)
+    check("two-sockets Ctrl+C: the launcher says where the partial entry went",
+          "PARTIAL" in launcher and "docs/measurements" in launcher, launcher)
+    check("two-sockets Ctrl+C: the on-screen promise before the run matches what happens -- it "
+          "says the entry will be marked partial",
+          "still writes what it saw" in src and "marked PARTIAL" in src)
+
+
+def test_probe_two_sockets_speaks_the_recorders_protocol_and_touches_no_store() -> None:
+    """The probe must subscribe exactly the way the recorder does, or it is
+    measuring a different client -- and it must never become an ingestion path.
+    """
+    pts = _import_tool("probe_two_sockets")
+
+    real = StreamConsumer("k", ["argonauts"], FakeWriter(), None)
+    check("two-sockets: the join frame is byte-identical to the recorder's",
+          [pts.join_frame("argonauts", "1")] == real.join_messages(),
+          f"{pts.join_frame('argonauts', '1')!r} vs {real.join_messages()!r}")
+    real._ref = 0
+    check("two-sockets: the heartbeat frame is byte-identical to the recorder's",
+          pts.heartbeat_frame("1") == real.heartbeat_message(),
+          f"{pts.heartbeat_frame('1')!r} vs {real.heartbeat_message()!r}")
+    check("two-sockets: it connects to the same URL the recorder uses",
+          pts.MAINNET_WS == "wss://stream.openseabeta.com/socket/websocket")
+
+    # Names of things that OPEN a store, not prose mentioning them: both probes
+    # say in their own docstrings which stores they leave alone, and a check
+    # that forbade the words would forbid the promise as well as the breach.
+    src = (ROOT / "tools" / "probe_two_sockets.py").read_text()
+    for forbidden in ("LandingZoneWriter", "OperationalStore", "open_store", "sqlite3",
+                      'cfg["analytical"]', "navanax.landing", "navanax.opstore",
+                      "navanax.normalize"):
+        check(f"two-sockets: never references {forbidden} -- it is a probe, not an ingestion "
+              f"path, and the landing zone is append-only and irreplaceable",
+              forbidden not in src)
+    check("two-sockets: its scratch frames go under data/, which .gitignore already excludes "
+          "whole -- real market data never reaches a commit",
+          "data/probes" in src and "data/" in (ROOT / ".gitignore").read_text())
+    # "It never reconnects" is asserted by BEHAVIOUR in
+    # test_probe_two_sockets_never_reconnects_after_the_peer_closes, not by
+    # grepping this file for the words. A docstring check passes on a file whose
+    # docstring is right and whose code is wrong, which is the only case worth
+    # catching (BUG-20260911-072).
+
+    pep = (ROOT / "tools" / "probe_events_page.py").read_text()
+    for forbidden in ("LandingZoneWriter", "navanax.landing", "open_store", "sqlite3",
+                      'cfg["analytical"]'):
+        check(f"probe-events-page: never opens a store -- no reference to {forbidden}",
+              forbidden not in pep)
+    check("probe-events-page: goes through RestClient, so the one read it spends is in the "
+          "ledger like every other read in the system",
+          "RestClient" in pep and "store.log_rest" in pep)
+
+
+def test_probe_launchers_are_double_clickable_and_name_the_right_module() -> None:
+    """The Operator double-clicks these. Each one has to say what it spends
+    before it spends it, and neither may start the recorder.
+    """
+    pairs = [("probe-events-page.command", "tools/probe_events_page.py"),
+             ("probe-two-sockets.command", "tools/probe_two_sockets.py")]
+    for name, module in pairs:
+        p = ROOT / name
+        check(f"{name}: exists and is executable",
+              p.exists() and os.access(p, os.X_OK))
+        if not p.exists():
+            continue
+        text = p.read_text()
+        check(f"{name}: runs {module}", module in text)
+        check(f"{name}: names no OTHER probe module -- a launcher that runs the wrong probe "
+              f"spends the wrong budget",
+              all(other not in text for _, other in pairs if other != module))
+        check(f"{name}: never starts the recorder -- it does not invoke the CLI at all",
+              "navanax.cli" not in text and "ingest" not in text)
+        check(f"{name}: sets PYTHONPATH=src, because tools/ is not a package and the import "
+              f"would fail on a machine without an editable install",
+              "PYTHONPATH=src" in text)
+        check(f"{name}: pauses for confirmation before it runs, so a stray double-click in the "
+              f"Finder cannot spend anything",
+              "close this window to cancel" in text)
+        check(f"{name}: keeps the window open at the end", "Press Enter to close" in text)
+        check(f"{name}: states in the window that it never writes to the landing zone",
+              "data/landing" in text)
+
+    ev = (ROOT / "probe-events-page.command").read_text()
+    check("probe-events-page.command: states the cost -- ONE read -- before spending it",
+          "ONE REST read" in ev and "refuses" in ev)
+    check("probe-events-page.command: explains the refusal exit code rather than leaving a bare "
+          "number on screen",
+          "6)" in ev and "Nothing was spent" in ev)
+    tw = (ROOT / "probe-two-sockets.command").read_text()
+    check("probe-two-sockets.command: states that it spends ZERO REST reads",
+          "zero REST reads" in tw)
+    check("probe-two-sockets.command: tells the Operator to LEAVE THE RECORDER RUNNING and that "
+          "a recorder disconnect during the probe is itself the answer",
+          "LEAVE THE RECORDER RUNNING" in tw and "that is the answer" in tw)
+    check("probe-two-sockets.command: says these are extra connections on the same key",
+          "two EXTRA connections" in tw)
+
+    doc = (ROOT / "docs" / "04_ENVIRONMENTS.md").read_text()
+    for name in ("probe-events-page.command", "probe-two-sockets.command"):
+        check(f"docs/04 §8's launcher table lists {name}", name in doc)
+    readme = (ROOT / "README.md").read_text()
+    check("README names the two PR-0 probes and what each costs",
+          "probe-events-page.command" in readme and "probe-two-sockets.command" in readme)
 
 
 if __name__ == "__main__":

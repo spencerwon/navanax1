@@ -2587,3 +2587,77 @@ bugs:
     and a real clock and would be the first thing deleted if it ever went flaky.
   pr: 9
 
+
+- id: BUG-20260911-072
+  summary: "`probe_two_sockets` decided window membership from each socket's OWN first-sight time, so an event A saw before the common window and B was replayed inside it counted as a unique for B -- fake drops, pointing in the direction that flatters PR-10's case for a second stream"
+  severity: S1
+  priority: P1
+  error_class: STA
+  status: fixed
+  logged_at: "2026-09-11T04:10:00-05:00"
+  occurred_at: "2026-09-10T23:40:00-05:00"
+  resolved_at: "2026-09-11T04:40:00-05:00"
+  detected_by: "tech-lead, PR-0.2 review"
+  detection_channel: tech-lead
+  branch: pr-0-probes
+  locations:
+  - {file: tools/probe_two_sockets.py, line: 208}
+  - {file: tools/probe_two_sockets.py, line: 251}
+  requirement: REQ-D-13
+  data_impact: >-
+    None on any stored row. The landing zone, ops.db and analytics.sqlite are not
+    opened by this probe and were not touched. The damage is to a NUMBER that was
+    about to be written into a document and quoted for months: the per-connection
+    unique count is the entire measured case for PR-10's redundant stream, and this
+    defect inflated it. The two sockets are opened five seconds apart by design, and
+    OpenSea replays recent events to a joining subscriber -- so on a real run the
+    bug fires every time B is replayed something A already had, and every one of
+    those became "an event a single socket dropped". A probe that miscounts in the
+    direction of the conclusion is worse than no probe, and this is the failure mode
+    docs/03 §1.2 names: not a crash, a confident plausible number.
+  root_cause: >-
+    `SocketTally.window_keys(t0, t1)` filtered `self.keys` -- first-sight times on
+    THAT socket only -- and `overlap_report` compared the two resulting sets
+    directly. Membership in the common window is not a per-socket property: an event
+    is in the window only if NEITHER socket had already seen it when the window
+    opened. `common_window`'s settle margin was there to handle exactly this replay
+    and could not, because it moves the window's edges and the comparison was still
+    being made on one socket's clock at a time. Separately, `verdict` reached its
+    "a single socket demonstrably drops events" branch from any non-empty union,
+    with no guard that the window existed or had length.
+  resolution: >-
+    New `window_sets(a, b, t0, t1)` computes both window sets, then drops every key
+    whose minimum first-sight ACROSS BOTH sockets is earlier than t0, and returns
+    the excluded set rather than discarding it; `overlap_report` uses it and reports
+    `n_excluded_pre_window` in the dict, the table and the verdict. `verdict` now
+    returns early unless the window exists AND has non-zero length AND the union is
+    non-empty, and the drop sentence carries its numerator and denominator beside
+    the percentage. Four other findings from the same review ride along: the
+    "never reconnects" property is now asserted by a counting connect factory
+    against a peer that closes early instead of by grepping the probe's own
+    docstring; Ctrl+C writes a measurement entry marked partial with the seconds it
+    ran, and the probe's on-screen strings and the launcher's exit-130 message say
+    so; `update.command` calls `launchctl bootstrap` once per job, captures the
+    output and branches on the status, and never prints an empty PROBLEM block; and
+    `_import_tool` sets `sys.dont_write_bytecode` and calls
+    `importlib.invalidate_caches()` so no stale .pyc can be graded.
+  regression_test:
+  - tests/selftest.py::test_probe_two_sockets_excludes_a_replay_of_an_event_seen_before_the_window
+  - tests/selftest.py::test_probe_two_sockets_verdict_refuses_to_claim_a_drop_from_an_empty_window
+  - tests/selftest.py::test_probe_two_sockets_never_reconnects_after_the_peer_closes
+  - tests/selftest.py::test_import_tool_loads_from_source_and_can_never_grade_stale_bytecode
+  - tests/selftest.py::test_update_command_bootstraps_each_job_once_and_prints_no_empty_problem_block
+  monitor_gap: >-
+    The suite DID have a test for the stagger -- it asserted that an event A saw
+    before B connected is not counted as a drop by B. It passed, because in that
+    fixture B never saw the event at all, so it was absent from B's set for the
+    trivial reason. The case that matters is the one where B DOES see it, late, as
+    a replay; nobody wrote it because the existing test read like it already covered
+    the ground. The new fixture has B observe the identical frame inside the window
+    and asserts only_b is 0 and the key is out of the union, with a mirror case
+    asserting a genuine in-window unique is still counted -- the fix must exclude
+    replays, not drops. Three of the four smaller findings have the same shape: a
+    property asserted against the text of a file (a docstring, one filename, one
+    data file) rather than against what the code does, which stays green for
+    whatever the text does not mention.
+  pr: 10
