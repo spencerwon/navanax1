@@ -365,3 +365,18 @@ Three things will make the B job refuse and exit 2, and all three are configurat
 `autostart-uninstall.command` and `autostart-status.command` take the same list from the generator **and** add every `com.navanax.*` label currently loaded — two sources because either alone leaves something behind: the generator does not know a job from a future version, and `launchctl list` does not show a job whose plist is installed but never loaded. A hardcoded three-label list could not stop, and could not even show, a job it had never heard of.
 
 Read `docs/07 §3.x` before turning the flag on. The cost is not only disk (which doubles): every raw count over `events` and `order_criteria` doubles too, and `/api/health`'s `dedup` block exists so that those numbers are never read raw.
+
+### 8.14 Never open the live analytical store from the sandbox (2026-09-14)
+
+Two dashboard crashes on 2026-09-14 (`SIGBUS, FS pagein error`, inside SQLite's
+WAL-index code) and, in all likelihood, the malformed store of 2026-09-10 have
+one cause: a Claude session opened `data/analytical.sqlite` *read-only* through
+the folder mount while the dashboard held it open on the Mac. The WAL index is a
+memory-mapped file; touching it through a second filesystem layer corrupts the
+mapping the Mac-side process is holding, and the process dies.
+
+The rule: **no process outside the Mac ever opens the live store, in any mode.**
+Measurements are taken through the dashboard's own HTTP API, or against a copy
+made while the dashboard is stopped. `ops.db` and the landing zone are not
+affected by this (the landing zone is append-only files; `ops.db` is not
+memory-mapped), but the same discipline applies until someone proves otherwise.
