@@ -7623,7 +7623,7 @@ def test_health_names_the_store_writer_and_caches_quick_check(tmp: Path) -> None
         check("health: the first call actually ran it, and the response says how old the "
               "answer is and how often it can be re-run",
               qc.get("cached") is False and qc.get("ttl_seconds") == QUICK_CHECK_TTL_SECONDS
-              and QUICK_CHECK_TTL_SECONDS == 600, str(qc)[:200])
+              and QUICK_CHECK_TTL_SECONDS == 6 * 60 * 60, str(qc)[:200])   # BUG-20260914-081: 6h, not 10 min
 
         st2, body2 = get("/api/health")
         qc2 = (json.loads(body2) or {}).get("quick_check") or {}
@@ -11392,6 +11392,29 @@ def test_page_requests_do_not_wait_for_the_fold(tmp: Path) -> None:
           "small store has them exact on the first call",
           h["store"]["counts_state"] == "ready" and h["store"]["counts_as_of"]
           and h["store"]["events"] == 4 and h["store"]["order_lives"] == 1, str(h["store"])[:200])
+    # BUG-20260914-081: quick_check reads every page; on a large store it must
+    # run in the background and never hold the page's lock.
+    import navanax.dashboard as _dm
+    saved = _dm.QUICK_CHECK_INLINE_MAX_BYTES
+    _dm.QUICK_CHECK_INLINE_MAX_BYTES = 0          # pretend the store is huge
+    dash._quick_check, dash._quick_check_mono = None, 0.0
+    try:
+        t0 = _time.monotonic()
+        first = dash.store_quick_check()
+        took_qc = _time.monotonic() - t0
+        check("quick_check: on a large store the request returns AT ONCE with "
+              f"state=checking ({took_qc:.3f}s) instead of reading every page on the request path",
+              first.get("state") == "checking" and took_qc < 1.0, str(first)[:160])
+        for _ in range(100):
+            if dash._quick_check is not None:
+                break
+            _time.sleep(0.05)
+        second = dash.store_quick_check()
+        check("quick_check: ...and the background pass lands and is served from cache",
+              second.get("state") == "done" and second.get("ok") is True and second.get("cached") is True,
+              str(second)[:160])
+    finally:
+        _dm.QUICK_CHECK_INLINE_MAX_BYTES = saved
     check("no-wait: status counts events by MAX(rowid) -- exact on an append-only "
           "table and free -- and reports the last event times from indexed columns",
           st["store"]["events"] == 4 and isinstance(st["store"]["last_observed_at"], str)

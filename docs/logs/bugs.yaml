@@ -3204,3 +3204,40 @@ bugs:
     page still answers.
   regression_test:
     - tests/selftest.py::test_page_requests_do_not_wait_for_the_fold
+
+- id: BUG-20260914-081
+  summary: "Health ran PRAGMA quick_check -- which reads every page of the store -- on its first call and every ten minutes after, on the request path, holding the page's read lock; on the 14 GB real store that is minutes per run, so the page kept hanging after BUG-080's fix"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T15:58:00-05:00"
+  occurred_at: "2026-09-14T15:55:00-05:00"
+  resolved_at: "2026-09-14T16:05:00-05:00"
+  detected_by: "the Operator's dashboard, redeployed with BUG-080's fix: /api/health still did not answer in 50s"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/dashboard.py, line: 59}
+  - {file: src/navanax/dashboard.py, line: 705}
+  requirement: REQ-N-16
+  data_impact: >-
+    None to the record; availability only. The comment beside the constant
+    said "on the Operator's 2.8 GB store that is seconds" -- true when it was
+    written, and the store is now five times that size.
+  root_cause: >-
+    A full-file read scheduled on the request path with a ten-minute TTL, sized
+    for a store that no longer exists. quick_check(1) on 14 GB reads 14 GB.
+  fix: >-
+    Above 512 MB the check runs in a background thread on a throwaway
+    read-only connection and Health returns at once with state=checking until
+    the verdict lands; the TTL is six hours (14 GB every ten minutes is two
+    terabytes a day of reads). Below 512 MB it runs inline as before, so a
+    small store still gets an immediate verdict.
+  monitor_gap: >-
+    The same gap as BUG-080: nothing measured this on the real store, and the
+    constant's own comment recorded the size assumption without anything
+    checking it. The regression test forces the large-store path and asserts
+    the request returns in under a second.
+  regression_test:
+    - tests/selftest.py::test_page_requests_do_not_wait_for_the_fold
