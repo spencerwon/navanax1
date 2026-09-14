@@ -11292,8 +11292,26 @@ def test_order_lives_refolds_when_the_method_stamp_is_stale(tmp: Path) -> None:
           str(ro.refold_stats))
     ro.close()
 
-    w = Normalizer(tmp / "unused-w", db, writer=True)
-    check("lives method: the WRITER re-folds the whole table on open",
+    deferred = Normalizer(tmp / "unused-def", db, writer=True)
+    check("lives method (BUG-20260914-079): the writer DEFERS the re-fold by default -- "
+          "startup must not do unbounded work; on the Operator's 11M-event store the "
+          "in-memory version made no progress in ten minutes while holding the page",
+          deferred.refold_stats["refolded"] is False
+          and deferred.refold_stats.get("deferred") is True,
+          str(deferred.refold_stats))
+    check("lives method: deferring leaves the stale count ALONE and still reports mixed, "
+          "so nothing is quietly presented as corrected",
+          lives_method_state(deferred.conn)["mixed"] is True
+          and deferred.conn.execute("SELECT terminations_seen FROM order_lives "
+                                    "WHERE order_hash='0xOLD'").fetchone()[0] == 2)
+    deferred.close()
+
+    os.environ["NAVANAX_REFOLD_LIVES"] = "1"
+    try:
+        w = Normalizer(tmp / "unused-w", db, writer=True)
+    finally:
+        os.environ.pop("NAVANAX_REFOLD_LIVES", None)
+    check("lives method: asked for explicitly, the WRITER re-folds the whole table",
           w.refold_stats["refolded"] is True and w.refold_stats["rows"] == 1,
           str(w.refold_stats))
     check("lives method: every row is now at the current method_version",
@@ -11309,9 +11327,13 @@ def test_order_lives_refolds_when_the_method_stamp_is_stale(tmp: Path) -> None:
           "visible rather than felt", isinstance(w.refold_stats["seconds"], float))
     w.close()
 
-    again = Normalizer(tmp / "unused-w2", db, writer=True)
-    check("lives method: a SECOND open re-folds nothing -- the stamp is current, so "
-          "this is not a re-fold on every start",
+    os.environ["NAVANAX_REFOLD_LIVES"] = "1"
+    try:
+        again = Normalizer(tmp / "unused-w2", db, writer=True)
+    finally:
+        os.environ.pop("NAVANAX_REFOLD_LIVES", None)
+    check("lives method: a SECOND explicit run re-folds nothing -- the stamp is current, "
+          "so this is not a re-fold on every start",
           again.refold_stats["refolded"] is False and again.refold_stats["seconds"] == 0.0,
           str(again.refold_stats))
     again.close()
@@ -11349,7 +11371,7 @@ def test_order_lives_method_mixed_is_reported_on_health_as_warn(tmp: Path) -> No
     src = (ROOT / "src" / "navanax" / "dashboard.py").read_text()
     check("lives method on Health: the response names the fix in a sentence the "
           "Operator can act on",
-          "Run rebuild-store.command or restart the dashboard." in src)
+          "Run rebuild-lives.command when you can leave the machine alone." in src)
     check("lives method on Health: and Health's top-level status goes to warn on it, "
           "not only the sub-block",
           'if lives_method.get("mixed")' in src)
@@ -11367,16 +11389,18 @@ def test_order_lives_method_mixed_is_reported_on_health_as_warn(tmp: Path) -> No
     check("lives method on Health: the field is on every health response",
           "lives_method" in h and h["lives_method"]["available"] is True,
           str(h.get("lives_method")))
-    check("lives method on Health: the dashboard IS the folding writer, so opening it "
-          "repaired the store and the flag is clear",
-          h["lives_method"]["mixed"] is False
-          and h["lives_method"]["refold_on_open"] is True, str(h["lives_method"]))
-    check("lives method on Health: a repaired store's status is not `warn` for this "
-          "reason", h["status"] != "warn" or h["lives_method"]["mixed"] is False)
-    check("lives method on Health: the corrected count is what the page now serves",
+    check("lives method on Health (BUG-20260914-079): the dashboard does NOT repair the "
+          "store on open -- startup does no unbounded work -- so the flag stays up",
+          h["lives_method"]["mixed"] is True
+          and h["lives_method"]["refold_on_open"] is False, str(h["lives_method"]))
+    check("lives method on Health: and a mixed store makes the whole response `warn`, "
+          "so the Operator is told rather than left to notice",
+          h["status"] == "warn", str(h.get("status")))
+    check("lives method on Health: the OLD count is still what the page serves, "
+          "unrepaired and flagged -- never silently presented as corrected",
           dash.norm is not None and dash.norm.conn.execute(
               "SELECT terminations_seen FROM order_lives WHERE order_hash='0xOLD'"
-          ).fetchone()[0] == 1)
+          ).fetchone()[0] == 2)
     if dash.norm is not None:
         dash.norm.close()
 

@@ -1163,13 +1163,41 @@ that signal was a human opening the Actions tab. The second gap is narrower and
 sharper: nothing said which verification method was *valid*, so a reasonable method
 that happened to be wrong was used and its clean result was believed.
 
+## Round 26 — the deploy, 2026-09-14
+
+**BUG-20260914-079 (S1/P0).** The first real deploy of this work onto the
+Operator's own machine. The dashboard came up, noticed `order_lives` had been
+folded by older rules, and started rewriting all 3.7 million rows — in one
+unbounded gulp, holding the writer lock and the whole page. Ten minutes later it
+had written nothing measurable to a 14 GB store and the dashboard was dead. It
+was stopped by hand.
+
+The fold materialises every qualifying `events` row into a Python dict before
+writing anything. That is bounded on the incremental path (400 hashes at a time)
+and unbounded on the full one. It was measured at 6.6 s on 200,000 synthetic
+lives and shipped on that number — and the tech-lead's own review said, in
+writing, that 6.6 s was not the number for the Operator's machine. Nobody acted
+on the caveat.
+
+The fix is deliberately small: the re-fold no longer happens at startup at all.
+It runs when asked — `rebuild-lives.command`, or `NAVANAX_REFOLD_LIVES=1` — and
+the deferral is loud rather than quiet: Health reports `lives_method` as mixed,
+the whole response goes to `warn`, and the log says the lifetime counts are
+still on the older rules. Nothing is presented as corrected when it is not.
+Making the fold itself streaming is separate work; an unbounded operation does
+not belong in a startup path whether or not it is fast.
+
+**The standing correction:** a performance claim about the analytical store is
+not verified until it is verified against a copy of the real one. Every gate
+that passed here ran on fixtures two orders of magnitude too small.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-77 of 78 logged bugs are fixed.
+78 of 79 logged bugs are fixed.
 
 ### The lesson
 

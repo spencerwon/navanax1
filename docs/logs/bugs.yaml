@@ -3112,3 +3112,51 @@ bugs:
     rather than running, because proving this dynamically needs an interpreter with no
     PyYAML -- which is exactly what the machine running the gate does not have.
   pr: 11
+
+- id: BUG-20260914-079
+  summary: "The full order_lives re-fold ran automatically at writer startup and materialised every qualifying events row in memory before writing anything; on the Operator's real store (11M events, 3.7M lives, 14 GB) it made no measurable progress in ten minutes while holding the writer lock, so the dashboard served nothing"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T14:05:00-05:00"
+  occurred_at: "2026-09-14T13:47:10-05:00"
+  resolved_at: "2026-09-14T14:30:00-05:00"
+  detected_by: "the Operator, on his own machine, immediately after the deploy"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 1230}
+  - {file: src/navanax/normalize.py, line: 1102}
+  requirement: REQ-N-16
+  data_impact: >-
+    None to the record. order_lives is DERIVED and the re-fold is one
+    transaction, so the interrupted run committed nothing and every row stayed
+    at its old method_version. The landing zone was never read. The cost was
+    availability: the dashboard was unusable for the duration and had to be
+    stopped by hand.
+  root_cause: >-
+    BUG-20260911-076 correctly made ORDER_LIVES_METHOD readable and triggered a
+    full re-fold when a store predated the current rules. What it did not do was
+    bound that work. _refresh_chunk materialises the whole result set into a
+    Python dict keyed by order_hash before folding anything, which is fine for
+    the incremental path (400 hashes at a time) and catastrophic for the full
+    one. It was measured at 6.6s on 200k synthetic lives and shipped on that
+    number; the tech-lead's review said in writing that this was not the number
+    for the Operator's machine, and that caveat was not acted on.
+  fix: >-
+    The automatic re-fold at startup is removed. It now runs only when asked --
+    rebuild-lives.command, or NAVANAX_REFOLD_LIVES=1 -- and the deferral is
+    loud: Health reports lives_method mixed, the whole response goes to warn,
+    and the log line says the counts are on the older rules. Making the fold
+    itself streaming and bounded is a separate piece of work; deferring it is
+    what gets the page back, and an unbounded operation does not belong in a
+    startup path either way.
+  monitor_gap: >-
+    Nothing measured this against a store of the Operator's size before it
+    shipped. Every gate ran against synthetic fixtures two orders of magnitude
+    smaller. The standing correction: performance claims about the analytical
+    store are not verified until they are verified on a copy of the real one.
+  regression_test:
+    - tests/selftest.py::test_order_lives_refolds_when_the_method_stamp_is_stale
+    - tests/selftest.py::test_order_lives_method_mixed_is_reported_on_health_as_warn

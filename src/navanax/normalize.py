@@ -1227,7 +1227,27 @@ class Normalizer:
             # that are not empty and not current, which is the case the emptiness
             # check above cannot see (BUG-20260911-076). Only the folding writer
             # may do this; a reader reports it on Health instead.
-            self.refold_stats = refold_lives_if_stale(self.conn)
+            # DEFERRED BY DEFAULT (BUG-20260914-079). On the Operator's real
+            # store -- 11M events, 3.7M lives -- this full re-fold materialised
+            # every qualifying row in memory before writing anything, and on a
+            # MacBook Air it made no measurable progress in ten minutes while
+            # holding the writer lock and the whole dashboard. Startup must not
+            # do unbounded work. Health reports `lives_method` as mixed until it
+            # is run deliberately: `rebuild-lives.command`, or
+            # NAVANAX_REFOLD_LIVES=1 in the environment.
+            if os.environ.get("NAVANAX_REFOLD_LIVES") == "1":
+                self.refold_stats = refold_lives_if_stale(self.conn)
+            else:
+                st = lives_method_state(self.conn)
+                self.refold_stats = {"refolded": False, "rows": None, "deferred": True,
+                                     "lives_method": st}
+                if st.get("mixed"):
+                    log.warning(
+                        "order_lives holds rows folded by method_version %s-%s and this build "
+                        "writes %s. The re-fold is DEFERRED: it is not run at startup. Bid "
+                        "lifetime and termination counts stay on the older rules -- Health says "
+                        "so -- until you run rebuild-lives.command.",
+                        st.get("min"), st.get("max"), ORDER_LIVES_METHOD)
         except BaseException:
             # Never hold the lock for a writer that did not come up: the next
             # start would then refuse against a process that owns nothing.
