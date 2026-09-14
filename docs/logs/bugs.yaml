@@ -3241,3 +3241,36 @@ bugs:
     the request returns in under a second.
   regression_test:
     - tests/selftest.py::test_page_requests_do_not_wait_for_the_fold
+
+- id: BUG-20260914-082
+  summary: "The background table counts introduced by BUG-080 ran on the page's own read connection under the page's own lock, so for the minute-plus they take on the real store -- and they start the moment the dashboard opens -- every page request queued behind them; the page was unresponsive for its first minutes and again every ten minutes"
+  severity: S2
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T16:32:00-05:00"
+  occurred_at: "2026-09-14T16:22:00-05:00"
+  resolved_at: "2026-09-14T16:40:00-05:00"
+  detected_by: "timing each endpoint from the page after the BUG-081 deploy: /api/meta answered in 0.0s, /api/status did not answer in eight minutes"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/dashboard.py, line: 300}
+  requirement: REQ-N-16
+  data_impact: None to the record; availability only.
+  root_cause: >-
+    BUG-080's fix moved page reads off the writer's connection but put the new
+    background counts on that same page connection, under the same lock. A
+    sqlite3 connection serialises its statements, so a 21-second COUNT(*) on
+    order_lives blocked every request sharing it, lock or no lock.
+  fix: >-
+    Background maintenance -- the table counts and the large-store quick_check
+    -- runs on its own read-only connection under its own lock, one job at a
+    time so two full scans never race for the same laptop disk. The regression
+    test holds the page's read lock and asserts the counts still complete.
+  monitor_gap: >-
+    Same as BUG-080 and BUG-081: nothing timed a request on the real store
+    before the fix shipped. The endpoint-by-endpoint timing that found this is
+    now the acceptance test for the dashboard on the Operator's machine.
+  regression_test:
+    - tests/selftest.py::test_page_requests_do_not_wait_for_the_fold

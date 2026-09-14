@@ -1211,13 +1211,19 @@ seconds"; the store is 14 GB. Above 512 MB it now runs in the background on a
 throwaway connection, Health answers at once with `state: checking`, and the TTL
 is six hours.
 
+**BUG-20260914-082 (S2/P0).** BUG-080's background counts ran on the page's own
+connection. A sqlite3 connection serialises its statements, so the 21-second
+`COUNT(*)` on `order_lives` blocked every request — for the first minutes after
+every start and again every ten minutes. Background maintenance now has its own
+connection and lock, one job at a time.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-80 of 81 logged bugs are fixed.
+81 of 82 logged bugs are fixed.
 
 ### The lesson
 

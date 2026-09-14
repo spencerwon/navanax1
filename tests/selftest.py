@@ -11392,6 +11392,21 @@ def test_page_requests_do_not_wait_for_the_fold(tmp: Path) -> None:
           "small store has them exact on the first call",
           h["store"]["counts_state"] == "ready" and h["store"]["counts_as_of"]
           and h["store"]["events"] == 4 and h["store"]["order_lives"] == 1, str(h["store"])[:200])
+    # BUG-20260914-082: background counts must never hold the PAGE's lock.
+    dash.read_lock.acquire()                       # simulate a page request in flight
+    try:
+        t0 = _time.monotonic()
+        dash.table_counts = {"as_of": None, "seconds": None, "counts": None}
+        dash._counts_mono = 0.0
+        got = dash.refresh_table_counts()
+        took_c = _time.monotonic() - t0
+        check("bg-counts: the table counts run on their OWN connection and finish while the "
+              f"page's read lock is held by someone else ({took_c:.2f}s) -- they never queue behind it",
+              got["counts"] is not None and took_c < 3.0, str(got)[:120])
+    finally:
+        dash.read_lock.release()
+    check("bg-counts: ...and that connection is distinct from the page's",
+          dash.bg_conn is not None and dash.bg_conn is not dash.ro_conn)
     # BUG-20260914-081: quick_check reads every page; on a large store it must
     # run in the background and never hold the page's lock.
     import navanax.dashboard as _dm

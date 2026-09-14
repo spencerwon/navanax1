@@ -114,6 +114,12 @@ class Dashboard:
         self.table_counts: dict[str, Any] = {"as_of": None, "seconds": None, "counts": None}
         self._counts_mono: float = 0.0
         self._counts_busy = threading.Lock()
+        # BUG-20260914-082. Background maintenance (table counts, quick_check)
+        # gets its OWN read-only connection and its own lock, so a minute-long
+        # COUNT never holds the connection the page reads through. One job at a
+        # time: two full scans racing on a laptop disk make both slower.
+        self.bg_conn: sqlite3.Connection | None = None
+        self.bg_lock = threading.Lock()
         self.refresh = float((cfg.get("dashboard") or {}).get("refresh_seconds", 5))
         self.last_sync: dict[str, Any] = {"at": None, "stats": None, "error": None, "took_ms": None}
         #: `covered_by` annotations this process has had to RETRACT (BUG-20260911-077).
@@ -191,6 +197,14 @@ class Dashboard:
             self.ro_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                            check_same_thread=False, timeout=30)
             self.ro_conn.row_factory = norm.conn.row_factory
+        with self.bg_lock:
+            if self.bg_conn is not None:
+                try:
+                    self.bg_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.bg_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
+                                           check_same_thread=False, timeout=30)
         self.engine = MetricEngine(self.ro_conn, self.intervals, self.tz)
         self.table_counts = {"as_of": None, "seconds": None, "counts": None}
         self._counts_mono = 0.0
@@ -299,14 +313,14 @@ class Dashboard:
         Returns the new cache entry. Safe to call from any thread; a second caller
         while one is running gets the current cache back rather than a second scan.
         """
-        if self.ro_conn is None:
+        if self.bg_conn is None:
             return self.table_counts
         if not self._counts_busy.acquire(blocking=False):
             return self.table_counts
         try:
             t0 = time.monotonic()
-            with self.read_lock:
-                c = self.ro_conn
+            with self.bg_lock:                # never read_lock: the page must not wait
+                c = self.bg_conn
                 counts: dict[str, Any] = {
                     "events": c.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0}
                 for t in ("order_lives", "order_criteria", "unparsed", "tokens", "traits",
@@ -759,12 +773,14 @@ class Dashboard:
         try:
             # quick_check(1) stops at the first fault: we need to know THAT the
             # store is broken, not to enumerate every broken page. A throwaway
-            # read-only connection, so the page's own connection is never held.
-            probe = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5)
-            try:
-                rows = probe.execute("PRAGMA quick_check(1)").fetchall()
-            finally:
-                probe.close()
+            # read-only connection, so the page's own connection is never held;
+            # under bg_lock so it never races the table counts for the disk.
+            with self.bg_lock:
+                probe = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5)
+                try:
+                    rows = probe.execute("PRAGMA quick_check(1)").fetchall()
+                finally:
+                    probe.close()
             result = [str(r[0]) for r in rows] or ["(no result)"]
             ok = result == ["ok"]
         except Exception as exc:  # noqa: BLE001 - a malformed store must still render
