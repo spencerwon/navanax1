@@ -1201,9 +1201,15 @@ function route(){
  return all()}
 
 /* ---------- orchestration ---------- */
-async function all(){try{await status();await loadGaps();
+/* BUG-20260914-083: one refresh at a time. A refresh that is still waiting on the
+   server must not be joined by the next one ten seconds later, or requests pile up
+   behind each other and the page never catches up on a large store. */
+let ALL_INFLIGHT=false,ALL_QUEUED=false;
+async function all(){if(ALL_INFLIGHT){ALL_QUEUED=true;return}ALL_INFLIGHT=true;
+ try{await status();await loadGaps();
   await Promise.all(VIEW_LOADERS[S.view].map(f=>f()));writeHash()}
- catch(e){console.error(e);$('#asof').textContent='error: '+e.message}}
+ catch(e){console.error(e);$('#asof').textContent='error: '+e.message}
+ finally{ALL_INFLIGHT=false;if(ALL_QUEUED){ALL_QUEUED=false;all()}}}
 function seg(id,key,cb){$('#'+id).querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{$('#'+id).querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');S[key]=b.dataset.v;cb()}))}
 function layout(){const h=document.querySelector('header').offsetHeight,c=document.querySelector('.controls').offsetHeight;document.documentElement.style.setProperty('--hdr',h+'px');document.documentElement.style.setProperty('--top',(h+c)+'px')}
 window.addEventListener('resize',layout);

@@ -1217,13 +1217,24 @@ connection. A sqlite3 connection serialises its statements, so the 21-second
 every start and again every ten minutes. Background maintenance now has its own
 connection and lock, one job at a time.
 
+**BUG-20260914-083 (S1/P0).** Timed every metric the page calls against a
+snapshot of the real 14.5 GB store, natively. Every chart series: 0.0–1.7 s at
+every range, ETH and USD. The main tab's `live_book`: **459.8 s** — it scanned
+every placement event ever recorded with two subqueries per row to find 25
+standing orders, when `order_lives` already holds one row per order. It now
+reads the lifetime table through a partial index over open orders: 0.0 s. Status
+lost two full-table scans (26.2 s and 15.3 s) to a partial index and a
+per-collection maximum. The page no longer starts a refresh while one is still
+waiting. Measured but not fixed here: `survival_prepare` over 7 d at 128.9 s and
+`wallets` over 24 h at 19.2 s — the Flow and Wallets tabs — are next.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-81 of 82 logged bugs are fixed.
+82 of 83 logged bugs are fixed.
 
 ### The lesson
 

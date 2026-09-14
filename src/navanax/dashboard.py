@@ -21,6 +21,7 @@ carries its basis so the page can print it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import mimetypes
@@ -171,10 +172,8 @@ class Dashboard:
             self.norm = self.engine = None
             with self.read_lock:
                 if self.ro_conn is not None:
-                    try:
+                    with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                         self.ro_conn.close()
-                    except Exception:  # noqa: BLE001
-                        pass
                 self.ro_conn = None
             self.store_error = {
                 "at": _now_iso(),
@@ -190,19 +189,15 @@ class Dashboard:
         self.norm = norm
         with self.read_lock:
             if self.ro_conn is not None:
-                try:
+                with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                     self.ro_conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
             self.ro_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                            check_same_thread=False, timeout=30)
             self.ro_conn.row_factory = norm.conn.row_factory
         with self.bg_lock:
             if self.bg_conn is not None:
-                try:
+                with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                     self.bg_conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
             self.bg_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                            check_same_thread=False, timeout=30)
         self.engine = MetricEngine(self.ro_conn, self.intervals, self.tz)
@@ -449,13 +444,23 @@ class Dashboard:
             # so MAX(rowid) is its exact row count and costs nothing; COUNT(*)
             # measured 14.8s on the Operator's store.
             n_events = c.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0
-            last_ts = c.execute("SELECT MAX(observed_ts), MAX(valid_ts) FROM events").fetchone()
-            last = tuple(_iso_or_none(t) for t in last_ts)
+            # MAX(valid_ts) has no single-column index (15.3 s on the real store);
+            # per collection it uses ix_events_coll_valid (0.0 s). Take the max
+            # over the watched collections.
+            last_obs = c.execute("SELECT MAX(observed_ts) FROM events").fetchone()[0]
+            last_valid = None
+            for slug in self.slugs:
+                v = c.execute("SELECT MAX(valid_ts) FROM events WHERE collection=?", (slug,)).fetchone()[0]
+                if v is not None and (last_valid is None or v > last_valid):
+                    last_valid = v
+            last = (_iso_or_none(last_obs), _iso_or_none(last_valid))
             per_min = c.execute(
                 "SELECT COUNT(*) FROM events WHERE observed_ts >= ?", (time.time() - 60,)).fetchone()[0]
             unparsed = c.execute("SELECT COUNT(*) FROM unparsed").fetchone()[0]
             # REQ-F-02 / REQ-D-25: the rate the USD view is converting at, with
             # its provenance and age, so "in dollars" is never an unstated basis.
+            # Served by the partial index ix_events_ethusd (BUG-20260914-083);
+            # without it this was a 26.2 s scan of every row on every status call.
             rate = c.execute(
                 """SELECT implied_ethusd, valid_at FROM events
                    WHERE implied_ethusd IS NOT NULL ORDER BY valid_ts DESC LIMIT 1""").fetchone()

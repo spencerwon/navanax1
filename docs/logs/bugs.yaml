@@ -3274,3 +3274,48 @@ bugs:
     now the acceptance test for the dashboard on the Operator's machine.
   regression_test:
     - tests/selftest.py::test_page_requests_do_not_wait_for_the_fold
+
+- id: BUG-20260914-083
+  summary: "The main tab could not load on the real store: live_book scanned every placement event ever recorded for the collection with two subqueries per row (459.8 s measured), status ran two full-table scans on every call (26.2 s for the ETH/USD rate, 15.3 s for MAX(valid_ts)), and the page started a new refresh every 10 s regardless of whether the last one had returned, so requests piled up without bound"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T17:40:00-05:00"
+  occurred_at: "2026-09-14T16:30:00-05:00"
+  resolved_at: "2026-09-14T18:10:00-05:00"
+  detected_by: "timing every metric the page calls against a consistent snapshot of the Operator's 14.5 GB store, natively on his Mac (docs/04 s8.14)"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 2027}
+  - {file: src/navanax/dashboard.py, line: 440}
+  - {file: src/navanax/ui/index.html, line: 1204}
+  requirement: REQ-N-16
+  data_impact: None to the record; availability only. Every chart series measured 0.0-1.7 s at every range, so the history and the USD view were always there -- the page never finished loading to show them.
+  root_cause: >-
+    live_book took "the book" from events: every item_listed / item_received_bid
+    / collection_offer row the collection ever produced, an EXISTS into
+    order_lives per row to ask whether it still stands, a scalar subquery per
+    row for quantity, then a sort of all of it for the top 25. order_lives IS
+    the book -- one de-duplicated row per order with price, token, maker,
+    expiry and termination -- and was never read for this. Status looked up the
+    ETH/USD rate with ORDER BY valid_ts DESC LIMIT 1 over rows carrying a rate,
+    which no index served, and took MAX(valid_ts) with no single-column index.
+    The page's refresh timer had no notion of a refresh still in flight.
+  fix: >-
+    live_book reads order_lives through a new PARTIAL index over open orders
+    (t_term IS NULL) ordered by price, so the best 25 standing asks is an index
+    walk that stops at 25: 0.0 s on the snapshot. Status uses a partial index on
+    rows that carry a rate and takes MAX(valid_ts) per watched collection via
+    ix_events_coll_valid: both 0.0 s. The page refuses to start a refresh while
+    one is in flight and runs at most one queued follow-up.
+  monitor_gap: >-
+    The gap that produced BUG-080/081/082 as well, now closed by method rather
+    than by patch: a consistent snapshot of the real store is taken with SQLite's
+    online backup and every metric the page calls is timed against it natively
+    before anything is called fixed. survival_prepare over 7 days measured 128.9 s
+    and wallets over 24 h 19.2 s in the same run -- the Flow and Wallets tabs --
+    and are logged as the next items, not folded into this one.
+  regression_test:
+    - tests/selftest.py::test_metric_engine_contract

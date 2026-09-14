@@ -2034,22 +2034,56 @@ class MetricEngine:
         now_dt = now or datetime.now(timezone.utc)
         now_iso = now_dt.isoformat().replace("+00:00", "Z")
         now_ts = now_dt.timestamp()
-        standing, sargs = standing_sql("e", now_ts)
-        base = f"""SELECT e.valid_at, e.event_type, e.token_id, e.price_eth, e.price_usd,
-                          e.maker, e.expiration_at, e.order_hash,
-                          (SELECT ol.quantity FROM order_lives ol WHERE ol.order_hash = e.order_hash)
-                   FROM events e
-                   WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL
-                     AND {standing}{self.dedup_where('e')}"""
-        tf, targs = token_filter_sql(collection, traits or {})
+        # BUG-20260914-083. This used to scan EVERY placement event of the type
+        # for the collection -- on the Operator's store, about a million rows --
+        # and run two subqueries per row to find the 25 best standing orders:
+        # 459.8 s measured. `order_lives` IS the book: one row per order (already
+        # de-duplicated across connections), with its price, token, maker,
+        # expiry and termination, under ix_lives_standing. Read it directly.
+        # `standing` here is the same predicate `standing_sql` expresses, on the
+        # life row itself instead of through an EXISTS.
+        # Two populations: lives with NO terminator (the partial index ix_lives_open
+        # walks them in price order and LIMIT stops early) and lives whose
+        # terminator is in the FUTURE relative to `now` -- only possible when `now`
+        # is a past instant, rare and small. UNION ALL keeps both exact.
+        base = """SELECT * FROM (
+                  SELECT ol.t_place, ol.event_type, ol.token_id, ol.price_eth, ol.price_usd,
+                         ol.maker, ol.expiration_ts, ol.order_hash, ol.quantity
+                  FROM order_lives ol INDEXED BY ix_lives_open
+                  WHERE ol.collection = ? AND ol.event_type = ? AND ol.t_term IS NULL
+                    AND ol.placement_seen = 1
+                    AND ol.t_place IS NOT NULL AND ol.t_place <= ?
+                    AND ol.exit_reason <> 'unknown'
+                    AND (ol.expiration_ts IS NULL OR ol.expiration_ts > ?)
+                  UNION ALL
+                  SELECT ol.t_place, ol.event_type, ol.token_id, ol.price_eth, ol.price_usd,
+                         ol.maker, ol.expiration_ts, ol.order_hash, ol.quantity
+                  FROM order_lives ol INDEXED BY ix_lives_term
+                  WHERE ol.collection = ? AND ol.t_term > ? AND ol.event_type = ?
+                    AND ol.placement_seen = 1
+                    AND ol.t_place IS NOT NULL AND ol.t_place <= ?
+                    AND ol.exit_reason <> 'unknown'
+                    AND (ol.expiration_ts IS NULL OR ol.expiration_ts > ?)
+                  ) ol WHERE 1=1"""
+        tf, targs = token_filter_sql(collection, traits or {}, alias="ol")
+
+        def iso(ts: float | None) -> str | None:
+            if ts is None:
+                return None
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
         def rows(etype: str, order: str) -> list[dict[str, Any]]:
             extra = tf if etype != "collection_offer" else ""
-            cur = self.conn.execute(base + extra + f" ORDER BY e.price_eth {order} LIMIT ?",
-                                    (collection, etype, *sargs, *(targs if extra else []), limit))
-            keys = ("valid_at", "event_type", "token_id", "price_eth", "price_usd",
-                    "maker", "expiration_at", "order_hash", "quantity")
-            return [dict(zip(keys, r, strict=True)) for r in cur]
+            cur = self.conn.execute(base + extra + f" ORDER BY ol.price_eth {order} LIMIT ?",
+                                    (collection, etype, now_ts, now_ts,
+                                     collection, now_ts, etype, now_ts, now_ts,
+                                     *(targs if extra else []), limit))
+            out = []
+            for r in cur:
+                out.append({"valid_at": iso(r[0]), "event_type": r[1], "token_id": r[2],
+                            "price_eth": r[3], "price_usd": r[4], "maker": r[5],
+                            "expiration_at": iso(r[6]), "order_hash": r[7], "quantity": r[8]})
+            return out
         book = {"as_of": now_iso,
                 "asks": rows("item_listed", "ASC"),
                 "item_bids": rows("item_received_bid", "DESC"),
