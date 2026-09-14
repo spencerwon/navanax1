@@ -15,11 +15,24 @@ jobs:
 
       # Runs with no third-party deps at all -- it is the floor of correctness
       # and must pass before anything else is attempted.
+      # BUG-20260911-078: this step ran BEFORE any install and died with
+      # ModuleNotFoundError: yaml, so every step below it was skipped and CI was
+      # red on every branch, main included, from 2026-09-09. Tests that genuinely
+      # need a dependency now declare it with @needs(...) and are reported as
+      # SKIPPED here -- listed by name, counted in their own column, never counted
+      # as passed. The strict step after Install is what actually runs them.
       - name: Self-test (stdlib only)
         run: python3 tests/selftest.py
 
       - name: Install
         run: pip install -e ".[dev]"
+
+      # The guard that keeps the skips above honest. With every dependency
+      # installed there is no excuse for a skip, so --no-skips turns one into a
+      # failure: the 79 tests the stdlib-only step could not run are executed here
+      # for real, and a test that quietly stops running cannot disappear.
+      - name: Self-test (strict; every skipped test actually runs)
+        run: python3 tests/selftest.py --no-skips
 
       # BUG-20260909-010: the production codec had ZERO test coverage because
       # the sandbox the code was written in cannot install zstandard. CI can,

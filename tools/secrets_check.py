@@ -48,7 +48,7 @@ SKIP_SUFFIXES = {".xlsx", ".gz", ".zst", ".db", ".pyc", ".png", ".jpg"}
 
 def tracked_files() -> list[pathlib.Path]:
     try:
-        out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=ROOT, capture_output=True,
                              text=True, timeout=30, check=True).stdout.split("\n")
         return [ROOT / f for f in out if f]
     except (OSError, subprocess.SubprocessError):

@@ -179,6 +179,41 @@ Analytical code receives a distinct review focused on statistical correctness, n
 - Is the denominator correct? (ETH vs USD, filtered vs raw, supply vs circulating)
 - Does the function fail loudly on insufficient data, or return a number anyway?
 
+### 4.6 The stdlib-only floor, and what a missing dependency does
+
+`tests/selftest.py` is the real suite. It is a plain script — no pytest, no runner to install — and CI runs it as its **first** step, before `pip install`, deliberately: a suite that cannot run until the environment is built cannot tell you the environment is broken.
+
+**"Runs on the standard library alone" is a promise about the runner, not about every test in it.** Parts of the suite exercise code that genuinely reads `config/*.yaml` through PyYAML — `load_intervals`, the assumptions registry, the CLI — and those tests cannot run before the dependency exists. As of 2026-09-11, 79 of 187 test functions are in that position; the other 108 need nothing but Python.
+
+**What happens when a dependency is missing is exactly this:**
+
+1. A test that needs a third-party module declares it at its definition site: `@needs("yaml")`. The declaration is a decorator, not a list kept somewhere else, for the reason `BUG-20260909-038` records — a list maintained separately drifts within a day.
+2. When the module cannot be imported, the runner records the test as **SKIPPED**. It prints `SKIP <name> -- needs yaml` where the test would have run, **lists every skipped test by name** above the summary, and counts skips in their own column: `187 test functions, 806 passed, 0 failed, 79 skipped (needs: yaml)`.
+3. **A skipped test is never counted as passed.** The exit code is 0 only when `failed == 0`, and a skip does not inflate the pass count.
+4. A test whose declared module *is* importable is not skipped — it runs exactly as it always did.
+
+**A skip is still a test that did not run, so the mode that matters is `--no-skips`.** `python3 tests/selftest.py --no-skips` exits non-zero if anything at all was skipped. That is the mode `tools/gates.py` runs, because the Mac and the container both have the dependencies and a skip there means a test has stopped running and nobody would find out. CI runs **both**: the stdlib-only step first (green, with skips, proving the floor holds with nothing installed), and a second step *after* `Install` with `--no-skips`, which is where the 79 dependency-needing tests are genuinely executed. Neither step may be removed. The first one alone lets a test disappear behind a skip; the second one alone lets the floor rot unnoticed, which is precisely `BUG-20260911-078` — CI red on every branch for two days because step one died on `import yaml` and every gate after it was skipped.
+
+**Never widen a `@needs` declaration to make a red test go away.** A test that fails with the dependency installed is a failing test; `@needs` is for a test that cannot execute at all without the module, and the strict run is what proves the difference.
+
+#### 4.6.1 How to verify the stdlib-only floor — and the one way that does not work
+
+**An in-process import blocker is not a valid check.** Blocking `yaml` with a `sys.meta_path` finder, a `sitecustomize`, or a patched `builtins.__import__` only affects the process doing the blocking. Several tests spawn a **child interpreter** — `python -m navanax.cli ingest --supervised` and others — and the child inherits none of it: it imports the real PyYAML out of the developer's environment and the test passes. This is not hypothetical. `BUG-20260911-078` shipped CI red **twice** for exactly this reason: the first fix was verified with a meta-path blocker, the subprocess class was invisible to it, and in CI the child died at `src/navanax/cli.py:40` while the parent reported an ordinary failed check with no mention of a missing module.
+
+**The only valid check is a bare interpreter, because it is what CI has:**
+
+```bash
+rm -rf /tmp/bare && python3 -m venv /tmp/bare
+/tmp/bare/bin/python tests/selftest.py              # must exit 0, "0 failed"
+/tmp/bare/bin/python tests/selftest.py --no-skips   # must exit non-zero, listing the skips
+```
+
+A child spawned with `sys.executable` inherits that interpreter, so the subprocess class is covered.
+
+**One hole the bare venv does not close by itself.** Tests that run a `*.command` shell script spawn `bash`, and every one of those scripts picks its interpreter by searching `PATH` (`for c in python3.14 … python3`), never `sys.executable`. On a developer machine that search finds the *system* python, which has PyYAML, so a script-spawning test is masked even under `/tmp/bare/bin/python`. To close it, put a `PATH` of wrappers pointing at the bare interpreter ahead of everything and re-run. As of 2026-09-14 that changes nothing — the same 7 checks fail and no others — but a new script-spawning test could change that, and the bare venv alone would not say so.
+
+A test that shells out to `navanax.cli` needs `yaml` exactly as surely as one that imports it, because the **child** does. `test_every_test_that_spawns_navanax_cli_declares_that_it_needs_yaml` is the tripwire between bare-venv runs: it walks the argv of every `subprocess.run`/`Popen` in the suite and fails if a spawner is missing its declaration.
+
 ---
 
 ## 5. Statistical Validation Protocol

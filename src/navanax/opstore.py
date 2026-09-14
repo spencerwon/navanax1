@@ -59,7 +59,17 @@ CREATE TABLE IF NOT EXISTS gap_register (
     backfillable_classes   TEXT NOT NULL DEFAULT '[]',   -- BUG-031
     irrecoverable_classes  TEXT NOT NULL DEFAULT '[]',
     backfilled_at TEXT,
-    notes         TEXT
+    notes         TEXT,
+    -- PR-10, both additive and both NULL for every gap recorded by a single
+    -- connection. `conn_label` says WHICH connection was blind (NULL = the
+    -- primary, A). `covered_by` says a DIFFERENT connection was recording
+    -- through this window -- an annotation and nothing more: the row keeps its
+    -- start, its end, its classes and its open/closed state, and it is still
+    -- returned by open_gaps() and unbackfilled_gaps(). Suppressing a gap because
+    -- the other socket happened to be up would turn "A was blind" into "nothing
+    -- happened", which is the one confusion this system cannot afford.
+    conn_label    TEXT,
+    covered_by    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_gap_open ON gap_register(ended_at) WHERE ended_at IS NULL;
 
@@ -132,6 +142,11 @@ class OperationalStore:
             for col in ("backfillable_classes", "irrecoverable_classes"):
                 if col not in have:
                     c.execute(f"ALTER TABLE gap_register ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'")
+            # PR-10. Additive and nullable, so a store created before the
+            # redundant stream existed gains two empty columns and loses nothing.
+            for col in ("conn_label", "covered_by"):
+                if col not in have:
+                    c.execute(f"ALTER TABLE gap_register ADD COLUMN {col} TEXT")
             row = c.execute("SELECT MAX(version) FROM schema_version").fetchone()
             if row is None or row[0] is None:
                 c.execute(
@@ -187,6 +202,7 @@ class OperationalStore:
         started_at: str | None = None,
         backfillable_classes: list[str] | None = None,
         irrecoverable_classes: list[str] | None = None,
+        conn_label: str | None = None,
     ) -> int:
         """Open a gap. `started_at` defaults to now.
 
@@ -198,14 +214,55 @@ class OperationalStore:
         with self.connect() as c:
             cur = c.execute(
                 """INSERT INTO gap_register(run_id, started_at, reason, topics, backfillable,
-                                            backfillable_classes, irrecoverable_classes)
-                   VALUES (?,?,?,?,?,?,?)""",
+                                            backfillable_classes, irrecoverable_classes,
+                                            conn_label)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 (run_id, started_at or _now(), reason,
                  json.dumps(topics or []), 1 if backfillable else 0,
                  json.dumps(backfillable_classes or []),
-                 json.dumps(irrecoverable_classes or [])),
+                 json.dumps(irrecoverable_classes or []),
+                 conn_label),
             )
             return int(cur.lastrowid)
+
+    def all_gaps(self) -> list[dict[str, Any]]:
+        """Every gap ever recorded, open or closed, oldest first."""
+        with self.connect() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT * FROM gap_register ORDER BY started_at, id")]
+
+    def annotate_gap(self, gap_id: int, *, covered_by: str | None) -> bool:
+        """Set or CLEAR this gap's `covered_by`. True if the value actually changed.
+
+        The ONLY column it may touch is `covered_by`. A gap's start, end, reason,
+        topics, classes and open/closed state are the record of a hole in what we
+        saw; an annotation is an additional fact about a DIFFERENT process, and
+        nothing here edits the first one. `covered_by` is never allowed to close,
+        shorten or remove a gap, and there is no code path in this file that lets
+        it try.
+
+        IT IS REVOCABLE, AND THAT IS DELIBERATE (BUG-20260911-077). The first
+        version guarded with `WHERE covered_by IS NULL`, so a claim made on
+        incomplete evidence was permanent -- and the evidence here is routinely
+        incomplete for a few seconds: a connection that is SIGKILLed has not yet
+        recorded the gap it is in, so a fold in that window sees an open landing
+        file, no gap, and annotates. When the process restarts and records its
+        downtime gap, the annotation becomes false and nothing could take it back.
+        `gap_register` lives in the OPERATIONAL store, which docs/07 §1 classifies
+        as disposable, reconstructible bookkeeping and which `close_gap` already
+        updates in place; it is not the landing zone and not the bitemporal
+        record. Correcting a derived annotation there is allowed. Leaving a false
+        "the other one was watching" in place is not.
+
+        Writes only on a real change, so a fold that re-derives the same answer
+        touches nothing and logs nothing.
+        """
+        with self.connect() as c:
+            cur = c.execute(
+                "UPDATE gap_register SET covered_by=? "
+                "WHERE id=? AND (covered_by IS NOT ?)",
+                (covered_by, gap_id, covered_by))
+            return cur.rowcount > 0
 
     def close_gap(self, gap_id: int, ended_at: str | None = None) -> None:
         with self.connect() as c:

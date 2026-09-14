@@ -25,11 +25,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import redundancy
 from .codec import get_codec, verify_codec_roundtrip
 from .dotenv import DotenvError, require
 from .landing import LandingZoneWriter, is_integrity_failure, verify_manifest
+from .normalize import LOCK_UNSUPPORTED_ERRNOS, StoreWriterBusyError
 from .opstore import OperationalStore
-from .stream import StreamConsumer, new_run_id
+from .stream import STREAM_KEY, StreamConsumer, new_run_id
 
 log = logging.getLogger("navanax")
 
@@ -94,11 +96,10 @@ def _single_instance(lock_path: Path):
             # the operator to stop a process that does not exist -- and a day
             # not recorded is a day that cannot be bought back, so failing
             # closed here is the wrong direction.
-            unsupported = {
-                errno.EOPNOTSUPP, errno.ENOLCK, errno.EINVAL, errno.ENOSYS,
-                getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-            }
-            if exc.errno in unsupported:
+            # The set lives in `normalize.LOCK_UNSUPPORTED_ERRNOS` so the
+            # analytical store's writer lock (BUG-20260910-067) applies exactly
+            # the same rule; two copies of this list would drift.
+            if exc.errno in LOCK_UNSUPPORTED_ERRNOS:
                 print(
                     f"WARNING: {lock_path.parent} does not support file locking "
                     f"({errno.errorcode.get(exc.errno, exc.errno)}). This is normal on a "
@@ -206,7 +207,19 @@ def _supervised_setup() -> None:
     print("=" * 70)
 
 
-def cmd_ingest(args) -> int:
+def cmd_ingest(args, *, connect_factory=None) -> int:
+    """Run one stream recorder.
+
+    `--redundant` runs CONNECTION B (PR-10): its own landing root, its own
+    `.ingest.lock`, its own API key, its own run id, its own checkpoint. It is a
+    second PROCESS, not a second socket inside this one -- two writers on one
+    landing root silently lose manifest records (BUG-006/007), and two stores
+    with one writer each is the shape that does not.
+
+    `connect_factory` is injectable so a test can observe what this function
+    actually connects to. It is the proof that `stream.redundant.enabled` is read
+    by RUNNING CODE rather than only by a document.
+    """
     if getattr(args, "supervised", False):
         _supervised_setup()
     root = Path(args.root)
@@ -226,6 +239,32 @@ def cmd_ingest(args) -> int:
     run_id = new_run_id()
     lz = cfg["landing"]
 
+    # -- PR-10: which connection is this? ------------------------------------
+    red = redundancy.settings(cfg)
+    conn_label: str | None = None
+    checkpoint_key = STREAM_KEY
+    landing_dir = root / lz["root"]
+    lock_file = landing_dir / ".ingest.lock"
+    if getattr(args, "redundant", False):
+        if not red.enabled:
+            print("REFUSING TO INGEST\n\n"
+                  "  --redundant asks for connection B, and `stream.redundant.enabled` is "
+                  "false in config/base.yaml.\n"
+                  "  The flag is the switch, not this argument: set it to true (and read "
+                  "docs/07 §3.x first -- B doubles disk and doubles every raw count over "
+                  "`events`), then start B again.\n"
+                  "  Nothing was recorded. Connection A is unaffected.", file=sys.stderr)
+            return EXIT_CONFIG
+        try:
+            key = redundancy.second_key(root, cfg, key)
+        except redundancy.RedundantKeyError as exc:
+            print(f"REFUSING TO INGEST\n\n{exc}", file=sys.stderr)
+            return EXIT_CONFIG
+        conn_label = red.label
+        checkpoint_key = f"{STREAM_KEY}:{red.label}"
+        landing_dir = red.root(root)
+        lock_file = red.lock(root)
+
     # Prove the crash-safety property on THIS machine before recording anything
     # that cannot be re-fetched. Costs microseconds; the alternative is trusting
     # that whichever `zstandard` version pip installed reads multi-frame files.
@@ -236,7 +275,7 @@ def cmd_ingest(args) -> int:
         return EXIT_CODEC
 
     writer = LandingZoneWriter(
-        root / lz["root"], run_id,
+        landing_dir, run_id,
         codec=lz.get("codec", "zstd"), codec_level=lz.get("codec_level"),
         roll_bytes=lz.get("roll_bytes", 64 << 20),
         flush_seconds=lz.get("flush_seconds", 5),
@@ -247,11 +286,16 @@ def cmd_ingest(args) -> int:
         url=cfg["opensea"]["stream_url"],
         heartbeat_seconds=cfg["opensea"].get("heartbeat_seconds", 30),
         max_backoff=cfg["opensea"].get("max_backoff_seconds", 60),
-        run_id=run_id)
+        run_id=run_id,
+        connect_factory=connect_factory,
+        conn_label=conn_label,
+        checkpoint_key=checkpoint_key)
 
     print(f"run_id      {run_id}")
+    print(f"connection  {conn_label or redundancy.PRIMARY_LABEL}"
+          + ("  (REDUNDANT: a second recorder; see docs/07 §3.x)" if conn_label else ""))
     print(f"collections {', '.join(slugs)}")
-    print(f"landing     {root / lz['root']}  codec={lz.get('codec')}")
+    print(f"landing     {landing_dir}  codec={lz.get('codec')}")
     print("ctrl-c to stop cleanly (the current frame is flushed on exit)\n")
 
     async def main() -> None:
@@ -263,7 +307,7 @@ def cmd_ingest(args) -> int:
             pass
 
     try:
-        with _single_instance(root / lz["root"] / ".ingest.lock"):
+        with _single_instance(lock_file):
             try:
                 asyncio.run(main())
             except KeyboardInterrupt:
@@ -314,8 +358,10 @@ def cmd_status(args) -> int:
 def cmd_verify(args) -> int:
     root = Path(args.root)
     cfg, _ = _config(root)
-    problems = verify_manifest(root / cfg["landing"]["root"],
-                               deep=not getattr(args, "shallow", False))
+    problems = []
+    for label, lroot in redundancy.landing_roots(root, cfg):
+        for p in verify_manifest(lroot, deep=not getattr(args, "shallow", False)):
+            problems.append(p if label == redundancy.PRIMARY_LABEL else f"[{label}] {p}")
     if getattr(args, "shallow", False):
         print("NOTE  --shallow: checksums only. A file whose bytes are intact but "
               "whose DECODER returns a prefix (BUG-20260909-010) is NOT detected "
@@ -342,8 +388,26 @@ def cmd_normalize(args) -> int:
     from .normalize import Normalizer
     root = Path(args.root)
     cfg, _ = _config(root)
-    n = Normalizer(root / cfg["landing"]["root"], root / cfg["analytical"]["path"])
+    # PR-10: fold EVERY landing root. With the flag off that is the one root it
+    # has always been; with it on, the second connection's frames land in their
+    # own append-only store and are folded into the same analytical store, where
+    # `order_lives` resolves the duplicates.
+    roots = redundancy.landing_roots(root, cfg)
+    n = Normalizer(roots[0][1], root / cfg["analytical"]["path"],
+                   label=roots[0][0], extra_roots=roots[1:])
     stats = n.sync()
+    # A gap in A that B covered stays a gap in A, annotated -- never closed,
+    # never shortened, never suppressed (dataeng §3.a, failure mode 5).
+    marked = 0
+    if len(roots) > 1:
+        store = OperationalStore(root / cfg["opstore"]["path"])
+        revoked = 0
+        for label, lroot in roots[1:]:
+            upd = redundancy.annotate_gaps_covered_by(store, label, lroot)
+            marked += len(upd.marked)
+            revoked += len(upd.revoked)
+        stats = {**stats, "gaps_covered_by_revoked": revoked}
+    stats = {**stats, "gaps_annotated_covered": marked}
     print(json.dumps(stats, indent=2))
     n.close()
     return 0
@@ -383,10 +447,29 @@ def cmd_traits(args) -> int:
 
     async def run() -> None:
         r1 = await job.list_tokens()
+        # The list response carries `traits` for Argonauts (BUG-20260909-054), so
+        # most of the work happens in pass 1. `traits_from_list` counts WRITES;
+        # an entry the store already had is counted separately, and one whose
+        # value DISAGREES with what we recorded first is reported, not dropped
+        # (BUG-20260909-055).
+        dis = r1.pop("traits_disagreements", [])
         print("token list  ", json.dumps(r1))
+        if dis:
+            print(f"\n*** {r1['traits_skipped_conflict']} token(s) where OpenSea's list response "
+                  f"DISAGREES with what this store already recorded -- nothing overwritten ***",
+                  file=sys.stderr)
+            for d in dis[:20]:
+                print(f"  token {d['token_id']:>6}  {d['trait_type']}: store={d['stored']}  list={d['list']}",
+                      file=sys.stderr)
+            if len(dis) > 20:
+                print(f"  ... and {len(dis) - 20} more", file=sys.stderr)
+            print("One of the two sources is wrong for these tokens. Decide which before trusting either.\n",
+                  file=sys.stderr)
         r2 = await job.fetch_traits(limit=args.limit)
         print("traits      ", json.dumps(r2))
-        print("summary     ", json.dumps(job.summary()))
+        s = job.summary()
+        print("summary     ", json.dumps(s))
+        print(f"coverage     {s['with_traits']} of {s['tokens']} tokens now have traits")
 
     try:
         asyncio.run(run())
@@ -397,14 +480,85 @@ def cmd_traits(args) -> int:
     return 0
 
 
+# The window a trait cache's `generated` time may fall in. Outside it, the value
+# is not a timestamp we can believe, and `traits_at` is the column the whole
+# bitemporal record rests on (docs/06 §2).
+#
+#   * BEFORE 2020-01-01 -- OpenSea did not exist in a form this tool could have
+#     read; 0 is what an absent field turns into, and 1.7e6 is what a
+#     hand-typed number turns into.
+#   * AFTER now + 1 h -- a cache cannot have been generated in the future. An
+#     hour of slack absorbs a clock skew between the machine that pulled the
+#     cache and this one; more than that is a wrong number, not a skew.
+#
+# BUG-20260909-055: neither bound was checked. A future epoch was written
+# straight into `traits_at`, where nothing downstream can tell it from an
+# observation, and a MILLISECOND epoch -- which is what every JavaScript tool
+# emits by default -- reached `datetime.fromtimestamp` and came back as a raw
+# `ValueError: year 58650 is out of range` with no indication of what to do.
+GENERATED_MIN = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
+GENERATED_SLACK_SECONDS = 3600
+
+
+def generated_at_iso(value, *, where: str = "--generated") -> str:
+    """Epoch seconds -> ISO-UTC, or raise ValueError with a plain refusal.
+
+    Never returns a time it cannot defend. The caller prints the message and
+    exits 2 -- refusing is always cheaper than a wrong `traits_at`, because the
+    wrong one is indistinguishable from a real observation a week later.
+    """
+    try:
+        g = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{where} must be a number of seconds since 1970-01-01 UTC; "
+                         f"got {value!r}, which is not a number") from None
+    if g != g or g in (float("inf"), float("-inf")):
+        raise ValueError(f"{where} is {value!r}, which is not a usable time") from None
+    hi = datetime.now(timezone.utc).timestamp() + GENERATED_SLACK_SECONDS
+    if not (GENERATED_MIN <= g <= hi):
+        hint = ""
+        if g > hi:
+            hint = ("\n  That is in the FUTURE. `traits_at` records when the traits were OBSERVED; "
+                    "a future observation is not a thing that can have happened.")
+            if g / 1000.0 >= GENERATED_MIN and g / 1000.0 <= hi:
+                hint += (f"\n  It looks like MILLISECONDS (the JavaScript default). "
+                         f"In seconds it would be {g / 1000.0:.0f} "
+                         f"({datetime.fromtimestamp(g / 1000.0, tz=timezone.utc).isoformat()}). "
+                         f"Pass that, or divide the cache's field by 1000.")
+        else:
+            hint = ("\n  That is before 2020-01-01, which no real cache can have been generated at. "
+                    "0 is what an absent or null field becomes.")
+        raise ValueError(
+            f"refusing: {where} is {g:.0f}, outside the believable window "
+            f"[{datetime.fromtimestamp(GENERATED_MIN, tz=timezone.utc).date()}, now + 1 h].{hint}\n"
+            f"  Nothing was written. Fix the timestamp and run again -- a wrong `traits_at` cannot "
+            f"be told from a real observation afterwards.") from None
+    try:
+        return datetime.fromtimestamp(g, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError(f"refusing: {where} is {g!r}, which this machine cannot convert to a "
+                         f"UTC time ({type(exc).__name__}: {exc}). Nothing was written.") from None
+
+
 def cmd_import_traits(args) -> int:
     """Load an Explorer `tokens.json` trait cache into the store. Zero REST reads.
 
-    Exit 0: imported cleanly. Exit 1: at least one token whose stored traits
-    DISAGREE with the cache -- printed in full; the store was not changed for
-    those tokens and the Operator must decide which source is right.
+    Exit 0: imported cleanly. Exit 1: at least one disagreement -- a token whose
+    stored traits differ from the cache's, or a token id the cache itself gives
+    two different sets of traits for. Both are printed in full; the store was not
+    changed for those tokens and the Operator must decide which source is right.
+    Exit 2: refused before writing anything (unreadable cache, unbelievable
+    timestamp, no collection).
     """
-    from .traits import import_explorer_cache, open_store
+    import hashlib
+
+    from .traits import (
+        case_near_misses,
+        criteria_trait_coverage,
+        import_explorer_cache,
+        open_store,
+        trait_coverage,
+    )
     root = Path(args.root)
     cfg, slugs = _config(root)
     slug = args.collection or (slugs[0] if slugs else None)
@@ -413,33 +567,97 @@ def cmd_import_traits(args) -> int:
         return 2
     src = Path(args.tokens_json)
     try:
-        cache = json.loads(src.read_text(encoding="utf-8"))
+        blob = src.read_bytes()
+        cache = json.loads(blob.decode("utf-8"))
     except (OSError, ValueError) as exc:
         print(f"cannot read {src}: {exc}", file=sys.stderr)
         return 2
     if not isinstance(cache, dict):
         print(f"{src} is not a dict keyed by token id", file=sys.stderr)
         return 2
-    generated: float | None = args.generated
+    generated = args.generated
+    where = "--generated"
     if generated is None:
         # The cache's own timestamp lives in summary.json next to it.
         sp = src.with_name("summary.json")
+        where = f"the `generated` field of {sp.name}"
         try:
-            generated = float(json.loads(sp.read_text(encoding="utf-8"))["generated"])
+            generated = json.loads(sp.read_text(encoding="utf-8"))["generated"]
         except (OSError, ValueError, KeyError, TypeError):
             print(f"no --generated given and {sp} has no `generated` epoch; refusing to guess when the "
                   f"traits were observed", file=sys.stderr)
             return 2
-    generated_at = datetime.fromtimestamp(generated, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        generated_at = generated_at_iso(generated, where=where)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    sha = hashlib.sha256(blob).hexdigest()
     db = root / cfg["analytical"]["path"]
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = open_store(db)
     try:
-        res = import_explorer_cache(conn, cache, slug=slug, generated_at=generated_at, contract=args.contract)
+        res = import_explorer_cache(conn, cache, slug=slug, generated_at=generated_at,
+                                    contract=args.contract, cache_file=str(src),
+                                    cache_bytes=len(blob), cache_sha256=sha)
+        cov = trait_coverage(conn, slug)
+        crit = criteria_trait_coverage(conn, slug)
+        near = case_near_misses(conn, slug)
     finally:
         conn.close()
     dis = res.pop("disagreements")
+    dup = res.pop("duplicate_id_disagreements")
+    malformed = res.pop("malformed_examples")
+    mismatch = res.pop("contract_mismatch_examples")
     print(json.dumps(res, indent=2))
+
+    # -- coverage, in the words the Operator asked the question in -------------
+    print(f"\ncoverage    {cov['with_traits']} of {cov['tokens']} tokens now have traits"
+          + (f" ({100 * cov['with_traits'] / cov['tokens']:.1f}%)" if cov["tokens"] else "")
+          + f"; {len(cov['trait_types'])} trait types")
+    for t in cov["trait_types"]:
+        print(f"              {t['trait_type']:<24} {t['distinct_values']} distinct values")
+    if crit.get("available"):
+        print(f"criteria    {crit['matched']} of {crit['distinct_criteria']} standing order criteria "
+              f"match a trait value; {crit['missing']} match none")
+        for p in crit["missing_pairs"]:
+            print(f"              NO MATCH  {p['trait_type']} = {p['value']}")
+    else:
+        print(f"criteria    not checked -- {crit['note']}")
+    if near["alert"]:
+        print("\n*** CASE NEAR-MISSES: two spellings that differ only by case are two different "
+              "values here, and a filter on one matches none of the other ***", file=sys.stderr)
+        for g in near["trait_type_near_misses"]:
+            print(f"  trait type  {g['variants']}", file=sys.stderr)
+        for g in near["value_near_misses"]:
+            print(f"  value       {g['trait_type']}: {g['variants']}", file=sys.stderr)
+        print("  Reported, never merged. Deciding they are the same value is the Operator's call.",
+              file=sys.stderr)
+    else:
+        print("near-miss   no trait type or value differs from another only by case")
+
+    if malformed:
+        print(f"\n*** {res['malformed']} MALFORMED cache item(s) skipped -- never stored as text ***",
+              file=sys.stderr)
+        for m in malformed[:20]:
+            print(f"  key {m['key']}: {m['reason']}", file=sys.stderr)
+        if len(malformed) > 20:
+            print(f"  ... and {len(malformed) - 20} more", file=sys.stderr)
+    if mismatch:
+        print(f"\n*** {res['contract_mismatches']} CONTRACT MISMATCH(ES): the store and this import "
+              f"disagree about which contract the token belongs to ***", file=sys.stderr)
+        for m in mismatch[:20]:
+            print(f"  token {m['token_id']:>6}  stored={m['stored']}  importing={m['importing']}",
+                  file=sys.stderr)
+        print("  The stored value was kept. One of the two is wrong, and a wrong contract sends every "
+              "fallback read to the wrong collection.", file=sys.stderr)
+    if dup:
+        print(f"\n*** {len(dup)} TOKEN ID(S) THE CACHE GIVES TWO DIFFERENT SETS OF TRAITS -- "
+              f"nothing written for them ***", file=sys.stderr)
+        for d in dup:
+            print(f"  token {d['token_id']:>6}  keys {d['keys']}: {d['first']}  vs  {d['second']}",
+                  file=sys.stderr)
+        print("The cache contradicts itself here. Neither set is recorded.", file=sys.stderr)
     if dis:
         print(f"\n*** {len(dis)} TRAIT DISAGREEMENT(S) between the store and {src.name} -- nothing overwritten ***",
               file=sys.stderr)
@@ -448,26 +666,74 @@ def cmd_import_traits(args) -> int:
                   file=sys.stderr)
         print("One of the two sources is wrong for these tokens. Decide which before trusting either.",
               file=sys.stderr)
-        return 1
-    return 0
+    return 1 if (dis or dup) else 0
+
+
+# The exit-code contract `dashboard` owes launchd, in the same shape `ingest`
+# owes it above. Tested in tests/selftest.py; documented in docs/04 §8.
+#
+#   0  clean stop -- Ctrl-C or SIGTERM
+#   2  REFUSED BEFORE THE STORE WAS OPENED: the host is not loopback (REQ-N-13),
+#      or the port is already held -- almost always by a second dashboard.
+#   4  refused: another process holds the analytical store's fold-writer lock
+#   5  the analytical store is unreadable AND the dashboard could not degrade
+#      around it (see below)
+#
+# 2 rather than 3 for a bind failure is BUG-20260910-067's other half. Under
+# KeepAlive, launchd restarts on ANY non-zero code, so what makes a port
+# conflict safe is not the number but (a) `serve()` binding BEFORE it opens the
+# store, so a doomed retry never becomes a second writer, and (b)
+# `ThrottleInterval: 30` on the dashboard plist, so the retry is slow enough to
+# read in the log rather than 177 folds in half an hour.
+#
+# 5 SHOULD BE UNREACHABLE, and that is the point of having it (tech-lead B1).
+# `Dashboard._open_store` catches `sqlite3.DatabaseError` and comes up DEGRADED
+# -- the page and Health still serve, data endpoints answer 503 with the rebuild
+# recipe -- because a corrupt store is exactly when the Operator needs the page.
+# Before that existed, a malformed store raised out of `Dashboard.__init__`, was
+# caught by nothing here, and became a raw traceback and an UNDOCUMENTED exit 1,
+# repeated by KeepAlive every 30 s: the actual end state of the 2026-09-10
+# incident. This catch is the belt to that braces. If it ever fires, the message
+# says what to do rather than printing sqlite's stack.
+DASH_EXIT_OK = 0
+DASH_EXIT_REFUSED = 2
+DASH_EXIT_STORE_BUSY = 4
+DASH_EXIT_STORE_MALFORMED = 5
 
 
 def cmd_dashboard(args) -> int:
+    import sqlite3
+
     from .dashboard import serve
+    from .normalize import rebuild_recipe
     root = Path(args.root)
     cfg, slugs = _config(root)
     try:
         serve(root, cfg, slugs, port=args.port, open_browser=not args.no_browser)
     except ValueError as exc:
         print(f"REFUSING: {exc}", file=sys.stderr)
-        return 2
+        return DASH_EXIT_REFUSED
+    except StoreWriterBusyError as exc:
+        print(f"REFUSING TO FOLD\n\n{exc}", file=sys.stderr)
+        return DASH_EXIT_STORE_BUSY
+    except sqlite3.DatabaseError as exc:
+        # Should not happen -- the dashboard degrades instead of raising. If it
+        # does, say the same thing the degraded page would have said.
+        db = root / cfg["analytical"]["path"]
+        print(f"THE ANALYTICAL STORE IS UNREADABLE\n\n  {type(exc).__name__}: {exc}\n"
+              f"  {db}\n\n  {rebuild_recipe(db)}\n\n"
+              f"  Nothing in data/landing was touched, and nothing was lost: rebuilding "
+              f"re-folds every frame that was ever recorded.", file=sys.stderr)
+        return DASH_EXIT_STORE_MALFORMED
     except OSError as exc:
         print(f"could not bind the dashboard port: {exc}\n"
               f"  Is another dashboard already running? Open http://127.0.0.1:"
-              f"{args.port or (cfg.get('dashboard') or {}).get('port', 8765)}/ instead.",
+              f"{args.port or (cfg.get('dashboard') or {}).get('port', 8765)}/ instead.\n"
+              f"  The analytical store was NOT opened: nothing folded, nothing written "
+              f"(BUG-20260910-067).",
               file=sys.stderr)
-        return 3
-    return 0
+        return DASH_EXIT_REFUSED
+    return DASH_EXIT_OK
 
 
 def main(argv=None) -> int:
@@ -476,6 +742,12 @@ def main(argv=None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("ingest")
+    i.add_argument("--redundant", action="store_true",
+                   help="run CONNECTION B (PR-10): a second recorder, on its own API "
+                        "key, writing to its own landing root with its own lock. "
+                        "Refuses unless stream.redundant.enabled is true in "
+                        "config/base.yaml, and refuses if B's key is missing or is "
+                        "the same key as A's")
     i.add_argument("--supervised", action="store_true",
                    help="running under launchd or another supervisor: line-buffer the "
                         "output so the log file is live, and print a run banner so one "
@@ -496,8 +768,11 @@ def main(argv=None) -> int:
     it.add_argument("tokens_json")
     it.add_argument("--collection", default=None)
     it.add_argument("--contract", default=None, help="token contract; defaults to the known one for the slug")
-    it.add_argument("--generated", type=float, default=None,
-                    help="epoch seconds the cache was generated; defaults to summary.json `generated` next to it")
+    # Deliberately NOT type=float: argparse's own failure is a usage dump and an
+    # exit code, where this needs a sentence saying what a believable value is.
+    it.add_argument("--generated", default=None,
+                    help="epoch SECONDS (not milliseconds) the cache was generated; defaults to "
+                         "summary.json `generated` next to it. Must fall in [2020-01-01, now + 1 h]")
     it.set_defaults(fn=cmd_import_traits)
     d = sub.add_parser("dashboard")
     d.add_argument("--port", type=int, default=None)

@@ -195,6 +195,8 @@ class StreamConsumer:
         stable_seconds: float = 60.0,
         checkpoint_every: int = 50,
         monotonic: Callable[[], float] = time.monotonic,
+        conn_label: str | None = None,
+        checkpoint_key: str = STREAM_KEY,
     ) -> None:
         if not api_key:
             raise ValueError(
@@ -217,6 +219,15 @@ class StreamConsumer:
         self.stable_seconds = stable_seconds
         self.checkpoint_every = checkpoint_every
         self._monotonic = monotonic
+        # PR-10. None for the primary connection A -- which is every run until
+        # the redundant stream is switched on -- so nothing about a single
+        # connection's records changes. B carries its label into the gap
+        # register and the manifest, and takes its OWN checkpoint key: sharing
+        # one key would make each process's restart compute its downtime gap
+        # from the OTHER process's last-alive time, and a running B would
+        # silently erase A's downtime gap.
+        self.conn_label = conn_label
+        self.checkpoint_key = checkpoint_key
         self.stats = StreamStats()
         self._ref = 0
         self._stop = asyncio.Event()
@@ -343,13 +354,14 @@ class StreamConsumer:
             # cancellations and order invalidations in it are gone (REQ-D-09a),
             # and we do not know how long it will last.
             backfillable=False,
+            conn_label=self.conn_label,
         )
         self._rejection_gaps[topic] = gid
         self._rejection_records[topic] = GapRecord(
             started_at=_iso(_now()), ended_at=None,
             reason=f"subscription rejected: {reason}",
             run_id=self.run_id, topics=[topic], backfillable=False,
-            gap_id=gid,
+            gap_id=gid, conn_label=self.conn_label,
         )
         self.stats.gaps_opened += 1
         self.writer.record_gap(self._rejection_records[topic])
@@ -373,7 +385,7 @@ class StreamConsumer:
         timestamp and the downtime between two runs was never recorded as a gap.
         """
         self.opstore.save_checkpoint(
-            STREAM_KEY, self.run_id, self.writer.sequence, self.stats.max_event_ts
+            self.checkpoint_key, self.run_id, self.writer.sequence, self.stats.max_event_ts
         )
         self._since_checkpoint = 0
 
@@ -543,6 +555,7 @@ class StreamConsumer:
         self._open_gap_id = self.opstore.open_gap(
             self.run_id, reason, topics=self._topics(), backfillable=full,
             backfillable_classes=recoverable, irrecoverable_classes=lost,
+            conn_label=self.conn_label,
         )
         self._open_gap_record = GapRecord(
             started_at=_iso(_now()),
@@ -554,6 +567,7 @@ class StreamConsumer:
             backfillable=full,
             backfillable_classes=recoverable,
             irrecoverable_classes=lost,
+            conn_label=self.conn_label,
         )
         self.stats.gaps_opened += 1
         self.writer.record_gap(self._open_gap_record)
@@ -607,7 +621,7 @@ class StreamConsumer:
         Called once at the start of `run()`. Returns the gap id, or None if
         this is the first run this store has ever seen.
         """
-        ck = self.opstore.get_checkpoint(STREAM_KEY)
+        ck = self.opstore.get_checkpoint(self.checkpoint_key)
         if not ck:
             log.info("no previous checkpoint: first run against this operational store")
             self._checkpoint()
@@ -638,6 +652,7 @@ class StreamConsumer:
             backfillable_classes=self._gap_classes()[0],
             irrecoverable_classes=self._gap_classes()[1],
             started_at=since,
+            conn_label=self.conn_label,
         )
         self.opstore.close_gap(gid)
         self.stats.gaps_opened += 1
@@ -649,6 +664,7 @@ class StreamConsumer:
                 backfillable=self._gap_classes()[2],
                 backfillable_classes=self._gap_classes()[0],
                 irrecoverable_classes=self._gap_classes()[1],
+                conn_label=self.conn_label,
             )
         )
         log.warning(

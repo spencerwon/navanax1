@@ -29,8 +29,13 @@ WHAT EACH KEY MEANS (for a reader who has not met launchd before)
                          clean exit, `kill`. This is what makes the recorder
                          unattended.
   ThrottleInterval       launchd will not restart a job more often than this
-                         many seconds. 10 s. Without it, a job that fails
-                         instantly is respawned in a hot loop.
+                         many seconds. 10 s for the recorder and the traits job;
+                         30 s for the DASHBOARD, because the thing that makes it
+                         exit instantly is a port conflict with a second
+                         dashboard, and a hot loop of those is what corrupted the
+                         analytical store on 2026-09-10 (BUG-20260910-067).
+                         Without it, a job that fails instantly is respawned in a
+                         hot loop.
   ExitTimeOut            how long launchd waits after SIGTERM before SIGKILL.
                          The recorder flushes its final frame on SIGTERM
                          (cli._install_shutdown_handlers), so this must be
@@ -45,6 +50,7 @@ WHAT EACH KEY MEANS (for a reader who has not met launchd before)
 from __future__ import annotations
 
 import argparse
+import importlib
 import plistlib
 import sys
 from pathlib import Path
@@ -58,28 +64,132 @@ DEFAULT_PATH = (
 )
 
 RECORDER = "com.navanax.recorder"
+RECORDER_B = "com.navanax.recorder-b"
 DASHBOARD = "com.navanax.dashboard"
 TRAITS = "com.navanax.traits"
 KEEPAWAKE = "com.navanax.keepawake"
 
 # The three the autostart pair installs. keepawake is deliberately NOT here:
 # it is opt-in, because it changes the machine's sleep behaviour (see
-# docs/04_ENVIRONMENTS.md §8).
+# docs/04_ENVIRONMENTS.md §8). RECORDER_B is not here either: it exists only
+# when `stream.redundant.enabled` is true in config/base.yaml -- see
+# `autostart_labels()`, which READS that flag rather than assuming it.
 AUTOSTART_LABELS = (RECORDER, DASHBOARD, TRAITS)
-ALL_LABELS = (*AUTOSTART_LABELS, KEEPAWAKE)
+ALL_LABELS = (*AUTOSTART_LABELS, RECORDER_B, KEEPAWAKE)
 
 LOG_NAMES = {
     RECORDER: "recorder.log",
+    RECORDER_B: "recorder-b.log",
     DASHBOARD: "dashboard.log",
     TRAITS: "traits.log",
     KEEPAWAKE: "keepawake.log",
 }
+
+
+def redundant_enabled(root: Path | str) -> bool:
+    """Is `stream.redundant.enabled` true for THIS project directory?
+
+    Read through `navanax.cli._config` and `navanax.redundancy.settings` -- the
+    same two functions the recorder itself reads the flag with, environment
+    overlay included. A second copy of the parsing here would be a second thing
+    to keep in step, and the failure mode of drift is a launchd job for a
+    connection that refuses to start (or, worse, no job for a connection the
+    Operator believes is running).
+
+    Returns False if the config cannot be read at all. Rendering no B job is the
+    safe direction: a missing job is visible in `launchctl list`, whereas a job
+    installed for a disabled connection restarts every 10 s forever and records
+    nothing.
+    """
+    try:
+        proj = Path(root).expanduser().resolve()
+        sys.path.insert(0, str(proj / "src"))
+        # Deliberately late: tools/ is not a package, and importing the project
+        # at module scope would make `--help` depend on it.
+        cli = importlib.import_module("navanax.cli")
+        red = importlib.import_module("navanax.redundancy")
+        cfg, _ = cli._config(proj)
+        return red.settings(cfg).enabled
+    except Exception as exc:                       # noqa: BLE001 - any failure -> no B job
+        print(f"launchd.py: could not read stream.redundant.enabled from {root} "
+              f"({type(exc).__name__}: {exc}); assuming OFF and rendering no "
+              f"{RECORDER_B} job", file=sys.stderr)
+        return False
+
+
+#: Labels that are OPT-IN and must never be treated as stale. `keepawake` changes
+#: the machine's sleep behaviour and is installed by its own launcher; an
+#: autostart install that quietly removed it would undo a deliberate choice.
+OPT_IN_LABELS = ("com.navanax.keepawake",)
+
+#: The prefix every job of ours carries. Anything else in `launchctl list` belongs
+#: to somebody else and is never touched.
+LABEL_PREFIX = "com.navanax."
+
+
+def stale_labels(root: Path | str, loaded: object) -> tuple[str, ...]:
+    """Loaded jobs of ours that this project no longer wants. Sorted, deduplicated.
+
+    The case this exists for: the Operator turns `stream.redundant.enabled` back
+    OFF. `com.navanax.recorder-b` is still installed and still loaded, so launchd
+    keeps starting it, `ingest --redundant` refuses with EXIT_CONFIG because the
+    flag is off, and `KeepAlive` restarts it ten seconds later -- forever. Nothing
+    is damaged (the refusal happens before anything is recorded) and nothing says
+    so either, except a log file nobody is reading.
+
+    ONLY labels this generator KNOWS are returned. A `com.navanax.*` job this
+    version has never heard of is reported by `unknown_labels` and left alone: it
+    is far more likely to be a job from a NEWER version of this project than
+    rubbish, and booting out something we cannot name is how an upgrade breaks a
+    downgrade. Opt-in labels are never stale.
+    """
+    wanted = set(autostart_labels(root)) | set(OPT_IN_LABELS)
+    known = set(ALL_LABELS)
+    return tuple(sorted({label for label in (loaded or ())
+                         if label in known and label not in wanted}))
+
+
+def unknown_labels(loaded: object) -> tuple[str, ...]:
+    """Loaded `com.navanax.*` jobs this generator cannot name. Reported, never removed."""
+    known = set(ALL_LABELS)
+    return tuple(sorted({label for label in (loaded or ())
+                         if label.startswith(LABEL_PREFIX) and label not in known}))
+
+
+def autostart_labels(root: Path | str) -> tuple[str, ...]:
+    """The labels the autostart pair should install for this project.
+
+    The redundant recorder is in this list ONLY when the flag is on. That is the
+    whole of PR-10's launchd half: with the flag off there is one recorder job,
+    exactly as before, and the second one does not exist on the machine at all.
+    """
+    if redundant_enabled(root):
+        return (RECORDER, RECORDER_B, DASHBOARD, TRAITS)
+    return AUTOSTART_LABELS
 
 # Daily traits refresh. Local time -- StartCalendarInterval is not UTC.
 TRAITS_HOUR = 3
 TRAITS_MINUTE = 30
 
 THROTTLE_SECONDS = 10
+
+# The dashboard's own throttle, and why it is not 10 (BUG-20260910-067).
+#
+# The failure mode a throttle has to survive here is a PORT CONFLICT: a second
+# dashboard is already listening on 8765, so every start of this one fails to
+# bind and exits 2. At ThrottleInterval 10 that is 360 starts an hour -- and on
+# 2026-09-10 it was 177 of them, each of which opened the 2.8 GB analytical
+# store and folded new frames into it before dying, because the store was opened
+# BEFORE the bind. Two writers alternating on one SQLite store, with processes
+# killed mid-write, left it "database disk image is malformed".
+#
+# `dashboard.serve()` now binds first, so a doomed retry writes nothing at all;
+# that is the fix. 30 s is the second layer: it makes the loop slow enough to
+# read in dashboard.log rather than a wall of banners, and it bounds the cost of
+# any future start-up work that is not free. Not longer, because a genuinely
+# crashed dashboard should come back promptly -- the page is how the Operator
+# sees the record at all.
+DASHBOARD_THROTTLE_SECONDS = 30
 
 
 def log_path(root: Path, label: str) -> Path:
@@ -126,12 +236,24 @@ def job(label: str, root: Path | str, python: str = "python3",
         plist["KeepAlive"] = True
         plist["ThrottleInterval"] = THROTTLE_SECONDS
         plist["ExitTimeOut"] = 30
+    elif label == RECORDER_B:
+        # PR-10, connection B. Identical supervision to A -- it is a recorder and
+        # the same argument applies: an hour it did not record cannot be bought
+        # back. What differs is `--redundant`, which makes the CLI refuse unless
+        # the flag is on AND B has its own key, and points it at B's landing root
+        # and B's own `.ingest.lock`. Two writers on one root lose manifest
+        # records silently; two roots with one writer each do not.
+        plist["ProgramArguments"] = [python, "-m", "navanax.cli", "ingest",
+                                     "--redundant", "--supervised"]
+        plist["KeepAlive"] = True
+        plist["ThrottleInterval"] = THROTTLE_SECONDS
+        plist["ExitTimeOut"] = 30
     elif label == DASHBOARD:
         plist["ProgramArguments"] = [
             python, "-m", "navanax.cli", "dashboard", "--no-browser", "--port", str(port),
         ]
         plist["KeepAlive"] = True
-        plist["ThrottleInterval"] = THROTTLE_SECONDS
+        plist["ThrottleInterval"] = DASHBOARD_THROTTLE_SECONDS
         plist["ExitTimeOut"] = 30
     elif label == TRAITS:
         # No KeepAlive: this job is SUPPOSED to finish. KeepAlive on a job that
@@ -167,8 +289,19 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="launchd.py", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("labels", help="print the labels the autostart pair installs")
-    sub.add_parser("all-labels", help="print every label including the opt-in keep-awake")
+    lb = sub.add_parser("labels", help="print the labels the autostart pair installs")
+    lb.add_argument("--root", default=".", help="project directory (the redundant "
+                                                "recorder is listed only when its flag is on)")
+    sub.add_parser("all-labels", help="print every label the generator knows, including "
+                                      "the opt-in keep-awake and the redundant recorder")
+
+    st = sub.add_parser("stale", help="of the loaded labels given as arguments, print the ones "
+                                      "this project no longer wants (one per line)")
+    st.add_argument("--root", default=".", help="project directory")
+    st.add_argument("--unknown", action="store_true",
+                    help="instead print the loaded com.navanax.* labels this version cannot "
+                         "name -- report them, never boot them out")
+    st.add_argument("loaded", nargs="*", help="labels currently loaded in launchd")
 
     r = sub.add_parser("render", help="write one plist")
     r.add_argument("label")
@@ -181,10 +314,16 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.cmd == "labels":
-        print("\n".join(AUTOSTART_LABELS))
+        print("\n".join(autostart_labels(args.root)))
         return 0
     if args.cmd == "all-labels":
         print("\n".join(ALL_LABELS))
+        return 0
+    if args.cmd == "stale":
+        out = (unknown_labels(args.loaded) if args.unknown
+               else stale_labels(args.root, args.loaded))
+        if out:
+            print("\n".join(out))
         return 0
 
     try:

@@ -114,6 +114,11 @@ def derive(bug: dict, repo: str) -> dict:
         for loc in locs
     )
     b["_pr_link"] = f"#{b['pr']}" if b.get("pr") else ""
+    # A fix may be backed by more than one test, and naming only one of them
+    # hides the others from the gate. The ledger accepts a string or a list.
+    rt = b.get("regression_test")
+    if isinstance(rt, list):
+        b["regression_test"] = "\n".join(rt)
     for k, v in list(b.items()):
         if isinstance(v, str):
             b[k] = " ".join(v.split()) if "\n" in v else v
@@ -271,7 +276,20 @@ def build(data: dict) -> None:
 def check(data: dict) -> list[str]:
     problems: list[str] = []
     md = MARKDOWN.read_text() if MARKDOWN.exists() else ""
-    ledger_ids = {b["id"] for b in data["bugs"]}
+    # (0) A DUPLICATE ID is the one defect that makes every other entry unciteable:
+    # a bug id is a name, and two entries under one name means "BUG-20260910-059"
+    # no longer identifies anything. This used to be a set comprehension, so two
+    # entries collapsed into one and the gate stayed green -- which is exactly what
+    # happens when two branches allocate the same number, and two branches in this
+    # repo are doing that right now with 059-061.
+    all_ids = [b["id"] for b in data["bugs"]]
+    ledger_ids = set(all_ids)
+    dupes = sorted({i for i in all_ids if all_ids.count(i) > 1})
+    for dupe in dupes:
+        problems.append(
+            f"{dupe}: appears {all_ids.count(dupe)} times in bugs.yaml -- a duplicate bug id "
+            f"means the id names two different defects, so every reference to it is ambiguous. "
+            f"Renumber the one that landed second (the branch that merges second renumbers).")
     md_ids = set(re.findall(r"BUG-\d{8}-\d{3}", md))
 
     for missing in sorted(ledger_ids - md_ids):
@@ -286,19 +304,22 @@ def check(data: dict) -> list[str]:
             if not (ROOT / loc["file"]).exists():
                 problems.append(f"{bid}: location {loc['file']} does not exist")
         rt = bug.get("regression_test")
-        if bug.get("status") == "fixed" and not rt:
+        tests = [rt] if isinstance(rt, str) else list(rt or [])
+        if bug.get("status") == "fixed" and not tests:
             problems.append(f"{bid}: marked fixed with NO regression test named")
             continue
         if bug.get("status") == "fixed" and not bug.get("resolved_at"):
             problems.append(f"{bid}: marked fixed with no resolved_at")
-        if rt and "::" in rt:
-            path, fn = rt.split("::", 1)
+        for one in tests:
+            if "::" not in one:
+                continue
+            path, fn = one.split("::", 1)
             p = ROOT / path
             if not p.exists():
                 problems.append(f"{bid}: regression test file {path} does not exist")
             elif f"def {fn}(" not in p.read_text():
                 problems.append(
-                    f"{bid}: regression test {rt} is named but `def {fn}(` is not in "
+                    f"{bid}: regression test {one} is named but `def {fn}(` is not in "
                     f"{path} -- a fix whose test does not exist is not a fix")
     # (4) V15: pyproject.toml cited BUG-20260909-011, which did not exist.
     # A reference to a bug id nobody can look up is worse than no reference.

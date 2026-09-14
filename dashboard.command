@@ -1,10 +1,13 @@
 #!/bin/bash
-# Navanax DASHBOARD — double-click to open the live view in your browser.
+# Navanax DASHBOARD (manual run) — NOT the viewer. To VIEW the dashboard,
+# double-click open-dashboard.command or "Navanax Dashboard.webloc".
 #
-# Reads what the recorder has written (it never touches the landing zone),
-# folds new frames into a queryable store every few seconds, and serves a page
-# at http://127.0.0.1:8765 -- reachable from THIS computer only (REQ-N-13).
-# Safe to run alongside start.command. Stop with Ctrl + C or close this window.
+# This starts a dashboard PROCESS by hand, for a machine WITHOUT the
+# background job. If the background job is running it refuses (exit 2) before
+# touching the store -- two dashboards on one store is how the store got
+# corrupted on 2026-09-10 (BUG-20260910-067). Reads what the recorder has
+# written (never the landing zone), folds new frames every few seconds, serves
+# http://127.0.0.1:8765 to THIS computer only (REQ-N-13). Ctrl + C stops it.
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 PY=""
