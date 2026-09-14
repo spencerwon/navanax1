@@ -1191,13 +1191,25 @@ not belong in a startup path whether or not it is fast.
 not verified until it is verified against a copy of the real one. Every gate
 that passed here ran on fixtures two orders of magnitude too small.
 
+**BUG-20260914-080 (S1/P0).** With the startup rebuild deferred the page still
+did not answer. Measured on the real store: `COUNT(*)` over `events` 14.8 s, over
+`order_lives` 20.8 s — and Health ran seven of those on every call, while status
+and the dedup block each scanned `events` in full. Worse, every request took the
+fold's lock and the fold's connection, so after any downtime a click waited behind
+a fold that runs for minutes. Requests now read through their own read-only
+connection under their own lock (a WAL reader never waits for the writer), and
+table counts are cached with `counts_as_of` beside them — instant `MAX(rowid)`
+for the append-only events table, background recounts at most every ten minutes
+for the rest. A regression test makes the fold artificially slow and asserts the
+page still answers.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-78 of 79 logged bugs are fixed.
+79 of 80 logged bugs are fixed.
 
 ### The lesson
 

@@ -94,6 +94,20 @@ class Dashboard:
         self.db_path = root / cfg["analytical"]["path"]
         self.store = OperationalStore(root / cfg["opstore"]["path"])
         self.lock = threading.Lock()
+        # BUG-20260914-080. `lock` guards the WRITER (the fold). Page requests
+        # used to take the same lock and the same connection, so every click
+        # waited behind whatever the fold was doing -- minutes, on the
+        # Operator's 11M-event store. Requests now read through their own
+        # read-only connection under their own lock; WAL mode lets a reader run
+        # while the writer writes.
+        self.read_lock = threading.Lock()
+        self.ro_conn: sqlite3.Connection | None = None
+        # Table counts are cached and refreshed in the background. COUNT(*) over
+        # `events` measured 14.8s and over `order_lives` 20.8s on the real store,
+        # and Health used to run seven of them on every call.
+        self.table_counts: dict[str, Any] = {"as_of": None, "seconds": None, "counts": None}
+        self._counts_mono: float = 0.0
+        self._counts_busy = threading.Lock()
         self.refresh = float((cfg.get("dashboard") or {}).get("refresh_seconds", 5))
         self.last_sync: dict[str, Any] = {"at": None, "stats": None, "error": None, "took_ms": None}
         #: `covered_by` annotations this process has had to RETRACT (BUG-20260911-077).
@@ -142,6 +156,13 @@ class Dashboard:
             ensure_traits_schema(norm.conn)
         except sqlite3.DatabaseError as exc:
             self.norm = self.engine = None
+            with self.read_lock:
+                if self.ro_conn is not None:
+                    try:
+                        self.ro_conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.ro_conn = None
             self.store_error = {
                 "at": _now_iso(),
                 "error": f"{type(exc).__name__}: {exc}",
@@ -154,7 +175,19 @@ class Dashboard:
                       self.db_path, exc, STORE_REOPEN_SECONDS, self.store_error["rebuild"])
             return False
         self.norm = norm
-        self.engine = MetricEngine(norm.conn, self.intervals, self.tz)
+        with self.read_lock:
+            if self.ro_conn is not None:
+                try:
+                    self.ro_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.ro_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
+                                           check_same_thread=False, timeout=30)
+            self.ro_conn.row_factory = norm.conn.row_factory
+        self.engine = MetricEngine(self.ro_conn, self.intervals, self.tz)
+        self.table_counts = {"as_of": None, "seconds": None, "counts": None}
+        self._counts_mono = 0.0
+        self._maybe_refresh_counts()
         if self.store_error is not None:
             log.warning("the analytical store opened again after being unreadable since %s; "
                         "the page is live", self.store_error["at"])
@@ -253,14 +286,72 @@ class Dashboard:
         if opened:
             self._sync_once()
 
+    def refresh_table_counts(self) -> dict[str, Any]:
+        """Count the big tables ONCE, on the read-only connection, off the request path.
+
+        Returns the new cache entry. Safe to call from any thread; a second caller
+        while one is running gets the current cache back rather than a second scan.
+        """
+        if self.ro_conn is None:
+            return self.table_counts
+        if not self._counts_busy.acquire(blocking=False):
+            return self.table_counts
+        try:
+            t0 = time.monotonic()
+            with self.read_lock:
+                c = self.ro_conn
+                counts: dict[str, Any] = {
+                    "events": c.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0}
+                for t in ("order_lives", "order_criteria", "unparsed", "tokens", "traits",
+                          "watermarks"):
+                    counts[t] = c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                counts["events_undedupable"] = c.execute(
+                    "SELECT COUNT(*) FROM events WHERE dedup_key IS NULL").fetchone()[0]
+                counts["events_pre_migration"] = c.execute(
+                    "SELECT COUNT(*) FROM events WHERE conn IS NULL").fetchone()[0]
+            self.table_counts = {"as_of": _now_iso(), "seconds": round(time.monotonic() - t0, 1),
+                                 "counts": counts}
+            self._counts_mono = time.monotonic()
+            return self.table_counts
+        finally:
+            self._counts_busy.release()
+
+    TABLE_COUNTS_TTL_SECONDS = 600.0
+
+    #: Below this many events the counts are taken synchronously -- they cost
+    #: milliseconds, and a small store gets exact numbers on its first page.
+    #: Above it they run in the background and Health says `counting` until done.
+    COUNT_INLINE_MAX_EVENTS = 200_000
+
+    def _maybe_refresh_counts(self, *, changed: bool = False) -> None:
+        """`changed` = a fold just added rows. A small store recounts inline at
+        once (milliseconds, exact); a large one recounts in the background no
+        more often than the TTL, because a 50-second scan after every fold
+        would be a permanent load on the disk."""
+        if self.ro_conn is None or self._counts_busy.locked():
+            return
+        have = self.table_counts["counts"] is not None
+        with self.read_lock:
+            approx = self.ro_conn.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0
+        if approx <= self.COUNT_INLINE_MAX_EVENTS:
+            if not have or changed:
+                self.refresh_table_counts()
+            return
+        if have and time.monotonic() - self._counts_mono < self.TABLE_COUNTS_TTL_SECONDS:
+            return
+        threading.Thread(target=self.refresh_table_counts, name="navanax-counts",
+                         daemon=True).start()
+
     def _sync_once(self) -> None:
         if self.norm is None:
             return
+        self._maybe_refresh_counts()
         t0 = time.monotonic()
         try:
             with self.lock:
                 stats = self.norm.sync()
             stats = {**stats, "gaps_annotated_covered": self.annotate_covered_gaps()}
+            self._maybe_refresh_counts(changed=bool(stats.get("rows_added")))
             # PR-10. A fold can be the one that first brings a second connection's
             # rows into the store, and every count in `metrics` branches on that
             # answer. Cached per fold, invalidated here -- the alternative is a
@@ -331,10 +422,14 @@ class Dashboard:
 
     def api_status(self) -> dict[str, Any]:
         recorder = self._recorder_state()
-        with self.lock:
-            c = self.norm.conn
-            n_events = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-            last = c.execute("SELECT MAX(observed_at), MAX(valid_at) FROM events").fetchone()
+        with self.read_lock:
+            c = self.ro_conn
+            # `events` is append-only (corrections supersede, nothing is deleted),
+            # so MAX(rowid) is its exact row count and costs nothing; COUNT(*)
+            # measured 14.8s on the Operator's store.
+            n_events = c.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0
+            last_ts = c.execute("SELECT MAX(observed_ts), MAX(valid_ts) FROM events").fetchone()
+            last = tuple(_iso_or_none(t) for t in last_ts)
             per_min = c.execute(
                 "SELECT COUNT(*) FROM events WHERE observed_ts >= ?", (time.time() - 60,)).fetchone()[0]
             unparsed = c.execute("SELECT COUNT(*) FROM unparsed").fetchone()[0]
@@ -368,7 +463,7 @@ class Dashboard:
         # collection_bid and immediacy_cost -- Operator, 2026-09-10) or the old
         # interval extremum as `book=observed`. Passed through untouched; the
         # engine owns the per-metric default and the basis says which was used.
-        with self.lock:
+        with self.read_lock:
             return self.engine.series(
                 metric=q.get("metric", "immediacy_cost"),
                 collection=self._slug(q),
@@ -404,29 +499,29 @@ class Dashboard:
         number with no basis. The engine owns every rule; this passes through.
         """
         s, e = self._window(q)
-        with self.lock:
+        with self.read_lock:
             return self.engine.trait_set_series(
                 self._slug(q), parse_trait_filter(q.get("traits")), s, e,
                 q.get("interval", "5m"), q.get("denom", "ETH"))
 
     def api_book(self, q: dict[str, str]) -> dict[str, Any]:
-        with self.lock:
+        with self.read_lock:
             return self.engine.live_book(self._slug(q), limit=int(q.get("limit", "25")),
                                          traits=parse_trait_filter(q.get("traits")))
 
     def api_tape(self, q: dict[str, str]) -> list[dict[str, Any]]:
-        with self.lock:
+        with self.read_lock:
             return self.engine.tape(self._slug(q), limit=int(q.get("limit", "50")),
                                     traits=parse_trait_filter(q.get("traits")))
 
     def api_makers(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
-        with self.lock:
+        with self.read_lock:
             return self.engine.makers(self._slug(q), s, e, limit=min(100, int(q.get("limit", "10"))))
 
     def api_lifetimes(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
-        with self.lock:
+        with self.read_lock:
             return self.engine.bid_lifetimes(self._slug(q), s, e)
 
     # -- PR-8 -----------------------------------------------------------------
@@ -475,7 +570,7 @@ class Dashboard:
         across that blocks every other panel and the background normalizer.
         """
         a = self._survival_args(q)
-        with self.lock:
+        with self.read_lock:
             prep = self.engine.survival_prepare(**a)
         return self.engine.survival(**a, prepared=prep)
 
@@ -488,27 +583,27 @@ class Dashboard:
         if not (hi > lo >= 0):
             raise ValueError(f"survival_drill needs 0 <= lo < hi; got lo={lo} hi={hi}")
         return_page = int(q.get("page", "0"))
-        with self.lock:
+        with self.read_lock:
             return self.engine.survival_drill(bin_lo=lo, bin_hi=hi, page=return_page,
                                               page_size=min(200, int(q.get("size", "50"))), **a)
 
     def api_mix(self, q: dict[str, str]) -> list[dict[str, Any]]:
         s, e = self._window(q)
-        with self.lock:
+        with self.read_lock:
             return self.engine.event_mix(q.get("collection"), s, e)
 
     def api_traits(self, q: dict[str, str]) -> dict[str, Any]:
         slug = self._slug(q)
-        with self.lock:
-            vals = trait_values(self.norm.conn, slug)
-            n_tokens = self.norm.conn.execute("SELECT COUNT(*) FROM tokens WHERE collection=?", (slug,)).fetchone()[0]
-            n_traited = self.norm.conn.execute("SELECT COUNT(DISTINCT token_id) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
+        with self.read_lock:
+            vals = trait_values(self.ro_conn, slug)
+            n_tokens = self.ro_conn.execute("SELECT COUNT(*) FROM tokens WHERE collection=?", (slug,)).fetchone()[0]
+            n_traited = self.ro_conn.execute("SELECT COUNT(DISTINCT token_id) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
         onboarding = next((r for r in self.store.onboarding_status() if r["collection_slug"] == slug), None)
         return {"collection": slug, "tokens": n_tokens, "with_traits": n_traited,
                 "onboarding": onboarding, "traits": vals}
 
     def api_screener(self, q: dict[str, str]) -> dict[str, Any]:
-        with self.lock:
+        with self.read_lock:
             return self.engine.screener(
                 self._slug(q), traits=parse_trait_filter(q.get("traits")),
                 sort=q.get("sort", "token_id"), direction=q.get("dir", "asc"),
@@ -564,11 +659,11 @@ class Dashboard:
         # as "no trait-offer depth" -- a quiet market -- unless it is surfaced.
         coverage = {}
         try:
-            with self.lock:
+            with self.read_lock:
                 coverage = {slug: self.engine.criteria_coverage(slug) for slug in self.slugs}
             for slug, cov in coverage.items():
                 if cov.get("alert"):
-                    n_tok = self.norm.conn.execute("SELECT COUNT(*) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
+                    n_tok = self.ro_conn.execute("SELECT COUNT(*) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
                     notes.append(f"{slug}: {cov['missing']} of {cov['distinct_criteria']} trait-offer criteria match no "
                                  f"trait value in the store ({'traits table is empty -- run traits.command' if n_tok == 0 else 'casing or spelling differs from the metadata'})")
         except Exception as exc:  # noqa: BLE001 - the audit must still report checksums
@@ -587,7 +682,7 @@ class Dashboard:
         # watchlist, whether or not it is the one on screen.
         crossed: dict[str, Any] = {}
         try:
-            with self.lock:
+            with self.read_lock:
                 for slug in self.slugs:
                     b = self.engine.series(metric="immediacy_cost", collection=slug,
                                            interval="1h", range_="24h",
@@ -634,8 +729,8 @@ class Dashboard:
             # quick_check(1) stops at the first fault: we need to know THAT the
             # store is broken, not to enumerate every broken page.
             if self.norm is not None:
-                with self.lock:
-                    rows = self.norm.conn.execute("PRAGMA quick_check(1)").fetchall()
+                with self.read_lock:
+                    rows = self.ro_conn.execute("PRAGMA quick_check(1)").fetchall()
             else:
                 probe = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5)
                 try:
@@ -700,7 +795,7 @@ class Dashboard:
     def api_ledger(self, q: dict[str, str]) -> dict[str, Any]:
         f = self._ledger_filters(q)
         slug = self._slug(q)
-        with self.lock:
+        with self.read_lock:
             if q.get("mode") == "chart":
                 return self.engine.ledger_chart(slug, cap=int(q.get("cap") or 0) or None, **f)
             return self.engine.ledger(slug, sort=q.get("sort", "valid_ts"),
@@ -711,7 +806,7 @@ class Dashboard:
     def api_wallets(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
         slug = self._slug(q)
-        with self.lock:
+        with self.read_lock:
             out = self.engine.wallets(slug, s, e, limit=int(q.get("limit", "50")),
                                       min_events=int(q.get("min_events", "0")))
             out["adjacency"] = self.engine.counterparty_adjacency(
@@ -722,7 +817,7 @@ class Dashboard:
         if not address:
             raise ValueError("/api/wallet/<address> needs an address")
         s, e = self._window(q)
-        with self.lock:
+        with self.read_lock:
             return self.engine.wallet(self._slug(q), address, s, e)
 
     def _degraded_health(self) -> dict[str, Any]:
@@ -830,24 +925,22 @@ class Dashboard:
         if self.norm is None:
             return {**out, "available": False,
                     "note": "the analytical store is unreadable; no duplicate measurement is possible"}
-        with self.lock:
-            c = self.norm.conn
+        with self.read_lock:
+            c = self.ro_conn
             counts = redundancy.dedup_counts(
                 c, window_seconds=s.window_seconds, now_ts=time.time(), label_b=s.label)
             out["monitor"] = self.dup_monitor.evaluate(counts)
-            row = c.execute(
-                "SELECT COUNT(*), SUM(dedup_key IS NULL) FROM events").fetchone()
-            out["store_total_events_n"] = row[0] or 0
-            out["store_undedupable_n"] = row[1] or 0
+            tc = self.table_counts.get("counts") or {}
+            out["store_total_events_n"] = tc.get("events")
+            out["store_undedupable_n"] = tc.get("events_undedupable")
+            out["store_counts_as_of"] = self.table_counts.get("as_of")
             # A row folded before PR-10 existed has no dedup_key and no `conn`,
             # and `valid_at` was ALREADY coalesced with `sent_at`, so it cannot
             # say whether it carried an `event_timestamp`. Those rows are counted
             # separately: adding them to the un-dedupable rate would report a
             # migration as a property of the market.
-            out["pre_migration_rows_n"] = c.execute(
-                "SELECT COUNT(*) FROM events WHERE conn IS NULL").fetchone()[0]
-            out["criteria_rows_raw_n"] = c.execute(
-                "SELECT COUNT(*) FROM order_criteria").fetchone()[0]
+            out["pre_migration_rows_n"] = tc.get("events_pre_migration")
+            out["criteria_rows_raw_n"] = tc.get("order_criteria")
             out["criteria_rows_deduped_n"] = c.execute(
                 "SELECT COUNT(*) FROM (SELECT DISTINCT e.dedup_key, oc.idx "
                 "  FROM order_criteria oc JOIN events e ON e.run=oc.run AND e.seq=oc.seq "
@@ -890,7 +983,7 @@ class Dashboard:
             return {"available": False, "mixed": False,
                     "note": "the analytical store is unreadable; the fold's method version "
                             "cannot be read either"}
-        with self.lock:
+        with self.read_lock:
             st = self.norm.lives_method()
         out = {"available": True, **st,
                "refold_on_open": self.norm.refold_stats.get("refolded", False),
@@ -934,10 +1027,12 @@ class Dashboard:
         crossed = audit.get("crossed_book") or {}
         dedup = self.api_dedup()
         lives_method = self.api_lives_method()
-        with self.lock:
-            counts = {t: self.norm.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                      for t in ("events", "order_lives", "order_criteria", "unparsed",
-                                "tokens", "traits", "watermarks")}
+        tc = self.table_counts.get("counts") or {}
+        counts = {t: tc.get(t) for t in ("events", "order_lives", "order_criteria", "unparsed",
+                                         "tokens", "traits", "watermarks")}
+        counts["counts_as_of"] = self.table_counts.get("as_of")
+        counts["counts_seconds"] = self.table_counts.get("seconds")
+        counts["counts_state"] = "ready" if tc else "counting"
         return {
             "at": _now_iso(), "display_timezone": self.tz, "watchlist": self.slugs,
             "recorder": status["recorder"],
@@ -998,6 +1093,12 @@ class Dashboard:
                 "anchored": list(self.intervals["anchored"]),
                 "transforms": ["ABS", "PCT", "LOG", "DIFF", "BPS"],
                 "denominations": ["ETH", "USD"], "watchlist": self.slugs}
+
+
+def _iso_or_none(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _now_iso() -> str:

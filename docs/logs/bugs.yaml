@@ -3160,3 +3160,47 @@ bugs:
   regression_test:
     - tests/selftest.py::test_order_lives_refolds_when_the_method_stamp_is_stale
     - tests/selftest.py::test_order_lives_method_mixed_is_reported_on_health_as_warn
+
+- id: BUG-20260914-080
+  summary: "Every page request took the fold's lock and the fold's connection, so a click waited behind the whole fold; and Health, status and the dedup block each ran full COUNT(*) scans over 11M events on every call (14.8s and 20.8s measured on the real store). Together they made the dashboard unresponsive at the Operator's scale"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T15:10:00-05:00"
+  occurred_at: "2026-09-14T14:39:00-05:00"
+  resolved_at: "2026-09-14T15:25:00-05:00"
+  detected_by: "the Operator, on his own machine: the page loaded and every number stayed at '...'"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/dashboard.py, line: 96}
+  - {file: src/navanax/dashboard.py, line: 334}
+  - {file: src/navanax/dashboard.py, line: 937}
+  requirement: REQ-N-16
+  data_impact: >-
+    None to the record. Availability only: the page could not answer while a
+    fold ran, and after any downtime a fold runs for minutes.
+  root_cause: >-
+    One sqlite3 connection, one threading.Lock, shared by the background fold
+    and every API handler. Correct on a fixture where a fold takes
+    milliseconds; on the real store a catch-up fold holds the lock for minutes
+    and the page queues behind it. Separately, api_health counted seven tables
+    with COUNT(*) on every call and api_status and api_dedup each scanned
+    events in full -- roughly a minute of scanning per page load before a
+    single chart was drawn.
+  fix: >-
+    Requests read through a dedicated read-only connection under their own
+    lock; WAL mode lets a reader run while the writer writes, so the fold no
+    longer blocks the page at all. Table counts are cached: an append-only
+    table's count is MAX(rowid), exact and instant; the rest are recounted
+    inline on a small store and in a background thread no more often than
+    every ten minutes on a large one, and Health says counts_state=counting
+    until the first pass lands, with counts_as_of beside every number.
+  monitor_gap: >-
+    No test ever ran a fold slow enough to notice the page waiting for it,
+    and no measurement of a COUNT(*) was ever taken on the real store. The
+    regression test below makes the fold artificially slow and asserts the
+    page still answers.
+  regression_test:
+    - tests/selftest.py::test_page_requests_do_not_wait_for_the_fold

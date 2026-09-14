@@ -4642,6 +4642,7 @@ def test_audit_surfaces_crossed_books_for_every_watched_collection(tmp: Path) ->
     d = Dashboard.__new__(Dashboard)
     d.landing, d.norm, d.slugs = landing, n, ["argonauts"]
     d.lock = threading.Lock()           # api_audit takes it twice, sequentially, as the real one does
+    d.read_lock, d.ro_conn = threading.Lock(), n.conn   # BUG-20260914-080: requests read through their own lock/connection
     d.engine = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"),
                             "America/Chicago")
 
@@ -4671,6 +4672,7 @@ def test_audit_surfaces_crossed_books_for_every_watched_collection(tmp: Path) ->
     d2 = Dashboard.__new__(Dashboard)
     d2.landing, d2.norm, d2.slugs = landing, n2, ["argonauts"]
     d2.lock = threading.Lock()
+    d2.read_lock, d2.ro_conn = threading.Lock(), n2.conn
     d2.engine = MetricEngine(n2.conn, load_intervals(ROOT / "config" / "intervals.yaml"),
                              "America/Chicago")
     clean = d2.api_audit()
@@ -5576,6 +5578,7 @@ def test_trait_series_endpoint_refuses_an_unknown_interval(tmp: Path) -> None:
     n, eng = _trait_chart_store(tmp, "badinterval.sqlite")
     d = Dashboard.__new__(Dashboard)
     d.engine, d.slugs, d.lock = eng, ["argonauts"], threading.Lock()
+    d.read_lock, d.ro_conn = threading.Lock(), eng.conn
     d.intervals, d.tz = eng.intervals, "America/Chicago"
     try:
         d.api_trait_series({"collection": "argonauts", "interval": "5min", "range": "24h"})
@@ -5680,6 +5683,7 @@ def test_trait_series_endpoint_passes_the_filter_through(tmp: Path) -> None:
     n, eng = _trait_chart_store(tmp, "traitchart7.sqlite")
     d = Dashboard.__new__(Dashboard)
     d.engine, d.slugs, d.lock = eng, ["argonauts"], threading.Lock()
+    d.read_lock, d.ro_conn = threading.Lock(), eng.conn
     d.intervals = eng.intervals
     d.tz = "America/Chicago"
     out = d.api_trait_series({"collection": "argonauts", "traits": "Print:Unclaimed",
@@ -11337,6 +11341,63 @@ def test_order_lives_refolds_when_the_method_stamp_is_stale(tmp: Path) -> None:
           again.refold_stats["refolded"] is False and again.refold_stats["seconds"] == 0.0,
           str(again.refold_stats))
     again.close()
+
+
+@needs("yaml")
+def test_page_requests_do_not_wait_for_the_fold(tmp: Path) -> None:
+    """BUG-20260914-080. One connection and one lock were shared by the fold and
+    every page request, so on the Operator's store a click waited behind a fold
+    that runs for minutes. The page must answer WHILE the fold holds its lock.
+    """
+    import shutil as _sh
+    import threading as _th
+    import time as _time
+
+    import yaml as _yaml
+
+    from navanax.dashboard import Dashboard
+
+    db = _pr10_stale_lives_store(tmp, "nowait")
+    root = tmp / "nowait-root"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    _sh.copy(db, root / cfg["analytical"]["path"])
+
+    dash = Dashboard(root, cfg, ["argonauts"])
+    check("no-wait: the page reads through its OWN connection, not the fold's",
+          dash.ro_conn is not None and dash.engine is not None
+          and dash.engine.conn is dash.ro_conn and dash.engine.conn is not dash.norm.conn)
+    check("no-wait: ...and that connection is read-only, so a page can never be a second writer",
+          _raises(lambda: dash.ro_conn.execute("CREATE TABLE zz(x)")))
+
+    # Hold the FOLD's lock for a while, as a slow fold would, and time a request.
+    released = _th.Event()
+    def slow_fold():
+        with dash.lock:
+            released.wait(timeout=8)
+    t = _th.Thread(target=slow_fold, daemon=True); t.start()
+    _time.sleep(0.1)
+    t0 = _time.monotonic()
+    h = dash.api_health({})
+    st = dash.api_status()
+    took = _time.monotonic() - t0
+    released.set(); t.join(timeout=10)
+    check("no-wait: Health and status answered while the fold held its lock "
+          f"({took:.2f}s, must be well under the 8s the fold was holding)",
+          took < 3.0 and "store" in h and "store" in st, f"{took:.2f}s")
+    check("no-wait: the counts a page shows carry the time they were taken, and a "
+          "small store has them exact on the first call",
+          h["store"]["counts_state"] == "ready" and h["store"]["counts_as_of"]
+          and h["store"]["events"] == 4 and h["store"]["order_lives"] == 1, str(h["store"])[:200])
+    check("no-wait: status counts events by MAX(rowid) -- exact on an append-only "
+          "table and free -- and reports the last event times from indexed columns",
+          st["store"]["events"] == 4 and isinstance(st["store"]["last_observed_at"], str)
+          and str(st["store"]["last_valid_at"]).startswith("2026-"), str(st["store"])[:200])
+    if dash.norm is not None:
+        dash.norm.close()
 
 
 @needs("yaml")
