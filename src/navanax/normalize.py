@@ -369,6 +369,10 @@ CREATE TABLE IF NOT EXISTS order_lives (
     method_version   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_lives_standing ON order_lives(collection, event_type, t_place, t_term);
+-- BUG-20260914-083: the live book is the OPEN orders, which are a few thousand
+-- rows among millions. Partial, ordered by price, so "best 25 standing asks" is
+-- an index walk that stops at 25 instead of a scan of every listing ever seen.
+CREATE INDEX IF NOT EXISTS ix_lives_open ON order_lives(collection, event_type, price_eth) WHERE t_term IS NULL;
 CREATE INDEX IF NOT EXISTS ix_lives_term     ON order_lives(collection, t_term);
 """
 
@@ -706,6 +710,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         with conn:
             conn.execute("ALTER TABLE events ADD COLUMN expiration_ts REAL")
             conn.execute("UPDATE events SET expiration_ts = nvx_iso_ts(expiration_at) WHERE expiration_at IS NOT NULL")
+    # implied_ethusd predates most stores, but a store from before it has no
+    # column for the ETH/USD rate at all -- and no way to fill one from what is
+    # here (the rate is derived from the raw frame's payment token). Add it so
+    # the status query and ix_events_ethusd exist on every store; it stays NULL
+    # on rows folded before it, which is the honest value (BUG-20260914-083).
+    if cols and "implied_ethusd" not in cols:
+        with conn:
+            conn.execute("ALTER TABLE events ADD COLUMN implied_ethusd REAL")
     # criteria_n / criteria_numeric_n: additive, same precedent -- but UNLIKE
     # expiration_ts there is no existing column to fill them from. The criteria
     # only exist in the raw frames, which live in the landing zone and not here
@@ -771,6 +783,10 @@ LEDGER_INDEXES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      "CREATE INDEX IF NOT EXISTS ix_events_coll_price ON events(collection, price_eth, valid_ts)"),
     ("ix_events_coll_observed", ("collection", "observed_ts"),
      "CREATE INDEX IF NOT EXISTS ix_events_coll_observed ON events(collection, observed_ts)"),
+    # BUG-20260914-083: the latest priced event, for the ETH/USD rate on every
+    # status call. Partial, so it holds only rows that carry a rate.
+    ("ix_events_ethusd", ("valid_ts", "implied_ethusd"),
+     "CREATE INDEX IF NOT EXISTS ix_events_ethusd ON events(valid_ts) WHERE implied_ethusd IS NOT NULL"),
 )
 
 
