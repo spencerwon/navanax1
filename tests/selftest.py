@@ -11388,13 +11388,15 @@ def test_page_requests_do_not_wait_for_the_fold(tmp: Path) -> None:
     def slow_fold():
         with dash.lock:
             released.wait(timeout=8)
-    t = _th.Thread(target=slow_fold, daemon=True); t.start()
+    t = _th.Thread(target=slow_fold, daemon=True)
+    t.start()
     _time.sleep(0.1)
     t0 = _time.monotonic()
     h = dash.api_health({})
     st = dash.api_status()
     took = _time.monotonic() - t0
-    released.set(); t.join(timeout=10)
+    released.set()
+    t.join(timeout=10)
     check("no-wait: Health and status answered while the fold held its lock "
           f"({took:.2f}s, must be well under the 8s the fold was holding)",
           took < 3.0 and "store" in h and "store" in st, f"{took:.2f}s")

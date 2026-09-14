@@ -21,6 +21,7 @@ carries its basis so the page can print it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import mimetypes
@@ -171,10 +172,8 @@ class Dashboard:
             self.norm = self.engine = None
             with self.read_lock:
                 if self.ro_conn is not None:
-                    try:
+                    with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                         self.ro_conn.close()
-                    except Exception:  # noqa: BLE001
-                        pass
                 self.ro_conn = None
             self.store_error = {
                 "at": _now_iso(),
@@ -190,19 +189,15 @@ class Dashboard:
         self.norm = norm
         with self.read_lock:
             if self.ro_conn is not None:
-                try:
+                with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                     self.ro_conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
             self.ro_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                            check_same_thread=False, timeout=30)
             self.ro_conn.row_factory = norm.conn.row_factory
         with self.bg_lock:
             if self.bg_conn is not None:
-                try:
+                with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                     self.bg_conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
             self.bg_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                            check_same_thread=False, timeout=30)
         self.engine = MetricEngine(self.ro_conn, self.intervals, self.tz)
