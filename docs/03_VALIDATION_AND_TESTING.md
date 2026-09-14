@@ -196,6 +196,24 @@ Analytical code receives a distinct review focused on statistical correctness, n
 
 **Never widen a `@needs` declaration to make a red test go away.** A test that fails with the dependency installed is a failing test; `@needs` is for a test that cannot execute at all without the module, and the strict run is what proves the difference.
 
+#### 4.6.1 How to verify the stdlib-only floor — and the one way that does not work
+
+**An in-process import blocker is not a valid check.** Blocking `yaml` with a `sys.meta_path` finder, a `sitecustomize`, or a patched `builtins.__import__` only affects the process doing the blocking. Several tests spawn a **child interpreter** — `python -m navanax.cli ingest --supervised` and others — and the child inherits none of it: it imports the real PyYAML out of the developer's environment and the test passes. This is not hypothetical. `BUG-20260911-078` shipped CI red **twice** for exactly this reason: the first fix was verified with a meta-path blocker, the subprocess class was invisible to it, and in CI the child died at `src/navanax/cli.py:40` while the parent reported an ordinary failed check with no mention of a missing module.
+
+**The only valid check is a bare interpreter, because it is what CI has:**
+
+```bash
+rm -rf /tmp/bare && python3 -m venv /tmp/bare
+/tmp/bare/bin/python tests/selftest.py              # must exit 0, "0 failed"
+/tmp/bare/bin/python tests/selftest.py --no-skips   # must exit non-zero, listing the skips
+```
+
+A child spawned with `sys.executable` inherits that interpreter, so the subprocess class is covered.
+
+**One hole the bare venv does not close by itself.** Tests that run a `*.command` shell script spawn `bash`, and every one of those scripts picks its interpreter by searching `PATH` (`for c in python3.14 … python3`), never `sys.executable`. On a developer machine that search finds the *system* python, which has PyYAML, so a script-spawning test is masked even under `/tmp/bare/bin/python`. To close it, put a `PATH` of wrappers pointing at the bare interpreter ahead of everything and re-run. As of 2026-09-14 that changes nothing — the same 7 checks fail and no others — but a new script-spawning test could change that, and the bare venv alone would not say so.
+
+A test that shells out to `navanax.cli` needs `yaml` exactly as surely as one that imports it, because the **child** does. `test_every_test_that_spawns_navanax_cli_declares_that_it_needs_yaml` is the tripwire between bare-venv runs: it walks the argv of every `subprocess.run`/`Popen` in the suite and fails if a spawner is missing its declaration.
+
 ---
 
 ## 5. Statistical Validation Protocol

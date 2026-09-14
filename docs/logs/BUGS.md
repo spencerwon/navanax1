@@ -1075,7 +1075,7 @@ altered. Health carries `covered_by_n` and `covered_by_revoked_since_start_n`.
 
 | ID | Sev | Pri | Status | Summary |
 |---|---|---|---|---|
-| BUG-20260911-078 | S2 | P0 | fixed | CI's first step runs `tests/selftest.py` **before `pip install`**, and 79 of 187 tests transitively `import yaml`. The job died on step one with `ModuleNotFoundError` and every later step was skipped — on every branch, `main` included |
+| BUG-20260911-078 | S2 | P0 | fixed | CI's first step runs `tests/selftest.py` **before `pip install`**, and 81 of 187 tests need PyYAML — 79 in-process, 2 in a spawned child. The job died on step one with `ModuleNotFoundError` and every later step was skipped — on every branch, `main` included. **Shipped red twice**: the first fix was verified with an in-process import blocker, which a child process does not inherit |
 
 **No data was lost; two days of verification were.** The steps that never ran
 include the bug-ledger consistency gate, the secret scan (REQ-N-11), the
@@ -1102,7 +1102,7 @@ is the drift `BUG-20260909-038` removed from discovery); `missing_modules` answe
 by actually importing it. A test whose module is absent is printed as `SKIP` where
 it would have run, **listed by name** above the summary, and counted in its own
 column — never added to `PASS`. The summary line reads
-`187 test functions, 806 passed, 0 failed, 79 skipped (needs: yaml)`.
+`191 test functions, 829 passed, 0 failed, 81 skipped (needs: yaml)`.
 
 **The guard that keeps the skips honest is the part that matters.** A skip is still
 a test that did not run, so `--no-skips` refuses to exit 0 if anything was skipped
@@ -1116,10 +1116,52 @@ existing test was weakened, deleted, or had an assertion changed.
 Both halves are mutation-checked by the regression tests: making a skip count as a
 pass fails them, and making strict mode ignore skips fails them.
 
+**It shipped red a second time, and the second cause is the interesting one.** The
+first fix was verified by making `yaml` unimportable with an in-process
+`sys.meta_path` finder. **A child process does not inherit that.**
+`test_ingest_supervised_exit_code_contract` and
+`test_ingest_supervised_sigterm_is_a_clean_stop` spawn
+`python -m navanax.cli ingest --supervised`; the child imported the real PyYAML out
+of the developer's environment, both tests passed under the blocker, and neither was
+declared. In CI the child dies at `src/navanax/cli.py:40` and the **parent** reports
+an ordinary failed check — `ingest --supervised: SIGTERM exits 0 ... exit=1` — with
+the `ModuleNotFoundError` buried in a captured traceback and nothing in the summary
+naming a missing module. The fix shipped, CI stayed red, and the second failure
+looked nothing like the first.
+
+**An in-process import blocker is not a valid check of the stdlib-only floor.** The
+only valid one is a bare interpreter, because that is what CI has:
+
+```bash
+rm -rf /tmp/bare && python3 -m venv /tmp/bare
+/tmp/bare/bin/python tests/selftest.py              # must exit 0, "0 failed"
+/tmp/bare/bin/python tests/selftest.py --no-skips   # must exit non-zero, listing skips
+```
+
+A child spawned with `sys.executable` inherits that interpreter, so the subprocess
+class is covered. One hole the bare venv does **not** close by itself: tests that run
+a `*.command` shell script spawn `bash`, and every one of those scripts picks its
+interpreter by searching `PATH` (`for c in python3.14 … python3`) rather than using
+`sys.executable` — so on a developer machine that search finds the *system* PyYAML.
+Re-running behind a `PATH` of wrappers pointing at the bare interpreter closes it; as
+of 2026-09-14 it changes nothing, the same failures and no others, but a new
+script-spawning test could change that silently. Both the rule and the hole are in
+`docs/03 §4.6.1`.
+
+A test that shells out to `navanax.cli` needs `yaml` exactly as surely as one that
+imports it, because the **child** does.
+`test_every_test_that_spawns_navanax_cli_declares_that_it_needs_yaml` is the tripwire
+between bare-venv runs: it walks the argv of every `subprocess.run`/`Popen` in the
+suite and fails if a spawner is missing its declaration. It scans source rather than
+running, because proving this dynamically needs an interpreter with no PyYAML — which
+is precisely what the machine running the gate does not have.
+
 **The monitor gap is the uncomfortable one.** Every gate in this repo checks the
 code; nothing checked that the thing running the gates was still running. A red
 pipeline on `main` for two days produced no alert, because the only consumer of
-that signal was a human opening the Actions tab.
+that signal was a human opening the Actions tab. The second gap is narrower and
+sharper: nothing said which verification method was *valid*, so a reasonable method
+that happened to be wrong was used and its clean result was believed.
 
 ### Still open
 

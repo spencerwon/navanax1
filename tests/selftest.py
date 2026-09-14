@@ -3696,6 +3696,7 @@ def _supervised_root(tmp: Path, name: str, *, env_file: str | None) -> Path:
     return root
 
 
+@needs("yaml")
 def test_ingest_supervised_exit_code_contract(tmp: Path) -> None:
     """launchd KeepAlive restarts on ANY exit. What matters is that a refusal is
     NON-ZERO, prompt, and says why -- an ingest that hangs instead of exiting is
@@ -3766,6 +3767,7 @@ def test_ingest_supervised_exit_code_contract(tmp: Path) -> None:
                   "REFUSING TO INGEST" in out2 and "LOSE manifest" in out2, out2[-400:])
 
 
+@needs("yaml")
 def test_ingest_supervised_sigterm_is_a_clean_stop(tmp: Path) -> None:
     """`launchctl bootout` sends SIGTERM. If that were not a clean stop, every
     uninstall, every logout and every reinstall would drop the final frame --
@@ -12155,6 +12157,88 @@ def test_a_declared_module_that_is_present_does_not_skip_the_test(tmp: Path) -> 
           all(m in {"yaml", "zstandard"} for _, fn in discover()
               for m in getattr(fn, "needs_modules", ())),
           str(sorted({m for _, fn in discover() for m in getattr(fn, "needs_modules", ())})))
+
+
+def _tests_that_spawn_navanax_cli() -> dict[str, str]:
+    """Every module-level `test_*` whose body SPAWNS a child interpreter running
+    `navanax.cli`, found by walking the argv list of each `subprocess.run` /
+    `Popen` / `check_output` call -- not by grepping for the string.
+
+    The distinction is the whole point. Three tests mention `"navanax.cli"` as a
+    string they assert ON -- a rendered plist's ProgramArguments, a .command
+    naming the right module -- and those spawn nothing and need nothing. A grep
+    would demand a declaration they do not need, and an unnecessary `@needs` is a
+    test that stops running in the stdlib-only step for no reason.
+    """
+    import ast
+
+    source = (ROOT / "tests" / "selftest.py").read_text()
+    tree = ast.parse(source)
+    spawners: dict[str, str] = {}
+    for node in tree.body:
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            fn = call.func
+            name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+            if name not in ("run", "Popen", "check_output", "check_call"):
+                continue
+            if not (call.args and isinstance(call.args[0], ast.List)):
+                continue
+            argv = [e.value for e in call.args[0].elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if "navanax.cli" in argv:
+                spawners[node.name] = " ".join(argv)
+    return spawners
+
+
+def test_every_test_that_spawns_navanax_cli_declares_that_it_needs_yaml() -> None:
+    """BUG-20260911-078, the SECOND time it shipped red. The first fix was verified
+    with an in-process `sys.meta_path` blocker, which a child process does not
+    inherit: `python -m navanax.cli ingest --supervised` imported the REAL PyYAML
+    out of the parent's environment, the test passed locally, and in CI -- where
+    there is no PyYAML anywhere -- the child died at `src/navanax/cli.py:40` and the
+    parent reported a plain failed check. **An in-process import blocker is not a
+    valid check of the stdlib-only floor.** The only valid one is a bare
+    interpreter: `python3 -m venv /tmp/bare && /tmp/bare/bin/python tests/selftest.py`.
+
+    This test cannot run that -- building a venv inside the suite is slow and needs
+    a network-free pip -- so it holds the line the cheap way: a test that shells out
+    to `navanax.cli` reaches `_config()` -> `_load_yaml()` -> `import yaml` in the
+    CHILD, and therefore needs yaml exactly as surely as one that imports it
+    directly. A source scan catches the next such test the day it is written,
+    everywhere, including on a machine that has PyYAML installed. The bare venv
+    stays the authority; this is the tripwire between bare-venv runs.
+    """
+    spawners = _tests_that_spawn_navanax_cli()
+    g = globals()
+    check("cli-spawn scan: it actually finds the spawning tests -- a scan that "
+          "matched nothing would pass vacuously forever",
+          len(spawners) >= 2, str(sorted(spawners)))
+    check("cli-spawn scan: it found the two that shipped CI red",
+          {"test_ingest_supervised_exit_code_contract",
+           "test_ingest_supervised_sigterm_is_a_clean_stop"} <= set(spawners),
+          str(sorted(spawners)))
+    undeclared = sorted(n for n in spawners
+                        if "yaml" not in getattr(g.get(n), "needs_modules", ()))
+    check("cli-spawn: every test that spawns `navanax.cli` declares @needs(\"yaml\") "
+          "-- the child imports PyYAML at cli.py:40 and dies without it",
+          undeclared == [], f"undeclared: {undeclared}")
+    for name in ("test_launchd_plists_are_valid_and_correct",
+                 "test_open_dashboard_command_looks_and_never_starts_a_dashboard",
+                 "test_probe_launchers_are_double_clickable_and_name_the_right_module"):
+        check(f"cli-spawn scan: {name} only ASSERTS ON the string 'navanax.cli' and "
+              "is not flagged -- an unnecessary @needs is a test that stops running "
+              "for no reason", name not in spawners, str(sorted(spawners)))
+    check("cli-spawn: cli.py really is the yaml door the child walks through, so the "
+          "rule above is about this code and not a guess",
+          "import yaml" in (ROOT / "src" / "navanax" / "cli.py").read_text())
+    d03 = (ROOT / "docs" / "03_VALIDATION_AND_TESTING.md").read_text()
+    check("docs/03 §4.6 records that an in-process import blocker is NOT a valid "
+          "check and names the bare-venv command that is",
+          "in-process" in d03 and "python3 -m venv" in d03, d03[:0])
 
 
 def _raises(fn) -> bool:

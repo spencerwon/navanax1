@@ -3001,8 +3001,10 @@ bugs:
     CI's first step -- `python3 tests/selftest.py`, run before `pip install` because docs/03
     promises the suite runs on the standard library alone -- died with
     `ModuleNotFoundError: No module named 'yaml'`, so EVERY later step was skipped and CI was
-    red on every branch, main included, from 2026-09-09. 79 of 187 test functions transitively
-    import PyYAML; the promise had been false since the metric engine landed
+    red on every branch, main included, from 2026-09-09. 81 of 187 test functions need PyYAML:
+    79 import it in-process, and 2 SPAWN `python -m navanax.cli`, whose CHILD dies at
+    cli.py:40. The first fix shipped still-red because it was verified with an in-process
+    import blocker, which a child process does not inherit
   severity: S2
   priority: P0
   error_class: INF
@@ -3042,13 +3044,27 @@ bugs:
     environment that has no dependencies: CI's first step. A bare `ModuleNotFoundError` out of
     a test aborts the runner, so the failure was total rather than partial, and GitHub Actions
     skips every subsequent step of a failed job -- one missing module silenced eleven gates.
+
+    THE SECOND ROOT CAUSE, and the more expensive one: the first fix was verified by making
+    `yaml` unimportable with an in-process `sys.meta_path` finder. A CHILD PROCESS DOES NOT
+    INHERIT THAT. `test_ingest_supervised_exit_code_contract` and
+    `test_ingest_supervised_sigterm_is_a_clean_stop` spawn
+    `python -m navanax.cli ingest --supervised`, and that child imported the real PyYAML out
+    of the developer's environment, so both tests passed under the blocker and were never
+    declared. In CI, where there is no PyYAML anywhere, the child dies at
+    `src/navanax/cli.py:40` and the PARENT reports an ordinary failed check --
+    `ingest --supervised: SIGTERM exits 0 ... exit=1` -- with the ModuleNotFoundError buried
+    in a captured traceback and nothing in the summary naming a missing module. So the fix
+    shipped, CI stayed red, and the second failure looked nothing like the first. An
+    in-process import blocker is NOT a valid check of the stdlib-only floor and must never
+    be used as one again; the only valid check is a bare interpreter, which is what CI has.
   resolution: >-
     A first-class skip. `needs("yaml")` is a decorator at the definition site (a list kept
     elsewhere is the drift BUG-20260909-038 removed) that records the modules a test cannot run
     without; `missing_modules` answers by actually importing, and `run_suite` records the test
     in SKIPPED -- printed by name at the point it would have run, listed by name above the
     summary, counted in its own column, never added to PASS. The summary line is now
-    `187 test functions, 806 passed, 0 failed, 79 skipped (needs: yaml)` with the module named,
+    `191 test functions, 829 passed, 0 failed, 81 skipped (needs: yaml)` with the module named,
     and the exit code is 0 only when nothing FAILED. The guard that keeps that honest is
     `--no-skips`: it exits non-zero if anything was skipped at all. `tools/gates.py` runs the
     suite that way, so a developer on a machine with the dependencies can never see a skip and
@@ -3056,10 +3072,23 @@ bugs:
     are genuinely executed on every push and cannot quietly disappear. The stdlib-only step is
     unchanged and now passes with skips; no existing test was weakened, deleted, or had an
     assertion changed.
+
+    Verification is now specified rather than improvised. `rm -rf /tmp/bare && python3 -m
+    venv /tmp/bare`, then `/tmp/bare/bin/python tests/selftest.py` (must exit 0, 0 failed)
+    and the same with `--no-skips` (must exit non-zero), is the ONLY accepted check: a child
+    spawned with `sys.executable` inherits that interpreter, so the subprocess class is
+    covered. One hole the bare venv does not close by itself is recorded in docs/03 §4.6.1 --
+    tests that run a `*.command` shell script spawn `bash`, and every one of those scripts
+    picks its interpreter by searching PATH (`for c in python3.14 ... python3`) instead of
+    using `sys.executable`, so on a developer machine that search finds the system PyYAML.
+    Re-running behind a PATH of wrappers pointing at the bare interpreter closes it; as of
+    2026-09-14 that changes nothing -- the same failures and no others -- but a new
+    script-spawning test could change that silently.
   regression_test:
     - tests/selftest.py::test_runner_records_a_skip_as_skipped_and_never_as_a_pass
     - tests/selftest.py::test_no_skips_mode_refuses_to_exit_zero_when_anything_was_skipped
     - tests/selftest.py::test_a_declared_module_that_is_present_does_not_skip_the_test
+    - tests/selftest.py::test_every_test_that_spawns_navanax_cli_declares_that_it_needs_yaml
   monitor_gap: >-
     Nothing watched CI's own colour. Every gate in this repo checks the code; none checked that
     the thing running the gates was still running. A red pipeline on main for two days
@@ -3070,4 +3099,16 @@ bugs:
     a skip is still a test that did not run -- which is why `--no-skips` exists in gates and in
     CI, and why the regression tests mutation-check both halves: making a skip count as a pass
     fails them, and making strict mode ignore skips fails them.
+
+    The gap that let it ship red a SECOND time is a gap in how the first fix was CHECKED, not
+    in the fix itself. The blocker was in-process, the masked tests were the ones that fork,
+    and nothing in the suite or the docs said which verification method was valid -- so a
+    reasonable method that happened to be wrong was used and its clean result was believed.
+    docs/03 §4.6.1 now names the bare venv as the only accepted check and says in as many
+    words that an in-process blocker is not one.
+    `test_every_test_that_spawns_navanax_cli_declares_that_it_needs_yaml` is the tripwire
+    between bare-venv runs: it walks the argv of every `subprocess.run`/`Popen` in the suite
+    and fails if a test that spawns `navanax.cli` is missing its declaration. It scans source
+    rather than running, because proving this dynamically needs an interpreter with no
+    PyYAML -- which is exactly what the machine running the gate does not have.
   pr: 11
