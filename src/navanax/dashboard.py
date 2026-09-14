@@ -902,7 +902,7 @@ class Dashboard:
                 f"writes {st['current']}. Rows from the older rules can carry counts the "
                 f"current rules would not produce -- under method 2, a doubled "
                 f"terminations_seen on any order with no further events. "
-                f"Run rebuild-store.command or restart the dashboard.")
+                f"Run rebuild-lives.command when you can leave the machine alone.")
         return out
 
     def api_health(self, q: dict[str, str]) -> dict[str, Any]:
