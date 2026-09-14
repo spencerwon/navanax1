@@ -56,7 +56,13 @@ UI_DIR = Path(__file__).resolve().parent / "ui"
 # app AND hold the writer lock while it ran. Ten minutes is the trade
 # (BUG-20260910-067): corruption that has just appeared is visible within one
 # refresh cycle of the tab, and the cost is paid once.
-QUICK_CHECK_TTL_SECONDS = 600
+QUICK_CHECK_TTL_HOURS = 6
+QUICK_CHECK_TTL_SECONDS = QUICK_CHECK_TTL_HOURS * 60 * 60
+#: Above this many bytes the check runs in a BACKGROUND thread on its own
+#: connection and Health says `state: checking` until it lands. Below it, inline.
+#: BUG-20260914-081: on the 14 GB real store the inline check took minutes and
+#: held the page's lock for the duration, every ten minutes.
+QUICK_CHECK_INLINE_MAX_BYTES = 512 * 1024 * 1024
 
 # How often a dashboard running DEGRADED (the store could not be opened) tries
 # the store again. 60 s, so `rebuild-store.command` is one click: move the corrupt
@@ -114,6 +120,7 @@ class Dashboard:
         self.covered_by_revoked = 0
         self._quick_check: dict[str, Any] | None = None
         self._quick_check_mono: float = 0.0
+        self._quick_check_busy = threading.Lock()
         # DEGRADED MODE (BUG-20260910-067, tech-lead B1). `norm` is None and
         # `store_error` is set when the store could not be opened at all. See
         # `_open_store`.
@@ -724,19 +731,40 @@ class Dashboard:
         cached = self._quick_check
         if cached is not None and (now - self._quick_check_mono) < QUICK_CHECK_TTL_SECONDS:
             return {**cached, "cached": True, "age_seconds": round(now - self._quick_check_mono, 1)}
+        try:
+            big = self.db_path.exists() and self.db_path.stat().st_size > QUICK_CHECK_INLINE_MAX_BYTES
+        except OSError:
+            big = False
+        if big:
+            # Never on the request path for a large store. One background pass on
+            # its own throwaway connection; the page keeps answering meanwhile.
+            if self._quick_check_busy.acquire(blocking=False):
+                threading.Thread(target=self._run_quick_check_bg, name="navanax-quickcheck",
+                                 daemon=True).start()
+            pending = cached or {"ok": None, "result": [], "at": None, "took_ms": None}
+            return {**pending, "state": "checking", "cached": cached is not None,
+                    "age_seconds": (round(now - self._quick_check_mono, 1) if cached else None),
+                    "note": "PRAGMA quick_check reads every page of a large store; it is running "
+                            "in the background and this answer will fill in when it lands."}
+        return self._quick_check_now()
+
+    def _run_quick_check_bg(self) -> None:
+        try:
+            self._quick_check_now()
+        finally:
+            self._quick_check_busy.release()
+
+    def _quick_check_now(self) -> dict[str, Any]:
         t0 = time.monotonic()
         try:
             # quick_check(1) stops at the first fault: we need to know THAT the
-            # store is broken, not to enumerate every broken page.
-            if self.norm is not None:
-                with self.read_lock:
-                    rows = self.ro_conn.execute("PRAGMA quick_check(1)").fetchall()
-            else:
-                probe = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5)
-                try:
-                    rows = probe.execute("PRAGMA quick_check(1)").fetchall()
-                finally:
-                    probe.close()
+            # store is broken, not to enumerate every broken page. A throwaway
+            # read-only connection, so the page's own connection is never held.
+            probe = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = probe.execute("PRAGMA quick_check(1)").fetchall()
+            finally:
+                probe.close()
             result = [str(r[0]) for r in rows] or ["(no result)"]
             ok = result == ["ok"]
         except Exception as exc:  # noqa: BLE001 - a malformed store must still render
@@ -745,8 +773,9 @@ class Dashboard:
             "ok": ok, "result": result[:5], "at": _now_iso(),
             "took_ms": round((time.monotonic() - t0) * 1000),
             "ttl_seconds": QUICK_CHECK_TTL_SECONDS,
+            "state": "done",
             "note": "PRAGMA quick_check reads every page, so it runs at most once per "
-                    f"{QUICK_CHECK_TTL_SECONDS // 60} minutes and this answer may be that old. "
+                    f"{QUICK_CHECK_TTL_HOURS} hours and this answer may be that old. "
                     "'ok' means the store's pages and indexes are structurally sound; it is not "
                     "a statement about whether the FOLD is correct.",
         }

@@ -1203,13 +1203,21 @@ for the append-only events table, background recounts at most every ten minutes
 for the rest. A regression test makes the fold artificially slow and asserts the
 page still answers.
 
+**BUG-20260914-081 (S1/P0).** Redeployed with BUG-080's fix, `/api/health` still
+hung. Health ran `PRAGMA quick_check` — which reads every page — on its first
+call and every ten minutes, on the request path, under the page's lock. The
+comment beside the constant said "on the Operator's 2.8 GB store that is
+seconds"; the store is 14 GB. Above 512 MB it now runs in the background on a
+throwaway connection, Health answers at once with `state: checking`, and the TTL
+is six hours.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-79 of 80 logged bugs are fixed.
+80 of 81 logged bugs are fixed.
 
 ### The lesson
 
