@@ -2881,6 +2881,69 @@ class MetricEngine:
                 "denomination": denom, "trait_types": trait_types, "as_of": now_iso,
                 "trait_filter": traits or {}, "rows": page_rows}
 
+    def trait_floors(self, collection: str, now: datetime | None = None) -> dict[str, Any]:
+        """Every trait value's floor and best item bid, from the standing book.
+
+        The floor of a trait value is the lowest standing ask on any token that
+        carries it; the best bid is the highest standing item bid on such a
+        token. Collection offers are not per-trait and are reported once. Read
+        off order_lives the way live_book and the screener do (BUG-083/091), so
+        the numbers agree with the book to the order. A value with no listed
+        token has no floor: null, never 0, and `listed` says how many stand.
+        """
+        now_dt = now or datetime.now(timezone.utc)
+        now_ts = now_dt.timestamp()
+        open_lives = """SELECT ol.token_id AS token_id, ol.price_eth AS eth, ol.price_usd AS usd
+                     FROM order_lives ol INDEXED BY ix_lives_open
+                     WHERE ol.collection = ? AND ol.event_type = ? AND ol.t_term IS NULL
+                       AND ol.placement_seen = 1 AND ol.t_place IS NOT NULL AND ol.t_place <= ?
+                       AND ol.exit_reason <> 'unknown' AND ol.token_id IS NOT NULL AND ol.price_eth IS NOT NULL
+                       AND (ol.expiration_ts IS NULL OR ol.expiration_ts > ?)
+                     UNION ALL
+                     SELECT ol.token_id, ol.price_eth, ol.price_usd
+                     FROM order_lives ol INDEXED BY ix_lives_term
+                     WHERE ol.collection = ? AND ol.t_term > ? AND ol.event_type = ?
+                       AND ol.placement_seen = 1 AND ol.t_place IS NOT NULL AND ol.t_place <= ?
+                       AND ol.exit_reason <> 'unknown' AND ol.token_id IS NOT NULL AND ol.price_eth IS NOT NULL
+                       AND (ol.expiration_ts IS NULL OR ol.expiration_ts > ?)"""
+
+        def per_token(etype: str, agg: str) -> dict[str, tuple[float, float]]:
+            cur = self.conn.execute(
+                f"SELECT token_id, {agg}(eth), {agg}(usd) FROM ({open_lives}) GROUP BY token_id",
+                (collection, etype, now_ts, now_ts, collection, now_ts, etype, now_ts, now_ts))
+            return {t: (e, u) for t, e, u in cur}
+        asks = per_token("item_listed", "MIN")
+        bids = per_token("item_received_bid", "MAX")
+        rows: dict[tuple[str, str], dict[str, Any]] = {}
+        for tid, tt, v in self.conn.execute(
+                "SELECT token_id, trait_type, value FROM traits WHERE collection = ?", (collection,)):
+            r = rows.setdefault((tt, v), {"trait_type": tt, "value": v, "tokens": 0, "listed": 0, "bid_on": 0,
+                                          "floor_eth": None, "floor_usd": None, "floor_token": None,
+                                          "bid_eth": None, "bid_usd": None, "bid_token": None})
+            r["tokens"] += 1
+            a = asks.get(tid)
+            if a is not None:
+                r["listed"] += 1
+                if r["floor_eth"] is None or a[0] < r["floor_eth"]:
+                    r["floor_eth"], r["floor_usd"], r["floor_token"] = a[0], a[1], tid
+            b = bids.get(tid)
+            if b is not None:
+                r["bid_on"] += 1
+                if r["bid_eth"] is None or b[0] > r["bid_eth"]:
+                    r["bid_eth"], r["bid_usd"], r["bid_token"] = b[0], b[1], tid
+        coll_floor = min(asks.values(), default=None)
+        return {"as_of": now_dt.isoformat(), "collection": collection,
+                "collection_floor_eth": coll_floor[0] if coll_floor else None,
+                "collection_floor_usd": coll_floor[1] if coll_floor else None,
+                "listed_tokens": len(asks), "tokens_with_bid": len(bids),
+                "rows": sorted(rows.values(), key=lambda r: (r["trait_type"], r["floor_eth"] is None,
+                                                             r["floor_eth"] or 0.0, r["value"])),
+                "basis": {"book": "standing", "source": "order_lives (the same rows the live book shows)",
+                          "floor": "lowest standing ask on any token carrying the value; null when none is listed",
+                          "best_bid": "highest standing ITEM bid on any token carrying the value; collection "
+                                      "offers apply to every token and are not per-trait",
+                          "left_truncated": "the book holds only orders whose placement was witnessed"}}
+
     def event_mix(self, collection: str | None, start: float, end: float) -> list[dict[str, Any]]:
         # BUG-20260914-086. Left to itself the planner walked ix_events_type_valid
         # and fetched every ROW in the window to check its collection: 2.8 M row

@@ -210,6 +210,7 @@ aside h3{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spaci
 .scrollx{overflow:auto;max-height:560px}
 th.dead{color:var(--faint);cursor:not-allowed}
 .chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:600;border:1px solid var(--border-2);background:var(--surface-2)}
+table.tf th{cursor:pointer;user-select:none}table.tf th.on{color:var(--ink)}table.tf tr[data-t]{cursor:pointer}table.tf tr[data-t]:hover td{background:var(--surface-2)}table.tf tr.sel td{background:var(--surface-2);box-shadow:inset 3px 0 0 var(--verde-2)}.faint{color:var(--faint)}.muted{color:var(--muted)}
 .badge{display:inline-block;margin-left:4px;border-radius:999px;padding:0 6px;font-size:10.5px;font-weight:600;color:var(--muted);border:1px solid var(--border-2);background:var(--surface-2);vertical-align:1px}
 .wcard{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:10px}
 @media(max-width:1250px){.wcard{grid-template-columns:1fr}}
@@ -270,22 +271,24 @@ footer{color:var(--faint);font-size:11.5px;padding:14px 24px 28px;border-top:1px
       Market and Traits grids (the two anchors above and below). Two copies would be
       two price panels showing different token sets, which is exactly how a trait
       floor gets read as the collection floor (docs/08 §4b.5). -->
- <div class="card c8" id="card-prices"><h2><span id="h-prices">Prices</span><em id="h-prices-sub">lowest ask · highest collection offer · highest item bid, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="tlg" id="tlegend"></div><div class="basis" id="b-prices"></div></div>
+ <div class="card c8" id="card-prices"><h2><span id="h-prices">Prices</span><em id="h-prices-sub">floor (lowest ask) · highest collection offer, per interval</em><span class="chips" data-plot="p-prices"></span></h2><div id="p-prices" class="plot tall"></div><div class="tlg" id="tlegend"></div><div class="basis" id="b-prices"></div></div>
  <div class="card c4"><h2>Live book<em>standing orders</em></h2><div id="book"></div></div>
  <div class="card c8"><h2>Immediacy cost<em>lowest ask − highest collection offer · holes = no bid or no ask</em><span class="chips" data-plot="p-imm"></span></h2><div id="p-imm" class="plot"></div><div class="basis" id="b-imm"></div></div>
+ <div class="card c4"><h2>Top item bid<em>highest standing bid on any single token · a rare-token bid lives here, never on the floor's axis</em><span class="chips" data-plot="p-tib"></span></h2><div id="p-tib" class="plot"></div><div class="basis" id="b-tib"></div></div>
  <div class="card c4"><h2>Activity<em>per interval</em><span class="chips" data-plot="p-act"></span></h2><div id="p-act" class="plot"></div><div class="basis" id="b-act"></div></div>
  <div class="card c4"><h2>Who is making this market<em>events by wallet · click a wallet for its card</em></h2><div id="makers"></div></div>
  <div class="card c4"><h2>Sales tape<em>most recent</em></h2><div id="tape"></div></div>
- <div class="card c4"><h2>Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
+ <div class="card c12"><h2>Event mix<em>this window</em></h2><div id="p-mix" class="plot short"></div></div>
 </section>
 <!-- ===================== #/traits ===================== -->
 <section class="view" id="v-traits">
  <i id="anchor-traits-hero" hidden></i>
+ <div class="card c12"><h2>Trait floors<em id="tf-sub">lowest standing ask and highest standing item bid per trait value · click a value to filter the page to it · click a column to sort</em></h2><div id="tfloors"></div><div class="basis" id="b-tfloors"></div></div>
  <div class="card c12"><h2>Tokens<em>every token matching the filters · click a column to sort</em></h2><div id="screener"></div></div>
 </section>
 <!-- ===================== #/flow ======================= -->
 <section class="view" id="v-flow">
- <div class="card c12"><h2>How long a bid stands<em id="s-sub">Kaplan–Meier · right-censored at as_of · competing risks · maker-episode cluster band</em></h2>
+ <div class="card c12"><h2>How long a bid stands<em id="s-sub">share of orders still alive after each age · orders still standing at as_of count as "not yet ended" (right-censored) · how they ended, side by side · maker-episode cluster band</em></h2>
   <div class="survbar" id="s-bar"></div>
   <div class="basis" id="s-head"></div>
   <div id="s-curve" class="plot"></div>
@@ -338,6 +341,12 @@ const GLOBAL_KEYS=['collection','interval','range','denom','transform','traits']
    that answers a different question from the one he asked. */
 const VIEW_DEFAULTS={market:{range:'6h',interval:'5m'},traits:{range:'24h',interval:'1h'},
  flow:{range:'1h',interval:'1m'},wallets:{range:'24h',interval:'1h'},health:{range:'24h',interval:'1h'}};
+// Which global controls each view actually reads (Operator, 2026-09-14: "buttons
+// that don't apply to certain screens are not a part of them"). A hidden control
+// keeps its value, so switching back restores exactly what he had.
+const VIEW_CONTROLS={market:['collection','interval','range','denom','transform'],
+ traits:['collection','interval','range','denom'],
+ flow:['collection','range','denom'],wallets:['collection','range','denom'],health:['collection','range']};
 /* The trait sidebar shows on Market and Traits. On Flow, Wallets and Health the filter
    is STILL APPLIED and still visible -- as a read-only chip row with a clear button --
    but 272 px of checkboxes is not earning its place there (DESIGN §1). */
@@ -663,21 +672,25 @@ function traitBasis(r){const b=r.basis,out=[];
 async function prices(){if(!window.Plotly)return;
  if(traitSpec()){await traitChart();return}
  $('#h-prices').textContent='Prices';
- $('#h-prices-sub').textContent='lowest ask · highest collection offer · highest item bid, per interval';
+ $('#h-prices-sub').textContent='floor (lowest ask) · highest collection offer, per interval';
  $('#tlegend').innerHTML='';
- const m=await J('/api/multi?'+qs({...base(),metrics:'floor_ask,collection_bid,top_item_bid'}));
- // The top item bid is the highest bid on ANY token -- on a rare one, ten
- // times the floor -- so on the floor's axis it flattened the floor and the
- // collection offer into one line at the bottom. It draws on its own
- // right-hand axis (Operator's choice, 2026-09-14), dashed so the two scales
- // are not read as one.
- const tr=[['floor_ask','lowest ask',C.ask],['collection_bid','collection offer',C.coll],['top_item_bid','top item bid (right axis)',C.bid]]
-  .map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:mode(m[k].v),line:{color:c,width:k==='top_item_bid'?1.6:2.2,dash:k==='top_item_bid'?'dot':'solid'},marker:{size:k==='top_item_bid'?4:5},
-   ...(k==='top_item_bid'?{yaxis:'y2'}:{}),connectgaps:false,customdata:meta(m[k]),hovertemplate:hov()+'%{customdata}<extra></extra>'}));
- draw('p-prices',tr,{...L(),shapes:gapShapes(m.floor_ask.basis),xaxis:{...L().xaxis,...xwin(m.floor_ask.basis)},yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}},
-  yaxis2:{overlaying:'y',side:'right',fixedrange:true,...yfmt(),title:{text:'top item bid',font:{color:C.bid}},gridcolor:'rgba(0,0,0,0)',tickfont:{color:C.bid}}});
+ // The floor is the collection-level price -- what the least-demanded token
+ // asks -- and the collection offer is the bid that stands against every
+ // token. Those two are one market and share an axis. The top ITEM bid is a
+ // bid on one token, a rare one at ten times the floor, and drawing it here
+ // made the floor unreadable; it has its own panel (Operator, 2026-09-14).
+ const m=await J('/api/multi?'+qs({...base(),metrics:'floor_ask,collection_bid'}));
+ const tr=[['floor_ask','floor (lowest ask)',C.ask],['collection_bid','collection offer',C.coll]]
+  .map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:mode(m[k].v),line:{color:c,width:2.2},marker:{size:5},
+   connectgaps:false,customdata:meta(m[k]),hovertemplate:hov()+'%{customdata}<extra></extra>'}));
+ draw('p-prices',tr,{...L(),shapes:gapShapes(m.floor_ask.basis),xaxis:{...L().xaxis,...xwin(m.floor_ask.basis)},yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}}});
  $('#b-prices').textContent=basis(m.floor_ask.basis)+'\n'
   +['floor_ask','collection_bid'].map(k=>`— ${m[k].basis.label}\n  `+bookBasis(m[k]).split('\n').join('\n  ')).join('\n')}
+async function tib(){if(!window.Plotly)return;const s=await J('/api/series?'+qs({...base(),metric:'top_item_bid'}));
+ const tr=[{x:s.t.map(plotT),y:scale(s.v),name:'top item bid',mode:mode(s.v),line:{color:C.bid,width:2.2},marker:{size:5},
+   connectgaps:false,customdata:meta(s),hovertemplate:hov()+'%{customdata}<extra></extra>'}];
+ draw('p-tib',tr,{...L(),showlegend:false,shapes:gapShapes(s.basis),xaxis:{...L().xaxis,...xwin(s.basis)},yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}}});
+ $('#b-tib').textContent=basis(s.basis)+'\n'+bookBasis(s)}
 async function imm(){if(!window.Plotly)return;const s=await J('/api/series?'+qs({...base(),metric:'immediacy_cost'}));
  const tr=[{x:s.t.map(plotT),y:scale(s.v),name:'spread',mode:mode(s.v),line:{color:C.spread,width:2.2},marker:{size:5},
    connectgaps:false,customdata:meta(s),hovertemplate:hov()+'%{customdata}<extra></extra>'},
@@ -730,6 +743,11 @@ const SURV={kind:'item_received_bid',mk:'',band:'',from:null,to:null,bin:null,lo
 const BANDS=[['','any price'],[':0.05','< 0.05 Ξ'],['0.05:0.25','0.05 – 0.25 Ξ'],['0.25:1','0.25 – 1 Ξ'],['1:5','1 – 5 Ξ'],['5:','≥ 5 Ξ']];
 const KINDS=[['item_received_bid','item bids'],['collection_offer','collection offers'],['trait_offer','trait offers']];
 const exitColor=k=>({cancelled:C.cancel,invalidated:C.invalidated,filled:C.sale,expired:C.expired,censored:C.censored}[k]||C.muted);
+// What the reader sees for an exit reason. "censored" is the statistician's word for
+// an order that was STILL STANDING when the window closed -- it has not ended, so its
+// full lifetime is unknown and the estimator counts it as "at least this long". The
+// Operator asked what it meant (2026-09-14); the page now says so instead.
+const exitLabel=k=>k==='censored'?'still standing (not yet ended)':k;
 const survQ=()=>{const p=base();const q={collection:p.collection,range:p.range,traits:p.traits,kind:SURV.kind};
  if(SURV.mk)q.maker=SURV.mk; if(SURV.band)q.price_band=SURV.band;
  if(SURV.from){q.from=SURV.from;q.to=SURV.to} return q};
@@ -761,7 +779,7 @@ function survHead(r){
  const res=(r.residual||[]).filter(x=>x.p_still_standing!=null)
    .map(x=>`age ${dur(x.age_s)} → +${dur(x.horizon_s)}: ${(100*x.p_still_standing).toFixed(1)}%`).join(' · ');
  $('#s-head').textContent=
-   `n = ${fmt(r.ended_n,0)} ended · ${fmt(r.censored_n,0)} still standing (censored) · n_eff = ${fmt(r.n_eff,0)} maker-episode clusters (ε = ${dur(r.episode_gap_s)}, min ${r.min_clusters})\n`
+   `n = ${fmt(r.ended_n,0)} ended · ${fmt(r.censored_n,0)} still standing at as_of (not yet ended — "censored" in the statistics: counted as living at least this long) · n_eff = ${fmt(r.n_eff,0)} maker-episode clusters (ε = ${dur(r.episode_gap_s)}, min ${r.min_clusters})\n`
   +`${pcts}\n${rm}${res?'\nresidual survival — '+res:''}`}
 function survBasis(r){
  const out=[];
@@ -796,7 +814,7 @@ async function surv(){
  if(strip){
   const rows=r.strip||[],by={};
   rows.forEach((x,i)=>{(by[x.exit_reason]=by[x.exit_reason]||[]).push([x.duration_s,((i%9)/9)-0.5,x])});
-  traces=Object.entries(by).map(([k,pts])=>({x:pts.map(p=>p[0]),y:pts.map(p=>p[1]),mode:'markers',type:'scatter',name:k,
+  traces=Object.entries(by).map(([k,pts])=>({x:pts.map(p=>p[0]),y:pts.map(p=>p[1]),mode:'markers',type:'scatter',name:exitLabel(k),
     marker:{color:exitColor(k),size:8,opacity:.85,line:{width:0}},
     customdata:pts.map(p=>[short(p[2].maker),p[2].token_id||'—',dur(p[2].duration_s)]),
     hovertemplate:'%{customdata[2]} · %{fullData.name}<br>maker %{customdata[0]} · token %{customdata[1]}<extra></extra>'}));
@@ -823,7 +841,7 @@ async function surv(){
  // (b) exit-reason histogram ---------------------------------------------
  const bins=(r.histogram.bins||[]);
  const hx=bins.map(b=>Math.sqrt(b.lo*b.hi)),hw=bins.map(b=>Math.log10(b.hi)-Math.log10(b.lo));
- const ht=(r.histogram.reasons||[]).map(k=>({x:hx,y:bins.map(b=>b.by_reason[k]||0),width:hw,type:'bar',name:k,
+ const ht=(r.histogram.reasons||[]).map(k=>({x:hx,y:bins.map(b=>b.by_reason[k]||0),width:hw,type:'bar',name:exitLabel(k),
    marker:{color:exitColor(k),line:{width:2,color:C.surface}},   // 2px --surface separator between stacked segments (dataviz marks-and-anatomy)
    customdata:bins.map(b=>dur(b.lo)+' – '+dur(b.hi)),
    hovertemplate:'%{customdata}: %{y:,d} %{fullData.name}<extra></extra>'}));
@@ -869,7 +887,7 @@ async function survDrill(bin){
   +`<td>${clock(x.placed_at_observed)}<span class="ro"> (+${fmt(x.stream_lag_s,2)}s)</span></td>`
   +`<td>${x.still_standing?'<span class="ro">still standing</span>':clock(x.ended_at)}</td>`
   +`<td class="num">${dur(x.lifetime_s)}</td>`
-  +`<td><span class="swatch" style="background:${exitColor(x.exit_reason)}"></span>${esc(x.exit_reason)}</td>`
+  +`<td><span class="swatch" style="background:${exitColor(x.exit_reason)}"></span>${esc(exitLabel(x.exit_reason))}</td>`
   +`<td class="num">${x.distance_to_floor_eth==null?'<span class="ro">— no floor known</span>':money2(x.distance_to_floor_eth,'ETH')}</td>`
   +`<td class="mono ro">${esc(short(x.order_hash))}</td></tr>`;
  $('#s-drill').innerHTML=
@@ -1002,7 +1020,7 @@ async function ledger(){
   +`<td>${esc(x.price_basis||'—')}</td>`
   +`<td class="mono">${esc(short(x.maker))}</td>`
   +`<td class="mono">${esc(short(x.taker))}</td>`
-  +`<td>${x.exit_reason?`<span class="swatch" style="background:${exitColor(x.exit_reason)}"></span>${esc(x.exit_reason)}`:'<span style="color:var(--faint)">—</span>'}</td>`
+  +`<td>${x.exit_reason?`<span class="swatch" style="background:${exitColor(x.exit_reason)}"></span>${esc(exitLabel(x.exit_reason))}`:'<span style="color:var(--faint)">—</span>'}</td>`
   +`<td class="mono" title="${esc(x.order_hash||'')}">${esc(short(x.order_hash))}</td></tr>`};
  $('#ledger').innerHTML=r.rows.length
   ?`<div class="scrollx"><table><thead><tr>${th}</tr></thead><tbody>${r.rows.map(row).join('')}</tbody></table></div>`
@@ -1141,6 +1159,32 @@ function chips(){const active=Object.entries(S.traits).flatMap(([t,vs])=>vs.map(
  const c=$('#clear');if(c)c.addEventListener('click',()=>{S.traits={};S.page=0;traits();all()});
  roChips()}
 
+/* ---------- trait floors ---------- */
+// One row per trait value: how many tokens carry it, how many are listed, the
+// floor (lowest standing ask) and the best standing item bid. Sorted by the
+// column the Operator clicks; default floor ascending within each trait type,
+// unlisted values last. Clicking a value sets it as THE filter for the page,
+// so the Prices card above turns into that trait's floor chart.
+const TF={sort:'floor',dir:'asc'};
+async function tfloors(){const p=base();const r=await J('/api/trait_floors?'+qs({collection:p.collection}));
+ const usd=S.denom==='USD',fl=x=>usd?x.floor_usd:x.floor_eth,bd=x=>usd?x.bid_usd:x.bid_eth;
+ const cols=[['value','trait',x=>x.trait_type+'\u0000'+x.value,0],['tokens','tokens',x=>x.tokens,1],['listed','listed',x=>x.listed,1],
+  ['floor','floor',x=>fl(x),1],['bid','best item bid',x=>bd(x),1],['prem','floor vs collection',x=>fl(x)==null||!r.collection_floor_eth?null:x.floor_eth/r.collection_floor_eth-1,1]];
+ const rows=[...r.rows];const c=cols.find(x=>x[0]===TF.sort)||cols[3];
+ rows.sort((a,b)=>{const va=c[2](a),vb=c[2](b);if(va==null&&vb==null)return 0;if(va==null)return 1;if(vb==null)return -1;const d=va<vb?-1:va>vb?1:0;return TF.dir==='desc'?-d:d});
+ const head=cols.map(([k,l,,num])=>`<th class="${num?'num':''} ${TF.sort===k?'on':''}" data-k="${k}">${l}${TF.sort===k?(TF.dir==='asc'?' ▲':' ▼'):''}</th>`).join('');
+ const body=rows.map(x=>{const sel=(S.traits[x.trait_type]||[]).includes(x.value);const prem=cols[5][2](x);
+  return `<tr class="${sel?'sel':''}" data-t="${esc(x.trait_type)}" data-v="${esc(x.value)}" title="click to filter the page to ${esc(x.trait_type)}: ${esc(x.value)}">`
+   +`<td><span class="muted">${esc(x.trait_type)}</span> · <b>${esc(x.value)}</b></td><td class="num">${fmt(x.tokens,0)}</td>`
+   +`<td class="num">${x.listed?fmt(x.listed,0):'<span class="faint">none</span>'}</td>`
+   +`<td class="num ask">${fl(x)==null?'<span class="faint">no listing</span>':money(fl(x))+(x.floor_token?` <span class="faint">#${esc(x.floor_token)}</span>`:'')}</td>`
+   +`<td class="num bid">${bd(x)==null?'<span class="faint">—</span>':money(bd(x))+(x.bid_token?` <span class="faint">#${esc(x.bid_token)}</span>`:'')}</td>`
+   +`<td class="num">${prem==null?'—':(prem>=0?'+':'')+(100*prem).toFixed(0)+'%'}</td></tr>`}).join('');
+ $('#tfloors').innerHTML=`<table class="tf"><tr>${head}</tr>${body}</table>`;
+ $('#tfloors').querySelectorAll('th').forEach(th=>th.addEventListener('click',()=>{const k=th.dataset.k;if(TF.sort===k)TF.dir=TF.dir==='asc'?'desc':'asc';else{TF.sort=k;TF.dir=k==='value'?'asc':k==='floor'?'asc':'desc'}tfloors()}));
+ $('#tfloors').querySelectorAll('tr[data-t]').forEach(tr=>tr.addEventListener('click',()=>{const t=tr.dataset.t,v=tr.dataset.v;const cur=S.traits[t]||[];S.traits={};if(!cur.includes(v))S.traits[t]=[v];S.page=0;traits();all()}));
+ $('#b-tfloors').textContent=`as of ${clock(r.as_of)} ${S.tz} · collection floor ${money(usd?r.collection_floor_usd:r.collection_floor_eth)} · ${fmt(r.listed_tokens,0)} tokens listed · ${fmt(r.tokens_with_bid,0)} tokens with a standing item bid · ${r.basis.floor} · ${r.basis.best_bid} · ${r.basis.left_truncated}`}
+
 /* ---------- screener ---------- */
 async function screener(){const p=base();const r=await J('/api/screener?'+qs({collection:p.collection,traits:p.traits,sort:S.sort,dir:S.dir,page:S.page,size:50,denom:S.denom}));
  if(!r.total){$('#screener').innerHTML=`<div class="empty">${S.traitTypes.length?'no tokens match these filters':'token list not loaded yet — run traits.command'}</div>`;return}
@@ -1206,8 +1250,8 @@ function roChips(){const active=Object.entries(S.traits).flatMap(([t,vs])=>vs.ma
    +`<div><button id="ro-clear" style="margin:6px 0 10px;font-size:12px">clear all</button></div>`
   :'<div class="basis">no trait filter — set one on Market or Traits</div>';
  const c=$('#ro-clear');if(c)c.addEventListener('click',()=>{S.traits={};S.page=0;traits();all()})}
-const VIEW_LOADERS={market:[kpis,prices,imm,act,mix,book,tape,makers],
- traits:[prices,screener],flow:[surv,ledger],wallets:[wallets],health:[health]};
+const VIEW_LOADERS={market:[kpis,prices,tib,imm,act,mix,book,tape,makers],
+ traits:[prices,tfloors,screener],flow:[surv,ledger],wallets:[wallets],health:[health]};
 function route(){
  const {view,q}=readHash();
  if(!view){          // bare URL: restore what he was last looking at, or Market
@@ -1220,6 +1264,8 @@ function route(){
  if(!S.touched.range&&d.range)$('#range').value=d.range;
  if(!S.touched.interval&&d.interval&&[...$('#interval').options].some(o=>o.value===d.interval))$('#interval').value=d.interval;
  VIEWS.forEach(v=>$('#v-'+v).classList.toggle('on',v===S.view));
+ const ctls=VIEW_CONTROLS[S.view]||[];
+ document.querySelectorAll('.ctl').forEach(c=>{const el=c.querySelector('select,.seg,button');const id=el&&el.id;if(id&&id!=='refresh')c.style.display=ctls.includes(id)?'':'none'});
  tabs();hostHero();sidebarMode();allChips();writeHash();
  return all()}
 

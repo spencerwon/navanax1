@@ -1317,13 +1317,19 @@ Frames are flushed whole and the file is append-only; the reader now resumes at
 the last complete-frame boundary and decodes only what is new. The fold's stats
 carry a phase breakdown so the next slow fold names its phase.
 
+**BUG-20260914-094 (S2/P1).** The phase breakdown's first catch, the same
+evening: `lives 22.4s` of a 22.6 s fold. The sweep that re-folds standing
+orders whose expiry has passed scanned all 5.9 million lives to find the
+fourteen thousand standing ones, five times a minute. A partial index over the
+standing lives makes it a seek.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-92 of 93 logged bugs are fixed.
+93 of 94 logged bugs are fixed.
 
 ### The lesson
 

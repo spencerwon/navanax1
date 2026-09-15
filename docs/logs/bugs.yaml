@@ -3682,3 +3682,31 @@ bugs:
     took_ms said "slow" without saying where; the phase breakdown closes that.
   regression_test:
     - tests/selftest.py::test_incremental_read_resumes_at_the_last_complete_frame
+- id: BUG-20260914-094
+  summary: "The fold's `lives` phase took 16-22 s of every 5 s pass (named by the BUG-093 phase timings): refresh_order_lives looked for standing lives whose expiry had passed with a predicate no index served, a scan of all 5.9 M order_lives rows on every fold"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-15T00:05:00-05:00"
+  occurred_at: "2026-09-10T00:00:00-05:00"
+  resolved_at: "2026-09-15T00:20:00-05:00"
+  detected_by: "dashboard.log after #19: 'slow fold: 22.6s for 319 rows from 4 files (read+insert 0.2s, lives 22.4s, analyze 0.0s)'; EXPLAIN on the snapshot: SCAN order_lives"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 1090}
+  requirement: REQ-N-16
+  data_impact: None. The same lives are re-folded; they are found by index instead of by scan.
+  root_cause: >-
+    The expiry sweep was added so an untouched standing order does not stay
+    "standing" past its expiry (a correct rule) with a predicate over
+    exit_reason and expiration_ts that no index covered; on a 5.9 M-row
+    table that is a full scan five times a minute.
+  fix: >-
+    Partial index ix_lives_expiring ON order_lives(expiration_ts) WHERE
+    exit_reason = 'censored' (about 14 k rows on the Operator's store); the
+    sweep reads it INDEXED BY.
+  monitor_gap: None new -- this is the phase timing doing its job on its first day.
+  regression_test:
+    - tests/selftest.py::test_expired_standing_lives_are_found_by_index_not_by_scan

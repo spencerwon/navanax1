@@ -3253,6 +3253,55 @@ def test_gap_mask_threshold_matches_the_assumptions_registry() -> None:
 
 
 @needs("yaml")
+def test_trait_floors_come_off_the_standing_book_per_value(tmp: Path) -> None:
+    """Operator, 2026-09-14: "floor per trait should be viewable in a nice way".
+    A trait value's floor is the lowest standing ask on any token carrying it,
+    its best bid the highest standing item bid; a value with no listed token has
+    NO floor (null, never 0) and says how many stand.
+    """
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import COLS, Normalizer, parse_event, refresh_order_lives
+    from navanax.traits import ensure_schema
+
+    n = Normalizer(tmp / "empty-lz", tmp / "tfloors.sqlite")
+    ensure_schema(n.conn)
+    for tid, bg, eyes in (("1", "Blue", "Laser"), ("2", "Red", "Plain"), ("3", "Blue", "Plain")):
+        n.conn.execute("INSERT INTO tokens (collection, token_id, listed_at) VALUES (?,?,?)", ("argonauts", tid, "2026-09-09T00:00:00Z"))
+        n.conn.execute("INSERT INTO traits (collection, token_id, trait_type, value) VALUES (?,?,?,?)", ("argonauts", tid, "Background", bg))
+        n.conn.execute("INSERT INTO traits (collection, token_id, trait_type, value) VALUES (?,?,?,?)", ("argonauts", tid, "Eyes", eyes))
+    def put(seq: int, doc: str, tid: str, eth: float, hsh: str) -> None:
+        row = parse_event(_env(seq, doc, "2026-09-09T10:00:00Z"))
+        row.update({"file": "f", "token_id": tid, "price_eth": eth, "price_usd": eth * 2500.0, "order_hash": hsh,
+                    "valid_ts": 1_757_412_000.0 + seq, "expiration_ts": None})
+        n.conn.execute(f"INSERT INTO events ({','.join(COLS)}) VALUES ({','.join('?'*len(COLS))})", tuple(row.get(c) for c in COLS))
+    put(1, DOC_LISTING, "1", 0.5, "0xa1")       # Blue/Laser listed at 0.5
+    put(2, DOC_LISTING, "3", 0.7, "0xa3")       # Blue/Plain listed at 0.7
+    put(3, REAL_BID, "2", 0.3, "0xb2")          # Red/Plain has a 0.3 item bid, no listing
+    n.conn.commit()
+    refresh_order_lives(n.conn)
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    r = eng.trait_floors("argonauts", now=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc))
+    by = {(x["trait_type"], x["value"]): x for x in r["rows"]}
+    check("trait floors: one row per trait value with token and listed counts",
+          len(by) == 4 and by[("Background", "Blue")]["tokens"] == 2 and by[("Background", "Blue")]["listed"] == 2)
+    check("trait floors: the floor of a value is the LOWEST standing ask among its tokens, and names the token",
+          by[("Background", "Blue")]["floor_eth"] == 0.5 and by[("Background", "Blue")]["floor_token"] == "1"
+          and by[("Eyes", "Plain")]["floor_eth"] == 0.7 and by[("Eyes", "Plain")]["floor_token"] == "3", str(by))
+    check("trait floors: a value with no listed token has NO floor -- null, never 0 -- and listed = 0",
+          by[("Background", "Red")]["floor_eth"] is None and by[("Background", "Red")]["listed"] == 0)
+    check("trait floors: the best bid is the highest standing ITEM bid on a token carrying the value",
+          by[("Background", "Red")]["bid_eth"] == 0.3 and by[("Background", "Red")]["bid_token"] == "2"
+          and by[("Background", "Blue")]["bid_eth"] is None)
+    check("trait floors: the collection floor and USD twins are reported alongside",
+          r["collection_floor_eth"] == 0.5 and r["collection_floor_usd"] == 1250.0 and r["listed_tokens"] == 2
+          and by[("Background", "Blue")]["floor_usd"] == 1250.0)
+    check("trait floors: rows are ordered by trait type, then floor ascending with unlisted values last",
+          [(x["trait_type"], x["value"]) for x in r["rows"]] == [("Background", "Blue"), ("Background", "Red"), ("Eyes", "Laser"), ("Eyes", "Plain")],
+          str([(x["trait_type"], x["value"], x["floor_eth"]) for x in r["rows"]]))
+    n.close()
+
+
+@needs("yaml")
 def test_screener_sort_and_filter(tmp: Path) -> None:
     """REQ-F-07: single and multi-trait filters (AND across types, OR within a type),
     every column sortable, nulls last, live prices from the store."""
@@ -6530,8 +6579,8 @@ def test_ui_survival_panel_is_the_shape_the_design_specifies() -> None:
     check("ui/survival: the HEADER TEMPLATE prints all three counts -- ended, still standing "
           "(censored) and n_eff -- so deleting n_eff from that one string fails here rather than "
           "being vouched for by the word appearing in a basis line further down",
-          "${fmt(r.ended_n,0)} ended" in head and "still standing (censored)" in head
-          and "n_eff = ${fmt(r.n_eff,0)}" in head, f"header template: {head[:150]!r}")
+          "${fmt(r.ended_n,0)} ended" in head and "still standing at as_of (not yet ended" in head
+          and "censored" in head and "n_eff = ${fmt(r.n_eff,0)}" in head, f"header template: {head[:150]!r}")
     check("ui/survival: below the cluster minimum the page says `strip, no curve` and draws every "
           "observation instead",
           "strip, no curve" in html and "mode==='strip'" in html)
@@ -7133,11 +7182,41 @@ def test_ui_charts_stay_inside_their_window_and_the_book_is_per_token() -> None:
           html.count("...xwin(") >= 5 and "const xwin=b=>" in html, str(html.count("...xwin(")))
     check("ui/window: no chart still calls the unclipped gapShapes()",
           "gapShapes()" not in html)
-    check("ui/prices: the top item bid draws on its own right-hand axis, dashed, and says so in its name",
-          "yaxis:'y2'" in html and "top item bid (right axis)" in html
-          and "yaxis2:{overlaying:'y',side:'right'" in html)
+    check("ui/prices: the Prices card draws the floor and the collection offer only -- the top item bid "
+          "(a rare-token bid, ten times the floor) has its own card and never shares the floor's axis",
+          "metrics:'floor_ask,collection_bid'})" in html and "metrics:'floor_ask,collection_bid,top_item_bid'" not in html
+          and 'id="p-tib"' in html and "async function tib()" in html and "tib," in html.split("const VIEW_LOADERS=")[1][:120])
+    check("ui/controls: each view lists the global controls it reads, and the router hides the rest",
+          "const VIEW_CONTROLS=" in html and "VIEW_CONTROLS[S.view]" in html
+          and "health:['collection','range']" in html and "flow:['collection','range','denom']" in html)
+    check("ui/flow: 'censored' is explained in the reader's words wherever it is shown",
+          "const exitLabel=k=>k==='censored'?'still standing (not yet ended)':k" in html
+          and html.count("exitLabel(") >= 4 and "still standing at as_of (not yet ended" in html)
+    check("ui/traits: the Traits view has a trait-floors card fed by /api/trait_floors, sortable and clickable",
+          'id="tfloors"' in html and "/api/trait_floors?" in html and "tfloors," in html.split("const VIEW_LOADERS=")[1][:200]
+          and "tr[data-t]" in html)
     check("ui/book: the live book groups standing orders per token and badges the count",
           "const perToken=rows=>" in html and "×${r.orders}" in html and "limit:25" in html)
+
+
+def test_expired_standing_lives_are_found_by_index_not_by_scan(tmp: Path) -> None:
+    """BUG-20260914-094. Every fold re-folds the standing lives whose expiry has
+    passed; finding them scanned every row of order_lives (5.9 M on the
+    Operator's store: 16-22 s per five-second fold, named by the new phase
+    timings as `lives`). A partial index over the standing lives makes it a seek.
+    """
+    from navanax.normalize import Normalizer
+
+    n = Normalizer(tmp / "empty-lz", tmp / "expiring.sqlite")
+    plan = " | ".join(r[3] for r in n.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT order_hash FROM order_lives INDEXED BY ix_lives_expiring "
+        "WHERE exit_reason='censored' AND expiration_ts IS NOT NULL AND expiration_ts < ?", (1.0,)))
+    check("expiring lives: found through the partial index ix_lives_expiring, not a scan of every life",
+          "ix_lives_expiring" in plan and "SCAN order_lives" not in plan, plan)
+    sql = n.conn.execute("SELECT sql FROM sqlite_master WHERE name='ix_lives_expiring'").fetchone()[0]
+    check("expiring lives: the index is PARTIAL over exit_reason='censored', so it holds only standing lives",
+          "WHERE exit_reason = 'censored'" in sql, sql)
+    n.close()
 
 
 @needs("yaml")
