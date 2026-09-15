@@ -38,6 +38,7 @@ from . import redundancy
 from .landing import is_integrity_failure, verify_manifest
 from .metrics import METRICS, MetricEngine, load_intervals, parse_range, parse_trait_filter
 from .normalize import (
+    BUSY_TIMEOUT_MS,
     DEDUP_KEY_FIELDS,
     Normalizer,
     iso_to_ts,
@@ -64,6 +65,18 @@ READER_POOL_MAX = 6
 #: A request slower than this is logged with its path and query, so the
 #: log names the slow panel instead of leaving "the page hung" to guesswork.
 SLOW_REQUEST_SECONDS = 2.0
+#: BUG-20260914-085. A write-ahead log (WAL) larger than this is checkpointed
+#: after the next fold. Every page a reader touches is first looked up in the
+#: WAL's index -- one hash table per 4096 frames -- so a WAL that never
+#: restarts makes EVERY query slower with age. The Operator's store carried a
+#: 1.13 GB WAL (about 276,000 frames, 68 hash tables per lookup): queries that
+#: took 0.0-1.7 s on a checkpointed copy took minutes on the live file. SQLite
+#: only restarts the WAL when a writer finds no reader using it, and a page
+#: that refreshes every 10 s never leaves that window on its own.
+WAL_CHECKPOINT_BYTES = 64 * 1024 * 1024
+#: How long a checkpoint waits for in-flight readers before giving up until
+#: the next fold. Short: the fold, and the page behind it, must not stall.
+WAL_CHECKPOINT_BUSY_MS = 3_000
 QUICK_CHECK_TTL_SECONDS = QUICK_CHECK_TTL_HOURS * 60 * 60
 #: Above this many bytes the check runs in a BACKGROUND thread on its own
 #: connection and Health says `state: checking` until it lands. Below it, inline.
@@ -134,6 +147,8 @@ class Dashboard:
         # from a small pool (`reader`); the slow panel is slow alone.
         self._readers: list[tuple[sqlite3.Connection, MetricEngine]] = []
         self._readers_lock = threading.Lock()
+        #: The last WAL checkpoint this process ran (BUG-085); Health shows it.
+        self.last_checkpoint: dict[str, Any] | None = None
         self.refresh = float((cfg.get("dashboard") or {}).get("refresh_seconds", 5))
         self.last_sync: dict[str, Any] = {"at": None, "stats": None, "error": None, "took_ms": None}
         #: `covered_by` annotations this process has had to RETRACT (BUG-20260911-077).
@@ -216,6 +231,9 @@ class Dashboard:
             self.bg_conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                            check_same_thread=False, timeout=30)
         self.engine = MetricEngine(self.ro_conn, self.intervals, self.tz)
+        # Nothing of ours is reading yet: the cheapest moment to restart the WAL.
+        # `_retry_open` calls this under `self.lock`; the first open does not.
+        self._checkpoint_wal_on(norm.conn, force=True)
         self.table_counts = {"as_of": None, "seconds": None, "counts": None}
         self._counts_mono = 0.0
         self._maybe_refresh_counts()
@@ -268,6 +286,53 @@ class Dashboard:
         for conn, _ in pairs:
             with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                 conn.close()
+
+    def wal_bytes(self) -> int:
+        wal = Path(f"{self.db_path}-wal")
+        try:
+            return wal.stat().st_size
+        except OSError:
+            return 0
+
+    def checkpoint_wal(self, *, force: bool = False) -> dict[str, Any] | None:
+        """Fold the WAL back into the store and truncate it (BUG-085).
+
+        Runs when the WAL has grown past WAL_CHECKPOINT_BYTES, or on `force`.
+        TRUNCATE waits (WAL_CHECKPOINT_BUSY_MS at most) for readers in flight;
+        if one is still running, the checkpoint reports `busy` and the next
+        fold tries again -- it never stalls the fold or a page behind it. The
+        result is kept in `last_checkpoint` and shown on Health.
+        """
+        if self.norm is None:
+            return None
+        with self.lock:
+            return self._checkpoint_wal_on(self.norm.conn, force=force)
+
+    def _checkpoint_wal_on(self, c: sqlite3.Connection, *, force: bool) -> dict[str, Any] | None:
+        """The checkpoint itself, on the writer connection the caller already holds."""
+        before = self.wal_bytes()
+        if not force and before < WAL_CHECKPOINT_BYTES:
+            return None
+        t0 = time.monotonic()
+        c.execute(f"PRAGMA busy_timeout={WAL_CHECKPOINT_BUSY_MS}")
+        try:
+            busy, frames, done = c.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            c.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        out = {"at": _now_iso(), "busy": bool(busy), "wal_frames": frames,
+               "frames_checkpointed": done, "wal_bytes_before": before,
+               "wal_bytes_after": self.wal_bytes(),
+               "seconds": round(time.monotonic() - t0, 1)}
+        if busy:
+            log.warning("WAL checkpoint could not finish: a reader was still using the log after "
+                        "%.1fs (%d of %d frames written back, WAL %.0f MB -> %.0f MB). "
+                        "It is retried after the next fold.", out["seconds"], done, frames,
+                        before / 1e6, out["wal_bytes_after"] / 1e6)
+        else:
+            log.info("WAL checkpointed and truncated: %d frames, %.0f MB -> %.0f MB in %.1fs",
+                     frames, before / 1e6, out["wal_bytes_after"] / 1e6, out["seconds"])
+        self.last_checkpoint = out
+        return out
 
     def store_unavailable(self) -> dict[str, Any]:
         """The 503 body. One shape, so every refused endpoint says the same thing."""
@@ -432,6 +497,7 @@ class Dashboard:
             with self._readers_lock:
                 for _, eng in self._readers:
                     eng.invalidate_connection_cache()
+            self.checkpoint_wal()
             self.last_sync = {"at": _now_iso(), "stats": stats, "error": None,
                               "took_ms": round((time.monotonic() - t0) * 1000)}
         except Exception as exc:  # noqa: BLE001 - the page must keep serving
@@ -527,7 +593,8 @@ class Dashboard:
             "now": _now_iso(), "display_timezone": self.tz, "watchlist": self.slugs,
             "recorder": recorder,
             "store": {"events": n_events, "events_last_60s": per_min, "unparsed_frames": unparsed,
-                      "landing_files_seen": files[0] or 0, "last_observed_at": last[0], "last_valid_at": last[1]},
+                      "landing_files_seen": files[0] or 0, "last_observed_at": last[0], "last_valid_at": last[1],
+                      "wal_bytes": self.wal_bytes(), "last_checkpoint": self.last_checkpoint},
             "normalizer": self.last_sync,
             "ethusd": {"rate": rate[0] if rate else None, "at": rate[1] if rate else None,
                        "provider": "opensea payment_token (implied by the latest priced event)"},

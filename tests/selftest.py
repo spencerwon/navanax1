@@ -11518,6 +11518,105 @@ def test_one_slow_request_does_not_hold_up_the_others(tmp: Path) -> None:
 
 
 @needs("yaml")
+def test_wal_is_checkpointed_at_open_and_after_a_fold_when_large(tmp: Path) -> None:
+    """BUG-20260914-085. The Operator's store carried a 1.13 GB write-ahead log
+    that never restarted, because a reader was always using it; every page lookup
+    then walked ~68 hash tables, and queries that take 0.0-1.7 s on a checkpointed
+    copy took minutes live. The dashboard must checkpoint at open (no readers of
+    its own yet) and after a fold once the WAL has grown, and it must give up
+    politely -- never stall -- when a reader is mid-query.
+    """
+    import shutil as _sh
+    import sqlite3 as _sq
+    import time as _time
+
+    import yaml as _yaml
+
+    import navanax.dashboard as _dm
+    from navanax.dashboard import Dashboard
+
+    db = _pr10_stale_lives_store(tmp, "wal")
+    root = tmp / "wal-root"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    live = root / cfg["analytical"]["path"]
+    _sh.copy(db, live)
+    # Grow a WAL on the store before the dashboard opens it, as days of folds do.
+    w = _sq.connect(live)
+    w.execute("PRAGMA journal_mode=WAL")
+    w.execute("PRAGMA wal_autocheckpoint=0")
+    w.execute("CREATE TABLE IF NOT EXISTS zz_wal_filler(x BLOB)")
+    for _ in range(40):
+        w.execute("INSERT INTO zz_wal_filler VALUES (?)", (b"x" * 50_000,))
+        w.commit()
+    grown = (root / (cfg["analytical"]["path"] + "-wal")).stat().st_size
+    w.close()   # the last connection closing would checkpoint; keep it open a moment
+    w = _sq.connect(live)
+    w.execute("PRAGMA wal_autocheckpoint=0")
+    for _ in range(40):
+        w.execute("INSERT INTO zz_wal_filler VALUES (?)", (b"y" * 50_000,))
+        w.commit()
+    check("wal: the fixture grew a WAL of real size before the dashboard opened",
+          Path(str(live) + "-wal").stat().st_size > 1_000_000, str(grown))
+
+    dash = Dashboard(root, cfg, ["argonauts"])
+    try:
+        ck = dash.last_checkpoint
+        check("wal: the dashboard checkpoints the WAL when it opens the store, before serving",
+              ck is not None and ck["busy"] is False and ck["frames_checkpointed"] == ck["wal_frames"]
+              and ck["wal_bytes_after"] < ck["wal_bytes_before"], str(ck))
+        check("wal: ...and status reports the WAL size and the last checkpoint",
+              dash.api_status()["store"]["wal_bytes"] < 1_000_000
+              and dash.api_status()["store"]["last_checkpoint"] == ck)
+        # Small WAL after a fold: nothing to do.
+        dash.last_checkpoint = None
+        check("wal: a WAL under the threshold is left alone after a fold",
+              dash.checkpoint_wal() is None and dash.last_checkpoint is None)
+        # Grow it again past the threshold and fold: it is checkpointed.
+        saved = _dm.WAL_CHECKPOINT_BYTES
+        _dm.WAL_CHECKPOINT_BYTES = 1_000_000
+        try:
+            for _ in range(40):
+                w.execute("INSERT INTO zz_wal_filler VALUES (?)", (b"z" * 50_000,))
+                w.commit()
+            big = dash.wal_bytes()
+            dash._sync_once()
+            after = dash.last_checkpoint
+            check("wal: a WAL past the threshold is checkpointed after the next fold "
+                  f"({big/1e6:.1f} MB -> {dash.wal_bytes()/1e6:.1f} MB)",
+                  after is not None and after["busy"] is False and dash.wal_bytes() < big, str(after))
+            # A reader mid-query: the checkpoint must report busy, quickly, and not raise.
+            for _ in range(40):
+                w.execute("INSERT INTO zz_wal_filler VALUES (?)", (b"q" * 50_000,))
+                w.commit()
+            r = _sq.connect(f"file:{live}?mode=ro", uri=True)
+            r.execute("BEGIN")
+            r.execute("SELECT COUNT(*) FROM events").fetchone()      # holds a read snapshot
+            _dm.WAL_CHECKPOINT_BUSY_MS = 300
+            t0 = _time.monotonic()
+            busy = dash.checkpoint_wal(force=True)
+            took = _time.monotonic() - t0
+            r.rollback()
+            r.close()
+            check("wal: with a reader mid-query the checkpoint reports busy within its short wait "
+                  f"({took:.2f}s) instead of stalling the fold", busy is not None and busy["busy"] is True
+                  and took < 3.0, str(busy))
+            done = dash.checkpoint_wal(force=True)
+            check("wal: ...and finishes once the reader is gone", done["busy"] is False
+                  and dash.wal_bytes() < 1_000_000, str(done))
+        finally:
+            _dm.WAL_CHECKPOINT_BYTES = saved
+            _dm.WAL_CHECKPOINT_BUSY_MS = 3_000
+    finally:
+        w.close()
+        if dash.norm is not None:
+            dash.norm.close()
+
+
+@needs("yaml")
 def test_order_lives_method_mixed_is_reported_on_health_as_warn(tmp: Path) -> None:
     """A reader cannot fix it, so it must say so -- with the sentence that names the fix.
 
