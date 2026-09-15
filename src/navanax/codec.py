@@ -45,6 +45,12 @@ class Codec(Protocol):
 
     def decompress(self, data: bytes) -> bytes: ...
 
+    def decompress_complete(self, data: bytes) -> tuple[bytes, int]:
+        """Every complete frame, and the number of input bytes those frames
+        occupy -- the point a later read of the same append-only file can
+        resume from (BUG-20260914-093)."""
+        ...
+
     def decompress_truncated(self, data: bytes) -> bytes:
         """Best-effort recovery from a truncated file.
 
@@ -101,6 +107,14 @@ class GzipCodec:
 
     def decompress_truncated(self, data: bytes) -> bytes:
         """Walk gzip members, stopping at the first incomplete one."""
+        return self.decompress_complete(data)[0]
+
+    def decompress_complete(self, data: bytes) -> tuple[bytes, int]:
+        """Every COMPLETE member, and the byte count they occupy (BUG-20260914-093).
+
+        The count is a resume point: a later read of the same append-only file
+        can start there and decode only what was flushed since.
+        """
         out = bytearray()
         pos = 0
         n = len(data)
@@ -117,7 +131,7 @@ class GzipCodec:
                 pos += consumed
             except zlib.error:
                 break
-        return bytes(out)
+        return bytes(out), pos
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +180,10 @@ ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"   # kept for tooling; the walk no longer depend
 
 
 def _zstd_walk(data: bytes, *, strict: bool) -> bytes:
+    return _zstd_walk_consumed(data, strict=strict)[0]
+
+
+def _zstd_walk_consumed(data: bytes, *, strict: bool) -> tuple[bytes, int]:
     """Decompress a concatenation of zstd frames, one frame at a time.
 
     BUG-20260909-010: `stream_reader`'s `read_across_frames` default changed
@@ -228,7 +246,7 @@ def _zstd_walk(data: bytes, *, strict: bool) -> bytes:
         if consumed <= 0:
             break
         pos += consumed
-    return bytes(out)
+    return bytes(out), pos
 
 
 class ZstdCodec:
@@ -246,6 +264,11 @@ class ZstdCodec:
 
     def decompress_truncated(self, data: bytes) -> bytes:
         return _zstd_walk(data, strict=False)
+
+    def decompress_complete(self, data: bytes) -> tuple[bytes, int]:
+        """Every complete frame and the bytes they occupy -- the resume point
+        for the next incremental read of an open file (BUG-20260914-093)."""
+        return _zstd_walk_consumed(data, strict=False)
 
 
 class RawCodec:
@@ -279,6 +302,10 @@ class RawCodec:
         # Drop a trailing partial line.
         idx = data.rfind(b"\n")
         return data[: idx + 1] if idx != -1 else b""
+
+    def decompress_complete(self, data: bytes) -> tuple[bytes, int]:
+        out = self.decompress_truncated(data)
+        return out, len(out)
 
 
 class _RawFrameWriter:

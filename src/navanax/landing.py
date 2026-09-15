@@ -675,6 +675,38 @@ class LandingZoneWriter:
 # ---------------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------------
+def read_file_from(path: str | Path, offset: int, codec: Codec | str | None = None,
+                   ) -> tuple[list[dict[str, Any]], int]:
+    """Envelopes in the complete frames at or after byte `offset`, and the byte
+    position just past the last complete frame -- the offset to pass next time.
+
+    BUG-20260914-093. The fold used to decode the WHOLE open landing file on
+    every pass and skip the frames it had already folded, so a fold's cost grew
+    with the file's age for the life of the file: 18-22 s per pass of a few
+    hundred new rows on the Operator's recorder. Frames are flushed whole and
+    the file is append-only, so decoding from the last complete-frame boundary
+    yields exactly the frames that are new. A partial trailing frame is not
+    consumed; the next pass starts at it. A file shorter than `offset` (it
+    should never happen; the landing zone is append-only) restarts from 0.
+    """
+    p = Path(path)
+    if codec is None:
+        codec = "zstd" if p.name.endswith(".zst") else "gzip" if p.name.endswith(".gz") else "raw"
+    c: Codec = get_codec(codec) if isinstance(codec, str) else codec
+    size = p.stat().st_size
+    if offset < 0 or offset > size:
+        offset = 0
+    with p.open("rb") as fh:
+        fh.seek(offset)
+        blob = fh.read()
+    data, consumed = c.decompress_complete(blob)
+    out: list[dict[str, Any]] = []
+    for line in data.decode("utf-8", errors="strict").splitlines():
+        if line.strip():
+            out.append(json.loads(line))
+    return out, offset + consumed
+
+
 def read_file(
     path: str | Path,
     codec: Codec | str | None = None,

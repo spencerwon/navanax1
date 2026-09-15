@@ -235,6 +235,52 @@ def test_crash_recovery(tmp: Path) -> None:
           seqs == list(range(1, len(seqs) + 1)), f"got {seqs}")
 
 
+def test_incremental_read_resumes_at_the_last_complete_frame(tmp: Path) -> None:
+    """BUG-20260914-093. The fold decoded the WHOLE open landing file on every
+    pass and skipped what it had folded, so a pass of a few hundred new rows
+    cost 18-22 s on the Operator's recorder. `read_file_from(path, offset)`
+    returns the frames at or after a complete-frame boundary and the next
+    offset; the union of incremental reads must equal one full read, and a
+    partial trailing frame must not be consumed.
+    """
+    from navanax.landing import read_file_from
+
+    clock = FakeClock(datetime(2026, 9, 9, 4, 0, 0, tzinfo=timezone.utc))
+    w = LandingZoneWriter(tmp / "incr", "run-i", codec=GzipCodec(),
+                          clock=clock.now, monotonic=clock.monotonic,
+                          flush_events=4, flush_seconds=1e9)
+    def put(n: int) -> None:
+        for _ in range(n):
+            w.write(frame("argonauts", "2026-09-09T04:00:00Z"), topic="collection:argonauts",
+                    event_timestamp="2026-09-09T04:00:00Z")
+        w.flush()
+    put(8)
+    path = sorted((tmp / "incr" / "stream").rglob("*.jsonl.gz"))[0]
+    first, pos1 = read_file_from(path, 0)
+    check("incremental: the first read from 0 yields every frame flushed so far and a positive offset",
+          [e["_seq"] for e in first] == list(range(1, 9)) and 0 < pos1 == path.stat().st_size, f"{len(first)} {pos1}")
+    again, pos_same = read_file_from(path, pos1)
+    check("incremental: re-reading from the returned offset with nothing new yields nothing and keeps the offset",
+          again == [] and pos_same == pos1)
+    put(6)
+    second, pos2 = read_file_from(path, pos1)
+    check("incremental: after more frames are flushed, reading from the old offset yields ONLY the new ones",
+          [e["_seq"] for e in second] == list(range(9, 15)) and pos2 > pos1, str([e["_seq"] for e in second]))
+    w.close()
+    full = list(read_file(path, GzipCodec()))
+    check("incremental: the union of incremental reads equals one full read",
+          [e["_seq"] for e in first + second] == [e["_seq"] for e in full])
+    # A partial trailing frame: not consumed, and the offset stays at its start.
+    blob = path.read_bytes()
+    victim = tmp / "incr_partial.jsonl.gz"
+    victim.write_bytes(blob[: pos1 + (len(blob) - pos1) // 2])
+    part, pos_part = read_file_from(victim, pos1)
+    check("incremental: a partial trailing frame yields nothing and the offset does NOT advance past it",
+          pos_part == pos1 and all(e["_seq"] <= 14 for e in part), f"{pos_part} vs {pos1}")
+    check("incremental: an offset past the end of the file restarts from 0 rather than raising",
+          [e["_seq"] for e in read_file_from(path, 10 ** 9)[0]][:3] == [1, 2, 3])
+
+
 def test_hour_rolling(tmp: Path) -> None:
     clock = FakeClock(datetime(2026, 9, 9, 4, 59, 30, tzinfo=timezone.utc))
     w = LandingZoneWriter(tmp / "roll", "run-c", codec=GzipCodec(),

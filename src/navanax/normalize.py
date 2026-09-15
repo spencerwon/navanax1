@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .landing import read_file
+from .landing import read_file_from
 
 log = logging.getLogger("navanax.normalize")
 
@@ -64,6 +64,8 @@ ANALYZE_MIN_ROWS = 100_000
 #: `PRAGMA analysis_limit`: rows sampled per index. SQLite's own guidance is
 #: 100-1000; the planner needs the shape of the data, not a census of it.
 ANALYZE_SAMPLE_ROWS = 1_000
+#: A fold slower than this is logged with its phase breakdown.
+SLOW_FOLD_SECONDS = 5.0
 
 # errno values that mean "THIS FILESYSTEM does not implement flock", as opposed
 # to "another process holds the lock". Defined once and shared with
@@ -1265,6 +1267,10 @@ class Normalizer:
         # has grown by ANALYZE_GROWTH since the last one (or has no stats at
         # all), under an analysis_limit so it samples rather than scans.
         self._analyzed_rows: int | None = None
+        #: Per landing file key: (byte offset just past the last complete frame
+        #: folded, the watermark seq it was folded to) -- BUG-20260914-093. In
+        #: memory only: a restart re-reads from 0 once.
+        self._read_pos: dict[str, tuple[int, int]] = {}
         self.refold_stats: dict[str, Any] = {"refolded": False, "rows": 0, "seconds": 0.0,
                                              "before": None, "after": None}
         if not self.writer:
@@ -1463,6 +1469,7 @@ class Normalizer:
     def sync(self) -> dict[str, int]:
         """Read every new complete frame from every landing file. Returns counts."""
         self._require_writer("sync")
+        t_start = time.monotonic()
         stats = {"files_checked": 0, "files_read": 0, "files_failed": 0, "files_short": 0, "last_error": None,
                  "rows_added": 0, "unparsed": 0,
                  "criteria_rows": 0, "lives_refreshed": 0,
@@ -1502,7 +1509,17 @@ class Normalizer:
             crit: list[tuple] = []
             high = last_seq
             try:
-                for env in read_file(path, tolerate_truncation=True):
+                # BUG-20260914-093: resume from the last complete frame this
+                # process folded, not from byte 0. The offset is trusted only
+                # while the watermark is the one it was recorded against: a
+                # reset_for_refold, a rebuilt store or another writer moves the
+                # watermark, and then the read starts at 0 again. The seq
+                # filter below is still the guard either way.
+                pos, seq_at = self._read_pos.get(key, (0, None))
+                if seq_at != last_seq:
+                    pos = 0
+                envs, new_pos = read_file_from(path, pos)
+                for env in envs:
                     seq = env.get("_seq", 0)
                     if seq <= last_seq:
                         continue
@@ -1559,18 +1576,31 @@ class Normalizer:
                          status=excluded.status, updated_at=excluded.updated_at""",
                     (key, high, len(rows), rec.get("status"),
                      datetime.now(timezone.utc).isoformat()))
+            self._read_pos[key] = (new_pos, high)
             stats["rows_added"] += len(rows)
             if rows:
                 stats["rows_by_conn"][label] = stats["rows_by_conn"].get(label, 0) + len(rows)
             stats["unparsed"] += len(bad)
             stats["criteria_rows"] += len(crit)
+        t_read = time.monotonic()
         if touched:
             # Refresh only the orders this pass touched. The whole life is
             # recomputed from every event naming that hash, so an out-of-order
             # arrival (a cancel folded before its bid) is corrected, not patched.
             stats["lives_refreshed"] = refresh_order_lives(self.conn, touched, stats=stats)
+        t_lives = time.monotonic()
         if stats["rows_added"]:
             stats["analyzed"] = self._maybe_analyze()
+        t_end = time.monotonic()
+        # Phase timings, so a slow fold names its slow phase (BUG-20260914-093
+        # was found by took_ms alone and then guessed at).
+        stats["seconds"] = {"read_and_insert": round(t_read - t_start, 2),
+                            "lives": round(t_lives - t_read, 2),
+                            "analyze": round(t_end - t_lives, 2), "total": round(t_end - t_start, 2)}
+        if t_end - t_start >= SLOW_FOLD_SECONDS:
+            log.warning("slow fold: %.1fs for %d rows from %d files (read+insert %.1fs, lives %.1fs, "
+                        "analyze %.1fs)", t_end - t_start, stats["rows_added"], stats["files_read"],
+                        t_read - t_start, t_lives - t_read, t_end - t_lives)
         return stats
 
     def _maybe_analyze(self) -> bool:
