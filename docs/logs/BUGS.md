@@ -1228,13 +1228,23 @@ per-collection maximum. The page no longer starts a refresh while one is still
 waiting. Measured but not fixed here: `survival_prepare` over 7 d at 128.9 s and
 `wallets` over 24 h at 19.2 s — the Flow and Wallets tabs — are next.
 
+**BUG-20260914-084 (S1/P0).** Deployed, and the main tab still did not load.
+`/api/meta` answered in 24 ms; `/api/status` had not answered after 25 s. Every
+page request went through one shared read-only connection under one lock —
+BUG-080's fix — so a single slow request held every other one for as long as it
+ran, and the Operator's open tab asks for a full refresh every 10 s. The log
+could not say which request it was: it carried no request timings, only 150
+broken-pipe tracebacks from browsers that had given up. Requests now each take a
+pooled read-only connection, so a slow panel is slow alone, and any request over
+2 s is logged with its path and query so the next stall names itself.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-82 of 83 logged bugs are fixed.
+83 of 84 logged bugs are fixed.
 
 ### The lesson
 

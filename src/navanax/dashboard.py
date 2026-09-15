@@ -58,6 +58,12 @@ UI_DIR = Path(__file__).resolve().parent / "ui"
 # (BUG-20260910-067): corruption that has just appeared is visible within one
 # refresh cycle of the tab, and the cost is paid once.
 QUICK_CHECK_TTL_HOURS = 6
+#: Idle read-only connections kept open between page requests (BUG-084).
+#: Requests beyond this open a throwaway connection rather than wait.
+READER_POOL_MAX = 6
+#: A request slower than this is logged with its path and query, so the
+#: log names the slow panel instead of leaving "the page hung" to guesswork.
+SLOW_REQUEST_SECONDS = 2.0
 QUICK_CHECK_TTL_SECONDS = QUICK_CHECK_TTL_HOURS * 60 * 60
 #: Above this many bytes the check runs in a BACKGROUND thread on its own
 #: connection and Health says `state: checking` until it lands. Below it, inline.
@@ -121,6 +127,13 @@ class Dashboard:
         # time: two full scans racing on a laptop disk make both slower.
         self.bg_conn: sqlite3.Connection | None = None
         self.bg_lock = threading.Lock()
+        # BUG-20260914-084. Every page request used to share ONE read
+        # connection under `read_lock`, so a 7-day survival curve on the Flow
+        # tab held /api/status for as long as it ran -- minutes -- and the
+        # page showed nothing. Requests now each take a read-only connection
+        # from a small pool (`reader`); the slow panel is slow alone.
+        self._readers: list[tuple[sqlite3.Connection, MetricEngine]] = []
+        self._readers_lock = threading.Lock()
         self.refresh = float((cfg.get("dashboard") or {}).get("refresh_seconds", 5))
         self.last_sync: dict[str, Any] = {"at": None, "stats": None, "error": None, "took_ms": None}
         #: `covered_by` annotations this process has had to RETRACT (BUG-20260911-077).
@@ -170,6 +183,7 @@ class Dashboard:
             ensure_traits_schema(norm.conn)
         except sqlite3.DatabaseError as exc:
             self.norm = self.engine = None
+            self._drop_readers()
             with self.read_lock:
                 if self.ro_conn is not None:
                     with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
@@ -187,6 +201,7 @@ class Dashboard:
                       self.db_path, exc, STORE_REOPEN_SECONDS, self.store_error["rebuild"])
             return False
         self.norm = norm
+        self._drop_readers()
         with self.read_lock:
             if self.ro_conn is not None:
                 with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
@@ -213,6 +228,46 @@ class Dashboard:
 
     def degraded(self) -> bool:
         return self.norm is None
+
+    @contextlib.contextmanager
+    def reader(self):
+        """A (connection, engine) pair for ONE request, from the pool.
+
+        Beyond READER_POOL_MAX concurrent requests the extra connections are
+        opened and closed per request; WAL mode lets any number of readers run
+        beside the writer. A test-built Dashboard (no `_readers`) falls back to
+        the shared `ro_conn` under `read_lock`, exactly as before BUG-084.
+        """
+        pool = getattr(self, "_readers", None)
+        if pool is None:
+            with self.read_lock:
+                yield self.ro_conn, self.engine
+            return
+        with self._readers_lock:
+            pair = pool.pop() if pool else None
+        if pair is None:
+            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
+                                   check_same_thread=False, timeout=30)
+            pair = (conn, MetricEngine(conn, self.intervals, self.tz))
+        try:
+            yield pair
+        finally:
+            keep = False
+            with self._readers_lock:
+                if self.norm is not None and len(pool) < READER_POOL_MAX:
+                    pool.append(pair)
+                    keep = True
+            if not keep:
+                with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
+                    pair[0].close()
+
+    def _drop_readers(self) -> None:
+        """Close every pooled reader: the store was reopened or went bad."""
+        with self._readers_lock:
+            pairs, self._readers[:] = list(self._readers), []
+        for conn, _ in pairs:
+            with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
+                conn.close()
 
     def store_unavailable(self) -> dict[str, Any]:
         """The 503 body. One shape, so every refused endpoint says the same thing."""
@@ -374,6 +429,9 @@ class Dashboard:
             # page that keeps printing doubled counts until the next restart.
             if self.engine is not None:
                 self.engine.invalidate_connection_cache()
+            with self._readers_lock:
+                for _, eng in self._readers:
+                    eng.invalidate_connection_cache()
             self.last_sync = {"at": _now_iso(), "stats": stats, "error": None,
                               "took_ms": round((time.monotonic() - t0) * 1000)}
         except Exception as exc:  # noqa: BLE001 - the page must keep serving
@@ -438,8 +496,7 @@ class Dashboard:
 
     def api_status(self) -> dict[str, Any]:
         recorder = self._recorder_state()
-        with self.read_lock:
-            c = self.ro_conn
+        with self.reader() as (c, _):
             # `events` is append-only (corrections supersede, nothing is deleted),
             # so MAX(rowid) is its exact row count and costs nothing; COUNT(*)
             # measured 14.8s on the Operator's store.
@@ -489,8 +546,8 @@ class Dashboard:
         # collection_bid and immediacy_cost -- Operator, 2026-09-10) or the old
         # interval extremum as `book=observed`. Passed through untouched; the
         # engine owns the per-metric default and the basis says which was used.
-        with self.read_lock:
-            return self.engine.series(
+        with self.reader() as (_, eng):
+            return eng.series(
                 metric=q.get("metric", "immediacy_cost"),
                 collection=self._slug(q),
                 denomination=q.get("denom", "ETH"),
@@ -525,30 +582,30 @@ class Dashboard:
         number with no basis. The engine owns every rule; this passes through.
         """
         s, e = self._window(q)
-        with self.read_lock:
-            return self.engine.trait_set_series(
+        with self.reader() as (_, eng):
+            return eng.trait_set_series(
                 self._slug(q), parse_trait_filter(q.get("traits")), s, e,
                 q.get("interval", "5m"), q.get("denom", "ETH"))
 
     def api_book(self, q: dict[str, str]) -> dict[str, Any]:
-        with self.read_lock:
-            return self.engine.live_book(self._slug(q), limit=int(q.get("limit", "25")),
+        with self.reader() as (_, eng):
+            return eng.live_book(self._slug(q), limit=int(q.get("limit", "25")),
                                          traits=parse_trait_filter(q.get("traits")))
 
     def api_tape(self, q: dict[str, str]) -> list[dict[str, Any]]:
-        with self.read_lock:
-            return self.engine.tape(self._slug(q), limit=int(q.get("limit", "50")),
+        with self.reader() as (_, eng):
+            return eng.tape(self._slug(q), limit=int(q.get("limit", "50")),
                                     traits=parse_trait_filter(q.get("traits")))
 
     def api_makers(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
-        with self.read_lock:
-            return self.engine.makers(self._slug(q), s, e, limit=min(100, int(q.get("limit", "10"))))
+        with self.reader() as (_, eng):
+            return eng.makers(self._slug(q), s, e, limit=min(100, int(q.get("limit", "10"))))
 
     def api_lifetimes(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
-        with self.read_lock:
-            return self.engine.bid_lifetimes(self._slug(q), s, e)
+        with self.reader() as (_, eng):
+            return eng.bid_lifetimes(self._slug(q), s, e)
 
     # -- PR-8 -----------------------------------------------------------------
     def _survival_args(self, q: dict[str, str]) -> dict[str, Any]:
@@ -596,9 +653,9 @@ class Dashboard:
         across that blocks every other panel and the background normalizer.
         """
         a = self._survival_args(q)
-        with self.read_lock:
-            prep = self.engine.survival_prepare(**a)
-        return self.engine.survival(**a, prepared=prep)
+        with self.reader() as (_, eng):
+            prep = eng.survival_prepare(**a)
+            return eng.survival(**a, prepared=prep)
 
     def api_survival_drill(self, q: dict[str, str]) -> dict[str, Any]:
         a = self._survival_args(q)
@@ -609,28 +666,28 @@ class Dashboard:
         if not (hi > lo >= 0):
             raise ValueError(f"survival_drill needs 0 <= lo < hi; got lo={lo} hi={hi}")
         return_page = int(q.get("page", "0"))
-        with self.read_lock:
-            return self.engine.survival_drill(bin_lo=lo, bin_hi=hi, page=return_page,
+        with self.reader() as (_, eng):
+            return eng.survival_drill(bin_lo=lo, bin_hi=hi, page=return_page,
                                               page_size=min(200, int(q.get("size", "50"))), **a)
 
     def api_mix(self, q: dict[str, str]) -> list[dict[str, Any]]:
         s, e = self._window(q)
-        with self.read_lock:
-            return self.engine.event_mix(q.get("collection"), s, e)
+        with self.reader() as (_, eng):
+            return eng.event_mix(q.get("collection"), s, e)
 
     def api_traits(self, q: dict[str, str]) -> dict[str, Any]:
         slug = self._slug(q)
-        with self.read_lock:
-            vals = trait_values(self.ro_conn, slug)
-            n_tokens = self.ro_conn.execute("SELECT COUNT(*) FROM tokens WHERE collection=?", (slug,)).fetchone()[0]
-            n_traited = self.ro_conn.execute("SELECT COUNT(DISTINCT token_id) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
+        with self.reader() as (c, _):
+            vals = trait_values(c, slug)
+            n_tokens = c.execute("SELECT COUNT(*) FROM tokens WHERE collection=?", (slug,)).fetchone()[0]
+            n_traited = c.execute("SELECT COUNT(DISTINCT token_id) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
         onboarding = next((r for r in self.store.onboarding_status() if r["collection_slug"] == slug), None)
         return {"collection": slug, "tokens": n_tokens, "with_traits": n_traited,
                 "onboarding": onboarding, "traits": vals}
 
     def api_screener(self, q: dict[str, str]) -> dict[str, Any]:
-        with self.read_lock:
-            return self.engine.screener(
+        with self.reader() as (_, eng):
+            return eng.screener(
                 self._slug(q), traits=parse_trait_filter(q.get("traits")),
                 sort=q.get("sort", "token_id"), direction=q.get("dir", "asc"),
                 page=int(q.get("page", "0")), page_size=min(200, int(q.get("size", "50"))),
@@ -685,11 +742,14 @@ class Dashboard:
         # as "no trait-offer depth" -- a quiet market -- unless it is surfaced.
         coverage = {}
         try:
-            with self.read_lock:
-                coverage = {slug: self.engine.criteria_coverage(slug) for slug in self.slugs}
+            with self.reader() as (c, eng):
+                coverage = {slug: eng.criteria_coverage(slug) for slug in self.slugs}
+                n_traits = {slug: c.execute("SELECT COUNT(*) FROM traits WHERE collection=?",
+                                            (slug,)).fetchone()[0]
+                            for slug, cov in coverage.items() if cov.get("alert")}
             for slug, cov in coverage.items():
                 if cov.get("alert"):
-                    n_tok = self.ro_conn.execute("SELECT COUNT(*) FROM traits WHERE collection=?", (slug,)).fetchone()[0]
+                    n_tok = n_traits[slug]
                     notes.append(f"{slug}: {cov['missing']} of {cov['distinct_criteria']} trait-offer criteria match no "
                                  f"trait value in the store ({'traits table is empty -- run traits.command' if n_tok == 0 else 'casing or spelling differs from the metadata'})")
         except Exception as exc:  # noqa: BLE001 - the audit must still report checksums
@@ -708,9 +768,9 @@ class Dashboard:
         # watchlist, whether or not it is the one on screen.
         crossed: dict[str, Any] = {}
         try:
-            with self.read_lock:
+            with self.reader() as (_, eng):
                 for slug in self.slugs:
-                    b = self.engine.series(metric="immediacy_cost", collection=slug,
+                    b = eng.series(metric="immediacy_cost", collection=slug,
                                            interval="1h", range_="24h",
                                            book="standing")["basis"]
                     crossed[slug] = {"negative_buckets": int(b.get("negative_buckets") or 0),
@@ -845,21 +905,21 @@ class Dashboard:
     def api_ledger(self, q: dict[str, str]) -> dict[str, Any]:
         f = self._ledger_filters(q)
         slug = self._slug(q)
-        with self.read_lock:
+        with self.reader() as (_, eng):
             if q.get("mode") == "chart":
-                return self.engine.ledger_chart(slug, cap=int(q.get("cap") or 0) or None, **f)
-            return self.engine.ledger(slug, sort=q.get("sort", "valid_ts"),
-                                      direction=q.get("dir", "desc"),
-                                      cursor=q.get("cursor") or None,
-                                      limit=int(q.get("limit", "200")), **f)
+                return eng.ledger_chart(slug, cap=int(q.get("cap") or 0) or None, **f)
+            return eng.ledger(slug, sort=q.get("sort", "valid_ts"),
+                              direction=q.get("dir", "desc"),
+                              cursor=q.get("cursor") or None,
+                              limit=int(q.get("limit", "200")), **f)
 
     def api_wallets(self, q: dict[str, str]) -> dict[str, Any]:
         s, e = self._window(q)
         slug = self._slug(q)
-        with self.read_lock:
-            out = self.engine.wallets(slug, s, e, limit=int(q.get("limit", "50")),
-                                      min_events=int(q.get("min_events", "0")))
-            out["adjacency"] = self.engine.counterparty_adjacency(
+        with self.reader() as (_, eng):
+            out = eng.wallets(slug, s, e, limit=int(q.get("limit", "50")),
+                              min_events=int(q.get("min_events", "0")))
+            out["adjacency"] = eng.counterparty_adjacency(
                 slug, s, e, limit=min(40, int(q.get("adjacency_limit", "40"))))
         return out
 
@@ -867,8 +927,8 @@ class Dashboard:
         if not address:
             raise ValueError("/api/wallet/<address> needs an address")
         s, e = self._window(q)
-        with self.read_lock:
-            return self.engine.wallet(self._slug(q), address, s, e)
+        with self.reader() as (_, eng):
+            return eng.wallet(self._slug(q), address, s, e)
 
     def _degraded_health(self) -> dict[str, Any]:
         """Health when the analytical store could not be opened at all.
@@ -975,8 +1035,7 @@ class Dashboard:
         if self.norm is None:
             return {**out, "available": False,
                     "note": "the analytical store is unreadable; no duplicate measurement is possible"}
-        with self.read_lock:
-            c = self.ro_conn
+        with self.reader() as (c, _):
             counts = redundancy.dedup_counts(
                 c, window_seconds=s.window_seconds, now_ts=time.time(), label_b=s.label)
             out["monitor"] = self.dup_monitor.evaluate(counts)
@@ -1228,9 +1287,19 @@ def make_handler(dash: Dashboard):
                     self._send(503, json.dumps(dash.store_unavailable(), default=str).encode(),
                                "application/json")
                     return
+                t_req = time.monotonic()
                 try:
                     payload = handler(q)
+                    took = time.monotonic() - t_req
+                    if took >= SLOW_REQUEST_SECONDS:
+                        log.warning("slow request: %s took %.1fs", self.path, took)
                     self._send(200, json.dumps(payload, default=str).encode(), "application/json")
+                except (BrokenPipeError, ConnectionResetError):
+                    # The browser gave up (a reload, a closed tab, its own
+                    # timeout) before the answer was written. One line, not a
+                    # 75-line traceback per abandoned request.
+                    log.warning("client went away before the answer to %s was sent (%.1fs)",
+                                self.path, time.monotonic() - t_req)
                 except ValueError as exc:
                     self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
                 except sqlite3.DatabaseError as exc:
