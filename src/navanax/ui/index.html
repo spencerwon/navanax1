@@ -210,6 +210,7 @@ aside h3{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spaci
 .scrollx{overflow:auto;max-height:560px}
 th.dead{color:var(--faint);cursor:not-allowed}
 .chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:600;border:1px solid var(--border-2);background:var(--surface-2)}
+.badge{display:inline-block;margin-left:4px;border-radius:999px;padding:0 6px;font-size:10.5px;font-weight:600;color:var(--muted);border:1px solid var(--border-2);background:var(--surface-2);vertical-align:1px}
 .wcard{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:10px}
 @media(max-width:1250px){.wcard{grid-template-columns:1fr}}
 .wcol h3{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
@@ -404,7 +405,18 @@ const L=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{c
  hoverlabel:{bgcolor:C.hoverBg,bordercolor:C.hoverBd,font:{color:C.ink,size:12.5,family:'ui-monospace,SF Mono,Menlo,monospace'},namelength:-1,align:'left'}});
 const CFG={displayModeBar:false,displaylogo:false,responsive:true,scrollZoom:false,doubleClick:false};
 let gaps=[];
-const gapShapes=()=>gaps.filter(g=>g.started_at).map(g=>({type:'rect',xref:'x',yref:'paper',x0:plotT(g.started_at),x1:plotT(g.ended_at||new Date().toISOString()),y0:0,y1:1,fillcolor:C.gap,line:{width:0}}));
+// BUG-20260914-092. Gap shading used to draw EVERY gap in the register, so a
+// "last 24 hours" chart stretched its x axis back to the Sept 10 outage and the
+// day's data sat in the right-hand sixth of the panel. Shapes are now clipped
+// to the query window the series' basis names, and the x axis is pinned to it.
+const winOf=b=>{if(!b)return null;const r=b.range||b.window||(b.filter&&b.filter.window)||{};
+ const a=r.start||(r.start_ts!=null?new Date(r.start_ts*1000).toISOString():null),z=r.end||(r.end_ts!=null?new Date(r.end_ts*1000).toISOString():null);
+ return a&&z?[new Date(a),new Date(z)]:null};
+const gapShapes=b=>{const w=winOf(b);const now=new Date();
+ return gaps.filter(g=>g.started_at).map(g=>[new Date(g.started_at),g.ended_at?new Date(g.ended_at):now])
+  .filter(([a,z])=>!w||(z>w[0]&&a<w[1]))
+  .map(([a,z])=>({type:'rect',xref:'x',yref:'paper',x0:plotT((w&&a<w[0]?w[0]:a).toISOString()),x1:plotT((w&&z>w[1]?w[1]:z).toISOString()),y0:0,y1:1,fillcolor:C.gap,line:{width:0}}))};
+const xwin=b=>{const w=winOf(b);return w?{range:[plotT(w[0].toISOString()),plotT(w[1].toISOString())]}:{}};
 const basis=b=>`${b.label}\n${b.denomination} · ${b.transform}${b.baseline_value!=null&&b.transform!=='ABS'?` · baseline ${fmt(b.baseline_value)} at ${clock(b.baseline_at)}`:''} · ${b.interval} bars aligned ${b.bucket_alignment||'UTC'} · ${b.range.spec} (${clock(b.range.start)} → ${clock(b.range.end)} ${S.tz}) · ${b.buckets} buckets, ${b.undefined_buckets} with no observation (holes)${Object.keys(b.trait_filter||{}).length?` · traits: ${esc(traitSpec())}`:''} · wash filter ${b.wash_filter}${b.legs?`\n⚠ under a trait filter the two legs differ — ask: ${b.legs.floor_ask}; bid: ${b.legs.collection_bid}`:''}${b.empty_token_set?`\n⚠ ${b.empty_token_set_note}`:''}`;
 
 /* ---------- the standing-book basis: which book, how much of the bucket the legs
@@ -623,7 +635,7 @@ async function traitChart(){
   if(r.single_floors.length>CAT_MAX)
    lg.push(`<div class="notice">${CAT_MAX} of ${r.single_floors.length} clauses drawn individually — the ramp has ${CAT_MAX} slots and a 5th clause gets no generated colour, it gets this line. Deselect to see the others; the combined floor still counts every clause.</div>`);
  }
- draw('p-prices',tr,{...L(),showlegend:false,shapes:gapShapes(),
+ draw('p-prices',tr,{...L(),showlegend:false,shapes:gapShapes(r.basis),xaxis:{...L().xaxis,...xwin(r.basis)},
   yaxis:{...L().yaxis,...tyfmt(),title:{text:S.denom==='USD'?'USD':'ETH',font:{color:C.muted}}}});
  $('#h-prices').textContent=multi?'Trait floors — asks':'Trait prices';
  $('#h-prices-sub').textContent=multi
@@ -654,24 +666,30 @@ async function prices(){if(!window.Plotly)return;
  $('#h-prices-sub').textContent='lowest ask · highest collection offer · highest item bid, per interval';
  $('#tlegend').innerHTML='';
  const m=await J('/api/multi?'+qs({...base(),metrics:'floor_ask,collection_bid,top_item_bid'}));
- const tr=[['floor_ask','lowest ask',C.ask],['collection_bid','collection offer',C.coll],['top_item_bid','top item bid',C.bid]]
-  .map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:mode(m[k].v),line:{color:c,width:2.2},marker:{size:5},
-   connectgaps:false,customdata:meta(m[k]),hovertemplate:hov()+'%{customdata}<extra></extra>'}));
- draw('p-prices',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}}});
+ // The top item bid is the highest bid on ANY token -- on a rare one, ten
+ // times the floor -- so on the floor's axis it flattened the floor and the
+ // collection offer into one line at the bottom. It draws on its own
+ // right-hand axis (Operator's choice, 2026-09-14), dashed so the two scales
+ // are not read as one.
+ const tr=[['floor_ask','lowest ask',C.ask],['collection_bid','collection offer',C.coll],['top_item_bid','top item bid (right axis)',C.bid]]
+  .map(([k,n,c])=>({x:m[k].t.map(plotT),y:scale(m[k].v),name:n,mode:mode(m[k].v),line:{color:c,width:k==='top_item_bid'?1.6:2.2,dash:k==='top_item_bid'?'dot':'solid'},marker:{size:k==='top_item_bid'?4:5},
+   ...(k==='top_item_bid'?{yaxis:'y2'}:{}),connectgaps:false,customdata:meta(m[k]),hovertemplate:hov()+'%{customdata}<extra></extra>'}));
+ draw('p-prices',tr,{...L(),shapes:gapShapes(m.floor_ask.basis),xaxis:{...L().xaxis,...xwin(m.floor_ask.basis)},yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}},
+  yaxis2:{overlaying:'y',side:'right',fixedrange:true,...yfmt(),title:{text:'top item bid',font:{color:C.bid}},gridcolor:'rgba(0,0,0,0)',tickfont:{color:C.bid}}});
  $('#b-prices').textContent=basis(m.floor_ask.basis)+'\n'
   +['floor_ask','collection_bid'].map(k=>`— ${m[k].basis.label}\n  `+bookBasis(m[k]).split('\n').join('\n  ')).join('\n')}
 async function imm(){if(!window.Plotly)return;const s=await J('/api/series?'+qs({...base(),metric:'immediacy_cost'}));
  const tr=[{x:s.t.map(plotT),y:scale(s.v),name:'spread',mode:mode(s.v),line:{color:C.spread,width:2.2},marker:{size:5},
    connectgaps:false,customdata:meta(s),hovertemplate:hov()+'%{customdata}<extra></extra>'},
   {x:s.t.map(plotT),y:(s.pct_of_ask||[]).map(v=>v==null?null:v*100),name:'% of ask',yaxis:'y2',mode:'lines',line:{color:C.ink2,dash:'dash',width:1.5},connectgaps:false,hovertemplate:'%{y:.1f}%<extra></extra>'}];
- draw('p-imm',tr,{...L(),shapes:gapShapes(),yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}},
+ draw('p-imm',tr,{...L(),shapes:gapShapes(s.basis),xaxis:{...L().xaxis,...xwin(s.basis)},yaxis:{...L().yaxis,...yfmt(),title:{text:yTitle(),font:{color:C.muted}}},
   yaxis2:{overlaying:'y',side:'right',fixedrange:true,title:{text:'% of ask',font:{color:C.muted}},gridcolor:'rgba(0,0,0,0)',tickfont:{color:C.tick}}});
  $('#b-imm').textContent=basis(s.basis)+'\n'+bookBasis(s)
   +(s.basis.undefined_buckets?`\n${s.basis.undefined_buckets} interval(s) undefined: no collection offer or no listing observed — shown as holes, never filled.`:'')}
 async function act(){if(!window.Plotly)return;const m=await J('/api/multi?'+qs({...base(),transform:'ABS',metrics:'bid_count,cancel_count,listing_count,sales_count'}));
  const tr=[['bid_count','bids',C.bid],['cancel_count','cancels',C.cancel],['listing_count','listings',C.ask],['sales_count','sales',C.sale]]
   .map(([k,n,c])=>({x:m[k].t.map(plotT),y:m[k].v,name:n,type:'bar',marker:{color:c,line:{width:0}},hovertemplate:'%{y:,d}<extra></extra>'}));
- draw('p-act',tr,{...L(),barmode:'stack',bargap:.25,shapes:gapShapes()});
+ draw('p-act',tr,{...L(),barmode:'stack',bargap:.25,shapes:gapShapes(m.bid_count.basis),xaxis:{...L().xaxis,...xwin(m.bid_count.basis)}});
  $('#b-act').textContent='counts per interval\n'+basis(m.bid_count.basis).split('\n')[1]}
 // Event-mix bars encode a QUANTITY, not a role, so they wear neutral ink rather than
 // any role hue (DESIGN §5.4). This panel is also why no role colour may be reused as
@@ -680,10 +698,15 @@ async function mix(){if(!window.Plotly)return;const p=base();const m=await J('/a
  Plotly.react('p-mix',[{x:m.map(r=>r.n),y:m.map(r=>String(r.event_type).replace('item_','')),type:'bar',orientation:'h',
   marker:{color:C.ink2,line:{width:0}},text:m.map(r=>fmt(r.n,0)),textposition:'outside',textfont:{color:C.ink2},hovertemplate:'%{y}: %{x:,d}<extra></extra>'}],
   {...L(),dragmode:false,margin:{l:110,r:50,t:4,b:24},xaxis:{...L().xaxis,showspikes:false,showgrid:false,showticklabels:false,fixedrange:true},yaxis:{...L().yaxis,fixedrange:true}},CFG)}
-async function book(){const p=base();const b=await J('/api/book?'+qs({collection:p.collection,traits:p.traits,limit:7}));const d=S.denom==='USD'?'price_usd':'price_eth';
- const row=(r,c)=>`<tr><td class="${c}">${r.token_id?'#'+esc(r.token_id):'collection'}</td><td class="num ${c}">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td>${age(r.valid_at)}</td></tr>`;
- const sec=(t,rows,c)=>`<h2 style="margin-top:8px">${t}<em>${rows.length}</em></h2>`+(rows.length?`<table><tr><th>item</th><th class="num">${S.denom}</th><th>maker</th><th>placed</th></tr>${rows.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`);
- $('#book').innerHTML=sec('asks',b.asks,'ask')+sec('collection offers',b.collection_offers,'coll')+sec('item bids',b.item_bids,'bid')}
+// The API returns one row per ORDER, best first. The panel shows one row per
+// TOKEN (Operator's choice, 2026-09-14): a seller who listed #319 three times at
+// the same price is one line with a "×3" badge, as OpenSea's listing view reads.
+// The first order per token is its best (the API's sort), the rest are counted.
+const perToken=rows=>{const m=new Map();for(const r of rows){const k=r.token_id==null?'collection:'+r.order_hash:r.token_id;const c=m.get(k);if(c)c.orders++;else m.set(k,{...r,orders:1})}return [...m.values()]};
+async function book(){const p=base();const b=await J('/api/book?'+qs({collection:p.collection,traits:p.traits,limit:25}));const d=S.denom==='USD'?'price_usd':'price_eth';
+ const row=(r,c)=>`<tr><td class="${c}">${r.token_id?'#'+esc(r.token_id):'collection'}${r.orders>1?` <span class="badge" title="${r.orders} standing orders on this token; best shown">×${r.orders}</span>`:''}</td><td class="num ${c}">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td>${age(r.valid_at)}</td></tr>`;
+ const sec=(t,rows,c,n)=>{const shown=perToken(rows).slice(0,7);return `<h2 style="margin-top:8px">${t}<em>${n!=null?n:rows.length}</em></h2>`+(shown.length?`<table><tr><th>item</th><th class="num">${S.denom}</th><th>maker</th><th>placed</th></tr>${shown.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`)};
+ $('#book').innerHTML=sec('asks',b.asks,'ask',b.depth&&b.depth.asks)+sec('collection offers',b.collection_offers,'coll',b.depth&&b.depth.collection_offers)+sec('item bids',b.item_bids,'bid',b.depth&&b.depth.item_bids)}
 async function tape(){const p=base();const t=await J('/api/tape?'+qs({collection:p.collection,traits:p.traits,limit:25}));const d=S.denom==='USD'?'price_usd':'price_eth';
  $('#tape').innerHTML=t.length?`<table><tr><th>when</th><th>item</th><th class="num">${S.denom}</th><th>seller</th><th>buyer</th></tr>${t.map(r=>`<tr><td>${clock(r.valid_at)}</td><td>#${esc(r.token_id||'?')}</td><td class="num">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td class="mono">${esc(short(r.taker))}</td></tr>`).join('')}</table>`:`<div class="empty">no sales in the store yet — a thin market can go hours between them</div>`}
 async function makers(){const p=base();const m=await J('/api/makers?'+qs({collection:p.collection,range:p.range}));const T=m.total_events_with_maker||1;
@@ -856,7 +879,7 @@ async function survDrill(bin){
    :'<div class="empty">no orders in this bin under the current filters</div>')
   +`<div class="basis">${esc(d.floor_basis)} · both clocks are shown: observed − valid is our stream lag, and a bid whose whole life is shorter than the lag was never reachable · showing ${fmt(d.rows.length,0)} of ${fmt(d.total,0)}</div>`;
  const x=$('#s-drill-x');if(x)x.addEventListener('click',()=>{SURV.bin=null;$('#s-drill').innerHTML=''})}
-/* Gaps are fetched on EVERY view, not only on Health: `gapShapes()` shades them on
+/* Gaps are fetched on EVERY view, not only on Health: `gapShapes(basis)` shades them on
    every time chart (REQ-F-15), and a chart drawn over unshaded time we were not
    listening in is the one lie this page must never tell. Rendering them is Health's
    job; knowing about them is everyone's. */
@@ -1018,7 +1041,7 @@ async function ledgerChart(){
   marker:{color:typeColor(k),size:k==='item_sold'?9:5,line:{width:0}},
   customdata:s.token_id.map((t,i)=>[t==null?'—':String(t),short(s.maker[i])]),
   hovertemplate:(den==='USD'?'$%{y:,.2f}':'%{y:,.4f} Ξ')+'<br>token %{customdata[0]} · maker %{customdata[1]}<extra>'+String(k).replace('item_','')+'</extra>'}));
- if(window.Plotly)draw('p-ledger',tr,{...L(),shapes:gapShapes(),
+ if(window.Plotly)draw('p-ledger',tr,{...L(),shapes:gapShapes(c.basis),xaxis:{...L().xaxis,...xwin(c.basis)},
   yaxis:{...L().yaxis,...(den==='USD'?{tickprefix:'$',tickformat:',.2f'}:{ticksuffix:' Ξ',tickformat:',.4f'}),
    title:{text:den,font:{color:C.muted}}}});
  const counts=Object.entries(c.counts).map(([k,v])=>`${k.replace('item_','')} ${fmt(v,0)}`).join(' · ');

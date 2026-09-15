@@ -3588,3 +3588,61 @@ bugs:
   monitor_gap: None new; the request log names the endpoint.
   regression_test:
     - tests/selftest.py::test_wallet_card_percentages_carry_their_counts
+- id: BUG-20260914-091
+  summary: "The Traits tab's token table never loaded: /api/screener took 518 s because it took MIN/MAX per token over EVERY placement event with the standing predicate's EXISTS subqueries per row -- the BUG-083 shape again, one PR later"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T21:05:00-05:00"
+  occurred_at: "2026-09-14T20:43:00-05:00"
+  resolved_at: "2026-09-14T21:35:00-05:00"
+  detected_by: "the request log on the live dashboard: 'slow request: /api/screener?collection=argonauts&sort=Crown&dir=asc&page=0&size=50&denom=USD took 518.5s' (three of them, one per sort the Operator clicked)"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 2810}
+  requirement: REQ-F-07
+  data_impact: None. The per-token best ask / best bid is read from order_lives, which live_book already reads and the equivalence run of 2026-09-14 (timing3) showed carries the same standing orders as the events-based predicate.
+  root_cause: >-
+    BUG-083 fixed live_book and left screener on the old query; nobody grepped
+    for the second copy of the pattern. The screener is the Traits tab's table,
+    so the tab looked "not functional".
+  fix: >-
+    Per-token MIN/MAX over the open lives via ix_lives_open (t_term IS NULL)
+    UNION ALL the future-terminated via ix_lives_term, the same two branches
+    as live_book, grouped by token_id.
+  monitor_gap: >-
+    A grep for `standing_sql(` callers would have found this the day BUG-083
+    landed. Added to the PR checklist: when a query pattern is found slow,
+    list every caller of the predicate it shares.
+  regression_test:
+    - tests/selftest.py::test_screener_sort_and_filter
+
+- id: BUG-20260914-092
+  summary: "Every time chart's x axis ran from Sept 10 to now regardless of the range selected, because gap shading drew every gap in the register (276 of them) and Plotly widened the axis to fit the shapes; a 'last 24 hours' chart showed its day in the right-hand sixth of the panel"
+  severity: S2
+  priority: P1
+  error_class: UI
+  status: fixed
+  logged_at: "2026-09-14T21:10:00-05:00"
+  occurred_at: "2026-09-10T00:00:00-05:00"
+  resolved_at: "2026-09-14T21:40:00-05:00"
+  detected_by: "screenshot of the live page at 1440 px after #17: 'last 24 hours' with x ticks Sep 10 ... Sep 15"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/ui/index.html, line: 407}
+  requirement: REQ-F-03
+  data_impact: None (rendering only).
+  root_cause: >-
+    gapShapes() mapped the whole gap register to rectangles with no window;
+    the register grew from a handful of outages to hundreds of reconnect
+    blips, and each rectangle outside the window stretched the axis.
+  fix: >-
+    gapShapes(basis) clips to the series' window (basis.range / window /
+    filter.window) and every time chart pins xaxis.range to it (xwin). The
+    trait series basis now carries its range like the others.
+  monitor_gap: None new; the UI scan test asserts no chart calls the unclipped form.
+  regression_test:
+    - tests/selftest.py::test_ui_charts_stay_inside_their_window_and_the_book_is_per_token
