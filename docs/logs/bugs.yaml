@@ -3646,3 +3646,39 @@ bugs:
   monitor_gap: None new; the UI scan test asserts no chart calls the unclipped form.
   regression_test:
     - tests/selftest.py::test_ui_charts_stay_inside_their_window_and_the_book_is_per_token
+- id: BUG-20260914-093
+  summary: "After BUG-088 a fold of 844 rows still took 18-22 s (status.normalizer.took_ms), so the page's header lagged the stream by ~20 s and every request on a busy disk slowed with it: the fold decoded the WHOLE open landing file on every pass and skipped the frames it had already folded, so each pass cost as much as the file's age"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T23:25:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  resolved_at: "2026-09-14T23:50:00-05:00"
+  detected_by: "/api/status normalizer.took_ms=22509 for rows_added=844 after the #18 deploy; reading sync(): read_file(path) decodes every frame from byte 0 and the seq filter discards the folded ones"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 1505}
+  - {file: src/navanax/landing.py, line: 678}
+  - {file: src/navanax/codec.py, line: 40}
+  requirement: REQ-D-26a
+  data_impact: None. The landing zone is read, never written; the seq watermark still guards every row, and a restart re-reads from byte 0 once.
+  root_cause: >-
+    The reader had one entry point, read_file(path), which decodes a whole
+    file. Frames are flushed whole and the file is append-only, but nothing
+    remembered where the last complete frame ended, so every 5 s pass paid
+    for every frame written since the file opened (files rotate every ~18 min
+    at 2.8 M events/day).
+  fix: >-
+    Codec.decompress_complete(data) returns every complete frame and the bytes
+    they occupy; landing.read_file_from(path, offset) decodes from a
+    complete-frame boundary and returns the next offset; Normalizer keeps
+    that offset per file key in memory and resumes there. A partial trailing
+    frame is not consumed; an offset past the file's end restarts at 0. The
+    fold's stats now carry phase timings (read_and_insert, lives, analyze)
+    and a fold over SLOW_FOLD_SECONDS logs its breakdown.
+  monitor_gap: >-
+    took_ms said "slow" without saying where; the phase breakdown closes that.
+  regression_test:
+    - tests/selftest.py::test_incremental_read_resumes_at_the_last_complete_frame

@@ -1310,13 +1310,20 @@ pinned to it. Two design calls taken with the Operator in the same pass: the top
 item bid (a bid on a rare token, ten times the floor) draws on its own right-hand
 axis; the live book shows one row per token with an ×N badge.
 
+**BUG-20260914-093 (S2/P1).** With ANALYZE gone, a fold of 844 rows still took
+18–22 s: it decoded the whole open landing file every pass and threw away the
+frames it had already folded, so each pass cost as much as the file's age.
+Frames are flushed whole and the file is append-only; the reader now resumes at
+the last complete-frame boundary and decodes only what is new. The fold's stats
+carry a phase breakdown so the next slow fold names its phase.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-91 of 92 logged bugs are fixed.
+92 of 93 logged bugs are fixed.
 
 ### The lesson
 
