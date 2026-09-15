@@ -1238,13 +1238,26 @@ broken-pipe tracebacks from browsers that had given up. Requests now each take a
 pooled read-only connection, so a slow panel is slow alone, and any request over
 2 s is logged with its path and query so the next stall names itself.
 
+**BUG-20260914-085 (S1/P0).** The one that explains the others' numbers. Every
+BUG-083 timing was taken on a snapshot made with SQLite's backup API, which
+writes one clean file. The live store had a 1.13 GB write-ahead log beside it
+that had not restarted in days, because SQLite only restarts the log when a
+writer finds no reader using it, and a page that refreshes every 10 s never
+leaves that window. Readers consult one hash table per 4096 log frames on
+every page lookup — about 68 tables per page here — so a query that took 0.5 s
+on the snapshot took ten minutes live. The dashboard now checkpoints and
+truncates the log when it opens the store and after any fold that finds it
+past 64 MB, waiting at most 3 s for readers and otherwise trying again next
+fold. The lesson is written into docs/03: a timing on a copy is a timing of
+the data, not of the file the Operator's page reads.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-83 of 84 logged bugs are fixed.
+84 of 85 logged bugs are fixed.
 
 ### The lesson
 

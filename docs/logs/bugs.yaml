@@ -3363,3 +3363,43 @@ bugs:
     endpoint. The survival and wallets timings themselves are still open.
   regression_test:
     - tests/selftest.py::test_one_slow_request_does_not_hold_up_the_others
+
+- id: BUG-20260914-085
+  summary: "Every query on the live store ran 100x slower than on a checkpointed copy of the same data (immediacy_cost 24 h: 0.5 s on the snapshot, ~10 min live) because the write-ahead log had grown to 1.13 GB (about 276,000 frames) and never restarted: a reader was always using it, and SQLite consults one WAL hash table per 4096 frames on every page lookup"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T19:30:00-05:00"
+  occurred_at: "2026-09-12T00:00:00-05:00"
+  resolved_at: "2026-09-14T19:55:00-05:00"
+  detected_by: "the BUG-083 timings were taken on a snapshot made with SQLite's backup API, which writes a single checkpointed file; the live store's -wal file was 1.13 GB and had the same size before and after the deploy restart. The only difference between 0.5 s and 10 min was the WAL."
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/dashboard.py, line: 66}
+  - {file: src/navanax/normalize.py, line: 1229}
+  requirement: REQ-N-16
+  data_impact: None to the record. The WAL is SQLite's own durable log; checkpointing writes it into the main file and truncates it. Nothing is dropped.
+  root_cause: >-
+    SQLite's automatic checkpoint (PASSIVE, every 1000 pages) copies frames
+    into the main file but only RESTARTS the log when a writer finds no reader
+    using it. The dashboard folds every 5 s and the page reads every 10 s, plus
+    minute-long queries, so that window never opened; the log grew for days.
+    Readers pay for its size on every page they touch, whether or not that page
+    is in the log. The snapshot the fixes were timed on had no WAL at all, so
+    every "0.0 s" measurement was true of the data and false of the file.
+  fix: >-
+    The dashboard checkpoints the WAL with TRUNCATE when it opens the store
+    (no readers of its own yet) and after any fold that finds the log past
+    WAL_CHECKPOINT_BYTES (64 MB). The checkpoint waits WAL_CHECKPOINT_BUSY_MS
+    (3 s) for readers in flight and otherwise reports busy and retries after
+    the next fold, so it never stalls the fold or the page. Status reports
+    wal_bytes and the last checkpoint. The deploy therefore starts with a
+    checkpoint of the 1.13 GB log, once.
+  monitor_gap: >-
+    Timings must be taken on the live file, not only on a snapshot; docs/03
+    s4.6 now says so. Health will show wal_bytes so a log that grows again is
+    visible before it is felt.
+  regression_test:
+    - tests/selftest.py::test_wal_is_checkpointed_at_open_and_after_a_fold_when_large

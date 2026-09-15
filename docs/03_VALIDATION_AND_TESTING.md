@@ -214,6 +214,28 @@ A child spawned with `sys.executable` inherits that interpreter, so the subproce
 
 A test that shells out to `navanax.cli` needs `yaml` exactly as surely as one that imports it, because the **child** does. `test_every_test_that_spawns_navanax_cli_declares_that_it_needs_yaml` is the tripwire between bare-venv runs: it walks the argv of every `subprocess.run`/`Popen` in the suite and fails if a spawner is missing its declaration.
 
+### 4.7 Performance is measured on the live file, not on a copy of its data
+
+A snapshot taken with SQLite's online backup API is one clean, checkpointed
+file. The Operator's live store is that file **plus its write-ahead log**, and
+the log is what the page actually reads through. BUG-20260914-085 is the
+cost of forgetting that: every BUG-083 timing was 0.0–1.7 s on the snapshot
+and minutes on the live file, because a 1.13 GB log that had not restarted in
+days sat between the query and the data. The rule is therefore:
+
+1. A timing on a snapshot is a timing of the **query plan**. It is necessary
+   and it is never sufficient.
+2. The acceptance timing is taken on the live dashboard, on the Operator's
+   machine, by its own request log (`slow request: <path> took <s>` for
+   anything over `SLOW_REQUEST_SECONDS`) or from the browser against the
+   running server — never from a copy.
+3. The live measurement must be reported with `wal_bytes` from `/api/status`
+   beside it. A number without the log size it was taken under is not
+   comparable to any other number.
+4. docs/04 §8.14 still holds: the live store is never opened from outside the
+   Mac. "On the live file" means through the running dashboard's own
+   endpoints and log, not through a second process.
+
 ---
 
 ## 5. Statistical Validation Protocol
