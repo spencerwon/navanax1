@@ -39,8 +39,10 @@ import errno
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -54,6 +56,14 @@ log = logging.getLogger("navanax.normalize")
 # length of one batch insert; a job that only writes `tokens`/`traits` (the
 # traits importer) must wait that out rather than fail spuriously.
 BUSY_TIMEOUT_MS = 30_000
+#: ANALYZE again once `events` has grown by this fraction since the last one
+#: (BUG-20260914-088); below ANALYZE_MIN_ROWS every fold that adds rows
+#: analyzes, because a tiny store's plans change with every file.
+ANALYZE_GROWTH = 0.10
+ANALYZE_MIN_ROWS = 100_000
+#: `PRAGMA analysis_limit`: rows sampled per index. SQLite's own guidance is
+#: 100-1000; the planner needs the shape of the data, not a census of it.
+ANALYZE_SAMPLE_ROWS = 1_000
 
 # errno values that mean "THIS FILESYSTEM does not implement flock", as opposed
 # to "another process holds the lock". Defined once and shared with
@@ -777,6 +787,12 @@ LEDGER_INDEXES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      "CREATE INDEX IF NOT EXISTS ix_events_coll_tokennum ON events(collection, token_num, valid_ts)"),
     ("ix_events_coll_maker", ("collection", "maker", "valid_ts"),
      "CREATE INDEX IF NOT EXISTS ix_events_coll_maker ON events(collection, maker, valid_ts)"),
+    # BUG-20260914-086: the makers panel ranks by maker and splits by type over
+    # a window; with event_type in the index that is an index-only walk. A
+    # separate index rather than a wider ix_events_coll_maker, because the
+    # ledger's maker sort relies on that index ending in (valid_ts, rowid).
+    ("ix_events_coll_maker_type", ("collection", "maker", "valid_ts", "event_type"),
+     "CREATE INDEX IF NOT EXISTS ix_events_coll_maker_type ON events(collection, maker, valid_ts, event_type)"),
     ("ix_events_coll_type", ("collection", "event_type", "valid_ts"),
      "CREATE INDEX IF NOT EXISTS ix_events_coll_type ON events(collection, event_type, valid_ts)"),
     ("ix_events_coll_price", ("collection", "price_eth", "valid_ts"),
@@ -813,9 +829,26 @@ def ensure_ledger_indexes(conn: sqlite3.Connection) -> list[str]:
             log.warning("ledger index %s not created: events has no column %s -- the ledger will "
                         "refuse that sort by name rather than scanning the table", name, ", ".join(missing))
             continue
+        # An index that exists under this name but over OTHER columns is an
+        # older definition (BUG-20260914-086 widened ix_events_coll_maker).
+        # CREATE IF NOT EXISTS would keep it silently; rebuild it instead,
+        # and say so, because on a large store this is minutes, once.
+        have = [r[2] for r in conn.execute(f"PRAGMA index_info({name})")]
+        want = _index_columns(sql)
+        if have and want and have != want:
+            log.warning("rebuilding index %s: it is over %s and this build needs %s -- "
+                        "one-time, and minutes on a large store", name, have, want)
+            with conn:
+                conn.execute(f"DROP INDEX IF EXISTS {name}")
         with conn:
             conn.execute(sql)
     return skipped
+
+
+def _index_columns(create_sql: str) -> list[str]:
+    """The column list of a `CREATE INDEX ... ON events(a, b, c) [WHERE ...]`."""
+    m = re.search(r"ON\s+events\s*\(([^)]*)\)", create_sql)
+    return [c.strip() for c in m.group(1).split(",")] if m else []
 
 
 _LIFE_COLS = ["order_hash", "collection", "event_type", "scope_kind", "token_id", "maker",
@@ -1216,6 +1249,13 @@ class Normalizer:
         self._locked_at: str | None = None
         self._lock_enforced = False
         #: What the open found and did about `order_lives`' method_version.
+        # BUG-20260914-088: ANALYZE ran after EVERY fold that added a row. It
+        # reads every index end to end -- minutes on the Operator's 15 GB store,
+        # every 5 s -- so the fold that adds 17,000 rows took 354 s and the page
+        # was always six minutes behind the stream. Now it runs when `events`
+        # has grown by ANALYZE_GROWTH since the last one (or has no stats at
+        # all), under an analysis_limit so it samples rather than scans.
+        self._analyzed_rows: int | None = None
         self.refold_stats: dict[str, Any] = {"refolded": False, "rows": 0, "seconds": 0.0,
                                              "before": None, "after": None}
         if not self.writer:
@@ -1521,10 +1561,37 @@ class Normalizer:
             # arrival (a cancel folded before its bid) is corrected, not patched.
             stats["lives_refreshed"] = refresh_order_lives(self.conn, touched, stats=stats)
         if stats["rows_added"]:
-            # Give the planner real statistics: a fresh store with no ANALYZE is
-            # where the O(n^2) join plan came from.
-            self.conn.execute("ANALYZE")
+            stats["analyzed"] = self._maybe_analyze()
         return stats
+
+    def _maybe_analyze(self) -> bool:
+        """ANALYZE when the store has outgrown its planner statistics (BUG-088).
+
+        A fresh store with no ANALYZE is where the O(n^2) join plan came from,
+        so a store with no `sqlite_stat1` is analyzed at once. After that the
+        statistics only need refreshing when the shape of the data has moved,
+        which "ANALYZE_GROWTH more rows than last time" approximates; a sampled
+        ANALYZE (`analysis_limit`) keeps even that to seconds.
+        """
+        n = self.conn.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0
+        if self._analyzed_rows is None:
+            has_stats = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat1'").fetchone()
+            if has_stats and self.conn.execute("SELECT COUNT(*) FROM sqlite_stat1").fetchone()[0]:
+                self._analyzed_rows = n          # opened with statistics: count growth from here
+                return False
+            self._analyzed_rows = 0
+        small = n < ANALYZE_MIN_ROWS                       # cheap, and plans still move
+        grown = n >= self._analyzed_rows * (1.0 + ANALYZE_GROWTH)
+        if not (small or grown):
+            return False
+        t0 = time.monotonic()
+        self.conn.execute(f"PRAGMA analysis_limit={ANALYZE_SAMPLE_ROWS}")
+        self.conn.execute("ANALYZE")
+        self._analyzed_rows = n
+        log.info("ANALYZE (sampled, %d rows per index) over %d events in %.1fs",
+                 ANALYZE_SAMPLE_ROWS, n, time.monotonic() - t0)
+        return True
 
     # -- re-folding ----------------------------------------------------------
     def refold_criteria(self) -> dict[str, Any]:

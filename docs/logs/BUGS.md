@@ -1251,13 +1251,42 @@ past 64 MB, waiting at most 3 s for readers and otherwise trying again next
 fold. The lesson is written into docs/03: a timing on a copy is a timing of
 the data, not of the file the Operator's page reads.
 
+**BUG-20260914-086 (S2/P1).** With the log truncated, the request log named the
+two panels still slow on the main tab: the event mix over a day (38–44 s) and
+the makers table (17–19 s). Both fetched every one of the day's 2.8 million
+rows from the table — one to check its collection, the other for its maker and
+type — when a covering index could answer without touching a row. The mix now
+reads `ix_events_coll_type`; a new `ix_events_coll_maker_type` (collection,
+maker, valid_ts, event_type) serves the makers query alone. The first cut
+widened the ledger's own maker index instead and the ledger's plan test caught
+the TEMP B-TREE that put back — the ledger sorts by that index's trailing
+(valid_ts, rowid). An index whose columns no longer match its definition is
+now rebuilt on open, with a log line saying so.
+
+**BUG-20260914-087 (S1/P0).** The one behind "the historical data is not
+there". A bucket was blanked if *any* ingestion gap overlapped it. The stream
+now closes with "Service restarting" every half hour and reconnects in 1–3 s;
+each blip is rightly a gap in the register, and each one blanked its whole
+hour. Eighteen of the last twenty-four hours were blank with 99.9 % of each
+observed. ASM-031: a bucket is masked only when blind time exceeds
+max(60 s, 10 % of the bucket); touched buckets keep their value and the basis
+lists their blind seconds. Masking never repaired what a blip loses (a missed
+cancel leaves its order standing in every later bucket regardless); it only
+hid the record.
+
+**BUG-20260914-088 (S1/P0).** Every fold that added a row ran a full ANALYZE
+over the 15 GB store — every index, end to end, every five seconds. A fold of
+17,512 rows took 354 s and the header read "EVENTS / MIN 0 · LAST EVENT 6.1m
+ago" forever. ANALYZE now runs once on a store without statistics and again
+only after 10 % growth, sampled.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-84 of 85 logged bugs are fixed.
+87 of 88 logged bugs are fixed.
 
 ### The lesson
 

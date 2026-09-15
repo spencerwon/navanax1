@@ -270,6 +270,11 @@ class Dashboard:
         try:
             yield pair
         finally:
+            # A statement left un-stepped (LIMIT 1 + fetchone) keeps a read
+            # snapshot open, and an open snapshot pins the WAL: no checkpoint
+            # can pass it. End it before the connection goes back to the pool.
+            with contextlib.suppress(Exception):
+                pair[0].rollback()
             keep = False
             with self._readers_lock:
                 if self.norm is not None and len(pool) < READER_POOL_MAX:

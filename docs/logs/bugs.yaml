@@ -3403,3 +3403,121 @@ bugs:
     visible before it is felt.
   regression_test:
     - tests/selftest.py::test_wal_is_checkpointed_at_open_and_after_a_fold_when_large
+
+- id: BUG-20260914-086
+  summary: "With the WAL checkpointed, the main tab's two remaining slow panels were named by the new request log: /api/mix over 24 h took 38-44 s and /api/makers over 24 h 17-19 s, because both fetched every one of the day's 2.8 M argonauts rows from the table instead of counting index entries"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T19:50:00-05:00"
+  occurred_at: "2026-09-14T19:44:00-05:00"
+  resolved_at: "2026-09-14T20:10:00-05:00"
+  detected_by: "the slow-request log added in BUG-084, on the live dashboard after the BUG-085 checkpoint: 'slow request: /api/mix?collection=argonauts&range=24h took 43.6s', '/api/makers ... took 19.2s'. EXPLAIN QUERY PLAN on the snapshot showed row fetches through ix_events_type_valid and ix_events_coll_valid."
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 2799}
+  - {file: src/navanax/metrics.py, line: 2107}
+  - {file: src/navanax/normalize.py, line: 777}
+  requirement: REQ-N-16
+  data_impact: None. The counts are unchanged; only the index they are read from.
+  root_cause: >-
+    event_mix filtered by collection AND valid_ts but the planner chose
+    ix_events_type_valid (event_type, valid_ts) and read every row in the window
+    to check its collection. makers grouped by maker and summed three event
+    types; no index carried both maker and event_type, so every row in the
+    window was fetched through ix_events_coll_valid. One day of argonauts is
+    2.8 M events (1.35 M bids, 0.98 M cancels; one maker alone 776 k), so
+    "every row" is tens of seconds.
+  fix: >-
+    event_mix reads ix_events_coll_type (collection, event_type, valid_ts) --
+    a covering index, so the count never touches the table. A new index
+    ix_events_coll_maker_type (collection, maker, valid_ts, event_type) makes
+    makers an index-only walk; it is separate from ix_events_coll_maker
+    because the ledger's maker sort relies on that one ending in (valid_ts,
+    rowid) -- widening it put a TEMP B-TREE back into the ledger's plan (caught
+    by test_ledger_page_uses_its_index_under_a_time_window). ensure_ledger_indexes
+    now compares an existing index's columns with its definition and rebuilds
+    it when they differ, with a log line, so an index can be changed later
+    without CREATE IF NOT EXISTS keeping the old one forever.
+  monitor_gap: >-
+    None new: this is the request log doing what it was added for. Traits-tab
+    trait_series over 24 h (14-24 s) is the next item it named.
+  regression_test:
+    - tests/selftest.py::test_mix_and_makers_are_index_only_and_an_old_maker_index_is_rebuilt
+- id: BUG-20260914-087
+  summary: "18 of the last 24 hourly buckets on every chart were blank -- 'the historical data is not there' -- because a bucket was masked as not-listening if ANY ingestion gap overlapped it, and the OpenSea stream reconnects every ~30 min with a 1-3 s 'Service restarting' close; each blip blanked its whole hour while 99.9 % of it had been observed"
+  severity: S1
+  priority: P0
+  error_class: DER
+  status: fixed
+  logged_at: "2026-09-14T20:05:00-05:00"
+  occurred_at: "2026-09-12T00:00:00-05:00"
+  resolved_at: "2026-09-14T20:30:00-05:00"
+  detected_by: "the live page after BUG-085: /api/series floor_ask 24h returned v=null for the last six hours with basis.gap_masked_buckets=18 while /api/status showed events landing every minute; /api/gaps listed gaps 270-274 of 1-3 s each"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 1923}
+  - {file: config/assumptions.yaml, line: 152}
+  requirement: REQ-F-03
+  data_impact: None to the record. Derived series only; every previously masked bucket is recomputed from the same events on the next request.
+  root_cause: >-
+    The masking rule was "any overlap": written when a gap meant minutes of
+    recorder downtime. Since 2026-09-12 the stream closes with 4002 "Service
+    restarting" every half hour or so, and each 1-3 s reconnect is (correctly)
+    a gap in the register. Under the old rule that gap masked its whole bucket,
+    so most hours of most days were blank. Masking was never a remedy for what
+    a blip loses -- a cancel missed in it leaves its order standing in every
+    later bucket regardless -- it was only a coverage statement, and the
+    statement was wildly disproportionate.
+  fix: >-
+    ASM-031: a bucket is masked when its blind seconds exceed
+    max(GAP_MASK_MIN_SECONDS=60, GAP_MASK_FRACTION=10 % of the observable
+    bucket); blind time adds across gaps. Buckets under the threshold keep
+    their value and are reported in the basis as gap_touched_buckets with a
+    per-bucket blind_seconds array and the rule spelled out (gap_mask_rule).
+    Registered in config/assumptions.yaml with a drift test against the code.
+  monitor_gap: >-
+    The basis carried gap_masked_buckets all along; nobody compared it with
+    the gap register. Health could show "buckets masked in the last 24 h" next
+    to "gap seconds in the last 24 h" -- 18 masked against 12 s blind is the
+    kind of ratio that reads as a bug on sight.
+  regression_test:
+    - tests/selftest.py::test_series_gap_masking
+    - tests/selftest.py::test_gap_mask_threshold_matches_the_assumptions_registry
+
+- id: BUG-20260914-088
+  summary: "Every fold that added a row ran a full ANALYZE over the 15 GB store, so a fold of 3 files / 17,512 rows took 354 s, the page was always ~6 minutes behind the stream (EVENTS / MIN 0, LAST EVENT 6.1m ago on the live header), and each fold wrote ~300 MB of WAL"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T20:10:00-05:00"
+  occurred_at: "2026-09-10T00:00:00-05:00"
+  resolved_at: "2026-09-14T20:35:00-05:00"
+  detected_by: "/api/status normalizer.took_ms=353771 for rows_added=17512 on the live dashboard; the only unconditional per-fold statement that touches every index is ANALYZE"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 1544}
+  requirement: REQ-N-16
+  data_impact: None. Planner statistics only; sampled statistics (analysis_limit 1000) are what SQLite recommends for large stores.
+  root_cause: >-
+    The ANALYZE was added when a fresh store's missing statistics produced an
+    O(n^2) join plan, and it was made unconditional so a fresh store would be
+    covered. On a store of 12 M rows and 13 indexes over events it reads
+    every index end to end, every 5 s.
+  fix: >-
+    Normalizer._maybe_analyze: a store with no sqlite_stat1 is analyzed at
+    once; afterwards ANALYZE runs only when events has grown by ANALYZE_GROWTH
+    (10 %) since the last one, under PRAGMA analysis_limit=1000. A store
+    opened with statistics counts growth from its size at open. The fold's
+    stats carry `analyzed` so a slow fold can be attributed.
+  monitor_gap: >-
+    Fold duration was in /api/status (took_ms) and nowhere else; no line said
+    "the fold took 6 minutes for 17 k rows". The fold now logs its ANALYZE and
+    the deploy should be judged on took_ms falling to seconds.
+  regression_test:
+    - tests/selftest.py::test_analyze_runs_on_growth_not_on_every_fold
