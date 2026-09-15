@@ -7111,6 +7111,27 @@ def test_wallet_card_percentages_carry_their_counts(tmp: Path) -> None:
     n, eng, _ = _ledger_store(tmp, "wallet-pct.sqlite")
     w = _lwin()
     lst = eng.wallets("argonauts", w["start"], w["end"], limit=20)
+    # BUG-20260914-090: the ranked list is an index-only walk, and first/last are
+    # the SAME instants the TEXT timestamps carried, now derived from valid_ts.
+    plan = " | ".join(r[3] for r in eng.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT e.maker, COUNT(*) n, SUM(e.event_type='item_sold'), MIN(e.valid_ts), "
+        "MAX(e.valid_ts) FROM events e INDEXED BY ix_events_coll_maker_type WHERE e.collection=? AND "
+        "e.maker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<? GROUP BY e.maker ORDER BY n DESC LIMIT 20",
+        ("argonauts", w["start"], w["end"])))
+    check("wallets: the ranked list is a COVERING walk of ix_events_coll_maker_type -- no row is fetched",
+          "COVERING INDEX ix_events_coll_maker_type" in plan, plan)
+    from navanax.normalize import iso_to_ts as _i2t
+    agree = all(
+        abs(_i2t(r["first_at"]) - eng.conn.execute(
+            "SELECT MIN(valid_ts) FROM events WHERE collection=? AND maker=? AND valid_ts>=? AND valid_ts<?",
+            ("argonauts", r["address"], w["start"], w["end"])).fetchone()[0]) < 1e-6
+        and abs(_i2t(r["last_at"]) - eng.conn.execute(
+            "SELECT MAX(valid_ts) FROM events WHERE collection=? AND maker=? AND valid_ts>=? AND valid_ts<?",
+            ("argonauts", r["address"], w["start"], w["end"])).fetchone()[0]) < 1e-6
+        for r in lst["rows"])
+    check("wallets: first_at/last_at are ISO strings of the wallet's real first and last valid_ts in the window",
+          lst["rows"] and agree and all(r["first_at"].endswith("+00:00") for r in lst["rows"]),
+          str([(r["address"][:10], r["first_at"], r["last_at"]) for r in lst["rows"][:2]]))
     bad = [r["address"] for r in lst["rows"]
            if not isinstance(r.get("events_share"), dict)
            or set(r["events_share"]) != {"pct", "n", "of"}]

@@ -91,6 +91,11 @@ BOOKS = ("standing", "observed")
 # told not to make in dashboard.py. Raised for the tech-lead.
 MIN_N_FOR_PERCENTILES = 30
 
+def _iso_utc(ts: float | None) -> str | None:
+    """Epoch seconds -> ISO-8601 in UTC; None stays None."""
+    return None if ts is None else datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+
+
 #: The bucket aggregations SQLite can do for us (BUG-20260914-089). MEDIAN is
 #: not among them: SQLite has no median and the Python path keeps the values.
 _SQL_AGG = {"MAX": "MAX", "MIN": "MIN", "SUM": "SUM", "COUNT": "COUNT"}
@@ -3247,6 +3252,11 @@ class MetricEngine:
         with_maker = self.conn.execute(
             "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? "
             "AND e.maker IS NOT NULL" + dq, (collection, start, end)).fetchone()[0]
+        # BUG-20260914-090. MIN/MAX(valid_at) -- the TEXT timestamp -- forced a
+        # row fetch for every one of the day's 2.8 M events (16.9-19.2 s
+        # measured). valid_ts is the same instant as a number and sits in
+        # ix_events_coll_maker_type with maker and event_type, so the whole
+        # table is an index-only walk; the ISO strings are made from the numbers.
         cur = self.conn.execute(
             """SELECT e.maker, COUNT(*) n,
                       SUM(e.event_type='item_received_bid') bids,
@@ -3255,9 +3265,9 @@ class MetricEngine:
                       SUM(e.event_type='item_sold') sold,
                       SUM(e.event_type='collection_offer') coll_offers,
                       SUM(e.event_type='trait_offer') trait_offers,
-                      MIN(e.valid_at), MAX(e.valid_at)
-               FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<?
-                 AND e.maker IS NOT NULL""" + dq + """
+                      MIN(e.valid_ts), MAX(e.valid_ts)
+               FROM events e INDEXED BY ix_events_coll_maker_type
+               WHERE e.collection=? AND e.maker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<?""" + dq + """
                GROUP BY e.maker HAVING n >= ? ORDER BY n DESC, e.maker ASC LIMIT ?""",
             (collection, start, end, max(0, int(min_events)), max(1, min(500, int(limit)))))
         rows = []
@@ -3266,7 +3276,8 @@ class MetricEngine:
                          "events_share": share(n, with_maker),
                          "bids": bids or 0, "cancels": cancels or 0, "listings": listings or 0,
                          "sales_as_maker": sold or 0, "collection_offers": co or 0,
-                         "trait_offers": to or 0, "first_at": first, "last_at": last})
+                         "trait_offers": to or 0,
+                         "first_at": _iso_utc(first), "last_at": _iso_utc(last)})
         distinct = self.conn.execute(
             "SELECT COUNT(DISTINCT e.maker) FROM events e WHERE e.collection=? AND e.valid_ts>=? "
             "AND e.valid_ts<? AND e.maker IS NOT NULL" + dq,

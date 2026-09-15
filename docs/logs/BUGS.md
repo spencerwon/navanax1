@@ -1291,13 +1291,19 @@ is a design item rather than a query fix: the unfiltered standing item-bid leg
 still sweeps every bid life in the window in Python — bucket extremes should
 be maintained by the fold.
 
+**BUG-20260914-090 (S2/P1).** The Wallets tab over a day: 17–19 s, because the
+ranked list took MIN/MAX of the *text* timestamp, which no index carries, so
+every row of the day was fetched. The same instants as numbers sit in the new
+maker index; the list is now index-only and the strings are made from the
+numbers.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-88 of 89 logged bugs are fixed.
+89 of 90 logged bugs are fixed.
 
 ### The lesson
 

@@ -3561,3 +3561,30 @@ bugs:
   regression_test:
     - tests/selftest.py::test_observed_series_aggregates_in_sql_and_agrees_with_the_row_path
     - tests/selftest.py::test_metric_engine_contract
+- id: BUG-20260914-090
+  summary: "The Wallets tab took 16.9-19.2 s over 24 h because the ranked-wallets query took MIN/MAX of valid_at -- the TEXT timestamp -- which forced a row fetch for every one of the day's 2.8 M events"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T21:20:00-05:00"
+  occurred_at: "2026-09-14T17:00:00-05:00"
+  resolved_at: "2026-09-14T21:30:00-05:00"
+  detected_by: "the BUG-083 snapshot timing run (wallets 24h 16.9 s, 19.2 s) and EXPLAIN: MIN/MAX over a column no index carries"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 3258}
+  requirement: REQ-N-16
+  data_impact: None. first_at/last_at are now derived from valid_ts (the same instant as a number) and rendered in UTC ISO-8601; a test asserts they equal the wallet's real first and last valid_ts in the window.
+  root_cause: >-
+    valid_at is the raw event timestamp string and valid_ts its parsed epoch;
+    the query grouped by maker over a day and took MIN/MAX of the string, so
+    no covering index could serve it.
+  fix: >-
+    MIN/MAX(valid_ts) INDEXED BY ix_events_coll_maker_type (collection, maker,
+    valid_ts, event_type): the whole ranked list is an index-only walk; the
+    ISO strings are made from the numbers.
+  monitor_gap: None new; the request log names the endpoint.
+  regression_test:
+    - tests/selftest.py::test_wallet_card_percentages_carry_their_counts
