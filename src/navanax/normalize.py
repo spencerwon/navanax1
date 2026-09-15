@@ -390,6 +390,10 @@ CREATE INDEX IF NOT EXISTS ix_lives_term     ON order_lives(collection, t_term);
 -- tokens the filter names instead of walking every life of the kind (1.35 M
 -- item bids a day) and filtering afterwards.
 CREATE INDEX IF NOT EXISTS ix_lives_token    ON order_lives(collection, event_type, token_id, t_place);
+-- BUG-20260914-094: every fold re-folds the still-standing lives whose expiry
+-- has passed; finding them was a scan of every life (5.9 M rows, 16-22 s per
+-- 5 s fold). Partial: only the ~14 k standing lives are in it.
+CREATE INDEX IF NOT EXISTS ix_lives_expiring ON order_lives(expiration_ts) WHERE exit_reason = 'censored';
 """
 
 MARKET_EVENTS = {
@@ -1088,8 +1092,8 @@ def refresh_order_lives(conn: sqlite3.Connection, hashes: list[str] | None = Non
     if hashes is not None:
         hs = set(hashes)
         hs.update(h for (h,) in conn.execute(
-            "SELECT order_hash FROM order_lives WHERE exit_reason='censored' "
-            "AND expiration_ts IS NOT NULL AND expiration_ts < ?", (now_ts,)))
+            "SELECT order_hash FROM order_lives INDEXED BY ix_lives_expiring "
+            "WHERE exit_reason='censored' AND expiration_ts IS NOT NULL AND expiration_ts < ?", (now_ts,)))
         hs = sorted(hs)
         if not hs:
             return 0

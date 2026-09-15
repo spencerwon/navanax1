@@ -747,6 +747,10 @@ class Dashboard:
         with self.reader() as (_, eng):
             return eng.event_mix(q.get("collection"), s, e)
 
+    def api_trait_floors(self, q: dict[str, str]) -> dict[str, Any]:
+        with self.reader() as (_, eng):
+            return eng.trait_floors(self._slug(q))
+
     def api_traits(self, q: dict[str, str]) -> dict[str, Any]:
         slug = self._slug(q)
         with self.reader() as (c, _):
@@ -1313,6 +1317,7 @@ def make_handler(dash: Dashboard):
         "/api/mix": dash.api_mix,
         "/api/gaps": lambda q: dash.api_gaps(),
         "/api/traits": dash.api_traits,
+        "/api/trait_floors": dash.api_trait_floors,
         "/api/screener": dash.api_screener,
         "/api/audit": lambda q: dash.api_audit(),
         "/api/ledger": dash.api_ledger,
