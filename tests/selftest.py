@@ -2177,6 +2177,16 @@ def test_metric_engine_contract(tmp: Path) -> None:
         "WHERE ol.collection=? AND ol.event_type=? AND ol.t_term IS NULL ORDER BY ol.price_eth", ("argonauts", "item_listed")))
     check("live book: standing asks come off ix_lives_open in price order -- no scan of events, no temp sort",
           "ix_lives_open" in plan and "TEMP B-TREE" not in plan, plan)
+    # BUG-20260914-089: a trait-filtered standing leg seeks the filter's tokens.
+    from navanax.traits import ensure_schema as _ensure_traits
+    _ensure_traits(eng.conn)
+    plan = " ".join(r[3] for r in eng.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT ol.t_place FROM order_lives ol INDEXED BY ix_lives_token WHERE ol.collection=? "
+        "AND ol.event_type=? AND ol.t_place IS NOT NULL AND ol.t_place < ? AND ol.token_id IN "
+        "(SELECT token_id FROM traits WHERE collection=? AND trait_type=? AND value IN (?))",
+        ("argonauts", "item_received_bid", 1.0, "argonauts", "Crown", "Corsair")))
+    check("standing/traits: a trait-filtered leg seeks ix_lives_token per token the filter names -- "
+          "not a walk of every life of the kind", "ix_lives_token (collection=? AND event_type=? AND token_id=?" in plan, plan)
     # now=11:00: the bid was CANCELLED at 10:19:02 (and would also have expired at 10:48);
     # the listing (#4027, a different order from the #8119 sale) still stands; so does the offer.
     check("metrics: live book -- the cancelled bid is gone, the unsold listing stands, the collection offer stands",
@@ -6894,6 +6904,7 @@ def test_ledger_token_number_sorts_numerically(tmp: Path) -> None:
     ln.close()
 
 
+@needs("yaml")
 def test_mix_and_makers_are_index_only_and_an_old_maker_index_is_rebuilt(tmp: Path) -> None:
     """BUG-20260914-086. The event mix over a day fetched 2.8 M rows to check
     their collection (38-44 s live) and the makers panel fetched every row for
@@ -6998,6 +7009,64 @@ def test_analyze_runs_on_growth_not_on_every_fold(tmp: Path) -> None:
               n2._maybe_analyze() is False and n2._analyzed_rows == 24, str(n2._analyzed_rows))
     finally:
         n2.close()
+
+
+@needs("yaml")
+def test_observed_series_aggregates_in_sql_and_agrees_with_the_row_path(tmp: Path) -> None:
+    """BUG-20260914-089. `top_item_bid` over 24 h took 18 s live: one row per
+    event (1.35 M item bids a day) pulled into Python to be bucketed. Sub-day
+    buckets are UTC-aligned arithmetic, so MAX/MIN/SUM/COUNT group in SQL over a
+    covering index. The SQL path must agree with the row path to the float, and
+    MEDIAN and day-or-longer buckets must still take the row path.
+    """
+    import random
+
+    import navanax.metrics as _mm
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+
+    n = Normalizer(tmp / "empty-lz", tmp / "obs.sqlite")
+    rnd = random.Random(89)
+    base = 1_757_000_000.0                    # 2025-09-04T14:13:20Z, mid-bucket on purpose
+    rows = []
+    for i in range(3000):
+        ts = base + rnd.uniform(0, 3 * 86400)
+        et = ("item_received_bid", "item_sold", "item_listed", "collection_offer")[i % 4]
+        price = round(rnd.uniform(0.1, 3.0), 4)
+        rows.append(("r", i, "f", "x", "x", ts, ts, et, "argonauts", str(i % 50), f"0xh{i}",
+                     price, price * 2500.0))
+    n.conn.executemany(
+        "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,event_type,collection,"
+        "token_id,order_hash,price_eth,price_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.commit()
+    iv = load_intervals(ROOT / "config" / "intervals.yaml")
+    eng = MetricEngine(n.conn, iv, "America/Chicago")
+    start, end = base + 3600, base + 2 * 86400 + 1234
+    saved = dict(_mm._SQL_AGG)
+    for metric in ("top_item_bid", "bid_count", "volume", "sales_count", "floor_ask", "sale_price"):
+        for interval in ("5m", "1h", "1d"):
+            spec = iv["intervals"][interval]
+            for denom in ("ETH", "USD"):
+                sql_path = eng._bucketed(metric, "argonauts", denom, start, end, spec)
+                _mm._SQL_AGG.clear()                       # force the row path
+                try:
+                    row_path = eng._bucketed(metric, "argonauts", denom, start, end, spec)
+                finally:
+                    _mm._SQL_AGG.update(saved)
+                same = (set(sql_path) == set(row_path)
+                        and all(abs(sql_path[k] - row_path[k]) <= 1e-9 * max(1.0, abs(row_path[k]))
+                                for k in sql_path))
+                check(f"observed/sql: {metric} {interval} {denom} -- the SQL bucket path and the row path "
+                      f"agree on every bucket ({len(sql_path)} buckets)", same and len(sql_path) > 0,
+                      f"sql={list(sql_path.items())[:3]} rows={list(row_path.items())[:3]}")
+    plan = " | ".join(r[3] for r in n.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT CAST(e.valid_ts / 3600 AS INTEGER) * 3600 AS b, MAX(e.price_eth) "
+        "FROM events e INDEXED BY ix_events_coll_type_price WHERE e.collection = ? AND e.valid_ts >= ? "
+        "AND e.valid_ts < ? AND e.event_type IN (?) AND e.price_eth IS NOT NULL GROUP BY b",
+        ("argonauts", start, end, "item_received_bid")))
+    check("observed/sql: the aggregation is a COVERING walk of ix_events_coll_type_price -- no row is fetched",
+          "COVERING INDEX ix_events_coll_type_price" in plan, plan)
+    n.close()
 
 
 @needs("yaml")

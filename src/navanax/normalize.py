@@ -384,6 +384,10 @@ CREATE INDEX IF NOT EXISTS ix_lives_standing ON order_lives(collection, event_ty
 -- an index walk that stops at 25 instead of a scan of every listing ever seen.
 CREATE INDEX IF NOT EXISTS ix_lives_open ON order_lives(collection, event_type, price_eth) WHERE t_term IS NULL;
 CREATE INDEX IF NOT EXISTS ix_lives_term     ON order_lives(collection, t_term);
+-- BUG-20260914-089: a trait-filtered standing series seeks the lives of the
+-- tokens the filter names instead of walking every life of the kind (1.35 M
+-- item bids a day) and filtering afterwards.
+CREATE INDEX IF NOT EXISTS ix_lives_token    ON order_lives(collection, event_type, token_id, t_place);
 """
 
 MARKET_EVENTS = {
@@ -795,6 +799,11 @@ LEDGER_INDEXES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      "CREATE INDEX IF NOT EXISTS ix_events_coll_maker_type ON events(collection, maker, valid_ts, event_type)"),
     ("ix_events_coll_type", ("collection", "event_type", "valid_ts"),
      "CREATE INDEX IF NOT EXISTS ix_events_coll_type ON events(collection, event_type, valid_ts)"),
+    # BUG-20260914-089: the observed-book series (MAX/MIN/SUM/COUNT of a price
+    # per bucket) becomes an index-only walk with both prices in the index.
+    ("ix_events_coll_type_price", ("collection", "event_type", "valid_ts", "price_eth", "price_usd"),
+     "CREATE INDEX IF NOT EXISTS ix_events_coll_type_price "
+     "ON events(collection, event_type, valid_ts, price_eth, price_usd)"),
     ("ix_events_coll_price", ("collection", "price_eth", "valid_ts"),
      "CREATE INDEX IF NOT EXISTS ix_events_coll_price ON events(collection, price_eth, valid_ts)"),
     ("ix_events_coll_observed", ("collection", "observed_ts"),

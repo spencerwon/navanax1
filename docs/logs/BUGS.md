@@ -1280,13 +1280,24 @@ over the 15 GB store — every index, end to end, every five seconds. A fold of
 ago" forever. ANALYZE now runs once on a store without statistics and again
 only after 10 % growth, sampled.
 
+**BUG-20260914-089 (S2/P1).** `top_item_bid` over a day took 18 s and a
+trait-filtered series 14–24 s. The observed-book path pulled one row per event
+into Python to bucket it — 1.35 million item bids a day — when a sub-day bucket
+is arithmetic and MAX/MIN/SUM/COUNT can be grouped in SQL over a covering
+index; the SQL path is asserted equal to the row path bucket by bucket. A
+trait-filtered standing leg now seeks the filter's tokens through a new
+`ix_lives_token` instead of walking every life of the kind. What remains, and
+is a design item rather than a query fix: the unfiltered standing item-bid leg
+still sweeps every bid life in the window in Python — bucket extremes should
+be maintained by the fold.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-87 of 88 logged bugs are fixed.
+88 of 89 logged bugs are fixed.
 
 ### The lesson
 

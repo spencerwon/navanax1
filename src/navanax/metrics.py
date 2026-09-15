@@ -91,6 +91,10 @@ BOOKS = ("standing", "observed")
 # told not to make in dashboard.py. Raised for the tech-lead.
 MIN_N_FOR_PERCENTILES = 30
 
+#: The bucket aggregations SQLite can do for us (BUG-20260914-089). MEDIAN is
+#: not among them: SQLite has no median and the Python path keeps the values.
+_SQL_AGG = {"MAX": "MAX", "MIN": "MIN", "SUM": "SUM", "COUNT": "COUNT"}
+
 # BUG-20260914-087 / ASM-031. A bucket is masked as "not listening" only when
 # the seconds we were blind in it exceed BOTH of these: a fraction of the
 # bucket and an absolute floor. Before, ANY overlap masked the whole bucket,
@@ -1260,14 +1264,32 @@ class MetricEngine:
         # PR-10: with two connections, every event both sockets saw is two rows,
         # and COUNT/SUM/MEDIAN over them would double. Empty string when there is
         # one connection, so the SQL is unchanged.
+        agg = spec["agg"]
+        out: dict[float, float] = {}
+        dur = int(interval["duration"]) if "duration" in interval else None
+        if agg in _SQL_AGG and dur is not None and dur < 86400:
+            # BUG-20260914-089. Sub-day buckets are UTC-aligned, so the bucket
+            # is arithmetic and MAX/MIN/SUM/COUNT can be grouped in SQL: one
+            # row per bucket comes back instead of one per event (1.35 M item
+            # bids a day for argonauts; 18 s in Python for `top_item_bid` over
+            # 24 h). Days and longer align to local midnight and MEDIAN needs
+            # the values, so those still take the row path below. The index
+            # hint is only sound when the WHERE starts from collection and
+            # event_type, which is every metric with `types`; the others are
+            # left to the planner.
+            expr = f"e.{col}" if spec["price"] else "1"
+            hint = " INDEXED BY ix_events_coll_type_price" if spec["types"] and not tf else ""
+            sql = (f"SELECT CAST(e.valid_ts / {dur} AS INTEGER) * {dur} AS b, {_SQL_AGG[agg]}({expr}) "
+                   f"FROM events e{hint} WHERE {' AND '.join(where)}{self.dedup_where('e')} GROUP BY b")
+            for b, v in self.conn.execute(sql, args):
+                out[float(b)] = float(v)
+            return out
         sql = (f"SELECT e.valid_ts, e.{col} FROM events e WHERE {' AND '.join(where)}"
                f"{self.dedup_where('e')} ORDER BY e.valid_ts")
         groups: dict[float, list[float]] = {}
         for ts, v in self.conn.execute(sql, args):
             b = bucket_of(ts, interval, self.tz)
             groups.setdefault(b, []).append(v if spec["price"] else 1.0)
-        agg = spec["agg"]
-        out: dict[float, float] = {}
         for b, vals in groups.items():
             if agg == "MAX":
                 out[b] = max(vals)
@@ -1314,10 +1336,12 @@ class MetricEngine:
                  "(ol.t_term IS NULL OR ol.t_term > ?)",
                  "(ol.expiration_ts IS NULL OR ol.expiration_ts > ?)"]
         args: list[Any] = [collection, spec["event_type"], horizon, start, start]
+        hint = ""
         if traits and spec["token_scoped"]:
             tf, targs = token_filter_sql(collection, traits, alias="ol")
             where.append(tf[len(" AND "):])
             args.extend(targs)
+            hint = " INDEXED BY ix_lives_token"      # seek the filter's tokens, not every life of the kind
         if spec.get("cover_scoped"):
             # `order_lives` is keyed on order_hash and carries no (run, seq), so the
             # criteria join goes through the placement row in `events`. The predicate
@@ -1329,7 +1353,7 @@ class MetricEngine:
                          f" AND e.event_type = 'trait_offer' AND {cover})")
             args.extend(cargs)
         rows = self.conn.execute(
-            f"SELECT ol.t_place, ol.t_term, ol.expiration_ts, ol.{col} FROM order_lives ol "
+            f"SELECT ol.t_place, ol.t_term, ol.expiration_ts, ol.{col} FROM order_lives ol{hint} "
             f"WHERE {' AND '.join(where)}", args)
         live: list[tuple[float, float, float]] = []
         for t_place, t_term, exp_ts, price in rows:

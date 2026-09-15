@@ -3521,3 +3521,43 @@ bugs:
     the deploy should be judged on took_ms falling to seconds.
   regression_test:
     - tests/selftest.py::test_analyze_runs_on_growth_not_on_every_fold
+- id: BUG-20260914-089
+  summary: "top_item_bid over 24 h took 18 s on the main tab and a trait-filtered series 14-24 s on the Traits tab: the observed-book path pulled one row per event into Python to bucket it (1.35 M item bids a day), and a trait-filtered standing leg walked every life of the kind before applying the token filter"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T20:40:00-05:00"
+  occurred_at: "2026-09-14T19:43:00-05:00"
+  resolved_at: "2026-09-14T21:00:00-05:00"
+  detected_by: "the request log ('slow request: /api/trait_series?...&range=24h took 23.9s') and a timed /api/series?metric=top_item_bid&range=24h from the built-in browser (18.0 s, book=observed); EXPLAIN on the snapshot"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 1263}
+  - {file: src/navanax/metrics.py, line: 1318}
+  - {file: src/navanax/normalize.py, line: 387}
+  requirement: REQ-N-16
+  data_impact: None. The SQL bucket path is asserted equal to the row path on every bucket for six metrics, three intervals and both denominations.
+  root_cause: >-
+    _bucketed fetched (valid_ts, price) for every event in the window and
+    bucketed in Python, for every aggregation. Sub-day buckets are UTC-aligned
+    arithmetic, so MAX/MIN/SUM/COUNT never needed the rows. _standing_live
+    under a trait filter used ix_lives_standing (collection, event_type,
+    t_place, t_term) and applied `token_id IN (...)` to every life of the kind
+    afterwards.
+  fix: >-
+    Sub-day MAX/MIN/SUM/COUNT group in SQL (`CAST(valid_ts/dur AS INTEGER)*dur`)
+    over a new covering index ix_events_coll_type_price (collection,
+    event_type, valid_ts, price_eth, price_usd); MEDIAN and day-or-longer
+    buckets keep the row path. A new ix_lives_token (collection, event_type,
+    token_id, t_place) lets a trait-filtered standing leg seek the filter's
+    tokens, and _standing_live reads it INDEXED BY when a filter is present.
+  monitor_gap: >-
+    The unfiltered standing item-bid leg (immediacy_cost and top_item_bid on
+    the standing book over 7 d and 30 d, survival over 7 d) still sweeps every
+    bid life in the window in Python: 1.35 M a day. That is the next design
+    item, not a query fix -- bucket extremes maintained by the fold.
+  regression_test:
+    - tests/selftest.py::test_observed_series_aggregates_in_sql_and_agrees_with_the_row_path
+    - tests/selftest.py::test_metric_engine_contract
