@@ -1297,13 +1297,26 @@ every row of the day was fetched. The same instants as numbers sit in the new
 maker index; the list is now index-only and the strings are made from the
 numbers.
 
+**BUG-20260914-091 (S1/P0).** The Traits tab's token table never loaded: the
+screener took 518 s, because it still took each token's best ask and bid over
+every placement event with the standing predicate's per-row subqueries — the
+exact shape BUG-083 removed from the live book one PR earlier. Nobody grepped
+for the second copy. It now reads the open lives the way the live book does.
+
+**BUG-20260914-092 (S2/P1).** Every chart's x axis ran from Sept 10 to now
+whatever range was chosen: gap shading drew all 276 gaps in the register and the
+axis grew to fit them. Shapes are clipped to the series' window and the axis is
+pinned to it. Two design calls taken with the Operator in the same pass: the top
+item bid (a bid on a rare token, ten times the floor) draws on its own right-hand
+axis; the live book shows one row per token with an ×N badge.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-89 of 90 logged bugs are fixed.
+91 of 92 logged bugs are fixed.
 
 ### The lesson
 

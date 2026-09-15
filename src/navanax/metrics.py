@@ -1747,6 +1747,8 @@ class MetricEngine:
                 "book": "standing",
                 "kind": "trait_set",
                 "interval_id": iv_id,
+                "range": {"start": datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
+                          "end": datetime.fromtimestamp(end, tz=timezone.utc).isoformat()},
                 "denomination": denom,
                 "trait_filter": traits,
                 "clauses": len(traits),
@@ -2807,12 +2809,32 @@ class MetricEngine:
         for tid, tt, v in self.conn.execute("SELECT token_id, trait_type, value FROM traits WHERE collection = ?", (collection,)):
             if tid in ids:
                 tr.setdefault(tid, {})[tt] = v
-        standing, sargs = standing_sql("e", now_ts)      # one definition, shared with live_book
-        live = f"""SELECT e.token_id, MIN(e.{col}), MAX(e.{col}) FROM events e
-                   WHERE e.collection = ? AND e.event_type = ? AND e.order_hash IS NOT NULL AND e.token_id IS NOT NULL
-                     AND {standing}{self.dedup_where('e')} GROUP BY e.token_id"""
-        ask = {t: lo for t, lo, _ in self.conn.execute(live, (collection, "item_listed", *sargs))}
-        bid = {t: hi for t, _, hi in self.conn.execute(live, (collection, "item_received_bid", *sargs))}
+        # BUG-20260914-091. This used to take MIN/MAX over EVERY placement event
+        # of the kind with the standing predicate's EXISTS subqueries per row --
+        # the BUG-083 shape again, 518 s live. order_lives IS the book: the open
+        # lives come off ix_lives_open (t_term IS NULL) and ix_lives_term (t_term
+        # in the future), exactly as live_book reads them, grouped per token.
+        live = f"""SELECT token_id, MIN(p), MAX(p) FROM (
+                     SELECT ol.token_id AS token_id, ol.{col} AS p
+                     FROM order_lives ol INDEXED BY ix_lives_open
+                     WHERE ol.collection = ? AND ol.event_type = ? AND ol.t_term IS NULL
+                       AND ol.placement_seen = 1 AND ol.t_place IS NOT NULL AND ol.t_place <= ?
+                       AND ol.exit_reason <> 'unknown' AND ol.token_id IS NOT NULL AND ol.{col} IS NOT NULL
+                       AND (ol.expiration_ts IS NULL OR ol.expiration_ts > ?)
+                     UNION ALL
+                     SELECT ol.token_id, ol.{col}
+                     FROM order_lives ol INDEXED BY ix_lives_term
+                     WHERE ol.collection = ? AND ol.t_term > ? AND ol.event_type = ?
+                       AND ol.placement_seen = 1 AND ol.t_place IS NOT NULL AND ol.t_place <= ?
+                       AND ol.exit_reason <> 'unknown' AND ol.token_id IS NOT NULL AND ol.{col} IS NOT NULL
+                       AND (ol.expiration_ts IS NULL OR ol.expiration_ts > ?)
+                   ) GROUP BY token_id"""
+
+        def per_token(etype: str) -> list[tuple[str, float, float]]:
+            return self.conn.execute(live, (collection, etype, now_ts, now_ts,
+                                            collection, now_ts, etype, now_ts, now_ts)).fetchall()
+        ask = {t: lo for t, lo, _ in per_token("item_listed")}
+        bid = {t: hi for t, _, hi in per_token("item_received_bid")}
         last_sale: dict[str, tuple[float, str]] = {}
         for t, p, at in self.conn.execute(
                 f"""SELECT e.token_id, e.{col}, e.valid_at FROM events e

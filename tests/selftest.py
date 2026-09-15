@@ -7069,6 +7069,31 @@ def test_observed_series_aggregates_in_sql_and_agrees_with_the_row_path(tmp: Pat
     n.close()
 
 
+def test_ui_charts_stay_inside_their_window_and_the_book_is_per_token() -> None:
+    """BUG-20260914-092 and the Operator's two design calls of 2026-09-14.
+
+    - Gap shading used to draw EVERY gap in the register, so a 24 h chart's x axis
+      ran back to the Sept 10 outage; shapes are clipped to the series' window and
+      the axis pinned to it.
+    - The top item bid (a bid on a rare token, ten times the floor) draws on its
+      own right-hand axis so the floor and the collection offer stay readable.
+    - The live book shows one row per token with an "×N" badge for a token that
+      carries several standing orders.
+    """
+    html = (ROOT / "src" / "navanax" / "ui" / "index.html").read_text()
+    check("ui/window: gap shapes take the series basis and clip to its window",
+          "const gapShapes=b=>" in html and "!w||(z>w[0]&&a<w[1])" in html)
+    check("ui/window: every time chart pins its x axis to the query window (xwin)",
+          html.count("...xwin(") >= 5 and "const xwin=b=>" in html, str(html.count("...xwin(")))
+    check("ui/window: no chart still calls the unclipped gapShapes()",
+          "gapShapes()" not in html)
+    check("ui/prices: the top item bid draws on its own right-hand axis, dashed, and says so in its name",
+          "yaxis:'y2'" in html and "top item bid (right axis)" in html
+          and "yaxis2:{overlaying:'y',side:'right'" in html)
+    check("ui/book: the live book groups standing orders per token and badges the count",
+          "const perToken=rows=>" in html and "×${r.orders}" in html and "limit:25" in html)
+
+
 @needs("yaml")
 def test_ledger_chart_states_its_cap_and_never_samples_silently(tmp: Path) -> None:
     """design §8.1.3. "Chart this selection" caps at 5,000 rows and prints
