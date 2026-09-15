@@ -229,3 +229,32 @@ assumptions:
       covered END TO END is annotated. Partial coverage is deliberately not
       representable: every consumer of the register treats a gap as a unit.
     applies_to: [order_lives, health_dedup, redundant_stream, metrics_counts, gap_register]
+
+
+  - id: ASM-031
+    name: gap_mask_threshold
+    layer: derivation
+    decided: 2026-09-14
+    decided_by: orchestrator, from the Operator's page (18 of 24 hourly buckets blank after 1-3 s reconnect blips); for Operator review
+    owner: data-engineer
+    review: 2026-12-01
+    code: src/navanax/metrics.py::GAP_MASK_FRACTION, src/navanax/metrics.py::GAP_MASK_MIN_SECONDS
+    value:
+      mask_fraction: 0.10                  # a bucket is masked when blind time exceeds this share of it...
+      mask_min_seconds: 60.0               # ...AND this many seconds (max of the two is the threshold)
+      touched_buckets: keep_value          # a bucket under the threshold keeps its value
+      reported_as: [gap_touched_buckets, blind_seconds, gap_mask_rule]   # in every series basis
+      superseded_rule: any_overlap_masks_whole_bucket
+      changed_by: BUG-20260914-087
+    rationale: >
+      The OpenSea stream reconnects every ~30 minutes with a 1-3 s
+      "Service restarting" close. Under the previous rule any overlap masked
+      the whole bucket, so an hourly chart lost 18 of 24 hours while 99.9 %
+      of each had been observed. Masking is a statement about coverage, not
+      a remedy: a cancel lost inside a blip leaves its order standing in
+      every later bucket whether or not that one bucket is blank (the
+      irrecoverable classes are listed on every gap), so blanking the bucket
+      never made the reconstruction right -- it only hid the record. A COUNT
+      or SUM in a touched bucket is short by at most mask_fraction; the basis
+      says which buckets and by how many seconds, so the reader can judge.
+    applies_to: [series, multi, trait_series, kpis]

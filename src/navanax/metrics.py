@@ -91,6 +91,27 @@ BOOKS = ("standing", "observed")
 # told not to make in dashboard.py. Raised for the tech-lead.
 MIN_N_FOR_PERCENTILES = 30
 
+def _iso_utc(ts: float | None) -> str | None:
+    """Epoch seconds -> ISO-8601 in UTC; None stays None."""
+    return None if ts is None else datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+
+
+#: The bucket aggregations SQLite can do for us (BUG-20260914-089). MEDIAN is
+#: not among them: SQLite has no median and the Python path keeps the values.
+_SQL_AGG = {"MAX": "MAX", "MIN": "MIN", "SUM": "SUM", "COUNT": "COUNT"}
+
+# BUG-20260914-087 / ASM-031. A bucket is masked as "not listening" only when
+# the seconds we were blind in it exceed BOTH of these: a fraction of the
+# bucket and an absolute floor. Before, ANY overlap masked the whole bucket,
+# and the OpenSea stream reconnects every ~30 min with a 1-3 s "Service
+# restarting" blip -- so 18 of the last 24 hourly buckets were blank on the
+# Operator's page while 99.9 % of each of them had been observed. Buckets with
+# blind time under the threshold keep their value and are counted in the basis
+# as `gap_touched_buckets`, with `blind_seconds` per bucket, so the reader can
+# see them; a COUNT or SUM in such a bucket is short by at most that fraction.
+GAP_MASK_FRACTION = 0.10
+GAP_MASK_MIN_SECONDS = 60.0
+
 # How many PARTIAL offers travel with a verdict report as full detail. The
 # report is JSON on a localhost response and the page prints the first few; an
 # uncapped list reached 4.1 MB on the tech-lead's fixture, which is a page that
@@ -1248,14 +1269,32 @@ class MetricEngine:
         # PR-10: with two connections, every event both sockets saw is two rows,
         # and COUNT/SUM/MEDIAN over them would double. Empty string when there is
         # one connection, so the SQL is unchanged.
+        agg = spec["agg"]
+        out: dict[float, float] = {}
+        dur = int(interval["duration"]) if "duration" in interval else None
+        if agg in _SQL_AGG and dur is not None and dur < 86400:
+            # BUG-20260914-089. Sub-day buckets are UTC-aligned, so the bucket
+            # is arithmetic and MAX/MIN/SUM/COUNT can be grouped in SQL: one
+            # row per bucket comes back instead of one per event (1.35 M item
+            # bids a day for argonauts; 18 s in Python for `top_item_bid` over
+            # 24 h). Days and longer align to local midnight and MEDIAN needs
+            # the values, so those still take the row path below. The index
+            # hint is only sound when the WHERE starts from collection and
+            # event_type, which is every metric with `types`; the others are
+            # left to the planner.
+            expr = f"e.{col}" if spec["price"] else "1"
+            hint = " INDEXED BY ix_events_coll_type_price" if spec["types"] and not tf else ""
+            sql = (f"SELECT CAST(e.valid_ts / {dur} AS INTEGER) * {dur} AS b, {_SQL_AGG[agg]}({expr}) "
+                   f"FROM events e{hint} WHERE {' AND '.join(where)}{self.dedup_where('e')} GROUP BY b")
+            for b, v in self.conn.execute(sql, args):
+                out[float(b)] = float(v)
+            return out
         sql = (f"SELECT e.valid_ts, e.{col} FROM events e WHERE {' AND '.join(where)}"
                f"{self.dedup_where('e')} ORDER BY e.valid_ts")
         groups: dict[float, list[float]] = {}
         for ts, v in self.conn.execute(sql, args):
             b = bucket_of(ts, interval, self.tz)
             groups.setdefault(b, []).append(v if spec["price"] else 1.0)
-        agg = spec["agg"]
-        out: dict[float, float] = {}
         for b, vals in groups.items():
             if agg == "MAX":
                 out[b] = max(vals)
@@ -1302,10 +1341,12 @@ class MetricEngine:
                  "(ol.t_term IS NULL OR ol.t_term > ?)",
                  "(ol.expiration_ts IS NULL OR ol.expiration_ts > ?)"]
         args: list[Any] = [collection, spec["event_type"], horizon, start, start]
+        hint = ""
         if traits and spec["token_scoped"]:
             tf, targs = token_filter_sql(collection, traits, alias="ol")
             where.append(tf[len(" AND "):])
             args.extend(targs)
+            hint = " INDEXED BY ix_lives_token"      # seek the filter's tokens, not every life of the kind
         if spec.get("cover_scoped"):
             # `order_lives` is keyed on order_hash and carries no (run, seq), so the
             # criteria join goes through the placement row in `events`. The predicate
@@ -1317,7 +1358,7 @@ class MetricEngine:
                          f" AND e.event_type = 'trait_offer' AND {cover})")
             args.extend(cargs)
         rows = self.conn.execute(
-            f"SELECT ol.t_place, ol.t_term, ol.expiration_ts, ol.{col} FROM order_lives ol "
+            f"SELECT ol.t_place, ol.t_term, ol.expiration_ts, ol.{col} FROM order_lives ol{hint} "
             f"WHERE {' AND '.join(where)}", args)
         live: list[tuple[float, float, float]] = []
         for t_place, t_term, exp_ts, price in rows:
@@ -1909,26 +1950,39 @@ class MetricEngine:
                 if key in extra:
                     extra[key] = [0] * len(keys)
         gap_masked = 0
+        gap_touched = 0
+        blind_seconds = [0.0] * len(keys)
         if gaps and keys:
             widths = [keys[i + 1] - keys[i] for i in range(len(keys) - 1)] + [end - keys[-1]]
+            now_ts = now.timestamp()
             for i, k in enumerate(keys):
                 k_end = k + widths[i]
-                if any(gs < k_end and (ge is None or ge > k) for gs, ge in gaps):
-                    gap_masked += 1                # every bucket we were not listening in, valued or not
-                    raw[i] = None
-                    if parts:
-                        for leg in parts.values():
-                            leg[i] = None
-                        if pct is not None:
-                            pct[i] = None
-                    # A standing series has its own arrays and every one of them
-                    # is a claim about a window we were not listening in.
-                    for key in ("p10", "p90", "coverage"):
-                        if key in extra:
-                            extra[key][i] = None
-                    for key in ("n", "n_ask", "n_bid"):
-                        if key in extra:
-                            extra[key][i] = 0
+                observable = max(0.0, min(k_end, now_ts) - k)
+                blind = 0.0
+                for gs, ge in gaps:
+                    ge_eff = now_ts if ge is None else ge
+                    blind += max(0.0, min(k_end, ge_eff, now_ts) - max(k, gs))
+                blind_seconds[i] = round(blind, 3)
+                if blind <= 0.0:
+                    continue
+                if blind <= max(GAP_MASK_MIN_SECONDS, GAP_MASK_FRACTION * observable):
+                    gap_touched += 1               # observed for all but a blip: the value stands
+                    continue
+                gap_masked += 1                    # a bucket we were materially not listening in
+                raw[i] = None
+                if parts:
+                    for leg in parts.values():
+                        leg[i] = None
+                    if pct is not None:
+                        pct[i] = None
+                # A standing series has its own arrays and every one of them
+                # is a claim about a window we were not listening in.
+                for key in ("p10", "p90", "coverage"):
+                    if key in extra:
+                        extra[key][i] = None
+                for key in ("n", "n_ask", "n_bid"):
+                    if key in extra:
+                        extra[key][i] = 0
 
         values, basis = apply_transform(raw, transform)
         basis.update(book_basis)
@@ -1948,6 +2002,11 @@ class MetricEngine:
             "buckets": len(keys),
             "undefined_buckets": sum(1 for v in raw if v is None),
             "gap_masked_buckets": gap_masked,
+            "gap_touched_buckets": gap_touched,
+            "gap_mask_rule": (f"a bucket is masked when blind time exceeds max({GAP_MASK_MIN_SECONDS:.0f}s, "
+                              f"{GAP_MASK_FRACTION:.0%} of the bucket); touched buckets keep their value "
+                              "and their blind seconds are listed (ASM-031)"),
+            "blind_seconds": blind_seconds,
             "bucket_alignment": ("UTC" if "duration" in ispec and int(ispec["duration"]) < 86400
                                  else f"local midnight ({self.tz})"),
         })
@@ -2110,13 +2169,17 @@ class MetricEngine:
             "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? "
             "AND e.maker IS NOT NULL" + dq,
             (collection, start, end)).fetchone()[0]
+        # BUG-20260914-086. The planner grouped 2.8 M rows by maker through
+        # ix_events_coll_valid and fetched every ROW for its maker and type:
+        # 17-19 s live for one day. ix_events_coll_maker_type carries
+        # event_type, so this is an index-only walk in maker order.
         cur = self.conn.execute(
             """SELECT e.maker, COUNT(*) n,
                       SUM(e.event_type='item_received_bid') bids,
                       SUM(e.event_type='item_cancelled') cancels,
                       SUM(e.event_type='item_listed') listings
-               FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<?
-                 AND e.maker IS NOT NULL""" + dq + """
+               FROM events e INDEXED BY ix_events_coll_maker_type
+               WHERE e.collection=? AND e.maker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<?""" + dq + """
                GROUP BY e.maker ORDER BY n DESC LIMIT ?""", (collection, start, end, limit))
         rows = [dict(zip(("maker", "events", "bids", "cancels", "listings"), r, strict=True)) for r in cur]
         return {"total_events_with_maker": total, "top": rows,
@@ -2797,10 +2860,18 @@ class MetricEngine:
                 "trait_filter": traits or {}, "rows": page_rows}
 
     def event_mix(self, collection: str | None, start: float, end: float) -> list[dict[str, Any]]:
-        where = "valid_ts>=? AND valid_ts<?" + (" AND collection=?" if collection else "")
-        args: list[Any] = [start, end] + ([collection] if collection else [])
+        # BUG-20260914-086. Left to itself the planner walked ix_events_type_valid
+        # and fetched every ROW in the window to check its collection: 2.8 M row
+        # reads for one day of argonauts, 38-44 s live. ix_events_coll_type
+        # covers the whole question (collection, event_type, valid_ts), so the
+        # count is an index walk that never touches the table.
+        if collection:
+            where, hint = "e.collection=? AND e.valid_ts>=? AND e.valid_ts<?", " INDEXED BY ix_events_coll_type"
+            args: list[Any] = [collection, start, end]
+        else:
+            where, hint, args = "e.valid_ts>=? AND e.valid_ts<?", "", [start, end]
         cur = self.conn.execute(
-            f"SELECT e.event_type, COUNT(*) FROM events e WHERE {where}{self.dedup_where('e')}"
+            f"SELECT e.event_type, COUNT(*) FROM events e{hint} WHERE {where}{self.dedup_where('e')}"
             f" GROUP BY e.event_type ORDER BY 2 DESC", args)
         return [{"event_type": t, "n": n} for t, n in cur]
 
@@ -3181,6 +3252,11 @@ class MetricEngine:
         with_maker = self.conn.execute(
             "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? "
             "AND e.maker IS NOT NULL" + dq, (collection, start, end)).fetchone()[0]
+        # BUG-20260914-090. MIN/MAX(valid_at) -- the TEXT timestamp -- forced a
+        # row fetch for every one of the day's 2.8 M events (16.9-19.2 s
+        # measured). valid_ts is the same instant as a number and sits in
+        # ix_events_coll_maker_type with maker and event_type, so the whole
+        # table is an index-only walk; the ISO strings are made from the numbers.
         cur = self.conn.execute(
             """SELECT e.maker, COUNT(*) n,
                       SUM(e.event_type='item_received_bid') bids,
@@ -3189,9 +3265,9 @@ class MetricEngine:
                       SUM(e.event_type='item_sold') sold,
                       SUM(e.event_type='collection_offer') coll_offers,
                       SUM(e.event_type='trait_offer') trait_offers,
-                      MIN(e.valid_at), MAX(e.valid_at)
-               FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<?
-                 AND e.maker IS NOT NULL""" + dq + """
+                      MIN(e.valid_ts), MAX(e.valid_ts)
+               FROM events e INDEXED BY ix_events_coll_maker_type
+               WHERE e.collection=? AND e.maker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<?""" + dq + """
                GROUP BY e.maker HAVING n >= ? ORDER BY n DESC, e.maker ASC LIMIT ?""",
             (collection, start, end, max(0, int(min_events)), max(1, min(500, int(limit)))))
         rows = []
@@ -3200,7 +3276,8 @@ class MetricEngine:
                          "events_share": share(n, with_maker),
                          "bids": bids or 0, "cancels": cancels or 0, "listings": listings or 0,
                          "sales_as_maker": sold or 0, "collection_offers": co or 0,
-                         "trait_offers": to or 0, "first_at": first, "last_at": last})
+                         "trait_offers": to or 0,
+                         "first_at": _iso_utc(first), "last_at": _iso_utc(last)})
         distinct = self.conn.execute(
             "SELECT COUNT(DISTINCT e.maker) FROM events e WHERE e.collection=? AND e.valid_ts>=? "
             "AND e.valid_ts<? AND e.maker IS NOT NULL" + dq,

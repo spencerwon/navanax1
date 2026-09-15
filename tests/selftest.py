@@ -2177,6 +2177,16 @@ def test_metric_engine_contract(tmp: Path) -> None:
         "WHERE ol.collection=? AND ol.event_type=? AND ol.t_term IS NULL ORDER BY ol.price_eth", ("argonauts", "item_listed")))
     check("live book: standing asks come off ix_lives_open in price order -- no scan of events, no temp sort",
           "ix_lives_open" in plan and "TEMP B-TREE" not in plan, plan)
+    # BUG-20260914-089: a trait-filtered standing leg seeks the filter's tokens.
+    from navanax.traits import ensure_schema as _ensure_traits
+    _ensure_traits(eng.conn)
+    plan = " ".join(r[3] for r in eng.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT ol.t_place FROM order_lives ol INDEXED BY ix_lives_token WHERE ol.collection=? "
+        "AND ol.event_type=? AND ol.t_place IS NOT NULL AND ol.t_place < ? AND ol.token_id IN "
+        "(SELECT token_id FROM traits WHERE collection=? AND trait_type=? AND value IN (?))",
+        ("argonauts", "item_received_bid", 1.0, "argonauts", "Crown", "Corsair")))
+    check("standing/traits: a trait-filtered leg seeks ix_lives_token per token the filter names -- "
+          "not a walk of every life of the kind", "ix_lives_token (collection=? AND event_type=? AND token_id=?" in plan, plan)
     # now=11:00: the bid was CANCELLED at 10:19:02 (and would also have expired at 10:48);
     # the listing (#4027, a different order from the #8119 sale) still stands; so does the offer.
     check("metrics: live book -- the cancelled bid is gone, the unsold listing stands, the collection offer stands",
@@ -3150,7 +3160,50 @@ def test_series_gap_masking(tmp: Path) -> None:
     s = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now, gaps=[(gap_start, None)])
     check("metrics: an OPEN gap masks every bucket from its start onward, the sale included",
           s["raw"] == [0.0, 0.0, None, None, None, None], f"got {s['raw']}")
+    # BUG-20260914-087 / ASM-031: a reconnect blip does not blank an hour.
+    from navanax.metrics import GAP_MASK_FRACTION, GAP_MASK_MIN_SECONDS
+    blip = datetime(2026, 9, 9, 9, 15, 0, tzinfo=timezone.utc).timestamp()
+    s = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now,
+                   gaps=[(blip, blip + 2.0)])
+    check("metrics: a 2 s stream reconnect inside the 09:00 bucket leaves its value standing and is "
+          "reported as a TOUCHED bucket with its blind seconds, not as a hole",
+          s["raw"] == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0] and s["basis"]["gap_masked_buckets"] == 0
+          and s["basis"]["gap_touched_buckets"] == 1 and s["basis"]["blind_seconds"][4] == 2.0
+          and "ASM-031" in s["basis"]["gap_mask_rule"], f"got {s['raw']} {s['basis'].get('blind_seconds')}")
+    five = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now,
+                      gaps=[(blip, blip + 300.0)])
+    seven = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now,
+                       gaps=[(blip, blip + 420.0)])
+    check(f"metrics: the threshold is max({GAP_MASK_MIN_SECONDS:.0f}s, {GAP_MASK_FRACTION:.0%} of the bucket): "
+          "5 min blind in an hour stands, 7 min is masked",
+          five["raw"][4] == 0.0 and five["basis"]["gap_touched_buckets"] == 1
+          and seven["raw"][4] is None and seven["basis"]["gap_masked_buckets"] == 1,
+          f"5min {five['raw']} 7min {seven['raw']}")
+    two_blips = eng.series(metric="sales_count", collection="argonauts", interval="1h", range_="6h", now=now,
+                           gaps=[(blip, blip + 200.0), (blip + 1000.0, blip + 1200.0)])
+    check("metrics: blind time ADDS across several gaps in one bucket (200 s + 200 s = 400 s > 360 s: masked)",
+          two_blips["raw"][4] is None and two_blips["basis"]["blind_seconds"][4] == 400.0,
+          f"got {two_blips['raw']} {two_blips['basis']['blind_seconds']}")
     n.close()
+
+
+@needs("yaml")
+def test_gap_mask_threshold_matches_the_assumptions_registry() -> None:
+    """ASM-031 is stated in config/assumptions.yaml and enforced in metrics.py; the
+    two must not drift (the same contract as ASM-021)."""
+    import yaml
+
+    from navanax.metrics import GAP_MASK_FRACTION, GAP_MASK_MIN_SECONDS
+
+    doc = yaml.safe_load((ROOT / "config" / "assumptions.yaml").read_text())
+    asm = next((a for a in (doc.get("assumptions") or []) if a.get("id") == "ASM-031"), {})
+    val = asm.get("value") or {}
+    check("assumptions: ASM-031 (gap_mask_threshold) is in the registry with both numbers",
+          asm.get("name") == "gap_mask_threshold" and "mask_fraction" in val and "mask_min_seconds" in val,
+          str(asm)[:200])
+    check("assumptions: the registry's numbers ARE the ones metrics.py enforces",
+          val.get("mask_fraction") == GAP_MASK_FRACTION and val.get("mask_min_seconds") == GAP_MASK_MIN_SECONDS,
+          f"yaml {val} · code {GAP_MASK_FRACTION}, {GAP_MASK_MIN_SECONDS}")
 
 
 @needs("yaml")
@@ -6852,6 +6905,171 @@ def test_ledger_token_number_sorts_numerically(tmp: Path) -> None:
 
 
 @needs("yaml")
+def test_mix_and_makers_are_index_only_and_an_old_maker_index_is_rebuilt(tmp: Path) -> None:
+    """BUG-20260914-086. The event mix over a day fetched 2.8 M rows to check
+    their collection (38-44 s live) and the makers panel fetched every row for
+    its maker and type (17-19 s). Both must be answered from a covering index;
+    a store carrying the OLD three-column maker index must get the new one.
+    """
+    import sqlite3 as _sq
+
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer, ensure_ledger_indexes
+
+    db = tmp / "mixmakers.sqlite"
+    n = Normalizer(tmp / "empty-lz", db)
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    have = [r[2] for r in n.conn.execute("PRAGMA index_info(ix_events_coll_maker_type)")]
+    check("mix/makers: ix_events_coll_maker_type carries (collection, maker, valid_ts, event_type)",
+          have == ["collection", "maker", "valid_ts", "event_type"], str(have))
+    keep = [r[2] for r in n.conn.execute("PRAGMA index_info(ix_events_coll_maker)")]
+    check("mix/makers: the ledger's own ix_events_coll_maker is unchanged, so its maker sort still "
+          "ends in (valid_ts, rowid) and pages without a sort", keep == ["collection", "maker", "valid_ts"], str(keep))
+    plans = {}
+    for label, q, a in (
+        ("mix", "SELECT e.event_type, COUNT(*) FROM events e INDEXED BY ix_events_coll_type "
+                "WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? GROUP BY e.event_type ORDER BY 2 DESC",
+         ("argonauts", 0.0, 1.0)),
+        ("makers", "SELECT e.maker, COUNT(*) n, SUM(e.event_type='item_received_bid'), "
+                   "SUM(e.event_type='item_cancelled'), SUM(e.event_type='item_listed') "
+                   "FROM events e INDEXED BY ix_events_coll_maker_type WHERE e.collection=? AND e.maker IS NOT NULL "
+                   "AND e.valid_ts>=? AND e.valid_ts<? GROUP BY e.maker ORDER BY n DESC LIMIT ?",
+         ("argonauts", 0.0, 1.0, 10)),
+    ):
+        plans[label] = " | ".join(r[3] for r in n.conn.execute("EXPLAIN QUERY PLAN " + q, a))
+    check("mix/makers: the event mix is a COVERING walk of ix_events_coll_type -- no row is fetched",
+          "COVERING INDEX ix_events_coll_type" in plans["mix"], plans["mix"])
+    check("mix/makers: the makers ranking is a COVERING walk of ix_events_coll_maker_type -- no row is fetched",
+          "COVERING INDEX ix_events_coll_maker_type" in plans["makers"], plans["makers"])
+    # The engine's own methods run without error on an empty store and agree in shape.
+    check("mix/makers: the engine methods run on the widened index",
+          eng.event_mix("argonauts", 0.0, 1.0) == [] and eng.makers("argonauts", 0.0, 1.0)["top"] == [])
+    n.close()
+
+    # An index that exists under a listed name but over OTHER columns (an older
+    # definition) is rebuilt on open; CREATE IF NOT EXISTS alone would keep it.
+    old = _sq.connect(db)
+    old.execute("DROP INDEX ix_events_coll_maker_type")
+    old.execute("CREATE INDEX ix_events_coll_maker_type ON events(collection, maker)")
+    old.commit()
+    old.close()
+    n2 = Normalizer(tmp / "empty-lz", db)
+    have2 = [r[2] for r in n2.conn.execute("PRAGMA index_info(ix_events_coll_maker_type)")]
+    check("mix/makers: opening a store whose index has an OLD column list rebuilds it to the "
+          "current definition -- CREATE IF NOT EXISTS alone would have kept the old one",
+          have2 == ["collection", "maker", "valid_ts", "event_type"], str(have2))
+    check("mix/makers: ...and a second open changes nothing (idempotent)",
+          ensure_ledger_indexes(n2.conn) == []
+          and [r[2] for r in n2.conn.execute("PRAGMA index_info(ix_events_coll_maker_type)")] == have2)
+    n2.close()
+
+
+def test_analyze_runs_on_growth_not_on_every_fold(tmp: Path) -> None:
+    """BUG-20260914-088. ANALYZE ran after every fold that added a row; on a 15 GB
+    store it reads every index end to end, so a fold of 17,000 rows took 354 s
+    and the page was always minutes behind the stream. It must run when the
+    store has no statistics, and again only when `events` has grown by
+    ANALYZE_GROWTH -- never on every fold of a large store.
+    """
+    import navanax.normalize as _nm
+    from navanax.normalize import Normalizer
+
+    n = Normalizer(tmp / "empty-lz", tmp / "analyze.sqlite")
+    def add(k: int) -> None:
+        base = n.conn.execute("SELECT COALESCE(MAX(rowid),0) FROM events").fetchone()[0]
+        n.conn.executemany(
+            "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,event_type,collection,"
+            "token_id,order_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [("r", base + i, "f", "2026-09-09T00:00:00Z", "2026-09-09T00:00:00Z", 1.0, 1.0, "item_listed",
+              "argonauts", "1", f"0x{base + i}") for i in range(k)])
+        n.conn.commit()
+    n.conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
+    n.conn.commit()
+    saved = (_nm.ANALYZE_MIN_ROWS, _nm.ANALYZE_GROWTH)
+    _nm.ANALYZE_MIN_ROWS = 10           # pretend 10 rows is "large"
+    try:
+        add(20)
+        first = n._maybe_analyze()
+        has = n.conn.execute("SELECT COUNT(*) FROM sqlite_stat1").fetchone()[0]
+        check("analyze: a store with NO statistics is analyzed at once (the O(n^2) plan came from this)",
+              first is True and has > 0, f"ran={first} stat rows={has}")
+        add(1)
+        check("analyze: a large store that grew by 5% is NOT analyzed again on the next fold",
+              n._maybe_analyze() is False)
+        add(3)                            # 24 rows: +20% over the 20 analyzed
+        check("analyze: ...and is analyzed once it has grown by ANALYZE_GROWTH",
+              n._maybe_analyze() is True)
+    finally:
+        _nm.ANALYZE_MIN_ROWS, _nm.ANALYZE_GROWTH = saved
+        n.close()
+    # A store that already carries statistics counts growth from its size at open.
+    n2 = Normalizer(tmp / "empty-lz", tmp / "analyze.sqlite")
+    try:
+        check("analyze: a store opened WITH statistics is not re-analyzed on its first fold",
+              n2._maybe_analyze() is False and n2._analyzed_rows == 24, str(n2._analyzed_rows))
+    finally:
+        n2.close()
+
+
+@needs("yaml")
+def test_observed_series_aggregates_in_sql_and_agrees_with_the_row_path(tmp: Path) -> None:
+    """BUG-20260914-089. `top_item_bid` over 24 h took 18 s live: one row per
+    event (1.35 M item bids a day) pulled into Python to be bucketed. Sub-day
+    buckets are UTC-aligned arithmetic, so MAX/MIN/SUM/COUNT group in SQL over a
+    covering index. The SQL path must agree with the row path to the float, and
+    MEDIAN and day-or-longer buckets must still take the row path.
+    """
+    import random
+
+    import navanax.metrics as _mm
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+
+    n = Normalizer(tmp / "empty-lz", tmp / "obs.sqlite")
+    rnd = random.Random(89)
+    base = 1_757_000_000.0                    # 2025-09-04T14:13:20Z, mid-bucket on purpose
+    rows = []
+    for i in range(3000):
+        ts = base + rnd.uniform(0, 3 * 86400)
+        et = ("item_received_bid", "item_sold", "item_listed", "collection_offer")[i % 4]
+        price = round(rnd.uniform(0.1, 3.0), 4)
+        rows.append(("r", i, "f", "x", "x", ts, ts, et, "argonauts", str(i % 50), f"0xh{i}",
+                     price, price * 2500.0))
+    n.conn.executemany(
+        "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,event_type,collection,"
+        "token_id,order_hash,price_eth,price_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    n.conn.commit()
+    iv = load_intervals(ROOT / "config" / "intervals.yaml")
+    eng = MetricEngine(n.conn, iv, "America/Chicago")
+    start, end = base + 3600, base + 2 * 86400 + 1234
+    saved = dict(_mm._SQL_AGG)
+    for metric in ("top_item_bid", "bid_count", "volume", "sales_count", "floor_ask", "sale_price"):
+        for interval in ("5m", "1h", "1d"):
+            spec = iv["intervals"][interval]
+            for denom in ("ETH", "USD"):
+                sql_path = eng._bucketed(metric, "argonauts", denom, start, end, spec)
+                _mm._SQL_AGG.clear()                       # force the row path
+                try:
+                    row_path = eng._bucketed(metric, "argonauts", denom, start, end, spec)
+                finally:
+                    _mm._SQL_AGG.update(saved)
+                same = (set(sql_path) == set(row_path)
+                        and all(abs(sql_path[k] - row_path[k]) <= 1e-9 * max(1.0, abs(row_path[k]))
+                                for k in sql_path))
+                check(f"observed/sql: {metric} {interval} {denom} -- the SQL bucket path and the row path "
+                      f"agree on every bucket ({len(sql_path)} buckets)", same and len(sql_path) > 0,
+                      f"sql={list(sql_path.items())[:3]} rows={list(row_path.items())[:3]}")
+    plan = " | ".join(r[3] for r in n.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT CAST(e.valid_ts / 3600 AS INTEGER) * 3600 AS b, MAX(e.price_eth) "
+        "FROM events e INDEXED BY ix_events_coll_type_price WHERE e.collection = ? AND e.valid_ts >= ? "
+        "AND e.valid_ts < ? AND e.event_type IN (?) AND e.price_eth IS NOT NULL GROUP BY b",
+        ("argonauts", start, end, "item_received_bid")))
+    check("observed/sql: the aggregation is a COVERING walk of ix_events_coll_type_price -- no row is fetched",
+          "COVERING INDEX ix_events_coll_type_price" in plan, plan)
+    n.close()
+
+
+@needs("yaml")
 def test_ledger_chart_states_its_cap_and_never_samples_silently(tmp: Path) -> None:
     """design §8.1.3. "Chart this selection" caps at 5,000 rows and prints
     `charting the 5,000 most recent of 41,208`. A silent sample is a chart whose
@@ -6893,6 +7111,27 @@ def test_wallet_card_percentages_carry_their_counts(tmp: Path) -> None:
     n, eng, _ = _ledger_store(tmp, "wallet-pct.sqlite")
     w = _lwin()
     lst = eng.wallets("argonauts", w["start"], w["end"], limit=20)
+    # BUG-20260914-090: the ranked list is an index-only walk, and first/last are
+    # the SAME instants the TEXT timestamps carried, now derived from valid_ts.
+    plan = " | ".join(r[3] for r in eng.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT e.maker, COUNT(*) n, SUM(e.event_type='item_sold'), MIN(e.valid_ts), "
+        "MAX(e.valid_ts) FROM events e INDEXED BY ix_events_coll_maker_type WHERE e.collection=? AND "
+        "e.maker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<? GROUP BY e.maker ORDER BY n DESC LIMIT 20",
+        ("argonauts", w["start"], w["end"])))
+    check("wallets: the ranked list is a COVERING walk of ix_events_coll_maker_type -- no row is fetched",
+          "COVERING INDEX ix_events_coll_maker_type" in plan, plan)
+    from navanax.normalize import iso_to_ts as _i2t
+    agree = all(
+        abs(_i2t(r["first_at"]) - eng.conn.execute(
+            "SELECT MIN(valid_ts) FROM events WHERE collection=? AND maker=? AND valid_ts>=? AND valid_ts<?",
+            ("argonauts", r["address"], w["start"], w["end"])).fetchone()[0]) < 1e-6
+        and abs(_i2t(r["last_at"]) - eng.conn.execute(
+            "SELECT MAX(valid_ts) FROM events WHERE collection=? AND maker=? AND valid_ts>=? AND valid_ts<?",
+            ("argonauts", r["address"], w["start"], w["end"])).fetchone()[0]) < 1e-6
+        for r in lst["rows"])
+    check("wallets: first_at/last_at are ISO strings of the wallet's real first and last valid_ts in the window",
+          lst["rows"] and agree and all(r["first_at"].endswith("+00:00") for r in lst["rows"]),
+          str([(r["address"][:10], r["first_at"], r["last_at"]) for r in lst["rows"][:2]]))
     bad = [r["address"] for r in lst["rows"]
            if not isinstance(r.get("events_share"), dict)
            or set(r["events_share"]) != {"pct", "n", "of"}]
