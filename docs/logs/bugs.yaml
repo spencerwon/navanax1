@@ -3319,3 +3319,47 @@ bugs:
     and are logged as the next items, not folded into this one.
   regression_test:
     - tests/selftest.py::test_metric_engine_contract
+
+- id: BUG-20260914-084
+  summary: "After deploying BUG-083 the main tab still did not load: every page request shared ONE read-only connection under one lock, so a single slow request (a Flow-tab survival curve, a 24 h wallets table, any cold-cache query) held /api/status and every other panel for as long as it ran -- 25 s+ measured on /api/status with /api/meta answering in 24 ms -- and the log said nothing about which request it was, only 150 broken-pipe tracebacks from browsers that had given up"
+  severity: S1
+  priority: P0
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-09-14T19:15:00-05:00"
+  occurred_at: "2026-09-14T18:59:00-05:00"
+  resolved_at: "2026-09-14T19:40:00-05:00"
+  detected_by: "timing /api/meta (24 ms) against /api/status (aborted at 25 s) on the deployed dashboard from the built-in browser; the log carried no request timings, only BrokenPipeError tracebacks"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/dashboard.py, line: 110}
+  - {file: src/navanax/dashboard.py, line: 1243}
+  requirement: REQ-N-16
+  data_impact: None to the record; availability only.
+  root_cause: >-
+    BUG-080 moved page reads off the fold's connection onto one shared read-only
+    connection guarded by `read_lock`. That fixed "the page waits for the fold"
+    and left "the page waits for the slowest panel": SQLite serialises statements
+    on one connection, and the lock made that explicit. The Operator's open tab
+    refreshes every 10 s; one panel that takes minutes (survival_prepare over
+    7 d measured 128.9 s, and any first query on a cold 14.5 GB file) therefore
+    stalls status, the KPIs and every chart behind it. The server logged no
+    request durations, so the stall could not be attributed without guessing.
+  fix: >-
+    Page requests each take a read-only connection (with its own MetricEngine)
+    from a small pool via `Dashboard.reader()`; up to READER_POOL_MAX idle pairs
+    are kept, extra concurrent requests open a throwaway connection, and the
+    pool is dropped whenever the store is reopened or degrades. WAL mode lets
+    readers run beside the writer, so a slow panel is now slow alone. The fold
+    invalidates every pooled engine's connection-count cache as it did the
+    shared one. Every request slower than SLOW_REQUEST_SECONDS (2 s) is logged
+    with its path and query; a browser that gives up before the answer is sent
+    is one WARNING line, not a 75-line traceback.
+  monitor_gap: >-
+    The snapshot timing method of BUG-083 timed each endpoint one at a time and
+    could not show that they serialised behind each other in the server. The
+    slow-request log closes the attribution gap: the next stall names its
+    endpoint. The survival and wallets timings themselves are still open.
+  regression_test:
+    - tests/selftest.py::test_one_slow_request_does_not_hold_up_the_others

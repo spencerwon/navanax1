@@ -11451,6 +11451,73 @@ def test_page_requests_do_not_wait_for_the_fold(tmp: Path) -> None:
 
 
 @needs("yaml")
+def test_one_slow_request_does_not_hold_up_the_others(tmp: Path) -> None:
+    """BUG-20260914-084. Every page request shared ONE read connection under one
+    lock, so a 7-day survival curve on the Flow tab held /api/status for minutes
+    and the page showed nothing. Requests now each take a pooled connection: a
+    request that is slow is slow ALONE.
+    """
+    import shutil as _sh
+    import threading as _th
+    import time as _time
+
+    import yaml as _yaml
+
+    import navanax.dashboard as _dm
+    from navanax.dashboard import Dashboard
+
+    db = _pr10_stale_lives_store(tmp, "pool")
+    root = tmp / "pool-root"
+    (root / "config").mkdir(parents=True)
+    for f in ("base.yaml", "intervals.yaml", "watchlist.yaml"):
+        _sh.copy(ROOT / "config" / f, root / "config" / f)
+    cfg = _yaml.safe_load((root / "config" / "base.yaml").read_text())
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    _sh.copy(db, root / cfg["analytical"]["path"])
+    dash = Dashboard(root, cfg, ["argonauts"])
+    try:
+        with dash.reader() as (c1, e1):
+            with dash.reader() as (c2, e2):
+                check("pool: two requests in flight read through two DIFFERENT connections, "
+                      "each with its own engine",
+                      c1 is not c2 and e1.conn is c1 and e2.conn is c2 and c1 is not dash.norm.conn)
+                check("pool: ...and both are read-only",
+                      _raises(lambda: c1.execute("CREATE TABLE zz(x)")))
+        check("pool: idle connections are kept for the next request, up to the cap",
+              0 < len(dash._readers) <= _dm.READER_POOL_MAX, str(len(dash._readers)))
+        # A request that holds its connection for a while must not delay another.
+        released = _th.Event()
+        def slow_request():
+            with dash.reader():
+                released.wait(timeout=8)
+        t = _th.Thread(target=slow_request, daemon=True)
+        t.start()
+        _time.sleep(0.1)
+        t0 = _time.monotonic()
+        st = dash.api_status()
+        book = dash.api_book({"collection": "argonauts"})
+        took = _time.monotonic() - t0
+        released.set()
+        t.join(timeout=10)
+        check("pool: status and the book answered WHILE another request held its connection "
+              f"({took:.2f}s, the slow one held for 8s)",
+              took < 3.0 and "store" in st and isinstance(book, dict), f"{took:.2f}s")
+        # The fold invalidates the per-connection cache of every pooled engine.
+        for _, eng in dash._readers:
+            eng._multi_conn = True
+        dash._sync_once()
+        check("pool: a fold invalidates the per-connection cache of every pooled engine, "
+              "as it does for the shared one (PR-10)",
+              all(eng._multi_conn is None for _, eng in dash._readers))
+        # Closing the store drops the pool: no reader may outlive the file it read.
+        dash._drop_readers()
+        check("pool: closing the store closes every pooled reader", dash._readers == [])
+    finally:
+        if dash.norm is not None:
+            dash.norm.close()
+
+
+@needs("yaml")
 def test_order_lives_method_mixed_is_reported_on_health_as_warn(tmp: Path) -> None:
     """A reader cannot fix it, so it must say so -- with the sentence that names the fix.
 
