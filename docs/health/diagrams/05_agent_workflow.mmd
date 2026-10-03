@@ -1,0 +1,22 @@
+%% docs/health/06_ARCHITECTURE.md §5 — how a model change flows through the agents (WF-H-01..03)
+sequenceDiagram
+  participant Op as Spencer (L4)
+  participant Or as orchestrator
+  participant Cu as literature-curator
+  participant Mo as physiology-modeler
+  participant Ri as rigor-lead (independent)
+  participant Sa as safety-reviewer (independent)
+  participant TL as tech-lead
+  Op->>Or: "add potassium dynamics"
+  Or->>Cu: register expectations BEFORE any run (WF-H-02)
+  Cu-->>Or: expects[] with ranges, kinds, evidence
+  Or->>Mo: implement behind module flag (enabled: false)
+  Mo-->>Mo: MODEL_VERSION bump, golden regenerated, tests green
+  Mo-->>Ri: hand off (modeler's involvement in validation ends)
+  Ri-->>Ri: re-derive params, ±20 % perturbation, planted KB violations
+  Ri-->>TL: PASS / BLOCK with findings
+  TL-->>Sa: user-facing text and surfaces
+  Sa-->>TL: HREQ-S checklist result
+  TL->>Op: PR with verified claims, deferred items, risk paragraph
+  Op-->>Or: approve → merge (module still off)
+  Or->>Op: enable/<module> PR (one line) → approve

@@ -1,0 +1,13 @@
+%% docs/health/06_ARCHITECTURE.md §3 — the path from a citation to a chart, and the gate at each arrow
+flowchart LR
+  E["Evidence record<br/>ev:robertson-athar-1976<br/>DOI · PMID · quote · accessed"]
+  VR["Verification<br/>method · checkedOn · retraction · errata"]
+  Q["Quantity<br/>value 281.0 · unit mOsm/kg<br/>range [278, 285.5] · grade A-primary"]
+  P["params.json row<br/>adh_threshold<br/>engineParam mirror checked by kb-check"]
+  M["model.py block M4<br/>ADH_target = max(0, slope · (osm − threshold))"]
+  S["simulate()<br/>default params · scenario · dt · seed"]
+  MC["simulate_mc()<br/>n samples · q05 · q50 · q95"]
+  H["evaluate_expectations()<br/>one row per registered expectation<br/>pass · fail · not_checked"]
+  C["Chart<br/>band + median + reference lines<br/>disclaimer · evidence chip · grade"]
+  E --> VR --> Q --> P --> M --> S --> MC --> H --> C
+  P -.->|"paramsFor(key): influence screen"| C

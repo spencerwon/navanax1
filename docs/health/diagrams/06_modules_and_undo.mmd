@@ -1,0 +1,17 @@
+%% docs/health/06_ARCHITECTURE.md §6 — modules, dependency edges, and removal order (against the arrows)
+flowchart TB
+  ref["reference-v1<br/>reference/metabolic-map-v1/<br/>(verbatim, read-only)"]
+  err["errors<br/>src/health/errors.py"]
+  eng["engine-v1<br/>src/health/engine/ · tests/health_selftest.py<br/>golden_v1.json · tools/health_golden.mjs"]
+  kb["kb-v1<br/>src/health/kb/ · tests/health_kb_selftest.py"]
+  cli["cli<br/>src/health/cli.py"]
+  proc["process<br/>docs/health/ · .claude/agents/health-*.md<br/>config/health/ · gates and CI steps"]
+  ref --> eng
+  ref --> kb
+  err --> eng
+  err --> kb
+  eng --> cli
+  kb --> cli
+  proc -.-> eng
+  proc -.-> kb
+  proc -.-> cli

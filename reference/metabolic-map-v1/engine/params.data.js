@@ -1,0 +1,796 @@
+// AUTO-GENERATED mirror of engine/params.json (the canonical table) so the engine loads
+// synchronously in Node and in browsers without JSON import attributes. DO NOT EDIT BY HAND.
+// Regenerate after editing params.json:   REGEN_PARAMS=1 node --test tests/engine.test.mjs
+// tests/engine.test.mjs fails if this file and params.json disagree.
+export default {
+ "V_ecf_0": {
+  "value": 14,
+  "unit": "L",
+  "range": [
+   12,
+   16
+  ],
+  "description": "Reference extracellular fluid volume, 70 kg adult (steady-state ECF volume at baseline intake).",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook 70 kg adult: ECF ~14 L (~20% body mass). Range is ±~15% inter-individual; scale with body mass in V2."
+ },
+ "V_icf_0": {
+  "value": 28,
+  "unit": "L",
+  "range": [
+   24,
+   32
+  ],
+  "description": "Reference intracellular fluid volume, 70 kg adult.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook ~28 L (~40% body mass). Range kind: curator assumption around a textbook point value (audit F-10)."
+ },
+ "K_icf_0": {
+  "value": 3920,
+  "unit": "mmol",
+  "range": [
+   3500,
+   4300
+  ],
+  "description": "Reference total intracellular potassium (≈140 mmol/L × 28 L).",
+  "evidence": [
+   "ev:guyton-hall-2021",
+   "ev:edelman-1958"
+  ],
+  "grade": "B-textbook",
+  "notes": "Each mmol of ICF K is counted with its accompanying anion as 2 mOsm (Edelman relation). K is not used by any V1 scenario except via the input kIn_mmolh. Range kind: curator assumption around a textbook point value (audit F-10)."
+ },
+ "glucose_mgdl": {
+  "value": 90,
+  "unit": "mg/dL",
+  "range": [
+   75,
+   100
+  ],
+  "description": "Plasma glucose, held constant in V1 (enters osmolality as glucose/18).",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Fasting normal range. Constant in V1 (no glucose dynamics)."
+ },
+ "bun_mgdl": {
+  "value": 14,
+  "unit": "mg/dL",
+  "range": [
+   8,
+   20
+  ],
+  "description": "Blood urea nitrogen, held constant in V1 (enters osmolality as BUN/2.8).",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Urea is treated as equal-concentration in ECF and ICF, so it never drives water shift. Range kind: textbook normal reference interval; the model holds BUN constant (audit F-10)."
+ },
+ "gut_water_thalf_h": {
+  "value": 0.2,
+  "unit": "h",
+  "range": [
+   0.13,
+   0.33
+  ],
+  "description": "Half-time of absorption of ingested plain water (first-order gut -> ECF).",
+  "evidence": [
+   "ev:peronnet-2012",
+   "ev:leiper-2015"
+  ],
+  "grade": "A-primary",
+  "notes": "D2O study: absorption half-life ~11-13 min (0.18-0.22 h). Range widened to 8-20 min to cover drink volume/temperature/gastric-emptying variability described by Leiper (assumption on the bounds)."
+ },
+ "gut_na_thalf_h": {
+  "value": 0.5,
+  "unit": "h",
+  "range": [
+   0.25,
+   1.5
+  ],
+  "description": "Half-time of intestinal absorption of ingested sodium (first-order gut -> ECF).",
+  "evidence": [
+   "ev:leiper-2015"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. No verified human half-time found for oral NaCl absorption with food; plausibly slower than water. Log-uniform sampling (range spans 6x)."
+ },
+ "osm_eq_tau_h": {
+  "value": 0.083,
+  "unit": "h",
+  "range": [
+   0.03,
+   0.25
+  ],
+  "description": "Time constant for osmotic water equilibration between ECF and ICF.",
+  "evidence": [
+   "ev:peronnet-2012",
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION (5 min). Cell membranes equilibrate osmotically within minutes (textbook, qualitative); D2O tracer distribution half-life 12.5 min (Peronnet) used as a loose upper bound. Model uses a linear flux J = Lp·(osm_icf − osm_ecf) with Lp derived from this tau."
+ },
+ "adh_threshold": {
+  "value": 281,
+  "unit": "mOsm/kg",
+  "range": [
+   278,
+   285.5
+  ],
+  "description": "Plasma osmolality at which ADH (AVP) secretion begins (x-intercept of AVP-osmolality regression) at normal volume.",
+  "evidence": [
+   "ev:robertson-athar-1976",
+   "ev:thompson-1986",
+   "ev:hughes-2018"
+  ],
+  "grade": "A-primary",
+  "notes": "Robertson & Athar 1976: 281.0 (recumbent), 277.8 (upright). Thompson 1986: 285; Hughes 2018 pooled AVP threshold 284.3 ± 0.71."
+ },
+ "adh_slope": {
+  "value": 0.35,
+  "unit": "pg/mL per mOsm/kg",
+  "range": [
+   0.25,
+   0.45
+  ],
+  "description": "Slope of plasma AVP vs plasma osmolality above threshold.",
+  "evidence": [
+   "ev:robertson-athar-1976",
+   "ev:thompson-1986"
+  ],
+  "grade": "A-primary",
+  "notes": "Robertson & Athar group regressions 0.31-0.35 pg/mL per mOsm/kg; Thompson 0.4 pmol/L per mOsm/kg (~0.43 pg/mL). Individual slopes vary more widely; range bounds are assumption around reported group values."
+ },
+ "adh_vol_shift": {
+  "value": 0.3,
+  "unit": "mOsm/kg per % ECF volume deviation",
+  "range": [
+   0.1,
+   0.6
+  ],
+  "description": "Shift of the ADH osmotic threshold per 1% change in ECF volume (hypovolemia lowers threshold, expansion raises it).",
+  "evidence": [
+   "ev:robertson-athar-1976"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION for magnitude. Direction and order of magnitude from Robertson & Athar (orthostasis -3.2 mOsm/kg; volume expansion +1.0 mOsm/kg), but the % volume change in those manoeuvres is not reported in the abstract. Linear; the steep non-linear response to >10% hypovolemia is not modelled."
+ },
+ "adh_thalf_h": {
+  "value": 0.4,
+  "unit": "h",
+  "range": [
+   0.27,
+   0.5
+  ],
+  "description": "Plasma half-life of ADH (AVP).",
+  "evidence": [
+   "ev:baumann-dingman-1976"
+  ],
+  "grade": "A-primary",
+  "notes": "Mean 24.1 min (0.40 h) in 10 normal subjects. Range (16-30 min) is an assumption around the mean. NOTE: the task brief suggested 15-20 min; the verified primary value is 24 min."
+ },
+ "adh_ec50": {
+  "value": 2,
+  "unit": "pg/mL",
+  "range": [
+   1.2,
+   3
+  ],
+  "description": "Plasma AVP producing half-maximal urine concentrating effect (Hill curve, urine osmolality vs AVP).",
+  "evidence": [
+   "ev:robertson-shelton-athar-1976",
+   "ev:robertson-2001"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Shape (urine near-maximally concentrated at a few pg/mL) follows the Robertson relationship, but numeric figure values were not verified. Free shape parameter."
+ },
+ "adh_hill": {
+  "value": 2,
+  "unit": "1",
+  "range": [
+   1,
+   3
+  ],
+  "description": "Hill coefficient of the urine osmolality vs AVP curve.",
+  "evidence": [
+   "ev:robertson-shelton-athar-1976"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Free shape parameter."
+ },
+ "U_osm_min": {
+  "value": 50,
+  "unit": "mOsm/kg",
+  "range": [
+   40,
+   80
+  ],
+  "description": "Minimum urine osmolality (maximal water diuresis, ADH absent).",
+  "evidence": [
+   "ev:guyton-hall-2021",
+   "ev:baylis-1986"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook ~50 mOsm/L. Baylis 1986 observed 69 ± 3 mOsm/kg after sustained water load."
+ },
+ "U_osm_max": {
+  "value": 1200,
+  "unit": "mOsm/kg",
+  "range": [
+   900,
+   1400
+  ],
+  "description": "Maximum urine osmolality (maximal antidiuresis).",
+  "evidence": [
+   "ev:guyton-hall-2021",
+   "ev:phillips-1984"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook 1200-1400 mOsm/L in young adults; lower in the elderly (Phillips 1984). Range kind: curator assumption around textbook point values (upper end = textbook young-adult maximum; lower end allows reduced concentrating ability, not a sourced number) (audit F-10)."
+ },
+ "thirst_threshold": {
+  "value": 285.2,
+  "unit": "mOsm/kg",
+  "range": [
+   281,
+   287
+  ],
+  "description": "Plasma osmolality at which thirst sensation begins.",
+  "evidence": [
+   "ev:hughes-2018",
+   "ev:thompson-1986"
+  ],
+  "grade": "A-meta",
+  "notes": "Systematic review pooled threshold 285.23 ± 1.29 (95% CI). Thompson 1986: 281. Literature does NOT support thirst threshold 5-10 mOsm above ADH threshold; they are similar."
+ },
+ "thirst_slope": {
+  "value": 0.054,
+  "unit": "per mOsm/kg (fraction of 10-cm VAS)",
+  "range": [
+   0.04,
+   0.068
+  ],
+  "description": "Gain of thirst drive (0-1) per mOsm/kg above threshold.",
+  "evidence": [
+   "ev:hughes-2018"
+  ],
+  "grade": "A-meta",
+  "notes": "0.54 ± 0.07 (SEM) cm/mOsm/kg on a 10-cm visual analogue scale -> 0.054 per mOsm/kg on a 0-1 scale; range = mean ± 2 SEM."
+ },
+ "thirst_vol_gain": {
+  "value": 0.02,
+  "unit": "per % ECF volume loss",
+  "range": [
+   0,
+   0.05
+  ],
+  "description": "Additional thirst drive per 1% ECF volume depletion (hypovolemic thirst).",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Hypovolemic thirst exists (textbook, qualitative); magnitude not verified."
+ },
+ "thirst_tau_h": {
+  "value": 0.25,
+  "unit": "h",
+  "range": [
+   0.1,
+   0.5
+  ],
+  "description": "Time constant of thirst drive following its osmotic/volume target.",
+  "evidence": [
+   "ev:thompson-1986"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Thompson 1986 shows thirst tracks osmolality during infusion; lag not quantified. Thirst is an OUTPUT signal in V1 (it does not trigger drinking)."
+ },
+ "GFR_0": {
+  "value": 125,
+  "unit": "mL/min",
+  "range": [
+   100,
+   140
+  ],
+  "description": "Reference glomerular filtration rate, healthy adult.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook ~125 mL/min (~180 L/day). Range kind: curator assumption around a textbook point value (audit F-10)."
+ },
+ "gfr_map_exp": {
+  "value": 0.3,
+  "unit": "1",
+  "range": [
+   0.1,
+   0.6
+  ],
+  "description": "Elasticity of GFR to MAP (GFR ∝ (MAP/MAP_0)^exp); small because of autoregulation.",
+  "evidence": [
+   "ev:guyton-hall-2021",
+   "ev:hallow-2017"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION for magnitude. Autoregulation keeps GFR nearly constant over a wide MAP range (textbook, qualitative)."
+ },
+ "gfr_vol_exp": {
+  "value": 0.5,
+  "unit": "1",
+  "range": [
+   0,
+   1
+  ],
+  "description": "Elasticity of GFR to ECF volume (GFR ∝ (V_ecf/V_ecf_0)^exp).",
+  "evidence": [
+   "ev:hallow-2017"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Mild rise of GFR with volume expansion; Andersen 2002 found creatinine clearance did not measurably change after IV saline, which argues for a small value."
+ },
+ "MAP_0": {
+  "value": 93,
+  "unit": "mmHg",
+  "range": [
+   85,
+   100
+  ],
+  "description": "Reference mean arterial pressure.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Normal adult ~93 mmHg. Range kind: curator assumption around a textbook point value (audit F-10)."
+ },
+ "map_vol_exp": {
+  "value": 0.9,
+  "unit": "1",
+  "range": [
+   0.4,
+   1.5
+  ],
+  "description": "Elasticity of target MAP to ECF volume (MAP_target = MAP_0·(V_ecf/V_ecf_0)^exp).",
+  "evidence": [
+   "ev:guyton-1972",
+   "ev:hall-2016"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Structure from Guyton volume-pressure coupling; magnitude chosen so the chronic MAP-salt slope falls inside the He 2013 normotensive meta-analysis band (see chronic_high_salt_30d validation). Since D-2 (v1.0.1) this long-term elasticity is split into a fast share and a slow share (map_auto_frac) delivered through the state R_auto; the steady-state value is unchanged. He 2013 band [0.7, 3.2] recomputed with the normotensive subgroup's own urinary Na change (−75 mmol/24 h, BMJ full text, read 2026-10-01): unchanged; still approximate because SBP/DBP CI end-points are combined (audit F-06)."
+ },
+ "map_tau_h": {
+  "value": 4,
+  "unit": "h",
+  "range": [
+   1,
+   24
+  ],
+  "description": "Time constant of the FAST part of MAP following its volume-determined target (cardiac output; hours).",
+  "evidence": [
+   "ev:guyton-1972"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Fast (cardiac-output) MAP dynamics only; since D-2 (v1.0.1) slow whole-body autoregulation is the separate state R_auto (map_auto_frac, map_auto_tau_h). Log-uniform sampling."
+ },
+ "pn_gain": {
+  "value": 0.05,
+  "unit": "per mmHg",
+  "range": [
+   0.02,
+   0.1
+  ],
+  "description": "Pressure natriuresis: fractional Na excretion multiplied by exp(pn_gain·(MAP−MAP_0)).",
+  "evidence": [
+   "ev:guyton-1972",
+   "ev:hall-2016",
+   "ev:karaaslan-2005"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION for magnitude; mechanism is the renal function curve (Guyton 1972; Hall 2016). Calibrated jointly with map_vol_exp and aldo_vol_exp against He 2013 chronic BP-salt slope. He 2013 band [0.7, 3.2] recomputed with the normotensive subgroup's own urinary Na change (−75 mmol/24 h, BMJ full text, read 2026-10-01): unchanged; still approximate because SBP/DBP CI end-points are combined (audit F-06)."
+ },
+ "na_osm_gain": {
+  "value": 0.061,
+  "unit": "per mmol/L plasma Na",
+  "range": [
+   0.03,
+   0.09
+  ],
+  "description": "Osmotic natriuresis: fractional Na excretion multiplied by exp(na_osm_gain·([Na]−[Na]_ss)).",
+  "evidence": [
+   "ev:andersen-2002",
+   "ev:andersen-1998"
+  ],
+  "grade": "A-primary",
+  "notes": "Derived: Na excretion 291 vs 199 µmol/min with plasma Na +4.2 vs −2.0 mmol/L -> ln(291/199)/6.2 = 0.061 per mmol/L. Bounds are assumption (half / 1.5x). Andersen 1998 shows the effect depends on prior Na intake."
+ },
+ "aldo_tau_h": {
+  "value": 1.5,
+  "unit": "h",
+  "range": [
+   0.5,
+   4
+  ],
+  "description": "Time constant of aldosterone (relative) activity following its volume-determined target (secretion + genomic action lag).",
+  "evidence": [
+   "ev:hallow-2017"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Combines plasma kinetics and delayed genomic effect on distal Na reabsorption. Log-uniform sampling."
+ },
+ "aldo_vol_exp": {
+  "value": 10,
+  "unit": "1",
+  "range": [
+   5,
+   20
+  ],
+  "description": "Sensitivity of aldosterone target to ECF volume: Aldo_target = (V_ecf/V_ecf_0)^(−aldo_vol_exp).",
+  "evidence": [
+   "ev:he-2013",
+   "ev:hallow-2017"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION for magnitude. Direction supported by He 2013 (aldosterone rises when salt intake falls). Lumps renin-angiotensin-aldosterone axis into one volume-sensing gain. Calibrated jointly with map_vol_exp and pn_gain against the He 2013 chronic BP-salt band; He 2013 band [0.7, 3.2] recomputed with the normotensive subgroup's own urinary Na change (−75 mmol/24 h, BMJ full text, read 2026-10-01): unchanged; still approximate because SBP/DBP CI end-points are combined (audit F-06)."
+ },
+ "aldo_effect_exp": {
+  "value": 1,
+  "unit": "1",
+  "range": [
+   0.5,
+   1.5
+  ],
+  "description": "Effect of aldosterone on fractional Na excretion: FE ∝ Aldo^(−aldo_effect_exp).",
+  "evidence": [
+   "ev:hallow-2014"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Multiplicative-modifier structure as in Guyton-type models."
+ },
+ "anp_thalf_h": {
+  "value": 0.052,
+  "unit": "h",
+  "range": [
+   0.042,
+   0.06
+  ],
+  "description": "Plasma half-life of ANP.",
+  "evidence": [
+   "ev:yandle-1986"
+  ],
+  "grade": "A-primary",
+  "notes": "t1/2 2.5 min after bolus, 3.1 min after infusion (0.042-0.052 h); upper bound 3.6 min is assumption. Range kind: lower end and point value = reported half-lives; upper end = curator assumption (audit F-10)."
+ },
+ "anp_vol_exp": {
+  "value": 4,
+  "unit": "1",
+  "range": [
+   1,
+   8
+  ],
+  "description": "Sensitivity of ANP target to ECF volume: ANP_target = (V_ecf/V_ecf_0)^anp_vol_exp.",
+  "evidence": [
+   "ev:hallow-2017"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Atrial stretch proxied by ECF volume."
+ },
+ "anp_effect_exp": {
+  "value": 0.3,
+  "unit": "1",
+  "range": [
+   0,
+   0.6
+  ],
+  "description": "Effect of ANP on fractional Na excretion: FE ∝ ANP^anp_effect_exp.",
+  "evidence": [
+   "ev:andersen-1998",
+   "ev:andersen-2002"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION; deliberately weak: Andersen 1998/2002 found plasma ANP unchanged during salt-load natriuresis in humans."
+ },
+ "k_excr_gain": {
+  "value": 50,
+  "unit": "1",
+  "range": [
+   20,
+   100
+  ],
+  "description": "Gain of renal K excretion on relative ICF K: K_excr = kIn_base·exp(k_excr_gain·(K_icf/K_icf_0 − 1)).",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Placeholder K balance (plasma K not modelled in V1). Log-uniform sampling."
+ },
+ "urea_excr_mosmd": {
+  "value": 400,
+  "unit": "mOsm/day",
+  "range": [
+   250,
+   550
+  ],
+  "description": "Urinary excretion of non-electrolyte solute (mainly urea), constant in V1.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION within textbook context (total obligatory solute excretion ~600 mOsm/day; urea depends on protein intake)."
+ },
+ "sweat_na_mmolL": {
+  "value": 40,
+  "unit": "mmol/L",
+  "range": [
+   20,
+   80
+  ],
+  "description": "Sodium concentration of sweat (used only when a scenario sets sweat_Lh > 0).",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION; varies widely with acclimatisation. No V1 scenario uses sweat."
+ },
+ "waterIn_base_Ld": {
+  "value": 2.1,
+  "unit": "L/day",
+  "range": [
+   2.1,
+   2.1
+  ],
+  "mc": false,
+  "description": "Baseline ingested water (drinks + food water), continuous.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook daily balance: ingested 2100 mL/day. Scenario condition (not sampled)."
+ },
+ "naIn_base_mmold": {
+  "value": 150,
+  "unit": "mmol/day",
+  "range": [
+   150,
+   150
+  ],
+  "mc": false,
+  "description": "Baseline dietary sodium intake (≈8.8 g NaCl/day), continuous.",
+  "evidence": [
+   "ev:he-2013"
+  ],
+  "grade": "A-meta",
+  "notes": "150 mmol/day (8.8 g salt) is a scenario condition (not sampled). He 2013 states in its conclusions that intakes are typically 9-12 g/day; that is a policy statement, not a measured trial intake, and 8.8 g is below that range, not within it. Grade B would be more honest for a scenario-condition intake (audit F-12); grade left unchanged until a source is chosen."
+ },
+ "kIn_base_mmold": {
+  "value": 80,
+  "unit": "mmol/day",
+  "range": [
+   80,
+   80
+  ],
+  "mc": false,
+  "description": "Baseline dietary potassium intake, continuous.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION (typical diet). Scenario condition (not sampled)."
+ },
+ "water_metabolic_Ld": {
+  "value": 0.2,
+  "unit": "L/day",
+  "range": [
+   0.15,
+   0.3
+  ],
+  "description": "Metabolic (oxidation) water production.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook ~200 mL/day. Range kind: curator assumption around a textbook point value (audit F-10)."
+ },
+ "insensible_Ld": {
+  "value": 0.7,
+  "unit": "L/day",
+  "range": [
+   0.55,
+   0.85
+  ],
+  "description": "Insensible water loss (skin diffusion + respiratory), pure water.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook skin 350 + lungs 350 mL/day; increases with heat/fever/exercise (not modelled)."
+ },
+ "fecal_water_Ld": {
+  "value": 0.1,
+  "unit": "L/day",
+  "range": [
+   0.05,
+   0.2
+  ],
+  "description": "Fecal water loss (Na content neglected).",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Textbook ~100 mL/day. Range kind: curator assumption around a textbook point value (audit F-10)."
+ },
+ "na_normal_low": {
+  "value": 135,
+  "unit": "mmol/L",
+  "range": [
+   135,
+   135
+  ],
+  "mc": false,
+  "description": "Lower bound of normal plasma Na; hyponatremia boundary shown in drink_water_3L_fast. Also used to reject implausible Monte Carlo baselines.",
+  "evidence": [
+   "ev:hew-butler-2015",
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Classification threshold, not a physiological parameter."
+ },
+ "na_normal_high": {
+  "value": 145,
+  "unit": "mmol/L",
+  "range": [
+   145,
+   145
+  ],
+  "mc": false,
+  "description": "Upper bound of normal plasma Na; used to reject implausible Monte Carlo baselines.",
+  "evidence": [
+   "ev:guyton-hall-2021"
+  ],
+  "grade": "B-textbook",
+  "notes": "Classification threshold, not a physiological parameter."
+ },
+ "strain_w_transport": {
+  "value": 0.25,
+  "unit": "1",
+  "range": [
+   0.25,
+   0.25
+  ],
+  "mc": false,
+  "description": "Kidney strain index weight: tubular Na transport (reabsorptive) work above baseline.",
+  "evidence": [
+   "ev:brezis-rosen-1995",
+   "ev:sejersted-1982"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Index definition, not physiology: equal weights. Rationale: tubular O2 consumption scales with Na reabsorption."
+ },
+ "strain_w_excretion": {
+  "value": 0.25,
+  "unit": "1",
+  "range": [
+   0.25,
+   0.25
+  ],
+  "mc": false,
+  "description": "Kidney strain index weight: Na excretory burden above baseline.",
+  "evidence": [
+   "ev:andersen-1999"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Index definition."
+ },
+ "strain_w_glomerular": {
+  "value": 0.25,
+  "unit": "1",
+  "range": [
+   0.25,
+   0.25
+  ],
+  "mc": false,
+  "description": "Kidney strain index weight: glomerular pressure/hyperfiltration proxy.",
+  "evidence": [
+   "ev:brenner-1982"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Index definition."
+ },
+ "strain_w_concentrating": {
+  "value": 0.25,
+  "unit": "1",
+  "range": [
+   0.25,
+   0.25
+  ],
+  "mc": false,
+  "description": "Kidney strain index weight: urine concentrating work (medullary transport demand).",
+  "evidence": [
+   "ev:brezis-rosen-1995"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Index definition."
+ },
+ "strain_scale_transport": {
+  "value": 0.1,
+  "unit": "fraction",
+  "range": [
+   0.1,
+   0.1
+  ],
+  "mc": false,
+  "description": "Relative rise in tubular Na reabsorption that counts as one 'unit' of transport load.",
+  "evidence": [
+   "ev:sejersted-1982"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Index normalisation."
+ },
+ "strain_scale_excretion": {
+  "value": 3,
+  "unit": "fold over baseline",
+  "range": [
+   3,
+   3
+  ],
+  "mc": false,
+  "description": "Rise in Na excretion (multiples of baseline excretion) that counts as one unit of excretory load.",
+  "evidence": [
+   "ev:andersen-1999"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Index normalisation."
+ },
+ "strain_scale_pressure": {
+  "value": 10,
+  "unit": "mmHg",
+  "range": [
+   10,
+   10
+  ],
+  "mc": false,
+  "description": "MAP rise above MAP_0 counted as one unit of glomerular-pressure load (averaged with the relative GFR rise / 0.1).",
+  "evidence": [
+   "ev:brenner-1982",
+   "ev:hall-2016"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION. Index normalisation."
+ },
+ "map_auto_frac": {
+  "value": 0.7,
+  "unit": "1",
+  "range": [
+   0.3,
+   0.9
+  ],
+  "description": "Share of the long-term MAP–volume elasticity (map_vol_exp) delivered slowly through the whole-body autoregulation state R_auto; the remaining share acts within hours.",
+  "evidence": [
+   "ev:guyton-1972",
+   "ev:hall-2016"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION (D-2, approved by Spencer 2026-10-01). Structure from Guyton's long-term regulation (Guyton 1972): an expanded volume first raises cardiac output, and over days to weeks whole-body autoregulation converts this into raised peripheral resistance; Hall 2016 reviews this sequence for salt-induced BP. No number in either paper was used. Does not change the steady state (MAP_ss = MAP_0·vr^map_vol_exp), only how fast it is reached. Range kind: curator assumption."
+ },
+ "map_auto_tau_h": {
+  "value": 240,
+  "unit": "h",
+  "range": [
+   120,
+   480
+  ],
+  "description": "Time constant of slow whole-body autoregulation (state R_auto); 240 h = 10 days.",
+  "evidence": [
+   "ev:guyton-1972",
+   "ev:he-2013"
+  ],
+  "grade": "E-assumption",
+  "notes": "ASSUMPTION (D-2, approved by Spencer 2026-10-01). Chosen so the chronic high-salt MAP rise is still developing at day 14 and near its plateau by day 30 (design target, not independent validation). Context only: the salt-reduction trials in He 2013 measured BP after at least 4 weeks; Guyton 1972 describes long-term autoregulation acting over days to weeks. No numeric time constant was taken from either. Range kind: curator assumption (5 to 20 days); sampled uniformly (hi/lo = 4)."
+ }
+};

@@ -24,6 +24,19 @@ jobs:
       - name: Self-test (stdlib only)
         run: python3 tests/selftest.py
 
+      # Health subsystem (docs/health/03 §2): the same stdlib-first rule. The engine
+      # self-test holds the Python port to the JavaScript reference's golden fixture;
+      # the knowledge-base self-test runs every contract rule against a planted violation;
+      # the errors self-test holds the halt rules of the error hierarchy. One step per
+      # module and mode, so a module's removal recipe (docs/health/07) deletes whole
+      # steps by name and never edits a shared one.
+      - name: Health engine self-test (stdlib only)
+        run: python3 tests/health_selftest.py
+      - name: Health knowledge-base self-test (stdlib only)
+        run: python3 tests/health_kb_selftest.py
+      - name: Health errors self-test (stdlib only)
+        run: python3 tests/health_errors_selftest.py
+
       - name: Install
         run: pip install -e ".[dev]"
 
@@ -33,6 +46,31 @@ jobs:
       # for real, and a test that quietly stops running cannot disappear.
       - name: Self-test (strict; every skipped test actually runs)
         run: python3 tests/selftest.py --no-skips
+      - name: Health engine self-test (strict)
+        run: python3 tests/health_selftest.py --no-skips
+      - name: Health knowledge-base self-test (strict)
+        run: python3 tests/health_kb_selftest.py --no-skips
+      - name: Health errors self-test (strict)
+        run: python3 tests/health_errors_selftest.py --no-skips
+
+      # HREQ-X-01/X-02: every module's fields, paths, tests, dependency edges and removal
+      # recipe hold against the repository, and docs/health/07 is the registry's rendering.
+      - name: Health module registry
+        run: PYTHONPATH=src python3 -m health.registry --check
+
+      # HREQ-D-03: the knowledge base conforms to its contract and the cross-file rules.
+      - name: Health knowledge-base contract (kb-check)
+        run: PYTHONPATH=src python3 -m health.cli kb-check
+
+      # HREQ-X-05 / docs/health/03 Appendix B V-08: the committed golden fixture is what
+      # the JavaScript reference writes today. Node 22 is the version the fixture was
+      # generated with (/opt/node22 on the development machine); setup-node v5 runs on
+      # Node 24 (BUG-20260909-034: the v4 actions target Node 20, removed from runners).
+      - name: Set up Node 22 (golden fixture)
+        uses: actions/setup-node@v5
+        with: {node-version: "22"}
+      - name: Health golden fixture up to date
+        run: node tools/health_golden.mjs --check
 
       # BUG-20260909-010: the production codec had ZERO test coverage because
       # the sandbox the code was written in cannot install zstandard. CI can,
@@ -81,17 +119,13 @@ jobs:
              --include='*.py' src/ ; then
             echo "::error::transaction-signing capability present (REQ-N-14)"; exit 1
           fi
+      # A syntax-tree check (tools/swallow_check.py): the regular expression used until
+      # 2026-10-03 flagged nothing on a planted swallow (BUG-20261003-169).
       - name: DataIntegrityError is never swallowed
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
-          bad = []
-          for p in pathlib.Path("src").rglob("*.py"):
-              src = p.read_text()
-              for m in re.finditer(r"except\s+DataIntegrityError[^\n]*:\n((?:\s+.*\n)+?)(?=\S|\Z)", src):
-                  if "raise" not in m.group(1):
-                      bad.append(f"{p}:{src[:m.start()].count(chr(10))+1}")
-          if bad:
-              print("::error::DataIntegrityError caught without re-raise (S1):", *bad, sep="\n  "); sys.exit(1)
-          print("ok")
-          PY
+        run: python3 tools/swallow_check.py --names DataIntegrityError src
+      # docs/health/05 §6.1: a surface that cannot render the disclaimer renders
+      # "unavailable"; it never swallows the error and shows the number anyway.
+      # The same syntax-tree check over every SurfaceIntegrityError subclass, qualified or
+      # in a tuple (BUG-20261003-168); tests/health_errors_selftest.py proves it fires.
+      - name: SurfaceIntegrityError is never swallowed (health)
+        run: PYTHONPATH=src python3 tools/swallow_check.py --family health.errors:SurfaceIntegrityError src/health

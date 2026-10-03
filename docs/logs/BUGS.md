@@ -1323,13 +1323,339 @@ orders whose expiry has passed scanned all 5.9 million lives to find the
 fourteen thousand standing ones, five times a minute. A partial index over the
 standing lives makes it a seek.
 
+## Health subsystem — 2026-10-03
+
+The health subsystem (`docs/health/`) shares this ledger; its entries carry
+`area: health` and the classes of `docs/health/05_BUG_TAXONOMY.md` §3. Its first five
+entries were found by the methodology builder measuring the vendored V1 reference under
+Node, not by a reader.
+
+**BUG-20261003-095 (S2/P2).** The kidney strain index's glomerular term averages a
+pressure load and a hyperfiltration load with `0.5`/`0.5` and scales the GFR rise by
+`0.1`, all three inline in `model.js` M10 (and mirrored in `model.py`), while every
+sibling weight and scale is a graded `params.json` row. Three constants the evidence
+drawer cannot list. Open: three E-assumption rows at M1, with the version bump.
+
+**BUG-20261003-096 (S1/P1).** The influence screen behind every evidence chip runs one
+reference scenario (10 g salt, 24 h, +10 %). Run on every scenario at its own horizon in
+both directions, MAP over 30 days has 15 feeders, not 12 — and one of the six missing is
+`pn_gain`, calibrated to the very band that chart is compared with. The lists look
+complete and are not. Open: HREQ-U-12 (union over scenarios and directions) at M1.
+
+**BUG-20261003-097 (S1/P1).** The Python harness had no `role`. A calibration target —
+the He 2013 blood-pressure band that `map_vol_exp`, `pn_gain` and `aldo_vol_exp` were
+tuned to hit — would have been counted as a literature pass, and so would the day-30
+sodium-balance row, which holds for any parameter set that reaches balance. Fixed in
+this PR on the Python side (role, calibrates, counted); the reference mirrors at M1.
+
+**BUG-20261003-098 (S3/P1).** The golden fixture covered four short scenarios and not
+`chronic_high_salt_30d` (744 h, 41,664 steps), the stiff parameter corner, or step
+checkpoints — so a Python/JavaScript divergence that grows with run length or stiffness
+had nowhere to show. Fixed in this PR: the fixture is regenerated with all of them and
+the source hashes in its header.
+
+**BUG-20261003-099 (S4/P3).** `index.js` still says "all 52" parameters and "~53
+simulations"; the table has had 54 rows since D-2. No M9 block exists between M8 and
+M10. Cosmetic; logged because a stale count in a comment is the shape this project
+keeps catching.
+
+**BUG-20261003-100 (S0a/P0)**, **-101**, **-102**, **-103**, **-104 (S1/P1).** The
+clinical-safety review of the published V1 surface, from source: the strain index is
+framed as a dose answer without its label on the dose panel and the HUD gauge (100,
+S0a, the Operator's artifact to patch — tracker A-2); 135 mmol/L drawn as a red danger
+line labelled "hyponatremia threshold" (101); imperative scenario titles with no
+reference person (102); the chronic result shows neither its known divergence nor that
+its band is a calibration target (103); only the first sentence of the disclaimer is
+rendered — "Not clinically validated." lives in a comment (104; the Python side now
+carries `meta.validation_status`). The vendored copy is never edited (HREQ-P-09); each
+lands in the artifact and in every new surface at M1.
+
+**BUG-20261003-105, BUG-20261003-106, BUG-20261003-107, BUG-20261003-108, BUG-20261003-109, BUG-20261003-110, BUG-20261003-111, BUG-20261003-112, BUG-20261003-113.** The rigor-lead's attack on the knowledge-base checker:
+`report.py` tracebacks on a list-typed field and `status` then prints no disclaimer
+(105); the loader accepts `NaN`/`Infinity` the browser rejects (106); `re.ASCII` lets a
+DOI with a Unicode space through (107); any `resolved: true` record verifies an id
+forever, so the append-only log cannot retire one (108); `status` prints
+`E-assumption: 0` when params are unusable instead of "unavailable" (109); the
+registry scanner disagrees with PyYAML in 17 of 20 crafted cases (110); a schema
+tightening the data violates is only a warning (111); `03 §6` names sixteen rules and
+seven are unimplemented, four warn-only (112); checker hygiene (113). All fixed in this PR
+with regression tests (47 blocking rules now), except what needs data fields that do not
+exist yet, which `DEFERRED_RULES` names and a meta-test enforces.
+
+**BUG-20261003-114 (S4/P3).** `k_excr_gain` says "Log-uniform sampling"; its range is
+exactly 5-fold and the rule is `hi/lo > 5`, so it is uniform. Inert in every scenario.
+
+**BUG-20261003-115 (S1/P1).** The first real literature fail: after 1 L of water the
+modelled sodium takes **7.05 h** to recover within 0.5 mmol/L, outside Crowe 1987's
+6 h, in both implementations (Monte Carlo n = 256: q05 2.83 h, q50 8.73 h, q95 +∞,
+in-range share 0.32). V1's own tests never scored this row. It stays a counted fail; the
+range is not widened (01 §7.4). The Operator decides: supersede as a known divergence,
+or recalibrate through WF-H-01 (tracker D-9).
+
+**BUG-20261003-116 (S4/P3).** Three latent quirks in the reference engine found while
+porting; none reachable with shipped data.
+
+**BUG-20261003-117 (S2/P1).** The self-test pinned only `status == "pass"` for the counted
+rows, so seven extractor mutants that read the wrong window, unit or baseline survived
+(peak time from t = 0, salt window from t = 0, water fraction without baseline urine, ΔMAP
+not per 100 mmol, osmolality rise at its peak, urine peak from mL/min, nadir at 1.5 h).
+Fixed: every extractor's value is pinned at 1e-9 and recomputed independently from the
+result's own series (trapezoid integrals, never the ledger); all seven are now killed.
+
+**BUG-20261003-118 (S2/P1).** A Monte Carlo set for another scenario, run length, dt or any
+n was attached as a row's band. Fixed: the set must match the scored result's scenario,
+t_end and dt and hold n runs, and n ≥ 256 unless `allow_small_n=True` (HREQ-U-08).
+
+**BUG-20261003-119 (S1/P1).** Rows without Monte Carlo carried no band fields and nothing
+said the statuses were unbanded. Fixed: the six band fields are always present
+(`band_reason` "no Monte Carlo supplied"); `summarize()` counts `unbanded_counted` and the
+status line prints "bands 0 of 10 counted" with the reason (HREQ-V-15).
+
+**BUG-20261003-120 (S2/P1).** An unregistered or mis-cased kind, a countable row without a
+range, or an extractor unavailable for any reason became a quiet not_checked row; a kind
+typo on the recovery row turned the summary into 9 pass / 0 fail. Fixed: registry defects
+are a `ConfigurationError`; only a run too short may give not_checked, and
+`summarize()` lists every countable not_checked row with its reason.
+
+**BUG-20261003-121 (S2/P1).** Truncated runs were scored with substitute values. Fixed: a
+run shorter than the scenario is not scored (every row not_checked, "run too short"), and
+whole-run extractors check coverage; on a full run a never-recovered +inf stays a
+counted fail.
+
+**BUG-20261003-122 (S2/P1).** Results from non-default parameters or another dt were
+scored without trace. Fixed: refused unless `params_override=True`; every row's meta
+stamps the params digest, the override flag, dt and t_end.
+
+**BUG-20261003-123 (S2/P1).** The duplicate-id guard saw only explicit ids, and none
+existed. Fixed: duplicates are checked over the final ids, and all 24 shipped
+expectations carry explicit `<scenario_id>/<NN>` ids (a Python-only key).
+
+**BUG-20261003-124 (S3/P2).** A reversed or NaN range was scored as a counted model fail.
+Fixed: `ConfigurationError` unless lo ≤ hi and neither bound is NaN (±inf allowed).
+
+**BUG-20261003-125 (S3/P2).** No plant covered the bounds or ±inf; the strict-comparison
+and inf-passes mutants survived and a string "0.5" scored a pass. Fixed: boundary, ±inf
+and non-number plants; both mutants killed.
+
+**BUG-20261003-126 (S3/P2).** The known-divergence and unverified rows gave generic
+reasons. Fixed: the row's note (else its target) is on the reason.
+
+**BUG-20261003-127 (S1/P1), open.** The counted row "minimum urine osmolality"
+(drink_water_1L/05) shares its only evidence, Baylis 1986, with `U_osm_min`, which floors
+the metric at the row's lower bound: only the upper bound is a test (harness value
+62.76 mOsm/kg). The row is unchanged; the curator decides between an independent source
+(dropping Baylis from `U_osm_min`) and marking the lower bound structural.
+
+**BUG-20261003-128 (S2/P1), open.** The recovery row's "< 6 h" bound has no traceable
+Crowe 1987 value (the only quote is the 2 h excreted share) and the row has no note. The
+fail itself is honest under every reading (7.05, 6.88, 6.47 h). Extends BUG-20261003-115;
+the range is not widened; the curator traces or regrades the bound.
+
+**BUG-20261003-129 (S1/P1).** The D-2 "MAP time course" design target had no role, so the
+harness reported 3 calibrated parameters where 03 §12 lists 4. Fixed: role calibration of
+`map_auto_tau_h`; the status line now says "calibrated params 4".
+
+**BUG-20261003-130 (S1/P1).** HREQ-U-08, M-12 and V-15 were listed as enforced by
+`validate.py` and were not. Fixed: the n gate (118), `independent_vs_calibrated` on the
+summary and the status line, and a `registry_version` (sha256 of every registered
+expectation record) on every row and the summary.
+
+**BUG-20261003-131 (S1/P1).** The 33-object disclaimer test never checked
+`meta.modelVersion`; dropping it from `result_meta` left the suite green. Fixed: the
+predicate requires it.
+
+**BUG-20261003-132 (S1/P1).** No golden or invariant test ever moved potassium or made
+the body sweat: every registered scenario holds K intake constant and sweat at zero, so
+eight port mutants of `model.py` (both K sign flips, the `k_excr_gain` sign, the `K_ur`
+exponential removed, both sweat signs, sweat sodium forced to 0, the sweat input ignored)
+passed the whole suite, and the potassium and cell-solute invariants "passed" because
+every K flux was identically zero. The fixture gains `solverCoverage` (a 24 h baseline
+from K_icf × 1.02, and a sweat/potassium run built in the test, not registered); all eight
+mutants are now killed. Fixed in this PR.
+
+**BUG-20261003-133 (S3/P2).** Output thinning at `outEvery` 7 and 2.5 had no golden, so
+dropping the final-point rule (103 points against JavaScript's 104) or using Python's
+banker's `round()` (361 against 241) survived. Both are now golden runs. Fixed in this PR.
+
+**BUG-20261003-134 (S3/P2).** The JavaScript NaN semantics the port emulates (NaN sorted
+last in quantiles, `Math.max(0, NaN)` = NaN, `Math.pow(1, NaN)` = NaN) had no golden; all
+three emulations could be deleted unseen. The fixture gains `nonFinite`, compared NaN for
+NaN by position. Fixed in this PR.
+
+**BUG-20261003-135 (S4/P3).** At dt = 1/60 h every shipped breakpoint sits on the output
+grid, so dropping all breakpoints passed the trajectory test and unsorted breakpoints were
+never exercised. Golden runs at dt = 0.1 h and an unsorted-breakpoint scenario close it.
+Fixed in this PR.
+
+**BUG-20261003-136 (S1/P1).** HREQ-V-07 was not enforced: the instability trap (step
+factor 3.5 on the 30-day scenario) returned tens of thousands of NaN values and no error.
+`simulate()` now raises `NonFiniteTrajectoryError` (S3/NUM) naming the first time and key;
+the JavaScript reference still returns the NaN trajectory, a documented port deviation.
+Fixed in this PR.
+
+**BUG-20261003-137 (S1/P1).** `03 §3.3–§3.4` read as enforced gates, but no test ran
+convergence, bolus exactness, the breakpoint trap or the instability trap. All four are now
+gates that fail: halving the step twice (1e-5 of peak, 1e-3 for ADH and Thirst), the
+off-grid bolus to 1e-12 (measured 2.4e-15), the trap without breakpoints misplacing 9.59 %,
+the instability trap raising; every scenario and the stiff corner under `--robust`. Fixed
+in this PR.
+
+**BUG-20261003-138 (S1/P1).** The n = 256 steady-state drift gate of `03 §3.1` was claimed
+while the test ran 3 samples for 6 h. The default suite keeps 3 × 6 h; n = 256 × 24 h runs
+under `--robust` (worst 4.1e-14), and the summary line says whether it ran. Fixed in this PR.
+
+**BUG-20261003-139 (S1/P1).** The `03 §9` fixtures (water 1.3 L/day: required urine
+1,228.57 mOsm/kg, infeasible; `adh_threshold` 296: sodium 145.61 mmol/L, feasible but
+rejected by Monte Carlo) were in no test. Both now are. Fixed in this PR.
+
+**BUG-20261003-140 (S4/P3).** The perturbation test exempted `k_excr_gain` and
+`sweat_na_mmolL` as inert only because no run let them act. After 132 the exempt set is the
+two `na_normal` thresholds, which the drawSamples golden catches. Fixed in this PR.
+
+The adversarial review of the health subsystem read the documents against the code. The
+twelve entries below are the document side of it. Each figure in the corrected text was
+re-measured on the port, and every line that depends on code landing in the same round is
+marked for re-verification after the merge (tracker W-22).
+
+**BUG-20261003-142 (S1/P1).** `03 §12`, the table that sets the validation record against
+the tuning, quoted about 8,900 compared golden values with a worst difference of 4e-14. The
+suite compares 12,822 values, and the worst difference is 1.24e-12 relative. The table also
+called the harness counts "identical on the reference", which has no harness. Fixed: model
+1.0.1 and default parameters stated, the counts as the suite prints them (24 rows; counted
+9 pass, 1 fail; 12 not_checked; calibration 1; structural 1), and a separate row for the
+counts once the MAP time-course row becomes a calibration row.
+
+**BUG-20261003-143 (S1/P1).** `01 §6.3` presented a two-sided calibration link as built: id
+`chronic_high_salt_30d:0`, `calibratedAgainst` on the parameters, and a knowledge-base check
+that the two agree. `params.json` has no `calibratedAgainst`, the check is deferred, and the
+harness id is `<scenario>/<NN>`. Fixed: the record as shipped, the id rule, and the
+parameter side and the JavaScript mirror named as planned (W-18, W-13).
+
+**BUG-20261003-144 (S4/P3).** `03 §4.2` listed four golden trajectories and asked for
+additions the fixture already held: all seven scenarios, the stiff corner, checkpoints,
+rejection margins and findings. Fixed: every section as built, this round's additions
+marked, and the regeneration rule stated (a `MODEL_VERSION` bump, or new sections with every
+old one byte-identical).
+
+**BUG-20261003-145 (S4/P3).** `03 §5.1` described harness rows with 8 fields and called
+`id`, `role`, `registered` and `counted` "required additions". The rows carry all 17 fields.
+Fixed.
+
+**BUG-20261003-146 (S4/P3).** `03 §2` gave Node timings as the cost of every layer. The Python
+port that runs the gates is 8 to 13 times slower per run, and about 10 minutes for the
+literature layer at n = 256, not about a minute. Fixed: a Node column and a Python column,
+both measured, with the method.
+
+**BUG-20261003-147 (S4/P3).** `03 §4.3` said a 1e-6 change to any parameter fails the golden
+comparison; the test exempts four. Fixed: the two classification thresholds stay exempt, with
+the reason, and the potassium and sweat goldens of this round cover the other two.
+
+**BUG-20261003-148 (S4/P3).** `03 §11` and the HREQ-V-25 row put the planted knowledge-base
+fixtures in `tests/health_selftest.py`, and §9 called them files. They are in-memory plants
+in `tests/health_kb_selftest.py`. Fixed.
+
+**BUG-20261003-149 (S4/P3).** `config/health/base.yaml` said no threshold lives in code. It
+is a checked mirror of code constants. Its comments also placed `MODEL_VERSION` in the wrong
+file and named two of the four invariants, and 13 of its keys have no reader. Fixed in
+comments only: the header says what the agreement test enforces, and each unread key is
+marked reserved. No key or value changed.
+
+**BUG-20261003-150 (S4/P3).** ADR-0002 and HREQ-P-01 said the port uses "the same
+identifiers", reads its tolerances from the configuration, and raises
+`ReferenceDivergenceError` on a divergence. Function names are snake_case, the tolerances are
+test constants mirrored in the configuration, and nothing raises the error. Fixed by an
+appended errata section (the accepted text stands) and a reworded HREQ-P-01.
+
+**BUG-20261003-151 (S4/P3).** `06 §4` drew CI as running on every push. It runs on a push or
+pull request to `main` only, and its order is kb-check, ledger, lint, pytest, secrets. A push
+to a branch with no pull request open against `main` runs no CI and is gated only by
+`tools/gates.py`. Fixed in the figure and its `.mmd` source.
+
+**BUG-20261003-152 (S4/P3).** Tracker W-1 still read "in progress" after b810ed6 delivered
+the port. Closed with the measured equivalence figures.
+
+**BUG-20261003-153 (S4/P3).** Three documents said six registered scenarios. Seven carry
+expectations: 1 + 6 + 2 + 5 + 2 + 4 + 4 = 24 rows. Fixed. The same pass corrected 08's "40
+contract rules" to the measured 54 checker codes (47 blocking).
+
+**The undo model, rehearsed (BUG-20261003-154 … BUG-20261003-165).** The adversarial
+review ran the removal recipes on scratch copies for the first time, and none of them
+worked as written. Removing `engine-v1` exactly as its recipe said turned the gates red,
+because the ledger requires every cited file to exist and seven entries cite the engine
+(BUG-20261003-154); the knowledge-base self-test typed the Phase 0 module set
+(BUG-20261003-155); the `cli` recipe's first edit left `import os` unused, so ruff failed
+(BUG-20261003-156); the `errors` recipe never set the flag or ran the gates
+(BUG-20261003-157); `depends_on` said `kb-v1` and `cli` import `health.errors`, which
+only the engine does, and 07 disagreed with the yaml (BUG-20261003-158); `reference-v1`
+and `errors` kept listing a test file the engine recipe deleted, and nothing checked a
+`tests` path (BUG-20261003-159); the flag was a label — a disabled engine was imported
+and `status` printed `model 1.0.1` beside `modules DISABLED: engine-v1`
+(BUG-20261003-160); the engine recipe left stale references in five files
+(BUG-20261003-161); "`process` can go at any time; nothing imports it" was false — the
+engine and knowledge-base tests read its configuration and documents (BUG-20261003-162,
+S1); no gate ran `health_golden.mjs --check` (BUG-20261003-163); the engine recipe was
+imprecise against a shared CI step (BUG-20261003-164); and the health README said
+`gates.py` runs `status` (BUG-20261003-165). All fixed in this PR: `removed_with_module`
+and `buglog.py --mark-removed`; a gate, `python -m health.registry --check`, that holds
+every entry to the disk, the imports, the live files naming its paths and the generated
+07; `status` obeys the flag; one CI step per module and mode; a golden gate that says
+SKIPPED rather than green when Node is absent; `errors` has its own test file; every
+module depends on `process`, which goes last. Each recipe was then run literally on a
+scratch copy with `tools/gates.py` green after it (`cli` then `engine-v1`; `errors`;
+`kb-v1`; `reference-v1`; `process`). `engine-v1` and `cli` are recorded in 07 as accepted
+exceptions to HREQ-X-02, with the reason.
+
+**BUG-20261003-166 (S3/P2).** `buglog.py --check` rule 4 (every id mentioned is in the
+ledger) walked the whole directory tree, so in the main checkout it failed on ids that
+exist only in the builders' git-ignored worktrees under `.claude/worktrees/`. It reads
+`git ls-files` now, and walks the tree only where git cannot answer. Fixed in this PR.
+
+**BUG-20261003-167 (S3/P2).** Rule 3 skipped any `regression_test` without `::`, so a
+fixed entry whose test was the sentence "none — doc-only; re-verified by the qa-auditor
+sweep" passed. A fixed entry's test is now `file::function` or exactly
+`docs-only (no mechanical guard)`, and the literal holds only when every location is
+documentation; `removed_with_module` does not bypass it. The four 2026-09-09 entries whose
+prose names a CI step are a closed exception list in the gate. Fixed in this PR.
+
+**BUG-20261003-168 and BUG-20261003-169 (S2/P2).** Both "never swallowed" CI steps were regular
+expressions that read a handler's body as running to the next column-0 line, so a `raise`
+later in the same function hid a swallowing handler; on a planted swallow they flagged
+nothing. Replaced by `tools/swallow_check.py`, a syntax-tree check that also sees subclasses,
+tuples and qualified names; the health step derives every `SurfaceIntegrityError` subclass by
+import, and the errors self-test proves the tool fires and that CI calls it.
+
+**BUG-20261003-170 (S3/P2).** `health.registry --check` walked the working tree, so an
+ignored build artefact (`src/navanax.egg-info/SOURCES.txt`) counted as a live reference to
+module paths and the gate failed in the main checkout. The scan reads `git ls-files` now and
+walks only outside a checkout, the rule the ledger gate learned the same day (BUG-166).
+
+**BUG-20261003-171 (S3/P1).** CI's first run on the pull request went red at the golden
+check: the fixture header records the Node version that wrote it and `--check` compared
+whole files, so the runner's Node 22.23.3 read a value-identical fixture as stale. Node
+20.20, 22.22 and 22.23 regenerate every value byte-identically; the check now treats the
+recorded version as provenance, names the first differing line when something real
+changed, and a test plants both cases on a copy.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
+| BUG-20261003-095 | S2 | P2 | Strain index glomerular constants live in code, not the table | Needs three graded rows and a model-version bump (M1) |
+| BUG-20261003-096 | S1 | P1 | Influence screen under-counts feeders; evidence chips omit a calibrated parameter | HREQ-U-12 per-scenario, both-direction screen (M1) |
+| BUG-20261003-099 | S4 | P3 | Stale parameter count in a reference comment; no M9 block | With the next reference change (M1) |
+| BUG-20261003-100 | S0a | P0 | Published V1 surface frames the strain index as a dose answer without its label | Operator decision A-2: patch the artifact or accept until M1 |
+| BUG-20261003-101 | S1 | P1 | 135 mmol/L drawn as a red danger line | M1 viewer review, both implementations |
+| BUG-20261003-102 | S1 | P1 | Imperative scenario titles, no reference person | Display-title map at M1 (W-19) |
+| BUG-20261003-103 | S1 | P1 | Chronic result hides its divergence and calibration status | M1 viewer review (HREQ-S-07) |
+| BUG-20261003-104 | S1 | P1 | Only the first disclaimer sentence is rendered in V1 | Python side fixed in this PR; reference at the next version bump (W-20) |
+| BUG-20261003-114 | S4 | P3 | k_excr_gain sampling note wrong | Curator, M1 |
+| BUG-20261003-115 | S1 | P1 | 1 L water sodium recovery 7.05 h vs registered 6 h | Operator decision D-9 |
+| BUG-20261003-116 | S4 | P3 | Latent reference-engine quirks | Next reference change (M1) |
+| BUG-20261003-127 | S1 | P1 | The counted row drink_water_1L/05 (minimum urine osmolality) shares its only evidence (Baylis 1986) with U_os… | Open -- the curator's decision (row not changed; ranges are never widened): cite an independent source for the row and drop Baylis 1986 fro… |
+| BUG-20261003-128 | S2 | P1 | The registered "< 6 h" bound of the sodium recovery row has no traceable Crowe 1987 source value, and the row… | Open -- curator (extends BUG-20261003-115): find and quote the source value for 6 h, or record the bound as an assumption with that grade;… |
 
-93 of 94 logged bugs are fixed.
+156 of 170 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
 
 ### The lesson
 

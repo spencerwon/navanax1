@@ -1,0 +1,304 @@
+# Health module registry -- THE SOURCE OF TRUTH for docs/health/07_MODULE_REGISTRY.md,
+# whose table and recipes are generated from this file
+# (`PYTHONPATH=src python3 -m health.registry --write-07`).
+#
+# A module is the unit of adding and undoing (docs/health/00 §7, 04 §6.5). Every entry
+# carries the written removal recipe; a module whose recipe has not been run on a scratch
+# copy with tools/gates.py green afterwards is not finished. `python -m health.registry
+# --check` (a gate) holds every entry to the files on disk, the imports in src/, and the
+# live files that name its paths.
+#
+# The flag governs every surface (`health.cli status` today, the app at M1): a disabled
+# module's output is shown as unavailable. The tests and the package still run, so a
+# disabled module stays verified. The merge is the code switch; the flag is the surface
+# switch.
+#
+# Removal order follows the dependency edges backwards: cli first; then engine-v1 or
+# kb-v1; errors once engine-v1 is gone; reference-v1 once engine-v1 and kb-v1 are gone;
+# process last, because every other module reads its configuration, its documents or its
+# registry, or lives in its package.
+
+version: 1
+
+modules:
+  - id: reference-v1
+    enabled: true
+    phase: 0
+    owner: operator
+    adr: ADR-0001
+    description: >
+      The Metabolic Map V1 artifact, vendored byte for byte: engine (JavaScript), knowledge
+      base, app. Read-only; the golden fixture and the Python knowledge-base data derive
+      from it. It has no test of its own: its consumers verify it (the engine port's
+      byte-identity and fixture-hash tests, the knowledge base's params-mirror check), so
+      its `tests` name those functions and each consumer's recipe deletes its entries.
+    paths: [reference/metabolic-map-v1/]
+    depends_on: [process]
+    tests:
+      - tests/health_selftest.py::test_params_json_is_byte_identical_to_reference
+      - tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes
+      - tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred
+    removal: |
+      1. Only after engine-v1 and kb-v1 are removed (both read it).
+      2. Set `enabled: false` on this entry.
+      3. Run `python3 tools/buglog.py --mark-removed reference-v1` (adds
+         `removed_with_module: reference-v1` to every ledger entry citing these files that
+         has no such field yet; in 07's order on 2026-10-03: BUG-20261003-099, 100, 103,
+         114, 116).
+      4. Delete `reference/metabolic-map-v1/`. The original stays at the artifact URL its
+         README recorded (git history keeps the README).
+      5. `config/health/base.yaml`: replace the `model.version` comment with
+         "# The model version (a bump in one place and not another is a CFG defect,
+         docs/health/05 §3)." on two comment lines.
+      6. `README.md`: delete the `reference/metabolic-map-v1/` row of the tree.
+         `docs/README.md`: in "The health subsystem", delete "; its origin is vendored at
+         `reference/metabolic-map-v1/`". `docs/health/README.md`: delete the "The V1
+         origin, byte-for-byte" bullet and the `reference/metabolic-map-v1/` row of "Where
+         things are". `docs/health/04_ENVIRONMENTS_AND_UNDO.md` §7: delete the
+         `reference/metabolic-map-v1/index.html` row.
+      7. Remove this entry.
+      8. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
+         `docs/health/07_MODULE_REGISTRY.md`).
+      9. Run `python3 tools/gates.py`: ALL GATES GREEN.
+
+  - id: engine-v1
+    enabled: true
+    phase: 0
+    owner: health-physiology-modeler
+    adr: ADR-0002
+    description: >
+      Pure-stdlib Python port of the V1 engine (solver, model, scenarios, Monte Carlo,
+      expectation harness) proven equivalent to the JavaScript reference by a golden
+      fixture regenerated with tools/health_golden.mjs.
+    paths:
+      - src/health/engine/
+      - tests/health_selftest.py
+      - tests/fixtures/health/golden_v1.json
+      - tools/health_golden.mjs
+    depends_on: [reference-v1, errors, process]
+    tests: [tests/health_selftest.py]
+    removal: |
+      An accepted, documented exception to HREQ-X-02 (docs/health/07): steps 5-10 go
+      beyond the four the requirement names.
+
+      1. Remove cli first (it imports health.engine).
+      2. Set `enabled: false` on this entry (status then shows the model as unavailable).
+      3. Run `python3 tools/buglog.py --mark-removed engine-v1` (adds
+         `removed_with_module: engine-v1` to every ledger entry citing these paths or this
+         test that has no such field yet; in 07's order on 2026-10-03: BUG-20261003-095,
+         096, 097, 098, 101, 102, 115).
+      4. Delete `src/health/engine/`, `tests/health_selftest.py`,
+         `tests/fixtures/health/golden_v1.json` and `tools/health_golden.mjs`.
+      5. `tools/gates.py`: delete the `("health selftest", "tests/health_selftest.py")` row
+         of `HEALTH_SUITES`, the `health_golden_check()` call in `main()`, the functions
+         `node_binary` and `health_golden_check`, the `NODE_CANDIDATES` line, and the
+         `health golden fixture` line of the docstring.
+      6. `.github/workflows/ci.yml`: delete the steps "Health engine self-test (stdlib
+         only)", "Health engine self-test (strict)", "Set up Node 22 (golden fixture)" and
+         "Health golden fixture up to date", with the comment block above the Node step.
+      7. `config/health/modules.yaml`: delete the two `tests/health_selftest.py::` entries
+         from reference-v1's `tests`.
+      8. `config/health/base.yaml`: delete `equivalence.golden_fixture` and
+         `equivalence.generator`; replace the header's three lines naming
+         `src/health/engine/params.json` with "# This file holds the rules the harness and
+         the surfaces apply around the model's parameters." on two comment lines; replace
+         the `model.version` comment with "# Mirrors MODEL_VERSION in
+         reference/metabolic-map-v1/engine/index.js (a bump in one place and not the other
+         is a CFG defect, docs/health/05 §3)." on two comment lines.
+      9. `pyproject.toml`: delete `"engine/params.json"` from
+         `[tool.setuptools.package-data] health`.
+      10. `README.md`: delete the `tests/health_selftest.py` line of the health block.
+          `docs/health/README.md`: delete the `src/health/engine/`,
+          `tests/health_selftest.py` and `tests/fixtures/health/` rows of "Where things
+          are" and the `tests/health_selftest.py` line of "Run it".
+          `docs/health/04_ENVIRONMENTS_AND_UNDO.md`: delete the REFERENCE row of §2, the
+          PARAMS row of §3, and in §7 the two `tests/health_selftest.py` rows and the
+          `node tools/health_golden.mjs` row.
+      11. Remove this entry.
+      12. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
+          `docs/health/07_MODULE_REGISTRY.md`).
+      13. Run `python3 tools/gates.py`: ALL GATES GREEN.
+
+  - id: kb-v1
+    enabled: true
+    phase: 0
+    owner: health-literature-curator
+    adr: ADR-0003
+    description: >
+      The knowledge base (entities, relations, evidence, verification log, schema) as
+      package data, with the contract checker (every schema rule plus the cross-file
+      rules) and the summary report. Its self-test parses the rule table of
+      docs/health/03 §6 at run time (HREQ-V-16), and it falls back to the reference's
+      params.json when the engine's is absent.
+    paths:
+      - src/health/kb/
+      - tests/health_kb_selftest.py
+    depends_on: [reference-v1, process]
+    tests: [tests/health_kb_selftest.py]
+    removal: |
+      1. Remove cli first (it imports health.kb).
+      2. Set `enabled: false` on this entry.
+      3. Run `python3 tools/buglog.py --mark-removed kb-v1` (adds
+         `removed_with_module: kb-v1` to every ledger entry citing these paths that has no
+         such field yet; in 07's order on 2026-10-03: BUG-20261003-106, 107, 108, 110, 111,
+         112, 113, 154 to 158, 161 to 167).
+      4. Delete `src/health/kb/` and `tests/health_kb_selftest.py`.
+      5. `tools/gates.py`: delete the `("health kb selftest", "tests/health_kb_selftest.py")`
+         row of `HEALTH_SUITES`.
+      6. `.github/workflows/ci.yml`: delete the steps "Health knowledge-base self-test
+         (stdlib only)" and "Health knowledge-base self-test (strict)".
+      7. `config/health/modules.yaml`: delete the `tests/health_kb_selftest.py::` entries
+         from the `tests` of reference-v1 and process.
+      8. `src/health/registry.py`: delete the docstring paragraph that begins
+         "tests/health_kb_selftest.py compares the two readers".
+      9. `pyproject.toml`: delete `"kb/data/*.json"` from
+         `[tool.setuptools.package-data] health`.
+      10. `README.md`: delete the `tests/health_kb_selftest.py` line of the health block.
+          `docs/health/README.md`: delete the `src/health/kb/` and
+          `tests/health_kb_selftest.py` rows of "Where things are" and the
+          `tests/health_kb_selftest.py` line of "Run it".
+          `docs/health/04_ENVIRONMENTS_AND_UNDO.md`: delete the KB row of §3 and the
+          `tests/health_kb_selftest.py` row of §7.
+      11. Remove this entry.
+      12. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
+          `docs/health/07_MODULE_REGISTRY.md`).
+      13. Run `python3 tools/gates.py`: ALL GATES GREEN.
+
+  - id: cli
+    enabled: true
+    phase: 0
+    owner: platform-engineer
+    adr: ADR-0003
+    description: >
+      python -m health.cli: status (versions, counts, grade share, module states, the
+      disclaimer), kb-check (exit 1 on an error finding), kb-summary. status honours the
+      flags: a disabled engine-v1 is shown as unavailable and not imported.
+    paths: [src/health/cli.py]
+    depends_on: [engine-v1, kb-v1, process]
+    tests:
+      - tests/health_kb_selftest.py::test_cli_kb_check_exit_codes
+      - tests/health_kb_selftest.py::test_status_prints_the_disclaimer
+      - tests/health_kb_selftest.py::test_status_expectations_line
+      - tests/health_kb_selftest.py::test_cli_constants_match_engine_and_config
+      - tests/health_kb_selftest.py::test_status_lists_every_registered_module
+      - tests/health_kb_selftest.py::test_status_honours_the_module_flags
+    removal: |
+      An accepted, documented exception to HREQ-X-02 (docs/health/07): its tests live in
+      kb-v1's test file, so step 4 edits a file this module does not own.
+
+      1. Set `enabled: false` on this entry.
+      2. Run `python3 tools/buglog.py --mark-removed cli` (adds
+         `removed_with_module: cli` to every ledger entry citing `src/health/cli.py` or one
+         of the tests below; on 2026-10-03: BUG-20261003-104, 105, 109, 160).
+      3. Delete `src/health/cli.py`.
+      4. `tests/health_kb_selftest.py`: delete the line
+         `from health.cli import DISCLAIMER, VALIDATION_STATUS  # noqa: E402`, the helpers
+         `_run_cli` and `_footer_ok`, and the six functions this entry's `tests` name.
+         Nothing else imports health.cli; `os` and `subprocess` stay in use.
+      5. `tools/gates.py`: delete the "health kb-check" `run(...)` statement with the
+         comment line above it, and the `health kb-check` line of the docstring.
+      6. `.github/workflows/ci.yml`: delete the step "Health knowledge-base contract
+         (kb-check)" with the comment line above it.
+      7. `README.md` and `docs/health/README.md`: delete the `health.cli status` and
+         `health.cli kb-check` lines of the run blocks, and on their `tools/gates.py` line
+         replace "every line above except `status` (a surface, not a gate)" with "every
+         line above". `docs/health/README.md`: delete the `src/health/cli.py` row of
+         "Where things are". `docs/health/04_ENVIRONMENTS_AND_UNDO.md` §7: delete the two
+         `health.cli` rows and replace "every command above except `status` (a surface,
+         not a gate)" with "every command above".
+      8. Remove this entry.
+      9. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
+         `docs/health/07_MODULE_REGISTRY.md`).
+      10. Run `python3 tools/gates.py`: ALL GATES GREEN.
+
+  - id: errors
+    enabled: true
+    phase: 0
+    owner: health-physiology-modeler
+    adr: ADR-0001
+    description: >
+      The runtime error hierarchy of docs/health/05 §6: severity and halt behaviour in
+      the type system so the halt rules execute without a human deciding. Imported by
+      the engine only.
+    paths:
+      - src/health/errors.py
+      - tests/health_errors_selftest.py
+    depends_on: [process]
+    tests: [tests/health_errors_selftest.py]
+    removal: |
+      1. Only after engine-v1 is removed (it imports health.errors; nothing else does).
+      2. Set `enabled: false` on this entry.
+      3. Run `python3 tools/buglog.py --mark-removed errors` (adds
+         `removed_with_module: errors` to every ledger entry citing these files that has
+         no such field yet; in 07's order on 2026-10-03: BUG-20261003-159).
+      4. Delete `src/health/errors.py` and `tests/health_errors_selftest.py`.
+      5. `tools/gates.py`: delete the
+         `("health errors selftest", "tests/health_errors_selftest.py")` row of
+         `HEALTH_SUITES`.
+      6. `.github/workflows/ci.yml`: delete the steps "Health errors self-test (stdlib
+         only)", "Health errors self-test (strict)" and "SurfaceIntegrityError is never
+         swallowed (health)", with the comment lines above the last.
+      7. `README.md` and `docs/health/README.md`: delete the
+         `tests/health_errors_selftest.py` line of the run blocks. `docs/health/README.md`:
+         delete the `src/health/errors.py` and `tests/health_errors_selftest.py` rows of
+         "Where things are". `docs/health/04_ENVIRONMENTS_AND_UNDO.md` §7: delete the
+         `tests/health_errors_selftest.py` row.
+      8. Remove this entry.
+      9. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
+         `docs/health/07_MODULE_REGISTRY.md`).
+      10. Run `python3 tools/gates.py`: ALL GATES GREEN.
+
+  - id: process
+    enabled: true
+    phase: 0
+    owner: orchestrator
+    adr: ADR-0001
+    description: >
+      The documents, the four health agent definitions, the configuration (base.yaml and
+      this registry), the registry's reader and gate, the package root, the process log
+      and the ADRs. Every other module depends on it.
+    paths:
+      - docs/health/
+      - .claude/agents/health-physiology-modeler.md
+      - .claude/agents/health-literature-curator.md
+      - .claude/agents/health-rigor-lead.md
+      - .claude/agents/health-safety-reviewer.md
+      - config/health/
+      - src/health/__init__.py
+      - src/health/registry.py
+    depends_on: []
+    tests:
+      - tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+      - tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference
+      - tests/health_kb_selftest.py::test_registry_reader_reads_the_yaml_subset
+      - tests/health_kb_selftest.py::test_registry_reader_agrees_with_pyyaml
+      - tests/health_kb_selftest.py::test_buglog_removed_with_module_exempts_deleted_files
+    removal: |
+      1. Last: only after every other module is removed (each lists process in
+         `depends_on`: engine-v1 and cli read config/health/base.yaml, kb-v1's tests parse
+         docs/health/03 §6, cli reads the registry, and every Python module lives in the
+         package whose root this module holds).
+      2. Set `enabled: false` on this entry.
+      3. Run `python3 tools/buglog.py --mark-removed process` (adds
+         `removed_with_module: process` to every ledger entry citing these paths that has
+         no such field yet; in 07's order on 2026-10-03: none left).
+      4. Delete `docs/health/`, the four `.claude/agents/health-*.md` files,
+         `config/health/` (the registry: this removes this entry with it),
+         `src/health/__init__.py` and `src/health/registry.py`.
+      5. `tools/gates.py`: delete `HEALTH_SUITES` (empty by now), the loop in `main()` that
+         runs it and the "health module registry" `run(...)` statement, each with the
+         comment lines above it; in the docstring, delete the two health bullets and the
+         block from "The health gates, one line per module" to "is not a gate".
+      6. `.github/workflows/ci.yml`: delete the step "Health module registry" with the
+         comment lines above it, and the comment block that begins "# Health subsystem
+         (docs/health/03 §2)" (left above "Install").
+      7. `pyproject.toml`: delete the `health = [...]` line of
+         `[tool.setuptools.package-data]`.
+      8. `tools/buglog.py`: no change. The health classes stay in `ERROR_CLASS` because the
+         ledger keeps its health entries, and `registered_modules()` reads a missing
+         registry as no modules.
+      9. `README.md`: delete "The health subsystem" section, the `config/health/`,
+         `docs/health/` and `src/health/` rows of the tree and its
+         `health_*_selftest.py` line, and " + 4 health" from its `.claude/` row.
+         `docs/README.md`: delete "The health subsystem" section.
+      10. Run `python3 tools/gates.py`: ALL GATES GREEN.

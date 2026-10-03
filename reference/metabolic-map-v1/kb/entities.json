@@ -1,0 +1,2025 @@
+{
+  "kbVersion": "1.0.0",
+  "generated": "2026-10-01",
+  "curator": "Literature Curator + Data-Rigor Lead (Opus)",
+  "schema": "./schema.json",
+  "entities": [
+    {
+      "id": "organism:body",
+      "type": "organism",
+      "name": "Whole body",
+      "synonyms": [
+        "organism",
+        "reference adult"
+      ],
+      "scale": 0,
+      "parent": null,
+      "externalIds": {
+        "UBERON": "UBERON:0000468"
+      },
+      "summary": "70 kg reference adult. Total body water about 42 L: about 14 L extracellular (plasma plus interstitial fluid) and 28 L intracellular.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "quantities": [
+        "V_ecf",
+        "V_icf"
+      ]
+    },
+    {
+      "id": "system:cardiovascular",
+      "type": "organ_system",
+      "name": "Cardiovascular system",
+      "synonyms": [],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0004535"
+      },
+      "summary": "Heart and blood vessels. Sets arterial pressure, which drives glomerular filtration and pressure natriuresis; atrial stretch releases ANP.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "system:renal",
+      "type": "organ_system",
+      "name": "Renal and urinary system",
+      "synonyms": [
+        "urinary system",
+        "renal system"
+      ],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0001008"
+      },
+      "summary": "Kidneys, ureters and bladder. Filters plasma and adjusts water and electrolyte excretion to match intake.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "system:gi",
+      "type": "organ_system",
+      "name": "Digestive system",
+      "synonyms": [
+        "gastrointestinal system",
+        "GI tract"
+      ],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0001007"
+      },
+      "summary": "Gut and accessory organs. Absorbs ingested water and sodium; the liver secretes angiotensinogen.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:leiper-2015"
+      ]
+    },
+    {
+      "id": "system:endocrine",
+      "type": "organ_system",
+      "name": "Endocrine system",
+      "synonyms": [],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0000949"
+      },
+      "summary": "Hormone-secreting glands. In V1: posterior pituitary (vasopressin), adrenal cortex (aldosterone), and cardiac atria (ANP, endocrine function of the heart).",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "system:nervous",
+      "type": "organ_system",
+      "name": "Nervous system",
+      "synonyms": [],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0001016"
+      },
+      "summary": "Brain and nerves. In V1: osmoreceptors in the lamina terminalis and hypothalamus, and the thirst circuit.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "system:musculoskeletal",
+      "type": "organ_system",
+      "name": "Musculoskeletal system",
+      "synonyms": [],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0002204"
+      },
+      "summary": "Bones and skeletal muscle. In V1, skeletal muscle stands in for the intracellular fluid compartment, which it dominates by volume.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "system:integumentary",
+      "type": "organ_system",
+      "name": "Integumentary system",
+      "synonyms": [
+        "integumental system"
+      ],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0002416"
+      },
+      "summary": "Skin and appendages. Route of insensible and sweat water loss; interstitial sodium storage is reported but not modelled in V1.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:wiig-2018"
+      ]
+    },
+    {
+      "id": "system:respiratory",
+      "type": "organ_system",
+      "name": "Respiratory system",
+      "synonyms": [],
+      "scale": 1,
+      "parent": "organism:body",
+      "externalIds": {
+        "UBERON": "UBERON:0001004"
+      },
+      "summary": "Airways and lungs. In V1 only as a site of angiotensin-converting enzyme and of respiratory insensible water loss.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "organ:heart",
+      "type": "organ",
+      "name": "Heart",
+      "synonyms": [],
+      "scale": 2,
+      "parent": "system:cardiovascular",
+      "externalIds": {
+        "UBERON": "UBERON:0000948"
+      },
+      "summary": "Pumps about 5 L/min at rest. In this model mean arterial pressure follows ECF volume; the badge on the heart shows the simulated MAP.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "system": "cardiovascular",
+      "quantities": [
+        "MAP"
+      ]
+    },
+    {
+      "id": "organ:aorta",
+      "type": "organ",
+      "name": "Aorta",
+      "synonyms": [],
+      "scale": 2,
+      "parent": "system:cardiovascular",
+      "externalIds": {
+        "UBERON": "UBERON:0000947"
+      },
+      "summary": "Main artery leaving the left ventricle. Its pressure drives glomerular filtration in the kidneys.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "system": "cardiovascular",
+      "quantities": [
+        "MAP"
+      ]
+    },
+    {
+      "id": "organ:vena-cava",
+      "type": "organ",
+      "name": "Venae cavae",
+      "synonyms": [
+        "vena cava"
+      ],
+      "scale": 2,
+      "parent": "system:cardiovascular",
+      "externalIds": {
+        "UBERON": "UBERON:0004087"
+      },
+      "summary": "Large veins returning blood to the right atrium. Atrial stretch releases ANP when ECF volume expands.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:potter-2006"
+      ],
+      "system": "cardiovascular",
+      "quantities": [
+        "V_ecf"
+      ]
+    },
+    {
+      "id": "organ:kidney",
+      "type": "organ",
+      "name": "Kidneys",
+      "synonyms": [
+        "kidney"
+      ],
+      "scale": 2,
+      "parent": "system:renal",
+      "externalIds": {
+        "UBERON": "UBERON:0002113"
+      },
+      "summary": "Filter about 180 L of plasma a day (GFR about 125 mL/min) and return over 99% of filtered water and sodium. They set urine volume and concentration under ADH, aldosterone and ANP.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ],
+      "system": "renal",
+      "quantities": [
+        "GFR",
+        "urine_flow",
+        "U_osm",
+        "strain_index"
+      ]
+    },
+    {
+      "id": "organ:ureters",
+      "type": "organ",
+      "name": "Ureters",
+      "synonyms": [
+        "ureter"
+      ],
+      "scale": 2,
+      "parent": "system:renal",
+      "externalIds": {
+        "UBERON": "UBERON:0000056"
+      },
+      "summary": "Carry urine from each kidney to the bladder.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "system": "renal",
+      "quantities": [
+        "urine_flow"
+      ]
+    },
+    {
+      "id": "organ:bladder",
+      "type": "organ",
+      "name": "Bladder",
+      "synonyms": [
+        "urinary bladder"
+      ],
+      "scale": 2,
+      "parent": "system:renal",
+      "externalIds": {
+        "UBERON": "UBERON:0001255"
+      },
+      "summary": "Stores urine. The viewer grows it with urine made since the last void and empties it at 0.4 L. That void rule is a display choice, not part of the model.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "system": "renal",
+      "quantities": [
+        "urine_flow"
+      ]
+    },
+    {
+      "id": "organ:stomach",
+      "type": "organ",
+      "name": "Stomach",
+      "synonyms": [],
+      "scale": 2,
+      "parent": "system:gi",
+      "externalIds": {
+        "UBERON": "UBERON:0000945"
+      },
+      "summary": "Receives drinks and food; gastric emptying gates delivery to the intestine. In the model, ingested water and salt sit in a single gut pool before absorption.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:leiper-2015"
+      ],
+      "system": "gi",
+      "quantities": [
+        "V_gut_water",
+        "Na_gut"
+      ]
+    },
+    {
+      "id": "organ:intestine",
+      "type": "organ",
+      "name": "Intestines",
+      "synonyms": [
+        "intestine",
+        "gut"
+      ],
+      "scale": 2,
+      "parent": "system:gi",
+      "externalIds": {
+        "UBERON": "UBERON:0000160"
+      },
+      "summary": "Absorb most ingested water and sodium. Plain water is absorbed with a half-time of minutes (deuterium tracer studies).",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:peronnet-2012",
+        "ev:leiper-2015"
+      ],
+      "system": "gi",
+      "quantities": [
+        "V_gut_water",
+        "Na_gut"
+      ]
+    },
+    {
+      "id": "organ:small-intestine",
+      "type": "organ",
+      "name": "Small intestine",
+      "synonyms": [],
+      "scale": 2,
+      "parent": "organ:intestine",
+      "externalIds": {
+        "UBERON": "UBERON:0002108"
+      },
+      "summary": "Main site of absorption of ingested water and sodium.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:leiper-2015"
+      ]
+    },
+    {
+      "id": "organ:liver",
+      "type": "organ",
+      "name": "Liver",
+      "synonyms": [],
+      "scale": 2,
+      "parent": "system:gi",
+      "externalIds": {
+        "UBERON": "UBERON:0002107"
+      },
+      "summary": "Secretes angiotensinogen, the substrate of renin. Included in V1 only for the renin-angiotensin pathway.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "organ:lung",
+      "type": "organ",
+      "name": "Lung",
+      "synonyms": [
+        "lungs"
+      ],
+      "scale": 2,
+      "parent": "system:respiratory",
+      "externalIds": {
+        "UBERON": "UBERON:0002048"
+      },
+      "summary": "Pulmonary endothelium is rich in angiotensin-converting enzyme, which converts angiotensin I to angiotensin II. Included in V1 only for that step.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "organ:pituitary",
+      "type": "organ",
+      "name": "Posterior pituitary",
+      "synonyms": [
+        "neurohypophysis",
+        "pituitary"
+      ],
+      "scale": 2,
+      "parent": "system:endocrine",
+      "externalIds": {
+        "UBERON": "UBERON:0002198"
+      },
+      "summary": "Neurohypophysis. Axon terminals of hypothalamic magnocellular neurons release vasopressin (ADH) into blood as plasma osmolality rises. The marker pulses faster as simulated ADH rises.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bourque-2008",
+        "ev:robertson-athar-1976"
+      ],
+      "system": "endocrine",
+      "quantities": [
+        "ADH",
+        "Thirst"
+      ]
+    },
+    {
+      "id": "organ:hypothalamus",
+      "type": "organ",
+      "name": "Hypothalamus",
+      "synonyms": [],
+      "scale": 2,
+      "parent": "organ:brain",
+      "externalIds": {
+        "UBERON": "UBERON:0001898"
+      },
+      "summary": "Contains the supraoptic and paraventricular nuclei, whose magnocellular neurons make vasopressin and project to the posterior pituitary.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "organ:adrenal",
+      "type": "organ",
+      "name": "Adrenal glands",
+      "synonyms": [
+        "adrenal gland",
+        "suprarenal gland"
+      ],
+      "scale": 2,
+      "parent": "system:endocrine",
+      "externalIds": {
+        "UBERON": "UBERON:0002369"
+      },
+      "summary": "Sit on top of each kidney. The cortex secretes aldosterone, which raises sodium reabsorption when ECF volume falls.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ],
+      "system": "endocrine",
+      "quantities": [
+        "Aldo"
+      ]
+    },
+    {
+      "id": "organ:brain",
+      "type": "organ",
+      "name": "Brain",
+      "synonyms": [],
+      "scale": 2,
+      "parent": "system:nervous",
+      "externalIds": {
+        "UBERON": "UBERON:0000955"
+      },
+      "summary": "Generates thirst in response to rising osmolality or falling volume, via the lamina terminalis. Thirst is reported but does not trigger drinking in V1.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:zimmerman-2017"
+      ],
+      "system": "nervous",
+      "quantities": [
+        "Thirst"
+      ]
+    },
+    {
+      "id": "organ:skin",
+      "type": "organ",
+      "name": "Skin and interstitium",
+      "synonyms": [
+        "skin of body"
+      ],
+      "scale": 2,
+      "parent": "system:integumentary",
+      "externalIds": {
+        "UBERON": "UBERON:0002097"
+      },
+      "summary": "Stands in for the extracellular compartment; it tints as ECF volume changes. Skin sodium storage is reported but not modelled in V1.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:wiig-2018"
+      ],
+      "system": "skin",
+      "quantities": [
+        "V_ecf"
+      ]
+    },
+    {
+      "id": "tissue:muscle",
+      "type": "tissue",
+      "name": "Skeletal muscle",
+      "synonyms": [
+        "skeletal muscle tissue"
+      ],
+      "scale": 3,
+      "parent": "system:musculoskeletal",
+      "externalIds": {
+        "UBERON": "UBERON:0001134"
+      },
+      "summary": "Holds most intracellular fluid. Shown here as a stand-in for the ICF compartment; it tints as ICF volume changes.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "system": "muscle",
+      "quantities": [
+        "V_icf"
+      ]
+    },
+    {
+      "id": "tissue:cardiac-atrium",
+      "type": "tissue",
+      "name": "Cardiac atria",
+      "synonyms": [
+        "cardiac atrium",
+        "atrium"
+      ],
+      "scale": 3,
+      "parent": "organ:heart",
+      "externalIds": {
+        "UBERON": "UBERON:0002081"
+      },
+      "summary": "Upper heart chambers. Atrial myocytes release ANP when stretched by expanded blood volume.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "tissue:supraoptic-nucleus",
+      "type": "tissue",
+      "name": "Supraoptic nucleus",
+      "synonyms": [
+        "SON"
+      ],
+      "scale": 3,
+      "parent": "organ:hypothalamus",
+      "externalIds": {
+        "UBERON": "UBERON:0001929"
+      },
+      "summary": "Hypothalamic nucleus of magnocellular vasopressin and oxytocin neurons that project to the posterior pituitary.",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "tissue:paraventricular-nucleus",
+      "type": "tissue",
+      "name": "Paraventricular nucleus",
+      "synonyms": [
+        "PVN",
+        "paraventricular nucleus of hypothalamus"
+      ],
+      "scale": 3,
+      "parent": "organ:hypothalamus",
+      "externalIds": {
+        "UBERON": "UBERON:0001930"
+      },
+      "summary": "Hypothalamic nucleus containing magnocellular vasopressin neurons (and parvocellular neurons not modelled in V1).",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "tissue:ovlt",
+      "type": "tissue",
+      "name": "OVLT",
+      "synonyms": [
+        "organum vasculosum of the lamina terminalis",
+        "supraoptic crest"
+      ],
+      "scale": 3,
+      "parent": "organ:brain",
+      "externalIds": {
+        "UBERON": "UBERON:0002689"
+      },
+      "summary": "Organum vasculosum of the lamina terminalis: a circumventricular organ lacking a blood-brain barrier whose neurons sense plasma osmolality and drive vasopressin release and thirst.",
+      "evidence": [
+        "ev:bourque-2008",
+        "ev:zimmerman-2017"
+      ]
+    },
+    {
+      "id": "tissue:subfornical-organ",
+      "type": "tissue",
+      "name": "Subfornical organ",
+      "synonyms": [
+        "SFO"
+      ],
+      "scale": 3,
+      "parent": "organ:brain",
+      "externalIds": {
+        "UBERON": "UBERON:0002219"
+      },
+      "summary": "Circumventricular organ of the lamina terminalis that senses circulating angiotensin II and osmolality and drives thirst.",
+      "evidence": [
+        "ev:zimmerman-2017"
+      ]
+    },
+    {
+      "id": "tissue:adrenal-cortex",
+      "type": "tissue",
+      "name": "Adrenal cortex",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "organ:adrenal",
+      "externalIds": {
+        "UBERON": "UBERON:0001235"
+      },
+      "summary": "Outer steroid-producing part of the adrenal gland: zona glomerulosa (aldosterone), fasciculata (cortisol) and reticularis (androgens) in the standard zonation model.",
+      "evidence": [
+        "ev:vinson-2016"
+      ]
+    },
+    {
+      "id": "tissue:zona-glomerulosa",
+      "type": "tissue",
+      "name": "Zona glomerulosa",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "tissue:adrenal-cortex",
+      "externalIds": {
+        "UBERON": "UBERON:0002053"
+      },
+      "summary": "Outermost adrenal cortical zone; the textbook site of aldosterone synthesis, stimulated by angiotensin II and plasma potassium.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ]
+    },
+    {
+      "id": "tissue:renal-cortex",
+      "type": "tissue",
+      "name": "Renal cortex",
+      "synonyms": [
+        "cortex of kidney"
+      ],
+      "scale": 3,
+      "parent": "organ:kidney",
+      "externalIds": {
+        "UBERON": "UBERON:0001225"
+      },
+      "summary": "Outer kidney layer containing glomeruli, proximal and distal convoluted tubules and cortical collecting ducts.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "tissue:renal-medulla",
+      "type": "tissue",
+      "name": "Renal medulla",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "organ:kidney",
+      "externalIds": {
+        "UBERON": "UBERON:0000362"
+      },
+      "summary": "Inner kidney region of loops of Henle and medullary collecting ducts; its hypertonic interstitium allows concentrated urine. Relatively hypoxic.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:brezis-rosen-1995"
+      ]
+    },
+    {
+      "id": "tissue:nephron",
+      "type": "tissue",
+      "name": "Nephron",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "organ:kidney",
+      "externalIds": {
+        "UBERON": "UBERON:0001285"
+      },
+      "summary": "Functional unit of the kidney, roughly one million per kidney with wide individual variation: glomerulus, proximal tubule, loop of Henle, distal tubule and (functionally) collecting duct.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bertram-2011"
+      ],
+      "system": "renal",
+      "quantities": [
+        "GFR",
+        "FE_Na",
+        "U_osm"
+      ]
+    },
+    {
+      "id": "tissue:glomerulus",
+      "type": "tissue",
+      "name": "Glomerulus",
+      "synonyms": [
+        "renal glomerulus"
+      ],
+      "scale": 3,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "UBERON": "UBERON:0000074"
+      },
+      "summary": "Capillary tuft where plasma is filtered into Bowman space through endothelium, basement membrane and podocyte slit diaphragms.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:pavenstadt-2003"
+      ]
+    },
+    {
+      "id": "tissue:proximal-tubule",
+      "type": "tissue",
+      "name": "Proximal tubule",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "UBERON": "UBERON:0004134"
+      },
+      "summary": "First tubular segment; reabsorbs about two-thirds of filtered sodium and water isosmotically. Site of acute pressure natriuresis.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015",
+        "ev:ivy-bailey-2014"
+      ]
+    },
+    {
+      "id": "tissue:loop-of-henle",
+      "type": "tissue",
+      "name": "Loop of Henle",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "UBERON": "UBERON:0001288"
+      },
+      "summary": "Hairpin segment; the water-impermeable thick ascending limb reabsorbs NaCl via NKCC2, building the medullary osmotic gradient.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "tissue:thick-ascending-limb",
+      "type": "tissue",
+      "name": "Thick ascending limb",
+      "synonyms": [
+        "TAL"
+      ],
+      "scale": 3,
+      "parent": "tissue:loop-of-henle",
+      "externalIds": {
+        "UBERON": "UBERON:0001291"
+      },
+      "summary": "Water-impermeable segment that reabsorbs NaCl through NKCC2; target of loop diuretics.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "tissue:distal-tubule",
+      "type": "tissue",
+      "name": "Distal tubule",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "UBERON": "UBERON:0004135"
+      },
+      "summary": "Segment after the macula densa; the distal convoluted tubule reabsorbs NaCl through NCC (thiazide target).",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "tissue:distal-convoluted-tubule",
+      "type": "tissue",
+      "name": "Distal convoluted tubule",
+      "synonyms": [
+        "DCT"
+      ],
+      "scale": 3,
+      "parent": "tissue:distal-tubule",
+      "externalIds": {
+        "UBERON": "UBERON:0001292"
+      },
+      "summary": "Cortical segment reabsorbing NaCl via the thiazide-sensitive NCC.",
+      "evidence": [
+        "ev:gamba-2005",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "tissue:collecting-duct",
+      "type": "tissue",
+      "name": "Collecting duct",
+      "synonyms": [
+        "collecting duct of renal tubule"
+      ],
+      "scale": 3,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "UBERON": "UBERON:0001232"
+      },
+      "summary": "Final segment where aldosterone (via ENaC) and vasopressin (via AQP2) fine-tune sodium and water excretion. Lined by principal and intercalated cells.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "tissue:juxtaglomerular-apparatus",
+      "type": "tissue",
+      "name": "Juxtaglomerular apparatus",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "UBERON": "UBERON:0002303"
+      },
+      "summary": "Contact zone of the afferent arteriole, macula densa and extraglomerular mesangium; source of renin.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "tissue:macula-densa",
+      "type": "tissue",
+      "name": "Macula densa",
+      "synonyms": [],
+      "scale": 3,
+      "parent": "tissue:juxtaglomerular-apparatus",
+      "externalIds": {
+        "UBERON": "UBERON:0002335"
+      },
+      "summary": "Specialised thick-ascending-limb plaque that senses tubular NaCl and signals renin release and tubuloglomerular feedback.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "cell:principal",
+      "type": "cell",
+      "name": "Principal cell (collecting duct)",
+      "synonyms": [
+        "kidney collecting duct principal cell"
+      ],
+      "scale": 4,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "CL": "CL:1001431"
+      },
+      "summary": "Collecting-duct cell that reabsorbs sodium through ENaC and water through AQP2 channels. ADH inserts AQP2 into the apical membrane; aldosterone up-regulates ENaC.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:pearce-2015",
+        "ev:nielsen-2002"
+      ],
+      "system": "renal",
+      "quantities": [
+        "ADH",
+        "U_osm"
+      ]
+    },
+    {
+      "id": "cell:intercalated",
+      "type": "cell",
+      "name": "Intercalated cell",
+      "synonyms": [
+        "renal intercalated cell"
+      ],
+      "scale": 4,
+      "parent": "tissue:collecting-duct",
+      "externalIds": {
+        "CL": "CL:0005010"
+      },
+      "summary": "Collecting-duct and connecting-tubule cell type (A, B, non-A non-B) handling acid-base, chloride and potassium; interspersed among principal cells. Not modelled dynamically in V1.",
+      "evidence": [
+        "ev:roy-2015"
+      ]
+    },
+    {
+      "id": "cell:podocyte",
+      "type": "cell",
+      "name": "Podocyte",
+      "synonyms": [],
+      "scale": 4,
+      "parent": "tissue:glomerulus",
+      "externalIds": {
+        "CL": "CL:0000653"
+      },
+      "summary": "Glomerular visceral epithelial cell whose interdigitating foot processes and slit diaphragms form the final filtration barrier.",
+      "evidence": [
+        "ev:pavenstadt-2003"
+      ]
+    },
+    {
+      "id": "cell:juxtaglomerular",
+      "type": "cell",
+      "name": "Juxtaglomerular cell",
+      "synonyms": [
+        "kidney granular cell",
+        "JG cell"
+      ],
+      "scale": 4,
+      "parent": "tissue:juxtaglomerular-apparatus",
+      "externalIds": {
+        "CL": "CL:0000648"
+      },
+      "summary": "Renin-secreting granular cell in the afferent arteriole wall; releases renin when perfusion pressure or distal NaCl delivery falls.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "cell:pt-epithelial",
+      "type": "cell",
+      "name": "Proximal tubule cell",
+      "synonyms": [
+        "epithelial cell of proximal tubule"
+      ],
+      "scale": 4,
+      "parent": "tissue:proximal-tubule",
+      "externalIds": {
+        "CL": "CL:0002306"
+      },
+      "summary": "Brush-border epithelial cell performing bulk isosmotic reabsorption of sodium, water, glucose and bicarbonate.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "cell:tal-epithelial",
+      "type": "cell",
+      "name": "Thick ascending limb cell",
+      "synonyms": [
+        "kidney loop of Henle thick ascending limb epithelial cell"
+      ],
+      "scale": 4,
+      "parent": "tissue:thick-ascending-limb",
+      "externalIds": {
+        "CL": "CL:1001106"
+      },
+      "summary": "Epithelial cell of the thick ascending limb; apical NKCC2 and ROMK, basolateral Na-K-ATPase.",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "cell:dct-epithelial",
+      "type": "cell",
+      "name": "Distal convoluted tubule cell",
+      "synonyms": [
+        "kidney distal convoluted tubule epithelial cell"
+      ],
+      "scale": 4,
+      "parent": "tissue:distal-convoluted-tubule",
+      "externalIds": {
+        "CL": "CL:1000849"
+      },
+      "summary": "Epithelial cell reabsorbing NaCl via apical NCC.",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "cell:macula-densa",
+      "type": "cell",
+      "name": "Macula densa cell",
+      "synonyms": [
+        "macula densa epithelial cell"
+      ],
+      "scale": 4,
+      "parent": "tissue:macula-densa",
+      "externalIds": {
+        "CL": "CL:1000850"
+      },
+      "summary": "Senses luminal NaCl via NKCC2 and signals to the afferent arteriole and juxtaglomerular cells.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "cell:magnocellular",
+      "type": "cell",
+      "name": "Magnocellular vasopressin neuron",
+      "synonyms": [
+        "vasopressin-secreting magnocellular cell",
+        "magnocellular neurosecretory cell"
+      ],
+      "scale": 4,
+      "parent": "tissue:supraoptic-nucleus",
+      "externalIds": {
+        "CL": "CL:4023109"
+      },
+      "summary": "Hypothalamic neurosecretory neuron (supraoptic and paraventricular nuclei) that is intrinsically osmosensitive and releases vasopressin from posterior pituitary terminals.",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "cell:zona-glomerulosa",
+      "type": "cell",
+      "name": "Zona glomerulosa cell",
+      "synonyms": [
+        "type I cell of adrenal cortex",
+        "epithelial cell of zona glomerulosa of adrenal gland"
+      ],
+      "scale": 4,
+      "parent": "tissue:zona-glomerulosa",
+      "externalIds": {
+        "CL": "CL:0002099"
+      },
+      "summary": "Adrenocortical cell that, in the standard model, synthesises aldosterone via aldosterone synthase (CYP11B2) in response to angiotensin II and potassium.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ]
+    },
+    {
+      "id": "cell:atrial-myocyte",
+      "type": "cell",
+      "name": "Atrial cardiomyocyte",
+      "synonyms": [
+        "regular atrial cardiac myocyte"
+      ],
+      "scale": 4,
+      "parent": "tissue:cardiac-atrium",
+      "externalIds": {
+        "CL": "CL:0002129"
+      },
+      "summary": "Atrial muscle cell that stores and secretes ANP in response to wall stretch.",
+      "evidence": [
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "cell:skeletal-muscle-fiber",
+      "type": "cell",
+      "name": "Skeletal muscle fibre",
+      "synonyms": [
+        "skeletal muscle fiber",
+        "myofibre"
+      ],
+      "scale": 4,
+      "parent": "tissue:muscle",
+      "externalIds": {
+        "CL": "CL:0008002"
+      },
+      "summary": "Multinucleate muscle cell; collectively the largest intracellular water and potassium store.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "organelle:principal-apical-membrane",
+      "type": "organelle",
+      "name": "Apical membrane (principal cell)",
+      "synonyms": [],
+      "scale": 5,
+      "parent": "cell:principal",
+      "externalIds": {
+        "GO": "GO:0016324"
+      },
+      "summary": "Luminal plasma membrane of the principal cell; contains ENaC, ROMK and, under vasopressin, AQP2.",
+      "evidence": [
+        "ev:pearce-2015",
+        "ev:nielsen-1995"
+      ]
+    },
+    {
+      "id": "organelle:principal-basolateral-membrane",
+      "type": "organelle",
+      "name": "Basolateral membrane (principal cell)",
+      "synonyms": [],
+      "scale": 5,
+      "parent": "cell:principal",
+      "externalIds": {
+        "GO": "GO:0016323"
+      },
+      "summary": "Blood-side membrane; carries the V2 receptor, Na-K-ATPase and the AQP3/AQP4 water exit channels.",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "organelle:aqp2-vesicle",
+      "type": "organelle",
+      "name": "AQP2 storage vesicles",
+      "synonyms": [],
+      "scale": 5,
+      "parent": "cell:principal",
+      "externalIds": {
+        "GO": "GO:0030133"
+      },
+      "summary": "Intracellular vesicles holding AQP2; vasopressin triggers their fusion with the apical membrane, reversed on withdrawal.",
+      "evidence": [
+        "ev:nielsen-1995"
+      ]
+    },
+    {
+      "id": "organelle:principal-nucleus",
+      "type": "organelle",
+      "name": "Nucleus (principal cell)",
+      "synonyms": [],
+      "scale": 5,
+      "parent": "cell:principal",
+      "externalIds": {
+        "GO": "GO:0005634"
+      },
+      "summary": "Site of mineralocorticoid-receptor gene transcription that raises ENaC activity over hours.",
+      "evidence": [
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "organelle:avp-neurosecretory-vesicle",
+      "type": "organelle",
+      "name": "Vasopressin neurosecretory vesicles",
+      "synonyms": [],
+      "scale": 5,
+      "parent": "cell:magnocellular",
+      "externalIds": {
+        "GO": "GO:1990008"
+      },
+      "summary": "Dense-core vesicles in magnocellular axon terminals of the posterior pituitary that store and release vasopressin.",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "organelle:jg-secretory-granule",
+      "type": "organelle",
+      "name": "Renin granules",
+      "synonyms": [],
+      "scale": 5,
+      "parent": "cell:juxtaglomerular",
+      "externalIds": {
+        "GO": "GO:0030141"
+      },
+      "summary": "Secretory granules of juxtaglomerular cells that store active renin.",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "pathway:adh-aqp2",
+      "type": "pathway",
+      "name": "ADH → V2R → cAMP → AQP2",
+      "synonyms": [
+        "vasopressin-regulated water reabsorption"
+      ],
+      "scale": 6,
+      "parent": "cell:principal",
+      "externalIds": {
+        "GO": "GO:0070295",
+        "KEGG": "hsa04962",
+        "Reactome": "R-HSA-432040"
+      },
+      "summary": "ADH binds the V2 receptor, Gs activates adenylyl cyclase, cAMP activates PKA, and PKA drives AQP2 vesicles to the apical membrane so water can be reabsorbed.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-1995",
+        "ev:nielsen-2002",
+        "ev:pearce-2015"
+      ],
+      "system": "renal",
+      "quantities": [
+        "ADH",
+        "U_osm"
+      ]
+    },
+    {
+      "id": "pathway:raas",
+      "type": "pathway",
+      "name": "Renin–angiotensin–aldosterone system",
+      "synonyms": [
+        "RAAS",
+        "renin-angiotensin system"
+      ],
+      "scale": 6,
+      "parent": "organism:body",
+      "externalIds": {
+        "GO": "GO:0003081",
+        "KEGG": "hsa04614",
+        "Reactome": "R-HSA-2022377"
+      },
+      "summary": "Renin from juxtaglomerular cells cleaves angiotensinogen to angiotensin I; ACE makes angiotensin II, which acts on AT1 receptors to constrict vessels, stimulate aldosterone and thirst, and retain sodium.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014",
+        "ev:forrester-2018"
+      ]
+    },
+    {
+      "id": "pathway:aldosterone-mr-enac",
+      "type": "pathway",
+      "name": "Aldosterone → MR → ENaC",
+      "synonyms": [
+        "aldosterone-regulated sodium reabsorption"
+      ],
+      "scale": 6,
+      "parent": "cell:principal",
+      "externalIds": {
+        "GO": "GO:0031959",
+        "KEGG": "hsa04960"
+      },
+      "summary": "Aldosterone binds the mineralocorticoid receptor in principal cells; gene transcription raises apical ENaC and basolateral Na-K-ATPase activity, increasing sodium reabsorption and potassium secretion.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "pathway:anp-npra-cgmp",
+      "type": "pathway",
+      "name": "ANP → NPR-A → cGMP",
+      "synonyms": [
+        "natriuretic peptide signalling"
+      ],
+      "scale": 6,
+      "parent": "organism:body",
+      "externalIds": {
+        "GO": "GO:0007168"
+      },
+      "summary": "ANP binds NPR-A (guanylyl cyclase A), raising cGMP; effects include natriuresis, vasodilation and suppression of renin and aldosterone. Its weight in human salt-load natriuresis is disputed (see relations).",
+      "evidence": [
+        "ev:potter-2006",
+        "ev:kuhn-2016",
+        "ev:andersen-2002"
+      ]
+    },
+    {
+      "id": "process:osmoreception",
+      "type": "process",
+      "name": "Osmoreception",
+      "synonyms": [
+        "osmosensation",
+        "detection of osmotic stimulus"
+      ],
+      "scale": 6,
+      "parent": "organism:body",
+      "externalIds": {
+        "GO": "GO:0043575"
+      },
+      "summary": "Detection of plasma osmolality by OVLT/SFO neurons and intrinsically osmosensitive magnocellular neurons; drives vasopressin release and thirst.",
+      "evidence": [
+        "ev:bourque-2008",
+        "ev:robertson-athar-1976"
+      ]
+    },
+    {
+      "id": "process:thirst",
+      "type": "process",
+      "name": "Thirst",
+      "synonyms": [
+        "drinking behavior"
+      ],
+      "scale": 6,
+      "parent": "organ:brain",
+      "externalIds": {
+        "GO": "GO:0042756"
+      },
+      "summary": "Conscious drive to drink, triggered by rising osmolality, falling volume and angiotensin II via the lamina terminalis. In V1 thirst is an output only.",
+      "evidence": [
+        "ev:zimmerman-2017",
+        "ev:hughes-2018",
+        "ev:thompson-1986"
+      ]
+    },
+    {
+      "id": "process:pressure-natriuresis",
+      "type": "process",
+      "name": "Pressure natriuresis",
+      "synonyms": [],
+      "scale": 6,
+      "parent": "organ:kidney",
+      "externalIds": {
+        "GO": "GO:0035813"
+      },
+      "summary": "Rise in renal sodium excretion when renal perfusion pressure rises, largely by reduced proximal reabsorption; the long-term anchor of arterial pressure in Guyton-type models.",
+      "evidence": [
+        "ev:ivy-bailey-2014",
+        "ev:hall-2016",
+        "ev:guyton-1972"
+      ]
+    },
+    {
+      "id": "process:na-k-atpase-cycle",
+      "type": "process",
+      "name": "Na-K-ATPase pump cycle",
+      "synonyms": [
+        "sodium pump",
+        "sodium ion export across plasma membrane"
+      ],
+      "scale": 6,
+      "parent": "organism:body",
+      "externalIds": {
+        "GO": "GO:0036376",
+        "Reactome": "R-HSA-936837"
+      },
+      "summary": "ATP-driven export of 3 Na+ and import of 2 K+ per cycle; maintains the cell gradients that power tubular sodium reabsorption.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:post-jolly-1957",
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "process:glomerular-filtration",
+      "type": "process",
+      "name": "Glomerular filtration",
+      "synonyms": [
+        "GFR"
+      ],
+      "scale": 6,
+      "parent": "tissue:glomerulus",
+      "externalIds": {
+        "GO": "GO:0003094"
+      },
+      "summary": "Ultrafiltration of plasma across the glomerular barrier; its rate (GFR) sets the filtered load of water and solutes.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:levey-2009"
+      ]
+    },
+    {
+      "id": "process:tubular-na-reabsorption",
+      "type": "process",
+      "name": "Tubular sodium reabsorption",
+      "synonyms": [
+        "renal sodium ion absorption"
+      ],
+      "scale": 6,
+      "parent": "tissue:nephron",
+      "externalIds": {
+        "GO": "GO:0070294"
+      },
+      "summary": "Recovery of filtered sodium along the nephron, normally over 99% of the filtered load; proximal segments deliver a fairly constant load and distal segments match excretion to intake.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "process:renin-secretion",
+      "type": "process",
+      "name": "Renin secretion",
+      "synonyms": [],
+      "scale": 6,
+      "parent": "cell:juxtaglomerular",
+      "externalIds": {
+        "KEGG": "hsa04924"
+      },
+      "summary": "Release of renin from juxtaglomerular granules, stimulated by low perfusion pressure, low macula densa NaCl and sympathetic input.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "process:aldosterone-synthesis",
+      "type": "process",
+      "name": "Aldosterone synthesis",
+      "synonyms": [
+        "aldosterone biosynthetic process"
+      ],
+      "scale": 6,
+      "parent": "cell:zona-glomerulosa",
+      "externalIds": {
+        "GO": "GO:0032342"
+      },
+      "summary": "Final steps of aldosterone production by aldosterone synthase (CYP11B2), stimulated by angiotensin II and potassium.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ]
+    },
+    {
+      "id": "molecule:water",
+      "type": "molecule",
+      "name": "Water",
+      "synonyms": [
+        "H2O"
+      ],
+      "scale": 7,
+      "parent": "organism:body",
+      "externalIds": {
+        "ChEBI": "CHEBI:15377",
+        "KEGG": "C00001"
+      },
+      "summary": "About 60% of body mass in the reference adult; distributed two-thirds intracellular, one-third extracellular, moving between them by osmosis.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "molecule:na",
+      "type": "molecule",
+      "name": "Sodium ion (Na+)",
+      "synonyms": [
+        "sodium",
+        "Na+"
+      ],
+      "scale": 7,
+      "parent": "organism:body",
+      "externalIds": {
+        "ChEBI": "CHEBI:29101",
+        "KEGG": "C01330"
+      },
+      "summary": "Main extracellular cation (plasma about 135–145 mmol/L); with its anions sets extracellular osmolality and hence ECF volume.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:hew-butler-2015"
+      ]
+    },
+    {
+      "id": "molecule:k",
+      "type": "molecule",
+      "name": "Potassium ion (K+)",
+      "synonyms": [
+        "potassium",
+        "K+"
+      ],
+      "scale": 7,
+      "parent": "organism:body",
+      "externalIds": {
+        "ChEBI": "CHEBI:29103",
+        "KEGG": "C00238"
+      },
+      "summary": "Main intracellular cation; kept inside cells by the Na-K-ATPase. Plasma K is not modelled in V1.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "molecule:cl",
+      "type": "molecule",
+      "name": "Chloride ion (Cl-)",
+      "synonyms": [
+        "chloride",
+        "Cl-"
+      ],
+      "scale": 7,
+      "parent": "organism:body",
+      "externalIds": {
+        "ChEBI": "CHEBI:17996",
+        "KEGG": "C00698"
+      },
+      "summary": "Main extracellular anion, co-transported with sodium by NKCC2 and NCC.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "molecule:urea",
+      "type": "molecule",
+      "name": "Urea",
+      "synonyms": [],
+      "scale": 7,
+      "parent": "organism:body",
+      "externalIds": {
+        "ChEBI": "CHEBI:16199",
+        "KEGG": "C00086"
+      },
+      "summary": "Nitrogen waste solute; contributes to plasma osmolality but crosses cell membranes, so it does not shift water between ECF and ICF. Held constant in V1.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "molecule:glucose",
+      "type": "molecule",
+      "name": "Glucose",
+      "synonyms": [
+        "D-glucose"
+      ],
+      "scale": 7,
+      "parent": "organism:body",
+      "externalIds": {
+        "ChEBI": "CHEBI:17234",
+        "KEGG": "C00031"
+      },
+      "summary": "Plasma fuel; enters plasma osmolality as glucose(mg/dL)/18. Held constant in V1.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "molecule:avp",
+      "type": "hormone",
+      "name": "Vasopressin (ADH)",
+      "synonyms": [
+        "arginine vasopressin",
+        "AVP",
+        "antidiuretic hormone",
+        "ADH",
+        "argipressin"
+      ],
+      "scale": 7,
+      "parent": "pathway:adh-aqp2",
+      "externalIds": {
+        "ChEBI": "CHEBI:34543",
+        "KEGG": "C13662",
+        "UniProt": "P01185",
+        "HGNC": "HGNC:894"
+      },
+      "summary": "Nine-residue peptide hormone (CYFQNCPRG) with a disulfide bond between the two cysteines. Released from the posterior pituitary as plasma osmolality rises; plasma half-life about 24 minutes.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:robertson-athar-1976",
+        "ev:baumann-dingman-1976"
+      ],
+      "system": "renal",
+      "quantities": [
+        "ADH"
+      ]
+    },
+    {
+      "id": "molecule:aldosterone",
+      "type": "hormone",
+      "name": "Aldosterone",
+      "synonyms": [],
+      "scale": 7,
+      "parent": "cell:zona-glomerulosa",
+      "externalIds": {
+        "ChEBI": "CHEBI:27584",
+        "KEGG": "C01780"
+      },
+      "summary": "Mineralocorticoid steroid that increases distal sodium reabsorption and potassium secretion via the mineralocorticoid receptor; rises when salt intake falls.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:rossier-2015",
+        "ev:he-2013"
+      ]
+    },
+    {
+      "id": "molecule:anp",
+      "type": "hormone",
+      "name": "Atrial natriuretic peptide (ANP)",
+      "synonyms": [
+        "ANP",
+        "ANF",
+        "natriuretic peptide A",
+        "NPPA"
+      ],
+      "scale": 7,
+      "parent": "cell:atrial-myocyte",
+      "externalIds": {
+        "UniProt": "P01160",
+        "HGNC": "HGNC:7939",
+        "KEGG": "C16003"
+      },
+      "summary": "Peptide hormone released by stretched atria; acts on NPR-A. Plasma half-life about 2.5–3 minutes in humans.",
+      "evidence": [
+        "ev:potter-2006",
+        "ev:yandle-1986"
+      ]
+    },
+    {
+      "id": "molecule:angiotensinogen",
+      "type": "protein",
+      "name": "Angiotensinogen",
+      "synonyms": [
+        "AGT"
+      ],
+      "scale": 7,
+      "parent": "pathway:raas",
+      "externalIds": {
+        "UniProt": "P01019",
+        "HGNC": "HGNC:333"
+      },
+      "summary": "Liver-secreted plasma protein; renin cleaves it to angiotensin I.",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "molecule:angiotensin-i",
+      "type": "molecule",
+      "name": "Angiotensin I",
+      "synonyms": [],
+      "scale": 7,
+      "parent": "pathway:raas",
+      "externalIds": {
+        "ChEBI": "CHEBI:2718"
+      },
+      "summary": "Decapeptide cut from angiotensinogen by renin; largely inactive until converted by ACE.",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "molecule:angiotensin-ii",
+      "type": "hormone",
+      "name": "Angiotensin II",
+      "synonyms": [
+        "Ang II",
+        "ANG II",
+        "Ile5-angiotensin II"
+      ],
+      "scale": 7,
+      "parent": "pathway:raas",
+      "externalIds": {
+        "ChEBI": "CHEBI:2719",
+        "KEGG": "C02135"
+      },
+      "summary": "Octapeptide (human sequence Ile5) and the main active RAAS product; via AT1 receptors it constricts arterioles, stimulates aldosterone and thirst, and increases proximal sodium reabsorption.",
+      "evidence": [
+        "ev:sparks-2014",
+        "ev:forrester-2018"
+      ]
+    },
+    {
+      "id": "molecule:renin",
+      "type": "enzyme",
+      "name": "Renin",
+      "synonyms": [
+        "REN"
+      ],
+      "scale": 7,
+      "parent": "cell:juxtaglomerular",
+      "externalIds": {
+        "UniProt": "P00797",
+        "HGNC": "HGNC:9958"
+      },
+      "summary": "Aspartyl protease secreted by juxtaglomerular cells; the rate-limiting step of the RAAS.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "molecule:ace",
+      "type": "enzyme",
+      "name": "Angiotensin-converting enzyme (ACE)",
+      "synonyms": [
+        "ACE",
+        "kininase II"
+      ],
+      "scale": 7,
+      "parent": "pathway:raas",
+      "externalIds": {
+        "UniProt": "P12821",
+        "HGNC": "HGNC:2707"
+      },
+      "summary": "Endothelial peptidase (abundant in lung) converting angiotensin I to angiotensin II.",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "molecule:camp",
+      "type": "molecule",
+      "name": "cAMP",
+      "synonyms": [
+        "3',5'-cyclic AMP",
+        "cyclic AMP"
+      ],
+      "scale": 7,
+      "parent": "pathway:adh-aqp2",
+      "externalIds": {
+        "ChEBI": "CHEBI:17489",
+        "KEGG": "C00575"
+      },
+      "summary": "Second messenger made by adenylyl cyclase after V2 receptor activation; activates PKA.",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "molecule:cgmp",
+      "type": "molecule",
+      "name": "cGMP",
+      "synonyms": [
+        "3',5'-cyclic GMP",
+        "cyclic GMP"
+      ],
+      "scale": 7,
+      "parent": "pathway:anp-npra-cgmp",
+      "externalIds": {
+        "ChEBI": "CHEBI:16356",
+        "KEGG": "C00942"
+      },
+      "summary": "Second messenger synthesised by NPR-A when ANP binds.",
+      "evidence": [
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "molecule:atp",
+      "type": "molecule",
+      "name": "ATP",
+      "synonyms": [
+        "adenosine triphosphate"
+      ],
+      "scale": 7,
+      "parent": "organism:body",
+      "externalIds": {
+        "ChEBI": "CHEBI:15422",
+        "KEGG": "C00002"
+      },
+      "summary": "Energy currency hydrolysed by the Na-K-ATPase; renal sodium transport is a major consumer of renal oxygen.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sejersted-1982"
+      ]
+    },
+    {
+      "id": "molecule:aqp2",
+      "type": "protein",
+      "name": "Aquaporin-2 (AQP2)",
+      "synonyms": [
+        "AQP-CD",
+        "aquaporin 2"
+      ],
+      "scale": 7,
+      "parent": "organelle:principal-apical-membrane",
+      "externalIds": {
+        "UniProt": "P41181",
+        "HGNC": "HGNC:634"
+      },
+      "summary": "Vasopressin-regulated water channel of collecting-duct principal cells, shuttled between storage vesicles and the apical membrane.",
+      "evidence": [
+        "ev:nielsen-1995",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "molecule:aqp3",
+      "type": "protein",
+      "name": "Aquaporin-3 (AQP3)",
+      "synonyms": [],
+      "scale": 7,
+      "parent": "organelle:principal-basolateral-membrane",
+      "externalIds": {
+        "UniProt": "Q92482",
+        "HGNC": "HGNC:636"
+      },
+      "summary": "Basolateral water exit channel of principal cells (with AQP4).",
+      "evidence": [
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "molecule:enac",
+      "type": "protein",
+      "name": "Epithelial sodium channel (ENaC)",
+      "synonyms": [
+        "ENaC",
+        "SCNN1A/B/G"
+      ],
+      "scale": 7,
+      "parent": "organelle:principal-apical-membrane",
+      "externalIds": {
+        "UniProt": [
+          "P37088",
+          "P51168",
+          "P51170"
+        ],
+        "HGNC": [
+          "HGNC:10599",
+          "HGNC:10600",
+          "HGNC:10602"
+        ]
+      },
+      "summary": "Apical, amiloride-sensitive sodium channel of alpha, beta and gamma subunits; up-regulated by aldosterone.",
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "molecule:na-k-atpase",
+      "type": "enzyme",
+      "name": "Na-K-ATPase",
+      "synonyms": [
+        "sodium pump",
+        "sodium:potassium-exchanging ATPase",
+        "ATP1A1/ATP1B1"
+      ],
+      "scale": 7,
+      "parent": "process:na-k-atpase-cycle",
+      "externalIds": {
+        "UniProt": [
+          "P05023",
+          "P05026"
+        ],
+        "HGNC": [
+          "HGNC:799",
+          "HGNC:804"
+        ],
+        "GO": "GO:0005890"
+      },
+      "summary": "Basolateral sodium pump (alpha1/beta1 is the renal isoform pair) exchanging 3 Na+ out for 2 K+ in per ATP.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:skou-1957",
+        "ev:post-jolly-1957",
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "molecule:nkcc2",
+      "type": "protein",
+      "name": "NKCC2",
+      "synonyms": [
+        "SLC12A1",
+        "Na-K-2Cl cotransporter 2"
+      ],
+      "scale": 7,
+      "parent": "cell:tal-epithelial",
+      "externalIds": {
+        "UniProt": "Q13621",
+        "HGNC": "HGNC:10910"
+      },
+      "summary": "Apical Na-K-2Cl cotransporter of the thick ascending limb and macula densa; target of loop diuretics.",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "molecule:ncc",
+      "type": "protein",
+      "name": "NCC",
+      "synonyms": [
+        "SLC12A3",
+        "thiazide-sensitive NaCl cotransporter"
+      ],
+      "scale": 7,
+      "parent": "cell:dct-epithelial",
+      "externalIds": {
+        "UniProt": "P55017",
+        "HGNC": "HGNC:10912"
+      },
+      "summary": "Apical thiazide-sensitive Na-Cl cotransporter of the distal convoluted tubule.",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "molecule:v2r",
+      "type": "protein",
+      "name": "Vasopressin V2 receptor",
+      "synonyms": [
+        "V2R",
+        "AVPR2"
+      ],
+      "scale": 7,
+      "parent": "organelle:principal-basolateral-membrane",
+      "externalIds": {
+        "UniProt": "P30518",
+        "HGNC": "HGNC:897"
+      },
+      "summary": "Gs-coupled receptor on the basolateral membrane of principal cells.",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "molecule:at1r",
+      "type": "protein",
+      "name": "Angiotensin II type 1 receptor",
+      "synonyms": [
+        "AT1R",
+        "AGTR1"
+      ],
+      "scale": 7,
+      "parent": "pathway:raas",
+      "externalIds": {
+        "UniProt": "P30556",
+        "HGNC": "HGNC:336"
+      },
+      "summary": "G-protein-coupled receptor mediating most known angiotensin II actions.",
+      "evidence": [
+        "ev:forrester-2018",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "molecule:mr",
+      "type": "protein",
+      "name": "Mineralocorticoid receptor",
+      "synonyms": [
+        "MR",
+        "NR3C2"
+      ],
+      "scale": 7,
+      "parent": "pathway:aldosterone-mr-enac",
+      "externalIds": {
+        "UniProt": "P08235",
+        "HGNC": "HGNC:7979"
+      },
+      "summary": "Nuclear receptor activated by aldosterone; drives transcription that increases ENaC activity.",
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "molecule:npr-a",
+      "type": "protein",
+      "name": "NPR-A (guanylyl cyclase A)",
+      "synonyms": [
+        "NPR1",
+        "GC-A"
+      ],
+      "scale": 7,
+      "parent": "pathway:anp-npra-cgmp",
+      "externalIds": {
+        "UniProt": "P16066",
+        "HGNC": "HGNC:7943"
+      },
+      "summary": "Transmembrane guanylyl cyclase receptor for ANP and BNP.",
+      "evidence": [
+        "ev:potter-2006",
+        "ev:kuhn-2016"
+      ]
+    },
+    {
+      "id": "molecule:gs-alpha",
+      "type": "protein",
+      "name": "Gs alpha subunit",
+      "synonyms": [
+        "GNAS",
+        "G(s) alpha"
+      ],
+      "scale": 7,
+      "parent": "pathway:adh-aqp2",
+      "externalIds": {
+        "UniProt": "P63092",
+        "HGNC": "HGNC:4392"
+      },
+      "summary": "Stimulatory G-protein alpha subunit coupling the V2 receptor to adenylyl cyclase.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "molecule:ac6",
+      "type": "enzyme",
+      "name": "Adenylyl cyclase 6",
+      "synonyms": [
+        "ADCY6",
+        "AC6"
+      ],
+      "scale": 7,
+      "parent": "pathway:adh-aqp2",
+      "externalIds": {
+        "UniProt": "O43306",
+        "HGNC": "HGNC:237"
+      },
+      "summary": "Adenylyl cyclase isoform producing cAMP downstream of the V2 receptor in principal cells.",
+      "evidence": [
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "molecule:pka",
+      "type": "enzyme",
+      "name": "Protein kinase A (catalytic alpha)",
+      "synonyms": [
+        "PKA",
+        "PRKACA"
+      ],
+      "scale": 7,
+      "parent": "pathway:adh-aqp2",
+      "externalIds": {
+        "UniProt": "P17612",
+        "HGNC": "HGNC:9380"
+      },
+      "summary": "cAMP-activated kinase that phosphorylates AQP2 and promotes its apical insertion.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "molecule:romk",
+      "type": "protein",
+      "name": "ROMK",
+      "synonyms": [
+        "KCNJ1",
+        "Kir1.1"
+      ],
+      "scale": 7,
+      "parent": "organelle:principal-apical-membrane",
+      "externalIds": {
+        "UniProt": "P48048",
+        "HGNC": "HGNC:6255"
+      },
+      "summary": "Renal outer medullary potassium channel; apical potassium secretion pathway of principal cells and recycling channel in the thick ascending limb.",
+      "evidence": [
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "molecule:cyp11b2",
+      "type": "enzyme",
+      "name": "Aldosterone synthase (CYP11B2)",
+      "synonyms": [
+        "CYP11B2",
+        "aldosterone synthase"
+      ],
+      "scale": 7,
+      "parent": "process:aldosterone-synthesis",
+      "externalIds": {
+        "UniProt": "P19099",
+        "HGNC": "HGNC:2592"
+      },
+      "summary": "Mitochondrial cytochrome P450 catalysing the final steps of aldosterone synthesis.",
+      "evidence": [
+        "ev:vinson-2016"
+      ]
+    }
+  ]
+}

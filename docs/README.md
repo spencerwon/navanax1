@@ -19,6 +19,15 @@ These documents are the project's contract. No implementation work should begin 
 
 Agent definitions live in `.claude/agents/`. Any new Claude session reads 0–3, then states its role, authority level, and permitted data partitions before beginning work (`02_AGENT_HIERARCHY.md` §10).
 
+## The health subsystem
+
+The same process, applied to evidence-graded mechanistic models of human physiology,
+starting from the Operator's Metabolic Map V1. Its own document set, architecture
+diagrams, module registry and decision records live under [`health/`](health/README.md);
+its four agent roles are `.claude/agents/health-*.md`; its origin is vendored at
+`reference/metabolic-map-v1/`. The health documents reuse the process sections of the
+documents above by reference and replace their content.
+
 ## The seven decisions everything else follows from
 
 1. **Stream-first, REST-rationed.** The OpenSea free tier allows 120 REST reads per hour (measured); the WebSocket Stream API is unmetered. The stream is the primary ingestion path and REST is a budgeted, priority-queued resource. Every architectural choice downstream follows from this.

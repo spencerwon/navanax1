@@ -1,0 +1,431 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Metabolic Map</title>
+<meta name="description" content="Educational body-fluid, sodium and kidney model with a 3D body viewer and Monte Carlo uncertainty bands. Not medical advice.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3c5 7 9 11.5 9 17a9 9 0 0 1-18 0c0-5.5 4-10 9-17z' fill='%231f5fe0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650&family=Hanken+Grotesk:wght@400;500;600;700&display=swap">
+<script type="importmap">
+{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }
+</script>
+<style>
+/* Layout: instrument console. Left rail = where in the body (scale ladder + entities);
+   centre = the body itself; right rail = the experiment and its read-out charts. */
+:root {
+  --bg: #eef1f5; --surface: #ffffff; --surface-2: #f5f7fa; --viewer-bg: #e6ebf1;
+  --ink: #0f1722; --ink-2: #445064; --muted: #6f7b8c; --grid: #e7ebf0; --axis: #c3cbd6;
+  --line: rgba(15, 23, 34, 0.1); --accent: #1f5fe0; --accent-ink: #ffffff; --accent-wash: rgba(31, 95, 224, 0.08);
+  --s1: #2a78d6; --s2: #eb6834;
+  --critical: #d03b3b; --warning: #fab219; --good: #0ca30c;
+  --gA: #0f7b3f; --gB: #1f5fe0; --gC: #6a4fc9; --gD: #a65411; --gE: #c62f2f;
+  --font-display: "Bricolage Grotesque", "Hanken Grotesk", system-ui, sans-serif;
+  --font-body: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --r-sm: 6px; --r-md: 10px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0a0f16; --surface: #111823; --surface-2: #172130; --viewer-bg: #0d141e;
+    --ink: #edf1f7; --ink-2: #aab5c5; --muted: #8592a5; --grid: #1e2938; --axis: #34425a;
+    --line: rgba(255, 255, 255, 0.09); --accent: #5a8dff; --accent-ink: #08101c; --accent-wash: rgba(90, 141, 255, 0.12);
+    --s1: #3987e5; --s2: #d95926;
+    --gA: #3cc27a; --gB: #6a9bff; --gC: #a08cf0; --gD: #e08a3c; --gE: #ff6b6b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a0f16; --surface: #111823; --surface-2: #172130; --viewer-bg: #0d141e;
+  --ink: #edf1f7; --ink-2: #aab5c5; --muted: #8592a5; --grid: #1e2938; --axis: #34425a;
+  --line: rgba(255, 255, 255, 0.09); --accent: #5a8dff; --accent-ink: #08101c; --accent-wash: rgba(90, 141, 255, 0.12);
+  --s1: #3987e5; --s2: #d95926;
+  --gA: #3cc27a; --gB: #6a9bff; --gC: #a08cf0; --gD: #e08a3c; --gE: #ff6b6b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 var(--font-body); -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { font-family: var(--font-display); font-weight: 650; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ---------- shell ---------- */
+.app {
+  height: 100%; display: grid;
+  grid-template-columns: 250px minmax(0, 1fr) 440px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "head head head" "left view right" "foot foot foot";
+}
+.top {
+  grid-area: head; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.brand h1 { font-size: 20px; }
+.brand p { margin: 0; color: var(--muted); font-size: 13px; }
+.top .spacer { flex: 1; }
+.cores { color: var(--ink-2); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.cores .dotrow { display: inline-flex; gap: 3px; }
+.cores .dotrow i { width: 7px; height: 7px; border-radius: 50%; background: var(--grid); display: block; transition: background .15s; }
+.cores .dotrow i.on { background: var(--accent); }
+
+.left { grid-area: left; overflow: auto; grid-auto-rows: max-content; border-right: 1px solid var(--line); background: var(--surface); padding: 14px 14px 20px; display: grid; gap: 18px; align-content: start; }
+.view { grid-area: view; position: relative; min-height: 0; background: var(--viewer-bg); overflow: hidden; }
+.right { grid-area: right; overflow: auto; grid-auto-rows: max-content; border-left: 1px solid var(--line); background: var(--bg); padding: 14px 14px 24px; display: grid; gap: 14px; align-content: start; }
+.foot {
+  grid-area: foot; display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center;
+  padding: 8px 16px; background: var(--surface); border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-2);
+}
+.foot strong { color: var(--ink); font-weight: 600; }
+.foot .disclaimer { color: var(--ink); font-weight: 600; }
+
+.section-title { font-family: var(--font-body); font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: 0.04em; margin: 0 0 8px; }
+
+/* ---------- left rail ---------- */
+.ladder { display: grid; gap: 2px; counter-reset: rung; }
+.ladder button {
+  display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 8px; text-align: left;
+  padding: 6px 8px; border: 0; border-radius: var(--r-sm); background: transparent; cursor: pointer; color: var(--ink-2);
+}
+.ladder button .rung { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; background: var(--surface-2); color: var(--muted); font-variant-numeric: tabular-nums; }
+.ladder button .what { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 110px; }
+.ladder button:hover:not(:disabled) { background: var(--accent-wash); }
+.ladder button[aria-current="true"] { background: var(--accent-wash); color: var(--ink); font-weight: 600; }
+.ladder button[aria-current="true"] .rung { background: var(--accent); color: var(--accent-ink); }
+.ladder button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.tree { display: grid; gap: 10px; }
+.tree .sys { display: grid; gap: 1px; }
+.tree .sys-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.tree .sys-head span { font-weight: 600; font-size: 13px; }
+.switch { position: relative; width: 30px; height: 18px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.switch i { position: absolute; inset: 0; border-radius: 9px; background: var(--axis); transition: background .15s; pointer-events: none; }
+.switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--surface); transition: transform .15s; }
+.switch input:checked + i { background: var(--accent); }
+.switch input:checked + i::after { transform: translateX(12px); }
+.switch input:focus-visible + i { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tree .ent { border: 0; background: transparent; text-align: left; padding: 4px 8px 4px 14px; border-radius: var(--r-sm); cursor: pointer; color: var(--ink-2); font-size: 13px; }
+.tree .ent:hover { background: var(--accent-wash); color: var(--ink); }
+.tree .ent[aria-current="true"] { background: var(--accent-wash); color: var(--ink); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+.tree .ent .sc { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.tree details.other { display: block; }
+.tree details.other > summary { cursor: pointer; list-style: none; padding: 1px 0; }
+.tree details.other > summary::-webkit-details-marker { display: none; }
+.tree details.other > summary::after { content: "▸"; color: var(--muted); font-size: 11px; }
+.tree details.other[open] > summary::after { content: "▾"; }
+.tree details.other > summary .sc { margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 500; }
+.tree details.other > .ent { display: block; width: 100%; }
+
+.kb { border-top: 1px solid var(--line); padding-top: 14px; display: grid; gap: 6px; }
+.kb h3 { font-size: 16px; }
+.kb .meta { color: var(--muted); font-size: 12px; }
+.kb p { margin: 0; color: var(--ink-2); font-size: 13px; }
+.kb .src { font-size: 12px; color: var(--muted); }
+.kb .live { display: flex; flex-wrap: wrap; gap: 6px; }
+.kb .live span { background: var(--surface-2); border-radius: var(--r-sm); padding: 2px 8px; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.kb .live .kb-note { flex-basis: 100%; font-size: 12px; color: var(--muted); } /* D-3: why the two GFR readouts differ */
+
+/* ---------- viewer HUD ---------- */
+.viewer-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+.hud { position: absolute; pointer-events: none; display: grid; gap: 6px; }
+.hud > * { pointer-events: auto; }
+.hud.tl { top: 12px; left: 12px; }
+.hud.tr { top: 12px; right: 12px; justify-items: end; text-align: right; }
+.hud.bl { bottom: 12px; left: 12px; }
+.hud.br { bottom: 12px; right: 12px; justify-items: end; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: 12px; color: var(--ink-2); }
+.chip.warn { color: var(--ink); border-color: var(--warning); }
+.hud .time { font-family: var(--font-display); font-size: 26px; font-weight: 650; color: var(--ink); line-height: 1; font-variant-numeric: tabular-nums; }
+.hud .scen { font-size: 12px; color: var(--ink-2); max-width: 260px; }
+.gauge { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px; display: grid; gap: 5px; width: 190px; }
+.gauge .lbl { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); }
+.gauge .lbl strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.meter { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; }
+.meter i { display: block; height: 100%; width: 0; background: var(--s1); border-radius: 3px; transition: width .12s linear; }
+.strain-legend { height: 6px; border-radius: 3px; background: linear-gradient(90deg, #9c4a44 0%, #f0a020 33%, #d03b3b 66%, #d03b3b 100%); position: relative; }
+.strain-legend b { position: absolute; top: -3px; width: 2px; height: 12px; background: var(--ink); transform: translateX(-1px); }
+.strain-ticks { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.fps { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.anchor { position: absolute; left: 0; top: 0; pointer-events: none; white-space: nowrap; padding: 3px 8px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--line); font-size: 12px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.anchor small { font-weight: 500; color: var(--muted); }
+.viewer-hover { position: absolute; pointer-events: none; padding: 4px 9px; border-radius: var(--r-sm); background: var(--ink); color: var(--surface); font-size: 12px; font-weight: 600; white-space: nowrap; z-index: 3; }
+.webgl-msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--ink-2); }
+
+/* ---------- right panel ---------- */
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px; display: grid; gap: 12px; min-width: 0; }
+.tabs { display: flex; gap: 2px; background: var(--surface-2); padding: 3px; border-radius: 8px; }
+.tabs button { flex: 1; border: 0; background: transparent; padding: 6px 8px; border-radius: 6px; cursor: pointer; color: var(--ink-2); font-weight: 600; font-size: 13px; }
+.tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+label.field { display: grid; gap: 4px; font-size: 12px; color: var(--ink-2); font-weight: 600; }
+select, input[type="number"] {
+  width: 100%; padding: 7px 9px; border-radius: var(--r-sm); border: 1px solid var(--axis); background: var(--surface); font-size: 14px;
+}
+.scen-desc { color: var(--ink-2); font-size: 13px; margin: 0; }
+details.expects summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+details.expects ul { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); font-size: 12px; display: grid; gap: 4px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.range-field { display: grid; gap: 4px; }
+.range-field .top-line { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.range-field output { color: var(--ink); font-variant-numeric: tabular-nums; }
+input[type="range"] { width: 100%; accent-color: var(--accent); margin: 0; }
+.btn { border: 1px solid var(--axis); background: var(--surface); padding: 7px 12px; border-radius: var(--r-sm); cursor: pointer; font-weight: 600; font-size: 13px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn:disabled { opacity: .5; cursor: progress; }
+.btn.play { width: 38px; height: 34px; padding: 0; display: grid; place-items: center; }
+.btn.play svg { width: 14px; height: 14px; fill: currentColor; }
+.playbar { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
+.playbar select { width: auto; padding: 5px 6px; font-size: 13px; }
+.mcnote { font-size: 12px; color: var(--muted); }
+.progress { height: 3px; background: var(--grid); border-radius: 2px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .1s; }
+
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line); border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--line); }
+.stat { background: var(--surface); padding: 10px; display: grid; gap: 2px; min-width: 0; }
+.stat .k { font-size: 11px; color: var(--muted); font-weight: 600; }
+.stat .v { font-family: var(--font-display); font-size: 21px; font-weight: 650; line-height: 1.1; }
+.stat .v small { font-family: var(--font-body); font-size: 11px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+.stat .d { font-size: 11px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.stat .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: 0; }
+
+.charts { display: grid; gap: 12px; }
+.chart-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 10px 6px; display: grid; gap: 4px; min-width: 0; }
+.chart-head { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+.chart-head h3 { font-family: var(--font-body); font-size: 13px; font-weight: 700; }
+.chart-head .unit { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+.chart-tools { display: flex; gap: 6px; flex: none; }
+.ev-chip { border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 1px 8px 1px 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); cursor: pointer; display: inline-flex; gap: 5px; align-items: center; }
+.ev-chip:hover { border-color: var(--accent); color: var(--ink); }
+.ev-chip .e { color: var(--gE); }
+.tbl-btn { border: 0; background: transparent; font-size: 11px; color: var(--muted); cursor: pointer; padding: 1px 4px; text-decoration: underline; text-underline-offset: 2px; }
+.legend { display: flex; gap: 12px; font-size: 12px; color: var(--ink-2); }
+.legend i { display: inline-block; width: 14px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 5px; }
+.chart-box { position: relative; height: 140px; }
+.chart-box.is-stale { opacity: .55; }
+.chart-canvas { display: block; outline: none; }
+.chart-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.chart-tip { position: absolute; z-index: 2; pointer-events: none; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 4px 14px rgba(0,0,0,.14); border-radius: var(--r-sm); padding: 6px 8px; font-size: 12px; display: grid; gap: 3px; min-width: 150px; }
+.tip-time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tip-row { display: grid; grid-template-columns: 14px auto; column-gap: 6px; align-items: center; }
+.tip-row strong { font-variant-numeric: tabular-nums; color: var(--ink); }
+.tip-key { width: 12px; height: 2px; border-radius: 1px; }
+.tip-sub { grid-column: 2; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart-foot { font-size: 11px; color: var(--muted); }
+.tablewrap { overflow-x: auto; max-height: 220px; overflow-y: auto; }
+table.data { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+table.data th, table.data td { padding: 3px 6px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+
+.dose-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.dose-head h2 { font-size: 17px; }
+.seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.seg button { border: 1px solid var(--line); background: var(--surface); padding: 3px 9px; border-radius: 999px; font-size: 12px; cursor: pointer; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { border-color: var(--accent); color: var(--ink); background: var(--accent-wash); font-weight: 600; }
+.dose-box { position: relative; height: 170px; }
+
+.stress table.data td:first-child { font-weight: 600; }
+.stress .bar { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; }
+.stress .bar i { display: block; height: 100%; background: var(--accent); }
+
+/* ---------- evidence drawer ---------- */
+.drawer-scrim { position: fixed; inset: 0; background: rgba(5, 10, 18, .4); z-index: 20; }
+.drawer {
+  position: fixed; z-index: 21; top: 0; right: 0; bottom: 0; width: min(560px, 100%);
+  background: var(--surface); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.18);
+  display: grid; grid-template-rows: auto minmax(0, 1fr); padding-top: env(safe-area-inset-top, 0px);
+}
+.drawer header { padding: 16px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.drawer header .row { justify-content: space-between; flex-wrap: nowrap; }
+.drawer h2 { font-size: 18px; }
+.drawer .body { overflow: auto; padding: 12px 16px 24px; display: grid; gap: 12px; align-content: start; }
+.grade-sum { display: flex; flex-wrap: wrap; gap: 6px; }
+.alert { border: 1px solid var(--gE); background: color-mix(in srgb, var(--gE) 9%, var(--surface)); color: var(--ink); border-radius: var(--r-sm); padding: 8px 10px; font-size: 13px; display: flex; gap: 8px; align-items: flex-start; }
+.alert svg { flex: none; width: 16px; height: 16px; fill: var(--gE); margin-top: 2px; }
+.prm { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 10px; display: grid; gap: 4px; }
+.prm.is-e { border-color: color-mix(in srgb, var(--gE) 55%, var(--line)); background: color-mix(in srgb, var(--gE) 5%, var(--surface)); }
+.prm .h { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.prm code { font-size: 12px; font-weight: 600; color: var(--ink); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.prm .val { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink); }
+.prm .val span { color: var(--muted); }
+.prm p { margin: 0; font-size: 12px; color: var(--ink-2); }
+.prm ul { margin: 0; padding-left: 16px; font-size: 12px; color: var(--ink-2); display: grid; gap: 2px; }
+.prm a, .srcs a { color: var(--accent); }
+.grade { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; border-radius: 4px; padding: 1px 6px; border: 1px solid currentColor; white-space: nowrap; }
+.grade.A { color: var(--gA); } .grade.B { color: var(--gB); } .grade.C { color: var(--gC); } .grade.D { color: var(--gD); }
+.grade.E { color: var(--surface); background: var(--gE); border-color: var(--gE); }
+.srcs { font-size: 12px; color: var(--ink-2); padding-left: 16px; margin: 0; display: grid; gap: 4px; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 1180px) {
+  .app { grid-template-columns: 230px minmax(0, 1fr) 380px; }
+}
+@media (max-width: 960px) {
+  html, body { height: auto; }
+  .app { height: auto; display: flex; flex-direction: column; }
+  .view { height: min(62vh, 560px); min-height: 360px; }
+  .left, .right { overflow: visible; border: 0; }
+  .left { order: 3; padding: 16px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .right { order: 2; padding: 16px; }
+  .foot { order: 4; }
+  .gauge { width: 160px; }
+}
+@media (max-width: 480px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hud .time { font-size: 20px; }
+  .hud .scen { max-width: 170px; }
+  .gauge { width: 150px; padding: 6px 8px; }
+  .brand p { display: none; }
+}
+/* Audit F-04 / BUG-0052: on narrow screens the footer disclaimer is ~6,000 px down, so a compact
+   strip rides in a sticky header and stays visible on every screen. Styling is provisional (UI Designer). */
+.top-disclaimer { display: none; }
+@media (max-width: 767.98px) {
+  .top { position: sticky; top: 0; z-index: 10; padding: 8px 16px; row-gap: 6px; }
+  .top-disclaimer {
+    display: block; flex-basis: 100%; margin: 0; padding: 3px 8px; border-radius: var(--r-sm);
+    background: var(--accent-wash); color: var(--ink); font-size: 12px; font-weight: 600; line-height: 1.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="top">
+    <div class="brand">
+      <h1>Metabolic Map</h1>
+      <p>Water, sodium and the kidney · V1 slice</p>
+    </div>
+    <div class="spacer"></div>
+    <div class="cores" id="coresBadge" title="Simulation workers running on this computer">
+      <span id="coresText">Starting workers…</span><span class="dotrow" id="coreDots"></span>
+    </div>
+    <p class="top-disclaimer" role="note">Educational model — not medical advice.</p>
+  </header>
+
+  <!-- LEFT: where in the body -->
+  <nav class="left" aria-label="Anatomy">
+    <section>
+      <h2 class="section-title">Scale</h2>
+      <div class="ladder" id="ladder"></div>
+    </section>
+    <section>
+      <h2 class="section-title">Organ systems</h2>
+      <div class="tree" id="tree"></div>
+    </section>
+    <section class="kb" id="kb" aria-live="polite"></section>
+  </nav>
+
+  <!-- CENTRE: the body -->
+  <main class="view" id="view">
+    <div class="hud tl">
+      <span class="chip" id="levelChip">Body</span>
+      <span class="chip warn" id="schemChip" hidden>Schematic, not to scale</span>
+    </div>
+    <div class="hud tr">
+      <div class="time" id="hudTime">0.00 h</div>
+      <div class="scen" id="hudScen"></div>
+    </div>
+    <div class="hud bl">
+      <div class="gauge" aria-label="Thirst and kidney strain">
+        <div class="lbl"><span>Thirst drive</span><strong id="thirstVal">–</strong></div>
+        <div class="meter" role="meter" aria-valuemin="0" aria-valuemax="100" id="thirstMeter"><i id="thirstBar"></i></div>
+        <div class="lbl"><span>Kidney strain index</span><strong id="strainVal">–</strong></div>
+        <div class="strain-legend" aria-hidden="true"><b id="strainMark" style="left:0%"></b></div>
+        <div class="strain-ticks"><span>0</span><span>0.33</span><span>0.66</span><span>1</span></div>
+      </div>
+    </div>
+    <div class="hud br"><span class="fps" id="fps"></span></div>
+  </main>
+
+  <!-- RIGHT: the experiment -->
+  <aside class="right" aria-label="Simulation">
+    <section class="panel" aria-label="Choose an intervention">
+      <div class="tabs" role="tablist" id="modeTabs">
+        <button role="tab" id="tab-scenario" aria-selected="true" data-mode="scenario">Scenarios</button>
+        <button role="tab" id="tab-custom" aria-selected="false" data-mode="custom">Custom</button>
+        <button role="tab" id="tab-chronic" aria-selected="false" data-mode="chronic">Chronic</button>
+      </div>
+      <div id="mode-scenario" class="row" style="display:grid;gap:8px">
+        <label class="field" for="scenarioSel">Scenario<select id="scenarioSel"></select></label>
+        <p class="scen-desc" id="scenarioDesc"></p>
+        <details class="expects" id="scenarioExpects"><summary>What the literature expects</summary><ul></ul></details>
+      </div>
+      <form id="mode-custom" hidden style="display:grid;gap:10px">
+        <div class="range-field"><div class="top-line"><label for="cWater">Water</label><output id="cWaterOut" class="num">1,000 mL</output></div>
+          <input type="range" id="cWater" min="0" max="4000" step="50" value="1000"></div>
+        <div class="range-field"><div class="top-line"><label for="cSalt">Salt (NaCl)</label><output id="cSaltOut" class="num">0.0 g</output></div>
+          <input type="range" id="cSalt" min="0" max="30" step="0.5" value="0"></div>
+        <div class="grid2">
+          <div class="range-field"><div class="top-line"><label for="cStart">Start</label><output id="cStartOut" class="num">1.00 h</output></div>
+            <input type="range" id="cStart" min="0" max="6" step="0.25" value="1"></div>
+          <div class="range-field"><div class="top-line"><label for="cDur">Over</label><output id="cDurOut" class="num">10 min</output></div>
+            <input type="range" id="cDur" min="5" max="120" step="5" value="10"></div>
+        </div>
+        <div class="row" style="justify-content:space-between"><span class="mcnote" id="cSummary"></span><button class="btn primary" id="cRun" type="submit">Run intervention</button></div>
+      </form>
+      <div id="mode-chronic" hidden style="display:grid;gap:8px">
+        <p class="scen-desc" id="chronicDesc"></p>
+        <span class="chip warn" style="justify-self:start">Modeled risk trajectory, not a prediction</span>
+      </div>
+      <div class="playbar">
+        <button class="btn play" id="playBtn" aria-label="Play"><svg viewBox="0 0 16 16" id="playIcon"><path d="M3 2l11 6-11 6z"/></svg></button>
+        <input type="range" id="scrub" min="0" max="100" value="0" step="1" aria-label="Scrub time">
+        <select id="speedSel" aria-label="Playback speed"></select>
+      </div>
+      <div class="progress" aria-hidden="true"><i id="mcProgress"></i></div>
+      <div class="mcnote" id="mcNote">Monte Carlo n = 64 · median line, 90% band (q05–q95)</div>
+    </section>
+
+    <section class="stats" id="stats" aria-label="Values at the playhead"></section>
+
+    <section class="charts" id="charts" aria-label="Charts"></section>
+
+    <section class="panel" id="dosePanel" aria-label="Salt dose response">
+      <div class="dose-head">
+        <h2>How much salt strains the kidney?</h2>
+        <button class="ev-chip" id="doseEv" type="button"></button>
+      </div>
+      <p class="scen-desc">Single oral salt loads from 0 to 30 g, each with 0.5 L water, 48 h per dose. Same 64 parameter samples at every dose, so the curve shape is not sampling noise.</p>
+      <div class="seg" id="doseMetric" role="group" aria-label="Dose response metric"></div>
+      <div class="dose-box" id="doseBox"></div>
+      <div class="row" style="justify-content:space-between"><span class="mcnote" id="doseNote">Queued after the main run</span><button class="btn" id="doseRun" type="button">Re-run sweep</button></div>
+    </section>
+
+    <section class="panel stress" aria-label="Computer stress test">
+      <div class="dose-head"><h2>Stress test</h2><button class="btn" id="stressBtn" type="button">Run stress test</button></div>
+      <p class="scen-desc" id="stressDesc">Runs the 1 L water scenario with 64, then 256, then 1,024 parameter samples across every worker, and reports throughput and frame rate.</p>
+      <div class="tablewrap"><table class="data" id="stressTable"><thead><tr><th>Samples</th><th>Time</th><th>Samples/s</th><th>Workers</th><th>FPS (min)</th></tr></thead><tbody></tbody></table></div>
+    </section>
+  </aside>
+
+  <footer class="foot" id="foot"></footer>
+</div>
+
+<div class="drawer-scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+  <header>
+    <div class="row"><h2 id="drawerTitle">Evidence</h2><button class="btn" id="drawerClose" type="button">Close</button></div>
+    <div class="grade-sum" id="drawerSum"></div>
+  </header>
+  <div class="body" id="drawerBody"></div>
+</aside>
+
+<script type="module" src="./app/ui.js"></script>
+</body>
+</html>
+
+</body></html>

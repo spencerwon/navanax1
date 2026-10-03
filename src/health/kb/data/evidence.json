@@ -1,0 +1,1636 @@
+{
+  "kbVersion": "1.0.0",
+  "generated": "2026-10-01",
+  "curator": "Literature Curator + Data-Rigor Lead (Opus)",
+  "schema": "./schema.json",
+  "evidence": [
+    {
+      "id": "ev:guyton-hall-2021",
+      "kind": "book",
+      "title": "Guyton and Hall Textbook of Medical Physiology, 14th edition",
+      "authors": "Hall JE, Hall ME",
+      "year": 2021,
+      "journal": "Elsevier (ISBN 978-0-323-59712-8)",
+      "url": "https://shop.elsevier.com/books/guyton-and-hall-textbook-of-medical-physiology/hall/978-0-323-59712-8",
+      "accessed": "2026-10-01",
+      "notes": "Standard physiology text. Source of textbook values (fluid compartments, daily water balance, GFR, urine osmolality limits, MAP). ISBN verified via publisher listing; chapter/page numbers not verified by this agent.",
+      "sourceType": "textbook",
+      "defaultGrade": "B-textbook",
+      "verification": {
+        "method": "publisher-listing",
+        "checkedOn": "2026-10-01",
+        "by": "Physiology Modeler",
+        "retraction": "not applicable (book)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:robertson-athar-1976",
+      "kind": "doi",
+      "doi": "10.1210/jcem-42-4-613",
+      "pmid": "1262438",
+      "title": "The interaction of blood osmolality and blood volume in regulating plasma vasopressin in man",
+      "authors": "Robertson GL, Athar S",
+      "year": 1976,
+      "journal": "The Journal of clinical endocrinology and metabolism",
+      "url": "https://doi.org/10.1210/jcem-42-4-613",
+      "accessed": "2026-10-01",
+      "quote": "y = 0.35 (x -281.0) where y represents the plasma AVP concentration in pg/ml and x the plasma osmolality",
+      "notes": "ADH-osmolality regression (recumbent hydropenic); orthostasis shifted intercept to 277.8 (slope 0.31); hypertonic saline volume expansion shifted it to 282 (slope 0.32). Used for adh_threshold, adh_slope, direction of volume shift. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, U.S. Gov't, P.H.S."
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:robertson-shelton-athar-1976",
+      "kind": "doi",
+      "doi": "10.1038/ki.1976.76",
+      "pmid": "181630",
+      "title": "The osmoregulation of vasopressin",
+      "authors": "Robertson GL, Shelton RL, Athar S",
+      "year": 1976,
+      "journal": "Kidney international",
+      "url": "https://doi.org/10.1038/ki.1976.76",
+      "accessed": "2026-10-01",
+      "notes": "Classic ADH osmoregulation paper. PubMed has no abstract; figure-level values (urine osmolality vs plasma AVP curve) NOT verified by this agent, so parameters relying on them are graded E-assumption. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:robertson-2001",
+      "kind": "doi",
+      "doi": "10.1016/s0889-8529(05)70207-3",
+      "pmid": "11571936",
+      "title": "Antidiuretic hormone. Normal and disordered function",
+      "authors": "Robertson GL",
+      "year": 2001,
+      "journal": "Endocrinology and metabolism clinics of North America",
+      "url": "https://doi.org/10.1016/s0889-8529(05)70207-3",
+      "accessed": "2026-10-01",
+      "notes": "Review of ADH physiology. Cited qualitatively for ADH -> urine concentration relationship; no numeric value taken from it. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, U.S. Gov't, P.H.S.",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:thompson-1986",
+      "kind": "doi",
+      "doi": "10.1042/cs0710651",
+      "pmid": "3791867",
+      "title": "The osmotic thresholds for thirst and vasopressin release are similar in healthy man",
+      "authors": "Thompson CJ, Bland J, Burd J, Baylis PH",
+      "year": 1986,
+      "journal": "Clinical science (London, England : 1979)",
+      "url": "https://doi.org/10.1042/cs0710651",
+      "accessed": "2026-10-01",
+      "quote": "Thirst (cm) = 0.3 (plasma osmolality-281)",
+      "notes": "Thirst onset threshold 281 mOsm/kg; AVP (pmol/l) = 0.4(Posm-285). Shows thirst threshold is NOT 5-10 mOsm above ADH threshold. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Clinical Trial",
+        "Journal Article",
+        "Randomized Controlled Trial",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:hughes-2018",
+      "kind": "doi",
+      "doi": "10.1186/s13741-017-0081-4",
+      "pmid": "29344350",
+      "title": "The sensitivity of the human thirst response to changes in plasma osmolality: a systematic review",
+      "authors": "Hughes F, Mythen M, Montgomery H",
+      "year": 2018,
+      "journal": "Perioperative medicine (London, England)",
+      "url": "https://doi.org/10.1186/s13741-017-0081-4",
+      "accessed": "2026-10-01",
+      "quote": "pOsm threshold for thirst sensation was found to be 285.23 ± 1.29 mOsm/kg",
+      "notes": "Systematic review, 12 trials, 167 participants. Thirst slope 0.54 ± 0.07 cm/mOsm/kg (10-cm VAS). AVP threshold 284.3 ± 0.71. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "systematic-review",
+      "defaultGrade": "A-meta",
+      "pubTypes": [
+        "Journal Article",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:baumann-dingman-1976",
+      "kind": "doi",
+      "doi": "10.1172/JCI108377",
+      "pmid": "1262458",
+      "title": "Distribution, blood transport, and degradation of antidiuretic hormone in man",
+      "authors": "Baumann G, Dingman JF",
+      "year": 1976,
+      "journal": "The Journal of clinical investigation",
+      "url": "https://doi.org/10.1172/JCI108377",
+      "accessed": "2026-10-01",
+      "quote": "The mean metabolic clearance rate of 125I-AVP was 4.1 ml/min/kg and the mean plasma half-life 24.1 min",
+      "notes": "10 hydrated normal subjects. AVP distributes into ~ECF volume. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, U.S. Gov't, Non-P.H.S.",
+        "Research Support, U.S. Gov't, P.H.S."
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:baylis-1986",
+      "kind": "doi",
+      "doi": "10.1111/j.1365-2265.1986.tb01642.x",
+      "pmid": "3017608",
+      "title": "Development of a cytochemical assay for plasma vasopressin: application to studies on water loading normal man",
+      "authors": "Baylis PH, Pippard C, Gill GV, Burd J",
+      "year": 1986,
+      "journal": "Clinical endocrinology",
+      "url": "https://doi.org/10.1111/j.1365-2265.1986.tb01642.x",
+      "accessed": "2026-10-01",
+      "quote": "fall in plasma osmolality from a basal of 286.5 +/- 2.0 (mean +/- SEM) to 279.2 +/- 2.4 mmol/kg",
+      "notes": "Sustained water load, 8 healthy men; urine osmolality fell 867 -> 69 mOsm/kg. Used for water-load validation and U_osm_min plausibility. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:peronnet-2012",
+      "kind": "doi",
+      "doi": "10.1007/s00421-011-2194-7",
+      "pmid": "21997675",
+      "title": "Pharmacokinetic analysis of absorption, distribution and disappearance of ingested water labeled with D₂O in humans",
+      "authors": "Péronnet F, Mignault D, du Souich P, Vergne S, Le Bellego L, Jimenez L, Rabasa-Lhoret R",
+      "year": 2012,
+      "journal": "European journal of applied physiology",
+      "url": "https://doi.org/10.1007/s00421-011-2194-7",
+      "accessed": "2026-10-01",
+      "quote": "the half-life of absorption (~11-13 min) indicates a complete absorption within ~75-120 min",
+      "notes": "300 mL D2O-labelled water, 36 subjects; 2-compartment distribution half-life 12.5 ± 4.3 min. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Randomized Controlled Trial",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:leiper-2015",
+      "kind": "doi",
+      "doi": "10.1093/nutrit/nuv032",
+      "pmid": "26290292",
+      "title": "Fate of ingested fluids: factors affecting gastric emptying and intestinal absorption of beverages in humans",
+      "authors": "Leiper JB",
+      "year": 2015,
+      "journal": "Nutrition reviews",
+      "url": "https://doi.org/10.1093/nutrit/nuv032",
+      "accessed": "2026-10-01",
+      "notes": "Review of gastric emptying and intestinal absorption of beverages; cited qualitatively for rapid emptying of plain water. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [
+          "Erratum in Nutr Rev. 2020 Sep 1;78(9):781. doi: 10.1093/nutrit/nuaa006 (PMID 32159769)"
+        ]
+      }
+    },
+    {
+      "id": "ev:shafiee-2005",
+      "kind": "doi",
+      "doi": "10.1111/j.1523-1755.2005.67117.x",
+      "pmid": "15673308",
+      "title": "Defining conditions that lead to the retention of water: the importance of the arterial sodium concentration",
+      "authors": "Shafiee MA, Charest AF, Cheema-Dhadli S, Glick DN, Napolova O, Roozbeh J, Semenova E, Sharman A, Halperin ML",
+      "year": 2005,
+      "journal": "Kidney international",
+      "url": "https://doi.org/10.1111/j.1523-1755.2005.67117.x",
+      "accessed": "2026-10-01",
+      "quote": "When 20 mL water/kg was consumed in <15 minutes, the peak urine flow rate was 11 +/- 0.6 mL/min",
+      "notes": "Water-load validation: peak urine flow ~0.66 L/h for ~1.4 L load. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:crowe-1987",
+      "kind": "doi",
+      "doi": "10.1093/ageing/16.5.285",
+      "pmid": "3687569",
+      "title": "Altered water excretion in healthy elderly men",
+      "authors": "Crowe MJ, Forsling ML, Rolls BJ, Phillips PA, Ledingham JG, Smith RF",
+      "year": 1987,
+      "journal": "Age and ageing",
+      "url": "https://doi.org/10.1093/ageing/16.5.285",
+      "accessed": "2026-10-01",
+      "quote": "After 2 h, the old group had excreted 41 +/- 2.4% ... compared to 100.7 +/- 8.8% in the water-replete young group",
+      "notes": "20 mL/kg oral water load; young peak free-water clearance 8.4 ± 0.72 mL/min. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:guyton-1972",
+      "kind": "doi",
+      "doi": "10.1146/annurev.ph.34.030172.000305",
+      "pmid": "4334846",
+      "title": "Circulation: overall regulation",
+      "authors": "Guyton AC, Coleman TG, Granger HJ",
+      "year": 1972,
+      "journal": "Annual review of physiology",
+      "url": "https://doi.org/10.1146/annurev.ph.34.030172.000305",
+      "accessed": "2026-10-01",
+      "notes": "Origin of the renal-body fluid feedback / pressure natriuresis structure. Used for model STRUCTURE, not numeric values. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "model",
+      "defaultGrade": "C-model",
+      "pubTypes": [
+        "Journal Article",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:hall-2016",
+      "kind": "doi",
+      "doi": "10.1161/CIRCULATIONAHA.115.018526",
+      "pmid": "26927007",
+      "title": "Renal Dysfunction, Rather Than Nonrenal Vascular Dysfunction, Mediates Salt-Induced Hypertension",
+      "authors": "Hall JE",
+      "year": 2016,
+      "journal": "Circulation",
+      "url": "https://doi.org/10.1161/CIRCULATIONAHA.115.018526",
+      "accessed": "2026-10-01",
+      "notes": "Review: renal pressure natriuresis dominates long-term salt-induced BP. Structural support; no numeric value taken. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Comment"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:karaaslan-2005",
+      "kind": "doi",
+      "doi": "10.1007/s10439-005-5976-4",
+      "pmid": "16341927",
+      "title": "Long-term mathematical model involving renal sympathetic nerve activity, arterial pressure, and sodium excretion",
+      "authors": "Karaaslan F, Denizhan Y, Kayserilioglu A, Gulcur HO",
+      "year": 2005,
+      "journal": "Annals of biomedical engineering",
+      "url": "https://doi.org/10.1007/s10439-005-5976-4",
+      "accessed": "2026-10-01",
+      "notes": "Long-term computational model (renal sympathetic activity, MAP, Na excretion). Structural reference only. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "model",
+      "defaultGrade": "C-model",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:uttamsingh-1985",
+      "kind": "doi",
+      "doi": "10.1007/BF02455306",
+      "pmid": "4079482",
+      "title": "Mathematical model of the human renal system",
+      "authors": "Uttamsingh RJ, Leaning MS, Bushman JA, Carson ER, Finkelstein L",
+      "year": 1985,
+      "journal": "Medical & biological engineering & computing",
+      "url": "https://doi.org/10.1007/BF02455306",
+      "accessed": "2026-10-01",
+      "notes": "Early mathematical model of the human renal system. Structural reference only. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "model",
+      "defaultGrade": "C-model",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:hallow-2014",
+      "kind": "doi",
+      "doi": "10.1152/ajpregu.00039.2013",
+      "pmid": "24500431",
+      "title": "A model-based approach to investigating the pathophysiological mechanisms of hypertension and response to antihypertensive therapies: extending the Guyton model",
+      "authors": "Hallow KM, Lo A, Beh J, Rodrigo M, Ermakov S, Friedman S, de Leon H, Sarkar A, Xiong Y, Sarangapani R, Schmidt H, Webb R, Kondic AG",
+      "year": 2014,
+      "journal": "American journal of physiology. Regulatory, integrative and comparative physiology",
+      "url": "https://doi.org/10.1152/ajpregu.00039.2013",
+      "accessed": "2026-10-01",
+      "notes": "Extension of the Guyton model. Structural reference (multiplicative modulation of tubular reabsorption). Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "model",
+      "defaultGrade": "C-model",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Validation Study"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:hallow-2017",
+      "kind": "doi",
+      "doi": "10.1002/psp4.12178",
+      "pmid": "28548387",
+      "title": "A quantitative systems physiology model of renal function and blood pressure regulation: Model description",
+      "authors": "Hallow KM, Gebremichael Y",
+      "year": 2017,
+      "journal": "CPT: pharmacometrics & systems pharmacology",
+      "url": "https://doi.org/10.1002/psp4.12178",
+      "accessed": "2026-10-01",
+      "notes": "QSP model of renal function and BP regulation: model description. Structural reference (hormone effects as multiplicative modifiers of reabsorption). Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "model",
+      "defaultGrade": "C-model",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:yandle-1986",
+      "kind": "doi",
+      "doi": "10.1016/0024-3205(86)90137-2",
+      "pmid": "2939312",
+      "title": "Metabolic clearance rate and plasma half life of alpha-human atrial natriuretic peptide in man",
+      "authors": "Yandle TG, Richards AM, Nicholls MG, Cuneo R, Espiner EA, Livesey JH",
+      "year": 1986,
+      "journal": "Life sciences",
+      "url": "https://doi.org/10.1016/0024-3205(86)90137-2",
+      "accessed": "2026-10-01",
+      "quote": "levels of immunoreactive alpha h-ANP ... fell rapidly and exponentially during the first 10 min (t1/2 = 2.5 min)",
+      "notes": "Rapid-phase disappearance after infusion 3.1 min; MCR 2.4 L/min. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:heer-2000",
+      "kind": "doi",
+      "doi": "10.1152/ajprenal.2000.278.4.F585",
+      "pmid": "10751219",
+      "title": "High dietary sodium chloride consumption may not induce body fluid retention in humans",
+      "authors": "Heer M, Baisch F, Kropp J, Gerzer R, Drummer C",
+      "year": 2000,
+      "journal": "American journal of physiology. Renal physiology",
+      "url": "https://doi.org/10.1152/ajprenal.2000.278.4.F585",
+      "accessed": "2026-10-01",
+      "quote": "Plasma volume dose dependently increased (P < 0.01), being elevated by 315 +/- 37 ml in the 550-meq-NaCl-intake group",
+      "notes": "Total body water did NOT increase. This model (Guyton-type) does expand ECF with salt -> documented divergence/limitation. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Clinical Trial",
+        "Controlled Clinical Trial",
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:rakova-2017",
+      "kind": "doi",
+      "doi": "10.1172/JCI88530",
+      "pmid": "28414302",
+      "title": "Increased salt consumption induces body water conservation and decreases fluid intake",
+      "authors": "Rakova N, Kitada K, Lerchl K, Dahlmann A, Birukov A, Daub S, Kopp C, Pedchenko T, Zhang Y, Beck L, Johannes B, Marton A, Müller DN, Rauh M, Luft FC, Titze J",
+      "year": 2017,
+      "journal": "The Journal of clinical investigation",
+      "url": "https://doi.org/10.1172/JCI88530",
+      "accessed": "2026-10-01",
+      "quote": "A 6-g/d increase in salt intake increased urine osmolyte excretion, but reduced free-water clearance",
+      "notes": "Long-term controlled salt intake (12/9/6 g/d). Supports ADH-mediated urine concentration under salt load; fluid intake fell (not modelled: V1 has no ad-lib drinking). Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Clinical Trial",
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:suckling-2012",
+      "kind": "doi",
+      "doi": "10.1038/ki.2011.369",
+      "pmid": "22048126",
+      "title": "Dietary salt influences postprandial plasma sodium concentration and systolic blood pressure",
+      "authors": "Suckling RJ, He FJ, Markandu ND, MacGregor GA",
+      "year": 2012,
+      "journal": "Kidney international",
+      "url": "https://doi.org/10.1038/ki.2011.369",
+      "accessed": "2026-10-01",
+      "quote": "The plasma sodium concentration was significantly increased by 3.13±0.75 mmol/l with salted compared with unsalted soup",
+      "notes": "6 g salt in soup, 10 normotensive volunteers. Salt-load [Na] validation. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Comparative Study",
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:andersen-1998",
+      "kind": "doi",
+      "doi": "10.1152/ajpregu.1998.275.6.R1833",
+      "pmid": "9843872",
+      "title": "Osmoregulatory control of renal sodium excretion after sodium loading in humans",
+      "authors": "Andersen LJ, Norsk P, Johansen LB, Christensen P, Engstrom T, Bie P",
+      "year": 1998,
+      "journal": "The American journal of physiology",
+      "url": "https://doi.org/10.1152/ajpregu.1998.275.6.R1833",
+      "accessed": "2026-10-01",
+      "quote": "Hypr increased plasma sodium by approximately 4 mmol/l",
+      "notes": "IV 3.08 mmol/kg NaCl over 120 min; ANP unchanged. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:andersen-1999",
+      "kind": "doi",
+      "doi": "10.1046/j.1365-201x.1999.00528.x",
+      "pmid": "10372975",
+      "title": "Isotonic and hypertonic sodium loading in supine humans",
+      "authors": "Andersen LJ, Jensen TU, Bestle MH, Bie P",
+      "year": 1999,
+      "journal": "Acta physiologica Scandinavica",
+      "url": "https://doi.org/10.1046/j.1365-201x.1999.00528.x",
+      "accessed": "2026-10-01",
+      "quote": "Cumulated sodium excretions following isotonic (131 +/- 13 mmol) and hypertonic saline (123 +/- 10 mmol)",
+      "notes": "IV load = 10% of ECF Na over 90 min; time control 81 ± 9 mmol over 8 h. Plasma Na +2.7 with hypertonic. Used for natriuresis time-course validation (IV, not oral: caveat). Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Clinical Trial",
+        "Controlled Clinical Trial",
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:andersen-2002",
+      "kind": "doi",
+      "doi": "10.1152/ajpregu.00732.2001",
+      "pmid": "12010758",
+      "title": "Natriuresis induced by mild hypernatremia in humans",
+      "authors": "Andersen LJ, Andersen JL, Pump B, Bie P",
+      "year": 2002,
+      "journal": "American journal of physiology. Regulatory, integrative and comparative physiology",
+      "url": "https://doi.org/10.1152/ajpregu.00732.2001",
+      "accessed": "2026-10-01",
+      "quote": "renal sodium excretion increased significantly more with Hyper (291 +/- 25 vs. 199 +/- 24 micromol/min)",
+      "notes": "Plasma Na 142.0 -> 146.2 (Hyper) vs 142.3 -> 140.3 (Iso). Used to derive na_osm_gain = ln(291/199)/(4.2+2.0) ≈ 0.061 per mmol/L. ANP unchanged. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Clinical Trial",
+        "Comparative Study",
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:he-2013",
+      "kind": "doi",
+      "doi": "10.1136/bmj.f1325",
+      "pmid": "23558162",
+      "title": "Effect of longer term modest salt reduction on blood pressure: Cochrane systematic review and meta-analysis of randomised trials",
+      "authors": "He FJ, Li J, Macgregor GA",
+      "year": 2013,
+      "journal": "BMJ (Clinical research ed.)",
+      "url": "https://doi.org/10.1136/bmj.f1325",
+      "accessed": "2026-10-01",
+      "quote": "In normotensive people, the figures were -2.42 mm Hg (-3.56 to -1.29, I(2)=66%) and -1.00 mm Hg (-1.85 to -0.15",
+      "notes": "Cochrane meta-analysis, 34 RCTs; -75 mmol/24 h urinary Na. Full text read 2026-10-01 (bmj.com, Results): the normotensive subgroup (12 trials, 2240 people) also had a pooled urinary Na change of -75 mmol/24 h (range -40 to -118), so the [0.7, 3.2] mmHg per 100 mmol band is scaled by the subgroup's own value (audit F-06). Used for chronic MAP salt-sensitivity validation and baseline intake context (9-12 g/day). Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "meta-analysis",
+      "defaultGrade": "A-meta",
+      "pubTypes": [
+        "Journal Article",
+        "Meta-Analysis",
+        "Systematic Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:phillips-1984",
+      "kind": "doi",
+      "doi": "10.1056/NEJM198409203111202",
+      "pmid": "6472364",
+      "title": "Reduced thirst after water deprivation in healthy elderly men",
+      "authors": "Phillips PA, Rolls BJ, Ledingham JG, Forsling ML, Morton JJ, Crowe MJ, Wollner L",
+      "year": 1984,
+      "journal": "The New England journal of medicine",
+      "url": "https://doi.org/10.1056/NEJM198409203111202",
+      "accessed": "2026-10-01",
+      "notes": "24 h water deprivation in young and elderly men; qualitative validation for no_water_24h (osmolality, Na, AVP rise; urine concentrates; thirst). Full-text numbers not verified. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Comparative Study",
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:edelman-1958",
+      "kind": "doi",
+      "doi": "10.1172/JCI103712",
+      "pmid": "13575523",
+      "title": "Interrelations between serum sodium concentration, serum osmolarity and total exchangeable sodium, total exchangeable potassium and total body water",
+      "authors": "EDELMAN IS, LEIBMAN J, O'MEARA MP, BIRKENFELD LW",
+      "year": 1958,
+      "journal": "The Journal of clinical investigation",
+      "url": "https://doi.org/10.1172/JCI103712",
+      "accessed": "2026-10-01",
+      "notes": "Serum Na determined by exchangeable Na + K over total body water; justifies counting ICF K (with anion) as 2 osmoles per mmol. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:brenner-1982",
+      "kind": "doi",
+      "doi": "10.1056/NEJM198209093071104",
+      "pmid": "7050706",
+      "title": "Dietary protein intake and the progressive nature of kidney disease: the role of hemodynamically mediated glomerular injury in the pathogenesis of progressive glomerular sclerosis in aging, renal ablation, and intrinsic renal disease",
+      "authors": "Brenner BM, Meyer TW, Hostetter TH",
+      "year": 1982,
+      "journal": "The New England journal of medicine",
+      "url": "https://doi.org/10.1056/NEJM198209093071104",
+      "accessed": "2026-10-01",
+      "notes": "Hemodynamically mediated glomerular injury (hyperfiltration / glomerular hypertension). Supports glomerular component of kidney strain index. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Research Support, U.S. Gov't, P.H.S.",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:brezis-rosen-1995",
+      "kind": "doi",
+      "doi": "10.1056/NEJM199503093321006",
+      "pmid": "7845430",
+      "title": "Hypoxia of the renal medulla--its implications for disease",
+      "authors": "Brezis M, Rosen S",
+      "year": 1995,
+      "journal": "The New England journal of medicine",
+      "url": "https://doi.org/10.1056/NEJM199503093321006",
+      "accessed": "2026-10-01",
+      "notes": "Medullary hypoxia: transport work vs O2 supply. Supports tubular-transport and concentrating-work components of strain index. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Research Support, U.S. Gov't, Non-P.H.S.",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:sejersted-1982",
+      "kind": "doi",
+      "doi": "10.1152/ajprenal.1982.242.3.F254",
+      "pmid": "6278951",
+      "title": "Energetics of tubular sodium reabsorption sensitive to ethacrynic acid and ouabain",
+      "authors": "Sejersted OM, Steen PA, Kiil F",
+      "year": 1982,
+      "journal": "The American journal of physiology",
+      "url": "https://doi.org/10.1152/ajprenal.1982.242.3.F254",
+      "accessed": "2026-10-01",
+      "notes": "Dog kidney: Na reabsorption and O2 consumption fall in parallel (delta Na/delta O2 ≈ 18). D-animal support for transport-work component. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "primary-animal",
+      "defaultGrade": "D-animal",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:hew-butler-2015",
+      "kind": "doi",
+      "doi": "10.1136/bjsports-2015-095004",
+      "pmid": "26227507",
+      "title": "Statement of the 3rd International Exercise-Associated Hyponatremia Consensus Development Conference, Carlsbad, California, 2015",
+      "authors": "Hew-Butler T, Rosner MH, Fowkes-Godek S, Dugas JP, Hoffman MD, Lewis DP, Maughan RJ, Miller KC, Montain SJ, Rehrer NJ, Roberts WO, Rogers IR, Siegel AJ, Stuempfle KJ, Winger JM, Verbalis JG",
+      "year": 2015,
+      "journal": "British journal of sports medicine",
+      "url": "https://doi.org/10.1136/bjsports-2015-095004",
+      "accessed": "2026-10-01",
+      "notes": "EAH consensus: hyponatremia defined as serum/plasma Na < 135 mmol/L. Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "guideline",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Consensus Statement",
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:wiig-2018",
+      "kind": "doi",
+      "doi": "10.1111/apha.13006",
+      "pmid": "29193764",
+      "title": "The interstitium conducts extrarenal storage of sodium and represents a third compartment essential for extracellular volume and blood pressure homeostasis",
+      "authors": "Wiig H, Luft FC, Titze JM",
+      "year": 2018,
+      "journal": "Acta physiologica (Oxford, England)",
+      "url": "https://doi.org/10.1111/apha.13006",
+      "accessed": "2026-10-01",
+      "notes": "Interstitial (skin) Na storage without commensurate water: NOT modelled in V1 (limitation). Metadata verified via PubMed E-utilities esummary.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esummary",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator (re-check of Physiology Modeler record)",
+        "titleMatch": true,
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": []
+      }
+    },
+    {
+      "id": "ev:palmer-schnermann-2015",
+      "kind": "doi",
+      "doi": "10.2215/CJN.12391213",
+      "pmid": "25098598",
+      "title": "Integrated control of Na transport along the nephron",
+      "authors": "Palmer LG, Schnermann J",
+      "year": 2015,
+      "journal": "Clinical journal of the American Society of Nephrology : CJASN",
+      "url": "https://doi.org/10.2215/CJN.12391213",
+      "accessed": "2026-10-01",
+      "quote": "The kidney filters vast quantities of Na at the glomerulus but excretes a very small fraction of this Na in the final urine.",
+      "notes": "Review of segmental Na transport (glomerulotubular balance, TGF, distal fine-tuning). Abstract gives no segment percentages; full text paywalled to this agent, so segment fractions in relations.json rest on the textbook (B-textbook) and this review is cited for the qualitative segment roles only.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Research Support, N.I.H., Intramural",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Integrated Control of Na Transport along the Nephron",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:levey-2009",
+      "kind": "doi",
+      "doi": "10.7326/0003-4819-150-9-200905050-00006",
+      "pmid": "19414839",
+      "title": "A new equation to estimate glomerular filtration rate",
+      "authors": "Levey AS, Stevens LA, Schmid CH, Zhang YL, Castro AF 3rd, Feldman HI, Kusek JW, Eggers P, Van Lente F, Greene T, Coresh J, CKD-EPI (Chronic Kidney Disease Epidemiology Collaboration)",
+      "year": 2009,
+      "journal": "Annals of internal medicine",
+      "url": "https://doi.org/10.7326/0003-4819-150-9-200905050-00006",
+      "accessed": "2026-10-01",
+      "quote": "In NHANES, the median estimated GFR was 94.5 mL/min per 1.73 m(2) (IQR, 79.7 to 108.1)",
+      "notes": "CKD-EPI creatinine equation development. NHANES 1999-2006 population median eGFR (estimated, not measured; all adult ages). The 2009 equation includes a race coefficient later removed (2021 refit) - V2: add the 2021 equation paper. Erratum 2011 noted.",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Validation Study"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "A New Equation to Estimate Glomerular Filtration Rate",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [
+          "Erratum in Ann Intern Med. 2011 Sep 20;155(6):408"
+        ],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:wetzels-2007",
+      "kind": "doi",
+      "doi": "10.1038/sj.ki.5002374",
+      "pmid": "17568781",
+      "title": "Age- and gender-specific reference values of estimated GFR in Caucasians: the Nijmegen Biomedical Study",
+      "authors": "Wetzels JF, Kiemeney LA, Swinkels DW, Willems HL, den Heijer M",
+      "year": 2007,
+      "journal": "Kidney international",
+      "url": "https://doi.org/10.1038/sj.ki.5002374",
+      "accessed": "2026-10-01",
+      "quote": "The median GFR was 85 ml/min/1.73 m(2) in 30-to 34-year-old men and 83 ml/min/1.73 m(2) in similar aged women.",
+      "notes": "Population reference values for eGFR (abbreviated MDRD) in healthy Dutch Caucasian adults; abstract also reports decline of approximately 0.4 ml/min/year. MDRD underestimates GFR at higher values (Levey 2009).",
+      "sourceType": "primary-human",
+      "defaultGrade": "A-primary",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Age- and gender-specific reference values of estimated GFR in Caucasians: The Nijmegen Biomedical Study",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:nielsen-1995",
+      "kind": "doi",
+      "doi": "10.1073/pnas.92.4.1013",
+      "pmid": "7532304",
+      "title": "Vasopressin increases water permeability of kidney collecting duct by inducing translocation of aquaporin-CD water channels to plasma membrane",
+      "authors": "Nielsen S, Chou CL, Marples D, Christensen EI, Kishore BK, Knepper MA",
+      "year": 1995,
+      "journal": "Proceedings of the National Academy of Sciences of the United States of America",
+      "url": "https://doi.org/10.1073/pnas.92.4.1013",
+      "accessed": "2026-10-01",
+      "quote": "vasopressin increases the water permeability of collecting duct cells by inducing a reversible translocation of AQP-CD water channels from IVs to the APM.",
+      "notes": "Rat isolated perfused collecting ducts + immuno-EM. Establishes AQP2 (then \"AQP-CD\") shuttling mechanism. Numeric permeability values are in the full text, which was not accessible to this agent.",
+      "sourceType": "primary-animal",
+      "defaultGrade": "D-animal",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Vasopressin increases water permeability of kidney collecting duct by inducing translocation of aquaporin-CD water channels to plasma membrane.",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:nielsen-2002",
+      "kind": "doi",
+      "doi": "10.1152/physrev.00024.2001",
+      "pmid": "11773613",
+      "title": "Aquaporins in the kidney: from molecules to medicine",
+      "authors": "Nielsen S, Frøkiaer J, Marples D, Kwon TH, Agre P, Knepper MA",
+      "year": 2002,
+      "journal": "Physiological reviews",
+      "url": "https://doi.org/10.1152/physrev.00024.2001",
+      "accessed": "2026-10-01",
+      "quote": "AQP2 is exclusively expressed in the principal cells of the connecting tubule and collecting duct and is the predominant vasopressin-regulated water channel.",
+      "notes": "Physiological Reviews. Localisation of AQP1-8 along the nephron; AQP3/AQP4 basolateral exit in principal cells.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Aquaporins in the Kidney: From Molecules to Medicine",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:post-jolly-1957",
+      "kind": "doi",
+      "doi": "10.1016/0006-3002(57)90426-2",
+      "pmid": "13445725",
+      "title": "The linkage of sodium, potassium, and ammonium active transport across the human erythrocyte membrane",
+      "authors": "POST RL, JOLLY PC",
+      "year": 1957,
+      "journal": "Biochimica et biophysica acta",
+      "url": "https://doi.org/10.1016/0006-3002(57)90426-2",
+      "accessed": "2026-10-01",
+      "notes": "Classic human erythrocyte study from which the 3 Na+ : 2 K+ coupling ratio of the Na/K pump is traditionally cited. PubMed has no abstract and the full text was not reviewed by this agent, so the 3:2 stoichiometry in relations.json is graded B-textbook (Guyton & Hall), with this paper cited as historical origin only.",
+      "sourceType": "primary-in-vitro",
+      "defaultGrade": "D-animal",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "The linkage of sodium, potassium, and ammonium active transport across the human erythrocyte membrane",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": null
+      }
+    },
+    {
+      "id": "ev:skou-1957",
+      "kind": "doi",
+      "doi": "10.1016/0006-3002(57)90343-8",
+      "pmid": "13412736",
+      "title": "The influence of some cations on an adenosine triphosphatase from peripheral nerves",
+      "authors": "SKOU JC",
+      "year": 1957,
+      "journal": "Biochimica et biophysica acta",
+      "url": "https://doi.org/10.1016/0006-3002(57)90343-8",
+      "accessed": "2026-10-01",
+      "notes": "Discovery of the Na+/K+-stimulated ATPase (crab nerve). No abstract in PubMed; cited for identity/history of the enzyme only, no number taken.",
+      "sourceType": "primary-animal",
+      "defaultGrade": "D-animal",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "The influence of some cations on an adenosine triphosphatase from peripheral nerves",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": null
+      }
+    },
+    {
+      "id": "ev:kuhn-2016",
+      "kind": "doi",
+      "doi": "10.1152/physrev.00022.2015",
+      "pmid": "27030537",
+      "title": "Molecular Physiology of Membrane Guanylyl Cyclase Receptors",
+      "authors": "Kuhn M",
+      "year": 2016,
+      "journal": "Physiological reviews",
+      "url": "https://doi.org/10.1152/physrev.00022.2015",
+      "accessed": "2026-10-01",
+      "quote": "GC-A mediates the endocrine effects of atrial and B-type natriuretic peptides regulating arterial blood pressure/volume and energy balance.",
+      "notes": "Physiological Reviews. GC-A = NPR-A = NPR1.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Molecular Physiology of Membrane Guanylyl Cyclase Receptors",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:potter-2006",
+      "kind": "doi",
+      "doi": "10.1210/er.2005-0014",
+      "pmid": "16291870",
+      "title": "Natriuretic peptides, their receptors, and cyclic guanosine monophosphate-dependent signaling functions",
+      "authors": "Potter LR, Abbey-Hosch S, Dickey DM",
+      "year": 2006,
+      "journal": "Endocrine reviews",
+      "url": "https://doi.org/10.1210/er.2005-0014",
+      "accessed": "2026-10-01",
+      "quote": "Two, NPR-A/GC-A/NPR1 and NPR-B/GC-B/NPR2, are transmembrane guanylyl cyclases, enzymes that catalyze the synthesis of cGMP.",
+      "notes": "Endocrine Reviews. ANP -> NPR-A -> cGMP signalling; NPR-C clearance receptor.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Natriuretic Peptides, Their Receptors, and Cyclic Guanosine Monophosphate-Dependent Signaling Functions",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:sparks-2014",
+      "kind": "doi",
+      "doi": "10.1002/cphy.c130040",
+      "pmid": "24944035",
+      "title": "Classical Renin-Angiotensin system in kidney physiology",
+      "authors": "Sparks MA, Crowley SD, Gurley SB, Mirotsou M, Coffman TM",
+      "year": 2014,
+      "journal": "Comprehensive physiology",
+      "url": "https://doi.org/10.1002/cphy.c130040",
+      "accessed": "2026-10-01",
+      "quote": "angiotensinogen is processed in a two-step reaction by renin and angiotensin converting enzyme, resulting in the sequential generation of angiotensin I and angiotensin II",
+      "notes": "Comprehensive Physiology. Classical RAS in kidney physiology; AT1/AT2 receptors.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Classical Renin‐Angiotensin System in Kidney Physiology",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:pearce-2015",
+      "kind": "doi",
+      "doi": "10.2215/CJN.05760513",
+      "pmid": "24875192",
+      "title": "Collecting duct principal cell transport processes and their regulation",
+      "authors": "Pearce D, Soundararajan R, Trimpert C, Kashlan OB, Deen PM, Kohan DE",
+      "year": 2015,
+      "journal": "Clinical journal of the American Society of Nephrology : CJASN",
+      "url": "https://doi.org/10.2215/CJN.05760513",
+      "accessed": "2026-10-01",
+      "quote": "The coordinated regulation of ENaC by aldosterone, and AQP2 by arginine vasopressin (AVP) in principal cells is essential",
+      "notes": "CJASN. Principal cell transporters: ENaC, ROMK, AQP2; aldosterone/MR and AVP/V2R regulation.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Collecting Duct Principal Cell Transport Processes and Their Regulation",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:zimmerman-2017",
+      "kind": "doi",
+      "doi": "10.1038/nrn.2017.71",
+      "pmid": "28638120",
+      "title": "Neural circuits underlying thirst and fluid homeostasis",
+      "authors": "Zimmerman CA, Leib DE, Knight ZA",
+      "year": 2017,
+      "journal": "Nature reviews. Neuroscience",
+      "url": "https://doi.org/10.1038/nrn.2017.71",
+      "accessed": "2026-10-01",
+      "quote": "a set of interconnected brain structures known as the lamina terminalis was shown to govern thirst.",
+      "notes": "Nature Reviews Neuroscience. Lamina terminalis (SFO, OVLT, MnPO) thirst circuits; much of the circuit evidence is from rodents.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Review",
+        "Research Support, Non-U.S. Gov't",
+        "Research Support, U.S. Gov't, Non-P.H.S.",
+        "Research Support, N.I.H., Extramural"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Neural circuits underlying thirst and fluid homeostasis",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:bourque-2008",
+      "kind": "doi",
+      "doi": "10.1038/nrn2400",
+      "pmid": "18509340",
+      "title": "Central mechanisms of osmosensation and systemic osmoregulation",
+      "authors": "Bourque CW",
+      "year": 2008,
+      "journal": "Nature reviews. Neuroscience",
+      "url": "https://doi.org/10.1038/nrn2400",
+      "accessed": "2026-10-01",
+      "quote": "changes in plasma osmolality, detected by osmoreceptors, modulate ingestive behaviour, sympathetic outflow and renal function to stabilize the tonicity and volume of the extracellular fluid",
+      "notes": "Nature Reviews Neuroscience. Central osmoreceptors (OVLT, SFO) and intrinsically osmosensitive magnocellular neurons. Mostly rodent cellular data.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Central mechanisms of osmosensation and systemic osmoregulation",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:ivy-bailey-2014",
+      "kind": "doi",
+      "doi": "10.1113/jphysiol.2014.271676",
+      "pmid": "25107929",
+      "title": "Pressure natriuresis and the renal control of arterial blood pressure",
+      "authors": "Ivy JR, Bailey MA",
+      "year": 2014,
+      "journal": "The Journal of physiology",
+      "url": "https://doi.org/10.1113/jphysiol.2014.271676",
+      "accessed": "2026-10-01",
+      "quote": "Renal perfusion pressure can directly regulate sodium reabsorption in the proximal tubule.",
+      "notes": "Journal of Physiology. Mechanism of pressure natriuresis.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Pressure natriuresis and the renal control of arterial blood pressure",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:pavenstadt-2003",
+      "kind": "doi",
+      "doi": "10.1152/physrev.00020.2002",
+      "pmid": "12506131",
+      "title": "Cell biology of the glomerular podocyte",
+      "authors": "Pavenstädt H, Kriz W, Kretzler M",
+      "year": 2003,
+      "journal": "Physiological reviews",
+      "url": "https://doi.org/10.1152/physrev.00020.2002",
+      "accessed": "2026-10-01",
+      "quote": "These are bridged by the slit diaphragm, which plays a major role in establishing the selective permeability of the glomerular filtration barrier.",
+      "notes": "Physiological Reviews. Podocyte cell biology.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Cell Biology of the Glomerular Podocyte",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:roy-2015",
+      "kind": "doi",
+      "doi": "10.2215/CJN.08880914",
+      "pmid": "25632105",
+      "title": "Collecting duct intercalated cell function and regulation",
+      "authors": "Roy A, Al-bataineh MM, Pastor-Soler NM",
+      "year": 2015,
+      "journal": "Clinical journal of the American Society of Nephrology : CJASN",
+      "url": "https://doi.org/10.2215/CJN.08880914",
+      "accessed": "2026-10-01",
+      "quote": "Intercalated cells are kidney tubule epithelial cells with important roles in the regulation of acid-base homeostasis.",
+      "notes": "CJASN. Type A, type B and non-A non-B intercalated cells.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Collecting Duct Intercalated Cell Function and Regulation",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:bertram-2011",
+      "kind": "doi",
+      "doi": "10.1007/s00467-011-1843-8",
+      "pmid": "21604189",
+      "title": "Human nephron number: implications for health and disease",
+      "authors": "Bertram JF, Douglas-Denton RN, Diouf B, Hughson MD, Hoy WE",
+      "year": 2011,
+      "journal": "Pediatric nephrology (Berlin, Germany)",
+      "url": "https://doi.org/10.1007/s00467-011-1843-8",
+      "accessed": "2026-10-01",
+      "quote": "average nephron number is approximately 900,000 to 1 million per kidney, numbers for individual kidneys range from approximately 200,000 to >2.5 million",
+      "notes": "Pediatric Nephrology. Summarises the authors' own autopsy stereology series; values are inter-individual extremes, not a confidence interval.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Human nephron number: implications for health and disease",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:gamba-2005",
+      "kind": "doi",
+      "doi": "10.1152/physrev.00011.2004",
+      "pmid": "15788703",
+      "title": "Molecular physiology and pathophysiology of electroneutral cation-chloride cotransporters",
+      "authors": "Gamba G",
+      "year": 2005,
+      "journal": "Physiological reviews",
+      "url": "https://doi.org/10.1152/physrev.00011.2004",
+      "accessed": "2026-10-01",
+      "quote": "Some of these cotransporters serve as targets for loop diuretics and thiazide-type diuretics",
+      "notes": "Physiological Reviews. NKCC2 (SLC12A1) and NCC (SLC12A3).",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Molecular Physiology and Pathophysiology of Electroneutral Cation-Chloride Cotransporters",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:rossier-2015",
+      "kind": "doi",
+      "doi": "10.1152/physrev.00011.2014",
+      "pmid": "25540145",
+      "title": "Epithelial sodium transport and its control by aldosterone: the story of our internal environment revisited",
+      "authors": "Rossier BC, Baker ME, Studer RA",
+      "year": 2015,
+      "journal": "Physiological reviews",
+      "url": "https://doi.org/10.1152/physrev.00011.2014",
+      "accessed": "2026-10-01",
+      "quote": "we emphasize the critical and dual role of Na(+)-K(+)-ATPase in the control of the ionic composition of the extracellular fluid",
+      "notes": "Physiological Reviews. Aldosterone -> ENaC (apical) and Na-K-ATPase (basolateral).",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Portrait",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Epithelial Sodium Transport and Its Control by Aldosterone: The Story of Our Internal Environment Revisited",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:vinson-2016",
+      "kind": "doi",
+      "doi": "10.3389/fnins.2016.00238",
+      "pmid": "27378832",
+      "title": "Functional Zonation of the Adult Mammalian Adrenal Cortex",
+      "authors": "Vinson GP",
+      "year": 2016,
+      "journal": "Frontiers in neuroscience",
+      "url": "https://doi.org/10.3389/fnins.2016.00238",
+      "accessed": "2026-10-01",
+      "quote": "This is particularly true of the glomerulosa, which does not seem to have the full suite of enzymes required for aldosterone biosynthesis.",
+      "notes": "Frontiers in Neuroscience. Challenges strict zonal autonomy of aldosterone production; evidence largely rodent. Recorded as a conflict on the zona glomerulosa -> aldosterone relation.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Functional Zonation of the Adult Mammalian Adrenal Cortex",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:forrester-2018",
+      "kind": "doi",
+      "doi": "10.1152/physrev.00038.2017",
+      "pmid": "29873596",
+      "title": "Angiotensin II Signal Transduction: An Update on Mechanisms of Physiology and Pathophysiology",
+      "authors": "Forrester SJ, Booz GW, Sigmund CD, Coffman TM, Kawai T, Rizzo V, Scalia R, Eguchi S",
+      "year": 2018,
+      "journal": "Physiological reviews",
+      "url": "https://doi.org/10.1152/physrev.00038.2017",
+      "accessed": "2026-10-01",
+      "quote": "AT1R remains central to the system in mediating physiological and pathophysiological functions of ANG II",
+      "notes": "Physiological Reviews. Angiotensin II / AT1R signalling.",
+      "sourceType": "review",
+      "defaultGrade": "B-textbook",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Research Support, Non-U.S. Gov't",
+        "Review"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Angiotensin II Signal Transduction: An Update on Mechanisms of Physiology and Pathophysiology",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:wang-2020",
+      "kind": "doi",
+      "doi": "10.3390/cells9040967",
+      "pmid": "32295252",
+      "title": "Aldosterone Decreases Vasopressin-Stimulated Water Reabsorption in Rat Inner Medullary Collecting Ducts",
+      "authors": "Wang Y, Ma F, Rodriguez EL, Klein JD, Sands JM",
+      "year": 2020,
+      "journal": "Cells",
+      "url": "https://doi.org/10.3390/cells9040967",
+      "accessed": "2026-10-01",
+      "quote": "Aldosterone decreased vasopressin-stimulated Pf from 146 ± 16 to 105 ± 10 µm/s in female rat IMCDs",
+      "notes": "Isolated perfused rat IMCD, vasopressin 50 pM. Full text reports vasopressin-stimulated Pf 146 ± 16 (female, N=3), 92 ± 14 (male, N=3) and 55 ± 10 µm/s (N=4) before aldosterone. No basal (no-AVP) Pf reported.",
+      "sourceType": "primary-animal",
+      "defaultGrade": "D-animal",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, N.I.H., Extramural",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Aldosterone Decreases Vasopressin-Stimulated Water Reabsorption in Rat Inner Medullary Collecting Ducts",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "Full text (open access, Europe PMC PMC7226978), Results, verbatim"
+      }
+    },
+    {
+      "id": "ev:flamion-1995",
+      "kind": "doi",
+      "doi": "10.1152/ajprenal.1995.268.1.F53",
+      "pmid": "7840248",
+      "title": "Adaptation of inner medullary collecting duct to dehydration involves a paracellular pathway",
+      "authors": "Flamion B, Spring KR, Abramow M",
+      "year": 1995,
+      "journal": "The American journal of physiology",
+      "url": "https://doi.org/10.1152/ajprenal.1995.268.1.F53",
+      "accessed": "2026-10-01",
+      "quote": "when IMCDs of thirsted rats were exposed to AVP in vitro, their transcellular Posm (36.0 +/- 2.4 microns/s)",
+      "notes": "Rat terminal IMCD; permeabilities expressed per unit basolateral membrane area corrected for infoldings, so not directly comparable to luminal-area Pf values.",
+      "sourceType": "primary-animal",
+      "defaultGrade": "D-animal",
+      "pubTypes": [
+        "Journal Article",
+        "Research Support, Non-U.S. Gov't"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Adaptation of inner medullary collecting duct to dehydration involves a paracellular pathway",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    },
+    {
+      "id": "ev:han-1994",
+      "kind": "doi",
+      "doi": "10.1152/ajprenal.1994.266.1.F139",
+      "pmid": "7905713",
+      "title": "Vasopressin-independent regulation of collecting duct water permeability",
+      "authors": "Han JS, Maeda Y, Ecelbarger C, Knepper MA",
+      "year": 1994,
+      "journal": "The American journal of physiology",
+      "url": "https://doi.org/10.1152/ajprenal.1994.266.1.F139",
+      "accessed": "2026-10-01",
+      "quote": "the vasopressin-independent osmotic water permeability was sustained at approximately 300 microns/s for at least 90 min.",
+      "notes": "Rat terminal IMCD from 24-h water-deprived animals, without vasopressin in vitro.",
+      "sourceType": "primary-animal",
+      "defaultGrade": "D-animal",
+      "pubTypes": [
+        "Journal Article"
+      ],
+      "verification": {
+        "method": "pubmed-esearch-by-doi + esummary; crossref title cross-check",
+        "checkedOn": "2026-10-01",
+        "by": "Literature Curator",
+        "crossrefTitle": "Vasopressin-independent regulation of collecting duct water permeability",
+        "retraction": "none found (PubMed publication types and linked notices)",
+        "errata": [],
+        "quoteSource": "PubMed abstract (efetch), verbatim"
+      }
+    }
+  ]
+}

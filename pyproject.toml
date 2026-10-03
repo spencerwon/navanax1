@@ -30,6 +30,7 @@ navanax = "navanax.cli:main"
 
 [tool.setuptools.package-data]
 navanax = ["ui/*.html"]
+health = ["kb/data/*.json", "engine/params.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

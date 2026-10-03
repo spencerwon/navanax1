@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" font-family="Helvetica, Arial, sans-serif">
+  <title>Health subsystem — layered architecture (docs/health/06_ARCHITECTURE.md)</title>
+  <desc>Six layers from the knowledge base up to process, with the files that implement each, the gates that sit between them, and the Operator who approves every pull request.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#445064"/>
+    </marker>
+    <style>
+      .layer { fill: #ffffff; stroke: #c3cbd6; stroke-width: 1.5; rx: 10; }
+      .layer.process { fill: #f5f7fa; stroke: #1f5fe0; stroke-dasharray: 6 4; }
+      .title { font-size: 15px; font-weight: 700; fill: #0f1722; letter-spacing: .04em; }
+      .file { font-size: 12.5px; fill: #445064; }
+      .note { font-size: 12px; fill: #6f7b8c; font-style: italic; }
+      .gate { font-size: 11.5px; fill: #1f5fe0; font-weight: 600; }
+      .edge { stroke: #445064; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+      .op { fill: #e8f0fe; stroke: #1f5fe0; stroke-width: 1.5; }
+      .optext { font-size: 13px; fill: #0f1722; font-weight: 600; }
+      .disc { font-size: 12px; fill: #d03b3b; font-weight: 700; }
+    </style>
+  </defs>
+
+  <text x="40" y="36" class="title" font-size="20">Health — layered architecture</text>
+  <text x="40" y="58" class="note">Every arrow between layers is a gate. Removal runs top-down; nothing above a layer is needed by anything below it.</text>
+
+  <!-- PROCESS (left column, spans all layers) -->
+  <rect x="40" y="90" width="230" height="620" class="layer process"/>
+  <text x="56" y="116" class="title">PROCESS</text>
+  <text x="56" y="140" class="file">.claude/agents/health-*.md</text>
+  <text x="56" y="158" class="note">physiology-modeler · literature-curator</text>
+  <text x="56" y="174" class="note">rigor-lead · safety-reviewer (independent)</text>
+  <text x="56" y="200" class="file">docs/health/00–07 (the contract)</text>
+  <text x="56" y="222" class="file">docs/health/decisions/ADR-*.md</text>
+  <text x="56" y="244" class="file">docs/health/logs/PROCESS_LOG.md</text>
+  <text x="56" y="266" class="file">docs/logs/bugs.yaml (area: health)</text>
+  <text x="56" y="292" class="file">config/health/base.yaml</text>
+  <text x="56" y="310" class="note">tolerances · seeds · labels · kinds</text>
+  <text x="56" y="332" class="file">config/health/modules.yaml</text>
+  <text x="56" y="350" class="note">flag · owner · paths · removal recipe</text>
+  <text x="56" y="376" class="file">tools/gates.py</text>
+  <text x="56" y="398" class="file">.github/workflows/ci.yml</text>
+  <text x="56" y="440" class="gate">Spencer approves every PR.</text>
+  <text x="56" y="458" class="gate">Nothing auto-merges.</text>
+  <text x="56" y="500" class="note">Removable at any time:</text>
+  <text x="56" y="516" class="note">nothing imports it.</text>
+
+  <!-- Right column layers -->
+  <!-- SURFACES -->
+  <rect x="300" y="90" width="860" height="86" class="layer"/>
+  <text x="316" y="116" class="title">SURFACES</text>
+  <text x="316" y="140" class="file">reference/metabolic-map-v1/index.html + app/ — the V1 viewer, verbatim</text>
+  <text x="316" y="160" class="file">src/health/cli.py — status · kb-check · kb-summary</text>
+  <text x="820" y="140" class="disc">Educational model — not medical advice.</text>
+  <text x="820" y="160" class="note">a field on every result object (HREQ-S-01)</text>
+
+  <!-- VALIDATION -->
+  <rect x="300" y="206" width="860" height="110" class="layer"/>
+  <text x="316" y="232" class="title">VALIDATION</text>
+  <text x="316" y="256" class="file">tests/health_selftest.py — golden equivalence · steady state · mass balance · expectations</text>
+  <text x="316" y="276" class="file">tests/health_kb_selftest.py — every KB rule, each with a planted violation</text>
+  <text x="316" y="296" class="file">tests/fixtures/health/golden_v1.json ← tools/health_golden.mjs (Node, runs the JS reference)</text>
+  <text x="900" y="256" class="file">src/health/engine/validate.py</text>
+  <text x="900" y="276" class="note">one row per expectation:</text>
+  <text x="900" y="292" class="note">pass · fail · not_checked</text>
+
+  <!-- ENGINE -->
+  <rect x="300" y="346" width="860" height="110" class="layer"/>
+  <text x="316" y="372" class="title">ENGINE  src/health/engine/</text>
+  <text x="316" y="396" class="file">solver.py — RK4, breakpoints, step ≤ 0.25 × fastest time constant</text>
+  <text x="316" y="416" class="file">model.py — 13 states, blocks M0–M10, kidney strain index (an index, not a clinical measure)</text>
+  <text x="316" y="436" class="file">scenarios.py — events, overrides, registered expectations (V1: co-developed)</text>
+  <text x="800" y="396" class="file">mc.py — mulberry32, log-uniform rule, quantiles</text>
+  <text x="800" y="416" class="file">params.py — loads params.json</text>
+  <text x="800" y="436" class="file">errors.py — severity in the type system</text>
+
+  <!-- PARAMETERS -->
+  <rect x="300" y="486" width="860" height="64" class="layer"/>
+  <text x="316" y="512" class="title">PARAMETERS</text>
+  <text x="316" y="534" class="file">src/health/engine/params.json — 54 rows: value · unit · range · evidence · grade · notes (30 E-assumption, 24 ≥ B)</text>
+
+  <!-- KNOWLEDGE -->
+  <rect x="300" y="580" width="860" height="130" class="layer"/>
+  <text x="316" y="606" class="title">KNOWLEDGE  src/health/kb/</text>
+  <text x="316" y="630" class="file">data/entities.json (107) · data/relations.json (203) · data/evidence.json (57)</text>
+  <text x="316" y="650" class="file">data/VERIFICATION_LOG.json (154) · data/schema.json</text>
+  <text x="316" y="670" class="file">check.py — 47 blocking codes; 11 of 16 documented rules enforced, 5 deferred (W-18) · report.py — counts and the grade share</text>
+  <text x="316" y="694" class="note">append-only: corrections supersede; disagreeing sources kept in `conflicts`</text>
+
+  <!-- gates between layers -->
+  <line x1="730" y1="580" x2="730" y2="550" class="edge"/>
+  <text x="740" y="570" class="gate">kb-check: quantity.engineParam mirrors the row</text>
+  <line x1="730" y1="486" x2="730" y2="456" class="edge"/>
+  <text x="740" y="476" class="gate">every parameter: value · unit · range · grade · source</text>
+  <line x1="730" y1="346" x2="730" y2="316" class="edge"/>
+  <text x="740" y="336" class="gate">golden diff vs JS reference, 1e-9 relative</text>
+  <line x1="730" y1="206" x2="730" y2="176" class="edge"/>
+  <text x="740" y="196" class="gate">results with band, labels, disclaimer; status beside them, not a filter</text>
+
+  <!-- Operator -->
+  <rect x="300" y="730" width="860" height="2" fill="#c3cbd6"/>
+  <text x="300" y="750" class="note">Figure source: docs/health/diagrams/architecture.svg · Mermaid versions of every figure: docs/health/diagrams/0*.mmd</text>
+</svg>
