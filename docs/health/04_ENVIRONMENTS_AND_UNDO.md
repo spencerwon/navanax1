@@ -171,9 +171,10 @@ Nothing in the health subsystem needs a credential, a network connection, or a
 background job.
 
 Interpreters the three health suites have run green on (2026-10-03): Python 3.11.15,
-3.12.3 and 3.13.14 (Linux, `--no-skips`, PyYAML 6.0.1, Node 22.22); Python 3.14.8
-(macOS, python.org build, without PyYAML or Node: every test that does not declare them
-passed, the declared ones were counted skips). `requires-python` is 3.10+; CI runs 3.12.
+3.12.3 and 3.13.14 (Linux, `--no-skips`, PyYAML 6.0.1, Node 22.22.0); Python 3.14.8
+(macOS arm64, python.org build, `--no-skips --robust`: 34 test functions, 404 passed,
+0 skipped, 25 s, PyYAML 6.0.3, Node 22.23.3, `tools/gates.py` ALL GATES GREEN).
+`requires-python` is 3.10+; CI runs 3.12.
 
 ## 8. Configuration
 
