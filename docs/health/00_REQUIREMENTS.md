@@ -75,7 +75,7 @@ the evidence goes and no further* — and can see where that is.
 The Operator's Metabolic Map V1 — a 13-state model of body water, sodium, vasopressin,
 aldosterone, atrial natriuretic peptide, arterial pressure and the kidney, with 54
 graded parameters, 57 verified sources, 107 ontology-linked entities and literature
-expectations on six scenarios — is the first slice. It is vendored verbatim under
+expectations on seven scenarios — is the first slice. It is vendored verbatim under
 `reference/metabolic-map-v1/` and is the thing everything here is measured against.
 
 The platform grows by **modules**, each a small, removable, independently validated
@@ -183,7 +183,7 @@ class of security and privacy obligations from v1 and is deliberate.
 
 ### 5.1 Model and engine
 
-- **HREQ-P-01** The Python engine SHALL implement the V1 model exactly: the same state vector, derived quantities, ledger, scenarios, Monte Carlo sampler and sensitivity screen, with the same identifiers, so a reader can audit the port against `reference/metabolic-map-v1/engine/model.js` block by block (M0–M10).
+- **HREQ-P-01** The Python engine SHALL implement the V1 model exactly: the same state vector, derived quantities, ledger, scenarios, Monte Carlo sampler and sensitivity screen, with the JavaScript's identifiers for every state, derived quantity, ledger entry, parameter and scenario and the JavaScript's keys in the result dictionaries the two share (function and argument names follow Python convention: `simulate_mc` for `simulateMC`, `t_end` for `tEnd`), so a reader can audit the port against `reference/metabolic-map-v1/engine/model.js` block by block (M0–M10).
 - **HREQ-P-02** The Python engine SHALL reproduce the JavaScript reference to 1e-9 relative on the golden fixture (`03 §4`). Divergence halts the release (`05 §2`, S0b).
 - **HREQ-P-03** Every simulation result SHALL be reproducible from (model version, parameter set, scenario, seed, dt). Those fields are part of the result object.
 - **HREQ-P-04** The engine SHALL refuse infeasible parameter sets loudly (`initial_state` raises) and SHALL count rejected Monte Carlo draws rather than silently resampling without a record.

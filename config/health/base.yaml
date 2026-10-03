@@ -1,23 +1,33 @@
-# Health base configuration. HREQ-N-06: no tolerance, seed, threshold or display rule
-# lives in code. Every change here is a logged change with a rationale in the commit
-# message (docs/00 REQ-N-10 applies).
+# Health base configuration. A CHECKED MIRROR, not the only home of these numbers: the
+# engine (src/health/engine/api.py, mc.py, validate.py) and tests/health_selftest.py hold
+# them as constants, as the JavaScript reference does (reference/metabolic-map-v1/engine/
+# index.js). tests/health_selftest.py::test_config_agrees_with_engine_and_reference fails
+# if any of these differ from the code: model.version, model.disclaimer,
+# model.validation_status, model.reference_person, every equivalence key, every numerics
+# key, every monte_carlo key, every influence key, expectations.countable_kinds and
+# expectations.reported_kinds. Keys marked "reserved" have no reader in code or tests.
+# Every change here is a logged change with a rationale in the commit message
+# (docs/00 REQ-N-10 applies).
 #
 # The parameter table itself is src/health/engine/params.json (values, units, ranges,
-# grades, sources); this file holds the rules the engine, the harness and the surfaces
+# grades, sources); this file mirrors the rules the engine, the harness and the surfaces
 # apply AROUND those parameters.
 
-version: 1
+version: 1                        # reserved: no reader yet (surface layer, M1)
 
 model:
-  # Mirrors MODEL_VERSION in src/health/engine/__init__.py and in
-  # reference/metabolic-map-v1/engine/index.js. tests/health_selftest.py checks the
-  # three agree (a bump in one place and not the others is a CFG defect, docs/health/05 §3).
+  # Mirrors MODEL_VERSION in src/health/engine/api.py (re-exported by health.engine) and
+  # in reference/metabolic-map-v1/engine/index.js. test_config_agrees_with_engine_and_reference
+  # checks this value, the Python constant, the JavaScript constant and the golden fixture's
+  # modelVersion agree (a bump in one place and not the others is a CFG defect,
+  # docs/health/05 §3).
   version: "1.0.1"
   # meta.disclaimer stays byte-equal to the V1 JavaScript DISCLAIMER (golden equivalence,
   # HREQ-V-09); the second sentence of the surface standard (docs/health/00 §1.4) travels
   # as meta.validation_status and every surface renders both (HREQ-S-01).
   disclaimer: "Educational model — not medical advice."
   validation_status: "Not clinically validated."
+  # reserved: no reader yet (surface layer, M1)
   intended_use: >-
     Intended use: education and research about mechanisms in a modelled reference adult
     and parameter-range populations. Not intended for use with any individual's data, or
@@ -29,8 +39,10 @@ model:
 
 equivalence:
   # docs/health/03 §4. Chosen, not measured: 1e-9 relative is far below any physiological
-  # meaning and far above double-precision noise for a 13-state RK4 over 744 h. A
-  # divergence beyond this is an S0b (ReferenceDivergenceError), never "tolerated".
+  # meaning and far above double-precision noise for a 13-state RK4 over 744 h. The suite
+  # applies its own constants (tests/health_selftest.py REL_TOL, ABS_TOL); these two must
+  # equal them. A divergence beyond them fails the golden comparison and is treated as S0b
+  # (docs/health/03 §4.4); errors.ReferenceDivergenceError exists but nothing raises it.
   relative_tolerance: 1.0e-9
   absolute_tolerance: 1.0e-12     # for values whose reference is ~0 (ledgers at t = 0)
   golden_fixture: tests/fixtures/health/golden_v1.json
@@ -38,7 +50,9 @@ equivalence:
 
 numerics:
   steady_state_drift_max: 1.0e-6  # max |Δstate| / scale over 24 h of baseline (scenarios.js, baseline.validation)
-  mass_balance_tolerance: 1.0e-9  # Δ(compartments) vs ledger in − out, water and sodium
+  # Each of the four linear invariants -- water, sodium, potassium, cell solute -- stays at
+  # its t = 0 value to this relative tolerance (test_water_and_sodium_mass_balance_closes).
+  mass_balance_tolerance: 1.0e-9
   max_step_fraction_of_tau_min: 0.25   # solver sub-step bound: 0.25 × fastest time constant (index.js simulate)
 
 monte_carlo:
@@ -64,20 +78,27 @@ expectations:
   # not_checked row with its reason; a missing row is ExpectationSkippedError.
   countable_kinds: [quantitative, semi-quantitative]
   reported_kinds: [qualitative, design-target, known-divergence, unverified, numerical]
-  evaluate_on: default_params     # or: mc_median -- the surface must say which
+  # The harness evaluates the default-parameter run only; HREQ-P-06's mc_median path does
+  # not exist.
+  evaluate_on: default_params     # reserved: no reader yet (surface layer, M1)
 
 grades:
-  order: [A-meta, A-primary, B-textbook, C-model, D-animal, E-assumption]
-  headline_at_least: B-textbook   # "share of parameters graded >= B" on the status line
+  order: [A-meta, A-primary, B-textbook, C-model, D-animal, E-assumption]   # reserved: no reader yet (surface layer, M1)
+  # "share of parameters graded >= B" on the status line; health.kb.report computes it
+  # from its own GRADES, not from this key.
+  headline_at_least: B-textbook   # reserved: no reader yet (surface layer, M1)
 
 display:
-  timezone: "America/Chicago"
-  usd_decimals: 2                 # unused by health; kept so display rules stay one shape across the repo
-  show_assumption_count: true
-  show_grade_share: true
-  # The one copy of each mandated label (HREQ-S-03, S-04, P-12, P-13); documents quote these.
-  index_label: "an index, not a clinical measure"
-  threshold_label: "classification threshold, not a physiological parameter"
-  trajectory_label: "modeled risk trajectory — not a prediction"   # V1's string; wording is tracker D-8
-  custom_run_label: "custom intervention on the 70 kg reference adult — no registered expectations"
-  extrapolation_label: "extrapolation beyond the evidence"
+  timezone: "America/Chicago"     # reserved: no reader yet (surface layer, M1)
+  # unused by health; kept so display rules stay one shape across the repo
+  usd_decimals: 2                 # reserved: no reader yet (surface layer, M1)
+  show_assumption_count: true     # reserved: no reader yet (surface layer, M1)
+  show_grade_share: true          # reserved: no reader yet (surface layer, M1)
+  # The mandated labels (HREQ-S-03, S-04, P-12, P-13); documents quote these. Only
+  # trajectory_label has a reader: the self-test holds it equal to the chronic scenario's
+  # label (the string V1 shows; wording is tracker D-8). [VERIFY-AFTER-MERGE]
+  index_label: "an index, not a clinical measure"   # reserved: no reader yet (surface layer, M1)
+  threshold_label: "classification threshold, not a physiological parameter"   # reserved: no reader yet (surface layer, M1)
+  trajectory_label: "modeled risk trajectory — not a prediction"
+  custom_run_label: "custom intervention on the 70 kg reference adult — no registered expectations"   # reserved: no reader yet (surface layer, M1)
+  extrapolation_label: "extrapolation beyond the evidence"   # reserved: no reader yet (surface layer, M1)

@@ -1395,6 +1395,71 @@ or recalibrate through WF-H-01 (tracker D-9).
 **BUG-20261003-116 (S4/P3).** Three latent quirks in the reference engine found while
 porting; none reachable with shipped data.
 
+The adversarial review of the health subsystem read the documents against the code. The
+twelve entries below are the document side of it. Each figure in the corrected text was
+re-measured on the port, and every line that depends on code landing in the same round is
+marked for re-verification after the merge (tracker W-22).
+
+**BUG-20261003-142 (S1/P1).** `03 §12`, the table that sets the validation record against
+the tuning, quoted about 8,900 compared golden values with a worst difference of 4e-14. The
+suite compares 12,822 values, and the worst difference is 1.24e-12 relative. The table also
+called the harness counts "identical on the reference", which has no harness. Fixed: model
+1.0.1 and default parameters stated, the counts as the suite prints them (24 rows; counted
+9 pass, 1 fail; 12 not_checked; calibration 1; structural 1), and a separate row for the
+counts once the MAP time-course row becomes a calibration row.
+
+**BUG-20261003-143 (S1/P1).** `01 §6.3` presented a two-sided calibration link as built: id
+`chronic_high_salt_30d:0`, `calibratedAgainst` on the parameters, and a knowledge-base check
+that the two agree. `params.json` has no `calibratedAgainst`, the check is deferred, and the
+harness id is `<scenario>/<NN>`. Fixed: the record as shipped, the id rule, and the
+parameter side and the JavaScript mirror named as planned (W-18, W-13).
+
+**BUG-20261003-144 (S4/P3).** `03 §4.2` listed four golden trajectories and asked for
+additions the fixture already held: all seven scenarios, the stiff corner, checkpoints,
+rejection margins and findings. Fixed: every section as built, this round's additions
+marked, and the regeneration rule stated (a `MODEL_VERSION` bump, or new sections with every
+old one byte-identical).
+
+**BUG-20261003-145 (S4/P3).** `03 §5.1` described harness rows with 8 fields and called
+`id`, `role`, `registered` and `counted` "required additions". The rows carry all 17 fields.
+Fixed.
+
+**BUG-20261003-146 (S4/P3).** `03 §2` gave Node timings as the cost of every layer. The Python
+port that runs the gates is 8 to 13 times slower per run, and about 10 minutes for the
+literature layer at n = 256, not about a minute. Fixed: a Node column and a Python column,
+both measured, with the method.
+
+**BUG-20261003-147 (S4/P3).** `03 §4.3` said a 1e-6 change to any parameter fails the golden
+comparison; the test exempts four. Fixed: the two classification thresholds stay exempt, with
+the reason, and the potassium and sweat goldens of this round cover the other two.
+
+**BUG-20261003-148 (S4/P3).** `03 §11` and the HREQ-V-25 row put the planted knowledge-base
+fixtures in `tests/health_selftest.py`, and §9 called them files. They are in-memory plants
+in `tests/health_kb_selftest.py`. Fixed.
+
+**BUG-20261003-149 (S4/P3).** `config/health/base.yaml` said no threshold lives in code. It
+is a checked mirror of code constants. Its comments also placed `MODEL_VERSION` in the wrong
+file and named two of the four invariants, and 13 of its keys have no reader. Fixed in
+comments only: the header says what the agreement test enforces, and each unread key is
+marked reserved. No key or value changed.
+
+**BUG-20261003-150 (S4/P3).** ADR-0002 and HREQ-P-01 said the port uses "the same
+identifiers", reads its tolerances from the configuration, and raises
+`ReferenceDivergenceError` on a divergence. Function names are snake_case, the tolerances are
+test constants mirrored in the configuration, and nothing raises the error. Fixed by an
+appended errata section (the accepted text stands) and a reworded HREQ-P-01.
+
+**BUG-20261003-151 (S4/P3).** `06 §4` drew CI as running on every push. It runs on a push or
+pull request to `main` only, and its order is kb-check, ledger, lint, pytest, secrets. A push
+to a branch with no pull request open against `main` runs no CI and is gated only by
+`tools/gates.py`. Fixed in the figure and its `.mmd` source.
+
+**BUG-20261003-152 (S4/P3).** Tracker W-1 still read "in progress" after b810ed6 delivered
+the port. Closed with the measured equivalence figures.
+
+**BUG-20261003-153 (S4/P3).** Three documents said six registered scenarios. Seven carry
+expectations: 1 + 6 + 2 + 5 + 2 + 4 + 4 = 24 rows. Fixed. The same pass corrected 08's "40
+contract rules" to the measured 54 checker codes (47 blocking).
 **BUG-20261003-117 (S2/P1).** The self-test pinned only `status == "pass"` for the counted
 rows, so seven extractor mutants that read the wrong window, unit or baseline survived
 (peak time from t = 0, salt window from t = 0, water fraction without baseline urine, ΔMAP

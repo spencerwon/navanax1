@@ -25,7 +25,7 @@ Standard software testing covers only the first class. Most of the risk to a rea
 
 ### 1.3 Governing principles
 
-1. **Validation is independent.** `rigor-lead` never reviews its own work (`02_AGENT_HIERARCHY.md`). This is enforced on commit metadata (§8), not left to aspiration.
+1. **Validation is independent.** `rigor-lead` never reviews its own work (`02_AGENT_HIERARCHY.md`). It SHALL be enforced on commit metadata (§8), not left to aspiration; that check does not exist yet (Appendix B, HREQ-V-23), so today independence rests on the review record.
 2. **Suspicion is proportional to good news.** A pass on a calibration target is not news (`01` §6). A new expectation that passes on its first run gets its extractor checked by hand before the pass is believed.
 3. **Cheap tests first.** A model that leaks mass is not worth comparing with the literature.
 4. **Nothing is silently skipped.** A test that did not run is never counted as passed; an expectation that was not checked carries a reason (§5). The NFT rule (`docs/03` §4.6) carries over: a test that needs a third-party module declares it with `@needs`, a skip is listed by name, and the strict run treats any skip as a failure.
@@ -63,16 +63,18 @@ Standard software testing covers only the first class. Most of the risk to a rea
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Layer | Question | Cost (basis) | A failure blocks |
-|---|---|---|---|
-| Software correctness | Do functions do what they say? | Seconds, every commit | Everything above |
-| Numerical correctness | Does the solver integrate the equations accurately and stably? | Seconds: the 7 scenarios at three step sizes, with default and stiff parameters (per-run times measured 12–159 ms) | Equivalence, expectations |
-| Reference equivalence | Do the JavaScript reference and the Python port agree to 1e-9? | Seconds to compare; regeneration only on a model change | All published results |
-| Steady state and conservation | Does the model sit still at baseline and conserve water, sodium and potassium? | Seconds; about 11 s to cover 256 accepted samples at 42 ms each | Expectations |
-| Literature expectations | Does the output fall inside pre-registered literature ranges? | About a minute at n = 256 for the 4 scenarios with countable expectations; the 30-day scenario alone takes about 41 s | Claims based on those expectations |
-| Sensitivity and robustness | Do conclusions survive ±20 %, other seeds, other scenarios? | Minutes: about 6 min for seed stability, under 1 min for the perturbation set (estimates from measured per-run times) | Claims marked robust |
-| Independent review | Did someone other than the author check the reasoning? | Hours to days | Merge |
-| Safety review | Could a reader take a user-facing claim as advice or as a clinical measure? | Hours per user-facing change | Release to readers |
+| Layer | Question | Cost, Node reference | Cost, Python port | A failure blocks |
+|---|---|---|---|---|
+| Software correctness | Do functions do what they say? | Seconds, every commit | Seconds, every commit | Everything above |
+| Numerical correctness | Does the solver integrate the equations accurately and stably? | Per run 5.3 ms (`drink_water_3L_fast`) to 151 ms (`chronic_high_salt_30d`) | Per run 0.044 s (`drink_water_1L`) to 1.91 s (`chronic_high_salt_30d`); `salt_load_10g` 0.28 s, `no_water_24h` 0.11 s, `baseline` 0.096 s | Equivalence, expectations |
+| Reference equivalence | Do the JavaScript reference and the Python port agree to 1e-9? | About 7.5 s per regeneration or `--check`, only on a model change or a new fixture section | Seconds to compare | All published results |
+| Steady state and conservation | Does the model sit still at baseline and conserve water, sodium and potassium? | 256 accepted samples × 24 h baseline: 3.0 s | The same 256 × 24 h: 34 s | Expectations |
+| Literature expectations | Does the output fall inside pre-registered literature ranges? | About 51 s at n = 256 for the 4 scenarios with countable expectations (201 ms per parameter set); the 30-day scenario alone about 39 s | About 10 min at n = 256 (2.34 s per parameter set); the 30-day scenario alone about 8 min | Claims based on those expectations |
+| Sensitivity and robustness | Do conclusions survive ±20 %, other seeds, other scenarios? | About 4 min for seed stability, about 17 s for the 336-run perturbation set | About 50 min for seed stability, about 3.3 min for the perturbation set | Claims marked robust |
+| Independent review | Did someone other than the author check the reasoning? | Hours to days | Hours to days | Merge |
+| Safety review | Could a reader take a user-facing claim as advice or as a clinical measure? | Hours per user-facing change | Hours per user-facing change | Release to readers |
+
+How the costs were measured (2026-10-03, this build container): per-run times are the best of 5 (Node v22.22.0) or of 3 (Python 3.11.15, `time.perf_counter`) default-parameter `simulate` calls after a warm-up run; the 256 × 24 h figures time `draw_samples(n = 256, seed = 1)` followed by one baseline run per sample. The literature and sensitivity figures are arithmetic on those per-run times (per parameter set: the sum over `drink_water_1L`, `salt_load_10g`, `chronic_high_salt_30d` and `no_water_24h`), so they understate runs at sampled parameter sets whose faster time constants need more steps.
 
 Run bottom-up. A failure in a lower layer makes every result above it unpublishable until it is fixed, because an expectation "pass" computed by a solver that leaks sodium is not a pass.
 
@@ -84,7 +86,8 @@ Run bottom-up. A failure in a lower layer makes every result above it unpublisha
 
 ### 3.1 Steady state
 
-The `baseline` scenario (`scenarios.js`) runs 24 h with nothing happening. Gate: for every state i, max over t of |y_i(t) − y_i(0)| / scale_i < 1e-6, with scale_i = |y_i(0)|, or 1 for a state whose baseline is exactly 0 (`max_relative_state_drift` in `src/health/engine/validate.py`); this is the `numerical` expectation in `scenarios.js`. Measured 2026-10-03 at default parameters: 9.7e-16 (ADH). The gate is nine orders above round-off on purpose. Its job is to catch a "steady state" that is not one (a wrong closed form in M0, or a flux missing from `rhs()`), not to measure round-off. Because the closed form must hold for every feasible parameter set, not only the default, the gate also runs on every accepted sample of the reporting set (n = 256).
+The `baseline` scenario (`scenarios.js`) runs 24 h with nothing happening. Gate: for every state i, max over t of |y_i(t) − y_i(0)| / scale_i < 1e-6, with scale_i = |y_i(0)|, or 1 for a state whose baseline is exactly 0 (`max_relative_state_drift` in `src/health/engine/validate.py`); this is the `numerical` expectation in `scenarios.js`. Measured 2026-10-03 at default parameters: 9.7e-16 (ADH). The gate is nine orders above round-off on purpose. Its job is to catch a "steady state" that is not one (a wrong closed form in M0, or a flux missing from `rhs()`), not to measure round-off. Because the closed form must hold for every feasible parameter set, not only the default, the gate also runs on accepted Monte Carlo samples: 3 samples × 6 h in the default suite (`test_baseline_is_a_steady_state`), and n = 256 × 24 h under `python3 tests/health_selftest.py --robust`. [VERIFY-AFTER-MERGE]
+Measured on the port 2026-10-03 for n = 256, seed 1, 24 h: worst drift 4.1e-14, in 34 s.
 
 ### 3.2 Mass balance
 
@@ -103,12 +106,14 @@ Gate: each is constant to 1e-9 relative to its value at t = 0, on every scenario
 
 The internal step is `maxStep = min(dt, 0.25·τ_min)` (`engine/index.js`), where τ_min is the fastest of the eight time constants in `constants()`: 0.075 h (ANP) at default parameters. On the negative real axis, RK4 is stable up to hλ ≈ 2.785, so a step of a quarter of the fastest time constant sits more than eleven times inside that limit. Inputs are piecewise constant, and every time they jump is a breakpoint that no step may straddle (`solver.js`).
 
-| Test | Pass criterion | Measured 2026-10-03 |
+| Test | Pass criterion | Measured 2026-10-03, both implementations |
 |---|---|---|
-| Step bound | Instrumented solver: every step ≤ `maxStep`; step count = Σ over segments of ⌈length / maxStep⌉ | 41,664 steps on `chronic_high_salt_30d` |
-| Breakpoint exactness | Off-grid bolus (1 L over 7.3 min starting at 1.0037 h) delivers its intake to 1e-12 relative (chosen) | Error 7.6e-15 |
+| Step bound | Step count = Σ over segments of ⌈length / maxStep⌉, and `maxStep` = min(dt, 0.25·τ_min): both equal to the reference's on every golden run (`test_default_params_trajectories_match_javascript_reference`). No instrumented per-step check exists | 41,664 steps on `chronic_high_salt_30d` |
+| Breakpoint exactness | Off-grid bolus (1 L over 7.3 min starting at 1.0037 h) delivers its intake to 1e-12 relative (chosen) | Error 7.6e-15 on the reference; 1.1e-14 on the port (12 h run, intake read from the cumulative ledger) |
 | Breakpoint trap | The same bolus with breakpoints removed **must fail** the exactness test | 9.6 % of the bolus misplaced |
-| Instability trap | Default parameters, `chronic_high_salt_30d`, step factor raised to 3.5 (capped by dt at 0.25 h = 3.3·τ_min): the finite-value gate **must fail** | Non-finite ANP within 48 h |
+| Instability trap | Default parameters, `chronic_high_salt_30d`, step factor raised to 3.5 (capped by dt at 0.25 h = 3.3·τ_min): the finite-value gate **must fail** | First non-finite state at t = 26.25 h (`V_ecf`, `Na_ecf`) |
+
+The default suite runs the bolus exactness test, the breakpoint trap and the instability trap, in which `simulate` raises `NonFiniteTrajectoryError`. [VERIFY-AFTER-MERGE]
 
 The two traps prove that the gates can see the failures they exist for. A gate that has never failed has not been shown to work.
 
@@ -116,17 +121,19 @@ The two traps prove that the gates can see the failures they exist for. A gate t
 
 Each scenario runs at the production step factor of 0.25 and at a quarter of it (0.0625). Error is the maximum difference per state divided by that state's peak magnitude over the run. Gate (chosen): ≤ 1e-5 for every state except ADH and Thirst, which are held to ≤ 1e-3. Their targets pass through max(0, ·) or a [0, 1] clamp, and the solver does not locate those kinks, so convergence drops below fourth order near them.
 
-| Measured worst (default and stiff parameters, all 7 scenarios) | Value | Order seen |
+| Measured worst (default and stiff parameters, all 7 scenarios; measured on both implementations) | Value | Order seen |
 |---|---|---|
 | Smooth states (worst: ANP, `drink_water_1L`) | 7.2e-7 | Error ratio 16–19 per halving: fourth order |
 | ADH | 2.0e-5 | — |
 | Thirst (`drink_water_1L`) | 3.2e-4 | Ratio about 3 |
 
+As gated: the default suite checks `drink_water_1L` and `salt_load_10g` at step factors 0.25 and 0.0625, and the `chronic_high_salt_30d` comparison runs under `--robust`. [VERIFY-AFTER-MERGE]
+
 The error is peak-scaled because pointwise relative error is meaningless when a state passes near zero. After a 3 L water load Thirst decays to about 1e-18; its pointwise figure there was 3.5e-2, and its peak-scaled figure 3.2e-4. Cost: an error that is small relative to a state's peak but large relative to its momentary value goes unflagged. V1 accepts this, and event location at kinks is deferred.
 
 ### 3.5 The stiff case
 
-A parameter corner with five fast time constants at the lower ends of their ranges and the slowest at its upper end: `osm_eq_tau_h` 0.03, `anp_thalf_h` 0.042, `thirst_tau_h` 0.1, `aldo_tau_h` 0.5, `map_tau_h` 1, `map_auto_tau_h` 480. This gives τ_min = 0.030 h against a 480 h slow mode, a stiffness ratio of 16,000. `chronic_high_salt_30d` at this corner takes 101,184 steps (measured). The corner must pass §3.1–§3.4 and the finite-value gate. Measured: chronic convergence 1.4e-11; worst over all scenarios 3.0e-5 (Thirst). This is the test a future stiff or implicit solver must also pass (`01` §10).
+A parameter corner with five fast time constants at the lower ends of their ranges and the slowest at its upper end: `osm_eq_tau_h` 0.03, `anp_thalf_h` 0.042, `thirst_tau_h` 0.1, `aldo_tau_h` 0.5, `map_tau_h` 1, `map_auto_tau_h` 480. This gives τ_min = 0.030 h against a 480 h slow mode, a stiffness ratio of 16,000. `chronic_high_salt_30d` at this corner takes 101,184 steps (measured). The corner must pass §3.1–§3.4 and the finite-value gate. Measured on both implementations: chronic convergence 1.4e-11; worst over all scenarios 3.0e-5 (Thirst, `drink_water_1L` and `drink_water_3L_fast`). This is the test a future stiff or implicit solver must also pass (`01` §10).
 
 ### 3.6 Non-finite values
 
@@ -149,37 +156,47 @@ The JavaScript reference (`reference/metabolic-map-v1/engine/`) runs in the brow
 
 ### 4.2 The golden fixture
 
-`tests/fixtures/health/golden_v1.json` is generated only by `tools/health_golden.mjs`, which imports the JavaScript reference. The output is deterministic, with no timestamps, so the same reference and Node version give the same bytes. `--check` regenerates in memory and fails if the file on disk differs, which is how a stale fixture is detected. As built on 2026-10-03, the fixture holds:
+`tests/fixtures/health/golden_v1.json` is generated only by `tools/health_golden.mjs`, which imports the JavaScript reference. The output is deterministic, with no timestamps, so the same reference and Node version give the same bytes. `--check` regenerates in memory and fails if the file on disk differs, which is how a stale fixture is detected; no gate ran it before this round, and `tools/gates.py` now runs it where a Node binary exists and prints a loud SKIPPED where none does. [VERIFY-AFTER-MERGE]
+Independently of Node, `test_reference_engine_files_match_the_fixture_hashes` fails when any reference engine file differs from the SHA-256 recorded in the fixture header. As built on 2026-10-03 (top-level keys listed with `python3 -c "import json;g=json.load(open('tests/fixtures/health/golden_v1.json'));print(list(g))"`), the fixture holds:
 
 | Section | Content |
 |---|---|
-| (a) PRNG | First 5 mulberry32 outputs for seeds 1 and 42 |
-| (b) Trajectories | `baseline`, `drink_water_1L`, `salt_load_10g`, `no_water_24h` at default parameters: states, derived and ledger at indices 0, 1, 10, 100, the last, and every whole hour; step count and `maxStep` |
-| (c) Samples | `drawSamples(n = 8, seed = 1)` |
-| (d) Monte Carlo | `simulateMC` on `drink_water_1L`, n = 8, seed 1, three keys at five time indices |
-| (e) Salt metrics | `saltLoadMetrics` of the 10 g load |
-| (f) Scenario records | Every scenario's validation record and input schedule |
-| (g) Rejection | `drawSamples` with ranges widened so that rejections occur (n = 8, seed 7) |
-| (h) Sweep | `simulateSweep`, n = 4, seed 1, doses 0, 10 and 20 g |
-| (i) Influence | `computeInfluence` on a reduced configuration |
-| (j), (k) | Analytic steady-state constants; `paramSummary()` |
+| Header | `generator`, `regenerate` (the command), `reference`, `node` (v22.22.0), `modelVersion`, `disclaimer`, `engineSha256` (every reference engine file) |
+| (a) `mulberry32` | First 5 outputs for seeds 1 and 42 |
+| (b) `trajectories` | All 7 registered scenarios at default parameters: states, derived and ledger at indices 0, 1, 10, 100 and the last, plus every stride-th grid point (hourly for the 1/60 h scenarios; every 4 h for `salt_load_sweep`, stride 240). `chronic_high_salt_30d` runs at dt 0.25 h for 41,664 steps, recorded every 3rd grid point (993 points) and sampled every 3 days. Step count and `maxStep` for each |
+| (b2) `stiffCorner` | The §3.5 overrides, and `chronic_high_salt_30d` (101,184 steps) and `drink_water_3L_fast` (2,160 steps) at that corner |
+| (b3) `checkpoints` | `rhsBaseline` and `rhsDrinking` (`rhs()` at the initial state with baseline and with drinking inputs) and `rk4Step` (the state and ledger after one RK4 step of 1/60 h while drinking) |
+| (c) `drawSamples` | n = 8, seed 1 |
+| (d) `simulateMC` | `drink_water_1L`, n = 8, seed 1, three keys at five time indices |
+| (e) `saltLoadMetrics` | The 10 g load at dt = 1/30 h |
+| (f) `scenarios` | Every scenario's record (validation, label, breakpoints, events, overrides) and its inputs at 18 probe times; the sweep's variants; six scenarios built by `makeWaterLoad` and `makeSaltLoad` |
+| (g) `rejection` | `drawSamples` with ranges widened so that rejections occur (n = 8, seed 7) |
+| (h) `simulateSweep` | n = 4, seed 1, doses 0, 10 and 20 g |
+| (i) `computeInfluence` | A reduced configuration: `drink_water_1L`, 3 h, dt 0.1 h |
+| (j), (k) `steadyState`, `paramSummary` | Analytic steady-state constants, initial state, derived quantities and fluxes at t = 0; the grade summary |
+| (l) `findings` | The failing `drink_water_1L` recovery-time expectation measured on the reference (7.05 h), its readings at dt 1/30 and 0.1 h, and its band at n = 8 and n = 256 |
+| `rejectionMargins` | For each Monte Carlo section, the smallest relative margin of any draw to a rejection boundary (urine-osmolality fraction h to 0 and 1, urine flow to 0, baseline sodium to 135 and 145 mmol/L). Smallest recorded: 0.00125 (`findings`, n = 256, baseline sodium to 145), above the 1e-6 below which the generator refuses to write (HREQ-V-11) |
+| Potassium and sweat runs | Runs with potassium intake changed and with sweating, so that `k_excr_gain` and `sweat_na_mmolL` move a golden value (added in this round) [VERIFY-AFTER-MERGE] |
+| `outEvery` 7 and 2.5 | Trajectories recorded with `outEvery` 7 and 2.5 (added in this round) [VERIFY-AFTER-MERGE] |
+| dt 0.1 h | Trajectories on a coarser output grid (added in this round) [VERIFY-AFTER-MERGE] |
+| Unsorted breakpoints | A scenario whose breakpoints are listed out of order (added in this round) [VERIFY-AFTER-MERGE] |
+| Non-finite quantiles | `quantileBands` on a series containing NaN and ±Infinity (added in this round) [VERIFY-AFTER-MERGE] |
+| `rhs()` at a NaN state | `rhs()` evaluated at a state containing NaN (added in this round) [VERIFY-AFTER-MERGE] |
 
-The generator enforces a 400 KB size budget. **Required additions**, which this document asks for and the fixture does not yet hold:
-- `chronic_high_salt_30d`. It has the most steps (41,664), so it is where ulp-level differences between the two maths libraries accumulate most.
-- `drink_water_3L_fast`, and both of these at the stiff corner of §3.5.
-- Divergence-localisation checkpoints: `rhs()` at the initial state with baseline inputs, and the state after one RK4 step.
-- The rejection-boundary margins of HREQ-V-11. For every Monte Carlo draw the generator records the distance to each rejection boundary: the urine-osmolality fraction h to 0 and 1, and baseline sodium to 135 and 145 mmol/L. It refuses to write a fixture in which any relative margin is below 1e-6 (chosen). An ulp-level difference at a knife-edge could flip one acceptance and shift every later sample, turning a rounding difference into an apparent model divergence. Section (g) deliberately produces rejections, so its margins matter most.
+The margins matter because an ulp-level difference at a knife-edge could flip one acceptance and shift every later sample, turning a rounding difference into an apparent model divergence. The generator enforces a 400 KB size budget.
+
+**When the fixture is regenerated.** Only (1) on a `MODEL_VERSION` bump, in the same change as the model change (HREQ-X-05), or (2) when it gains sections. In case (2) every pre-existing section must be shown byte-identical: the diff of `golden_v1.json` adds lines and changes none, and the pull request says so.
 
 ### 4.3 Tolerance
 
-As enforced by `tests/health_selftest.py`: |py − js| ≤ max(1e-9 × max(|py|, |js|), 1e-12) for every floating-point value (HREQ-P-02 in `00_REQUIREMENTS.md`); 1e-12 relative for sampled parameter values, which pass through a single `exp` or `log` each with nothing to amplify the difference. The 1e-12 absolute floor exists for values that sit at or cross zero: the strain components are zero at baseline, and free-water clearance crosses zero after a water load. Round-off on O(1) intermediates leaves noise of about 1e-16 absolute there, and a pure relative test would fail on it. Cost: below about 1e-3 in magnitude the absolute floor dominates, and the check there is looser than 1e-9 relative. Integers (step counts, rejected counts, lengths), strings (`MODEL_VERSION`, the disclaimer, scenario labels) and the positions of non-finite values must match exactly. The suite also proves the comparison has teeth: a 1e-6 relative change to any parameter must fail the trajectory comparison.
+As enforced by `tests/health_selftest.py`: |py − js| ≤ max(1e-9 × max(|py|, |js|), 1e-12) for every floating-point value (HREQ-P-02 in `00_REQUIREMENTS.md`); 1e-12 relative for sampled parameter values, which pass through a single `exp` or `log` each with nothing to amplify the difference. The 1e-12 absolute floor exists for values that sit at or cross zero: the strain components are zero at baseline, and free-water clearance crosses zero after a water load. Round-off on O(1) intermediates leaves noise of about 1e-16 absolute there, and a pure relative test would fail on it. Cost: below about 1e-3 in magnitude the absolute floor dominates, and the check there is looser than 1e-9 relative. Integers (step counts, rejected counts, lengths), strings (`MODEL_VERSION`, the disclaimer, scenario labels) and the positions of non-finite values must match exactly. The suite also proves the comparison has teeth (`test_golden_comparison_detects_a_perturbed_model_constant`): a 1e-6 relative change to any parameter except the two classification thresholds must fail the trajectory comparison. `na_normal_low` and `na_normal_high` are read only by the Monte Carlo rejection rule, so the `drawSamples` comparison catches them instead. `k_excr_gain` and `sweat_na_mmolL`, inert in every V1 scenario, are caught by the potassium and sweat runs added to the fixture in this round. [VERIFY-AFTER-MERGE]
 
-1e-9 is achievable. Both sides use IEEE-754 doubles in the same order of operations. What remains is the maths library: `exp`, `log` and `pow` may differ by an ulp between V8 and the platform libm. In a dissipative system such differences do not grow. Estimate: steps × machine epsilon ≈ 41,664 × 2.2e-16 ≈ 9e-12 on the longest scenario. That is consistent with the 2.75e-12 mass-balance round-off measured over the same run, and two orders inside 1e-9.
+1e-9 is achievable. Both sides use IEEE-754 doubles in the same order of operations. What remains is the maths library: `exp`, `log` and `pow` may differ by an ulp between V8 and the platform libm. In a dissipative system such differences do not grow. Estimate: steps × machine epsilon ≈ 41,664 × 2.2e-16 ≈ 9e-12 on the longest scenario. That is consistent with the 2.75e-12 mass-balance round-off measured over the same run, and two orders inside 1e-9. Measured on the port 2026-10-03 (`python3 tests/health_selftest.py --no-skips`, per-section lines summed): 12,822 golden values compared, worst 1.24e-12 relative (`computeInfluence` `effects.strain_excretion.glucose_mgdl`, 0.00124 × tolerance); trajectories 9,512 values, 97.9 % bit-identical, worst 3.84e-14 relative (`strain_concentrating` at 744 h, `chronic_high_salt_30d` at the stiff corner).
 
 ### 4.4 On divergence: stop the line
 
 1. **Stop.** No merge that touches `src/health/engine/` or the reference engine until the divergence is resolved. `00_REQUIREMENTS.md` HREQ-P-02 classes it S0b (`05_BUG_TAXONOMY.md` §2); the release halts.
-2. **Localise** in fixture order: constants → initial state → `rhs()` at t = 0 → one step → step count → first diverging time and key. The checkpoints (a required addition, §4.2) exist to make this mechanical.
+2. **Localise** in fixture order: constants → initial state → `rhs()` at t = 0 → one step → step count → first diverging time and key. The checkpoints of §4.2 (b3) exist to make this mechanical.
 3. **Decide which side is wrong** by a third computation, such as a hand calculation or an exact-arithmetic evaluation of the single diverging step. Never by majority, and never by which implementation is older.
 4. **Fix the wrong side.** If it is the JavaScript reference, that is a model change: bump `MODEL_VERSION` and regenerate the fixture with `tools/health_golden.mjs` in the same change (HREQ-X-05), then compare the port to the new fixture.
 5. **Keep the case.** The diverging input joins the fixture as a permanent regression.
@@ -197,14 +214,17 @@ Never: loosen the tolerance; regenerate the fixture to match the port; edit the 
 
 ### 5.1 The `evaluate_expectations` contract
 
-`evaluate_expectations(scenario_id, result)` (`src/health/engine/validate.py`) scores one simulation against its scenario's registered `expects` entries and returns one row per entry, in registration order (HREQ-P-05 in `00_REQUIREMENTS.md`). As built on 2026-10-03, a row carries `metric`, `kind`, `target`, `range`, `actual`, `status`, `reason` and `evidence`, and `summarize()` counts rows by status. The rules that calibration is never validation and that no number goes without its band (`01` §5–§6) need more than that. Without a role, the chronic ΔMAP row, which is a calibration target, would be counted as a validation pass. Without a band, a status is a point estimate. **Required additions** to every row:
+`evaluate_expectations(scenario_id, result)` (`src/health/engine/validate.py`) scores one simulation against its scenario's registered `expects` entries and returns one row per entry, in registration order (HREQ-P-05 in `00_REQUIREMENTS.md`). As built on 2026-10-03 (`_evaluate_one` in `validate.py`), a row carries `id`, `metric`, `kind`, `role`, `calibrates`, `registered`, `target`, `range`, `actual`, `status`, `reason`, `evidence`, `countable`, `counted`, `model_version`, `disclaimer` and `meta` (disclaimer, validation status, model version, scenario); `band`, `in_range_share`, `n`, `rejected` and `seed` are added only when a Monte Carlo set is passed. `summarize()` counts rows by status and by role.
+After this round every row also carries `band`, `in_range_share`, `n`, `rejected`, `seed` and `band_reason` whether or not a Monte Carlo set is passed, and `meta` carries the parameter-set digest, `dt`, `t_end` and `registry_version` (the SHA-256 of the registered records). [VERIFY-AFTER-MERGE]
+
+The rules that calibration is never validation and that no number goes without its band (`01` §5–§6) are why these fields exist. Without a role, the chronic ΔMAP row, which is a calibration target, would be counted as a validation pass. Without a band, a status is a point estimate.
 
 | Field | Content |
 |---|---|
-| `id` | Stable expectation id (`01` HREQ-E-13) |
+| `id` | Stable expectation id `<scenario>/<NN>`: the expectation's 1-based position in registration order, two digits (`01` HREQ-E-13) |
 | `role` | `validation`, `calibration` or `structural` (`01` §6) |
 | `registered` | Whether pre-registration is demonstrable or the expectation was co-developed with V1 |
-| `band`, `in_range_share`, `n`, `rejected`, `seed` | Per-sample q05, q50 and q95 of the metric at n ≥ 256, and the share of accepted samples inside the range |
+| `band`, `in_range_share`, `n`, `rejected`, `seed` | Per-sample q05, q50 and q95 of the metric, and the share of accepted samples inside the range. A status or claim needs n ≥ 256 (`01` HREQ-U-08); `health.cli status` reports default-parameter rows, whose band is empty with its reason in `band_reason` [VERIFY-AFTER-MERGE] |
 | `counted` | Whether the row enters the validation totals (§5.2 rule 4) |
 | `model_version`, `disclaimer` | As on every result (`01` HREQ-M-01) |
 
@@ -259,9 +279,11 @@ V1 scale, for sizing the gate: 107 entities, 203 relations, 57 evidence records,
 ---
 ## 7. Sensitivity and Robustness
 
+Status (Phase 0): none of §7.1–§7.4 runs as a gate. The influence screen is W-15; the perturbation, seed-stability and rejection-share runs are W-21. The measurements quoted below were made by hand, not by a gate.
+
 ### 7.1 Influence screen
 
-The screen runs per scenario, at each scenario's horizon, in both directions (`01` §8, HREQ-U-12). On every model change the difference in feeder lists between versions is part of the review. A parameter that newly feeds a displayed quantity is a claim that the rigor review must accept.
+The screen SHALL run per scenario, at each scenario's horizon, in both directions (`01` §8, HREQ-U-12). Not yet: the port runs the default screen only (BUG-20261003-096, W-15). On every model change the difference in feeder lists between versions SHALL be part of the review (HREQ-V-19). A parameter that newly feeds a displayed quantity is a claim that the rigor review must accept.
 
 ### 7.2 ±20 % perturbation
 
@@ -273,7 +295,7 @@ Each scenario with countable expectations runs at n = 256 with seeds 1–5. Gate
 
 ### 7.4 Rejection share
 
-The rejection share stays ≤ 5 % (`01` HREQ-U-06). Measured 0.4–1.2 % across seeds 1–5 at n = 256.
+The rejection share stays ≤ 5 % (`01` HREQ-U-06). Measured 0.4–1.2 % across seeds 1–5 at n = 256 (1, 3, 2, 1 and 1 rejected; the same counts on both implementations).
 
 - **HREQ-V-19** The influence screen SHALL be rerun on every model change, and the difference in feeder lists SHALL be part of the review record.
 - **HREQ-V-20** One-at-a-time perturbation of each sampled parameter by ±20 %, clipped to its range, SHALL NOT flip the sign of any countable expectation whose range excludes zero. Status changes and infeasible perturbations SHALL be reported.
@@ -286,7 +308,7 @@ The rejection share stays ≤ 5 % (`01` HREQ-U-06). Measured 0.4–1.2 % across 
 
 ### 8.1 Rigor review
 
-`rigor-lead` never reviews its own work. Author and reviewer are recorded on every change, and a change whose author and reviewer coincide fails the gate. The same applies down the chain: the curator who entered a number does not verify it, and the agent who registered an expectation does not approve its supersession. The rigor review checks what the gates cannot:
+`rigor-lead` never reviews its own work. Author and reviewer SHALL be recorded on every change, and a change whose author and reviewer coincide SHALL fail the gate (HREQ-V-23); that check does not exist yet. The same applies down the chain: the curator who entered a number does not verify it, and the agent who registered an expectation does not approve its supersession. The rigor review checks what the gates cannot:
 
 - calibration links are complete (a parameter tuned to a target with no `calibratedAgainst` is invisible to every gate);
 - grades sit at or below their ceiling *and* are honest (the ceiling did not catch F-12);
@@ -311,7 +333,7 @@ Every user-facing claim, string, chart and label gets a clinical-safety review b
 | Direction | No direction claimed where the change band spans zero (`01` HREQ-M-15) |
 | Divergences and grades | Known divergences shown on affected outputs; E count and ≥ B share visible |
 
-An automated lint over user-facing strings supports this review and does not replace it. It flags imperatives, second-person physiology, "safe", and clinical terms applied to an index. The clinical-term check is scoped to index names and descriptions, because the V1 trajectory label legitimately contains "risk".
+An automated lint over user-facing strings SHALL support this review and SHALL NOT replace it; it does not exist yet. It is to flag imperatives, second-person physiology, "safe", and clinical terms applied to an index. The clinical-term check is scoped to index names and descriptions, because the V1 trajectory label legitimately contains "risk".
 
 - **HREQ-V-23** No change SHALL be merged whose recorded reviewer is its author.
 - **HREQ-V-24** Every user-facing claim SHALL pass the §8.2 clinical-safety checklist, reviewed by someone other than its author, before release to readers.
@@ -325,13 +347,13 @@ Version-controlled and permanent. Tests read fixtures and never write them.
 | Fixture | Purpose | Construction |
 |---|---|---|
 | `tests/fixtures/health/golden_v1.json` | JS ↔ Python equivalence (§4) | `tools/health_golden.mjs` from the reference |
-| Planted KB violations, one file per rule | Each rule fires, alone (§6) | Hand-built minimal copies |
-| Infeasible: `waterIn_base_Ld` = 1.3 L/day | `initialState()` must raise: required urine 1,229 mOsm/kg exceeds `U_osm_max` 1,200 | Hand-built; verified on the reference 2026-10-03 |
-| Infeasible: `waterIn_base_Ld` = 0.5 L/day | Must raise: non-positive urine flow | As above |
-| Non-normal: `adh_threshold` = 296 mOsm/kg | Feasible, baseline sodium 145.6 mmol/L: Monte Carlo must reject it | As above |
+| Planted KB violations, one per checker code | Each rule fires, alone (§6) | In-memory mutations of the shipped KB (`PLANTS` in `tests/health_kb_selftest.py`) |
+| Infeasible: `waterIn_base_Ld` = 1.3 L/day | `initialState()` must raise: required urine 1,229 mOsm/kg exceeds `U_osm_max` 1,200 | Hand-built; verified on both implementations 2026-10-03; in `test_infeasible_params_are_refused_not_silently_accepted` from this round [VERIFY-AFTER-MERGE] |
+| Infeasible: `waterIn_base_Ld` = 0.5 L/day | Must raise: non-positive urine flow | `test_infeasible_params_are_refused_not_silently_accepted` |
+| Non-normal: `adh_threshold` = 296 mOsm/kg | Feasible, baseline sodium 145.6 mmol/L: Monte Carlo must reject it | Hand-built; verified on both implementations 2026-10-03; in the infeasible-parameter test from this round [VERIFY-AFTER-MERGE] |
 | Stiff corner (§3.5) | Numerical gates at a stiffness ratio of 16,000 | Parameter override plus `chronic_high_salt_30d` |
-| Off-grid bolus and breakpoint trap (§3.3) | Intake exactness; must fail without breakpoints | 1 L over 7.3 min from 1.0037 h |
-| Instability trap (§3.3) | The finite-value gate must fail | Step factor 3.5, default parameters |
+| Off-grid bolus and breakpoint trap (§3.3) | Intake exactness; must fail without breakpoints | 1 L over 7.3 min from 1.0037 h; in the default suite from this round [VERIFY-AFTER-MERGE] |
+| Instability trap (§3.3) | The finite-value gate must fail | Step factor 3.5, default parameters; in the default suite from this round [VERIFY-AFTER-MERGE] |
 | Expectation-registry traps (§5.2) | Each harness rule fires | Calibration pass, missing extractor, NaN extractor, qualitative row, duplicate id |
 
 - **HREQ-V-25** Every fixture in the §9 table SHALL exist under version control, and tests SHALL NOT write to fixtures.
@@ -388,9 +410,9 @@ Work is complete only when every applicable row passes.
 
 | Environment | Runs | Purpose |
 |---|---|---|
-| **Fixture** | `tests/health_selftest.py` with the Python port, golden fixture, planted KB fixtures and registry traps | Every commit. Fast and deterministic. Follows the NFT `@needs` and `--no-skips` rules (`docs/03` §4.6) |
-| **Reference** | Node running the JavaScript reference; `tools/health_golden.mjs` | Fixture generation, and measurement of the reference itself. The Node version is recorded in the fixture header; the figures in this document were measured on v22.22.0 |
-| **Browser** | `reference/metabolic-map-v1/index.html`, with the engine in a Web Worker (`reference/metabolic-map-v1/app/worker.js`) | What a reader sees. Worker trajectories are compared with the golden fixture at the same 1e-9, because each browser's maths library may differ from Node's. The checklist of §8.2 is verified on the rendered page |
+| **Fixture** | `tests/health_selftest.py` with the Python port, golden fixture and registry traps; `tests/health_kb_selftest.py` with the planted KB fixtures | Every commit. Fast and deterministic. Follows the NFT `@needs` and `--no-skips` rules (`docs/03` §4.6) |
+| **Reference** | Node running the JavaScript reference; `tools/health_golden.mjs` | Fixture generation, and measurement of the reference itself. The Node version is recorded in the fixture header; the Node figures in this document were measured on v22.22.0, the Python figures on Python 3.11.15 |
+| **Browser** | `reference/metabolic-map-v1/index.html`, with the engine in a Web Worker (`reference/metabolic-map-v1/app/worker.js`) | What a reader sees. Worker trajectories SHALL be compared with the golden fixture at the same 1e-9, because each browser's maths library may differ from Node's; no such comparison exists yet. The checklist of §8.2 is verified on the rendered page |
 
 ---
 
@@ -402,10 +424,11 @@ Computed from data, never typed, recorded on every release:
 |---|---|---|
 | Share of parameters graded ≥ B | 24 / 54 = 44.4 % | Evidence strength of the parameter table |
 | E-assumption count, and its trend | 30 | Should fall release on release; a rise must be explained |
-| Expectations: counted pass / counted fail / not_checked | 24 rows; counted 9 pass, 1 fail; 12 not_checked; calibration 1 (pass), structural 1 (pass) — measured on the port 2026-10-03, identical on the reference; the fail is `drink_water_1L` sodium recovery 7.05 h vs [0, 6] h (BUG-20261003-115) | The validation record, read with the next row |
-| Calibrated parameters vs independent countable expectations | 4 calibrated (3 to the He 2013 band; `map_auto_tau_h` to the D-2 design target); 0 pre-registered independent expectations | Whether validation outnumbers tuning |
-| Rejection share | 0.4–1.2 % at n = 256 | Whether the ranges describe possible people |
-| JS/Python divergence incidents | 0 (port landed 2026-10-03; ~8,900 golden values compared, worst difference about 4e-14 relative) | Each is a stop-the-line event |
+| Expectations: counted pass / counted fail / not_checked | 24 rows (model 1.0.1, default parameters): counted 9 pass, 1 fail; 12 not_checked; calibration 1 (pass); structural 1 (pass). Measured on the port 2026-10-03 (the summary line of `python3 tests/health_selftest.py`; `health.cli status` prints the same). The fail is `drink_water_1L` sodium recovery 7.05 h vs [0, 6] h (BUG-20261003-115), pinned to the reference by the fixture's `findings` | The validation record, read with the next row |
+| The same, after this round | The MAP time-course design target takes role calibration (it calibrates `map_auto_tau_h`): calibration 2 rows (1 pass, 1 not_checked), not_checked 11, counted 9 pass and 1 fail unchanged [VERIFY-AFTER-MERGE] | |
+| Calibrated parameters vs independent countable expectations | 4 calibrated (3 to the He 2013 band; `map_auto_tau_h` to the D-2 design target); 0 pre-registered independent expectations. The harness summary names all 4 from this round (it named 3 before) [VERIFY-AFTER-MERGE] | Whether validation outnumbers tuning |
+| Rejection share | 0.4–1.2 % at n = 256 (seeds 1–5, both implementations) | Whether the ranges describe possible people |
+| JS/Python divergence incidents | 0 since the port landed (b810ed6, 2026-10-03); 12,822 golden values compared, worst difference 1.24e-12 relative (§4.3) | Each is a stop-the-line event |
 | Bugs by class and severity | Per `05_BUG_TAXONOMY.md` | Where errors come from |
 
 **The one that matters most:** the number of **pre-registered, independent, countable expectations that pass**, set against the number of calibrated parameters. For V1 it is zero against four. Everything in this document exists to make that first number grow honestly. A model that hits only the targets it was tuned to hit has shown that its tuning works, and nothing about physiology.
@@ -414,32 +437,32 @@ Computed from data, never typed, recorded on every release:
 
 ## Appendix B. Requirements Minted in This Document
 
-For import into `00_REQUIREMENTS.md`.
+For import into `00_REQUIREMENTS.md`. "Status" says whether the check exists, checked against the code on 2026-10-03: `Enforced` names the test function or code path that fails when the requirement is violated; `Partial` says which part is checked; `Planned` names the milestone and tracker item; `Not enforced` means nothing fails today.
 
-| ID | Requirement (short form) | § | Enforced by |
-|---|---|---|---|
-| HREQ-V-01 | Layers run bottom-up; a lower failure blocks publication above it | 2 | CI ordering in `tests/health_selftest.py` |
-| HREQ-V-02 | Baseline drift < 1e-6 at default and every reporting sample | 3.6 | `tests/health_selftest.py` |
-| HREQ-V-03 | Water, sodium, potassium and cell-solute invariants to 1e-9 | 3.6 | `tests/health_selftest.py` |
-| HREQ-V-04 | Step bound, no straddled breakpoint, bolus exact to 1e-12; traps fail | 3.6 | Instrumented solver; trap fixtures |
-| HREQ-V-05 | Step-halving change ≤ 1e-5 of peak (1e-3 for ADH, Thirst) | 3.6 | `tests/health_selftest.py` |
-| HREQ-V-06 | Stiff corner passes every numerical gate | 3.6 | Stiff fixture |
-| HREQ-V-07 | Non-finite trajectory fails and is never displayed | 3.6 | Engine; result schema |
-| HREQ-V-08 | Golden fixture only from `tools/health_golden.mjs`, byte-reproducible, never hand-edited, covering every scenario and the stiff corner | 4.4 | `tools/health_golden.mjs --check` |
-| HREQ-V-09 | Port matches golden to max(1e-9 rel, 1e-12 abs), samples to 1e-12; integers, strings, non-finite positions exact (refines HREQ-P-02) | 4.4 | `tests/health_selftest.py` |
-| HREQ-V-10 | Divergence stops engine merges; never resolved by changing tolerance or fixture | 4.4 | Merge gate |
-| HREQ-V-11 | Fixture generator refuses samples within 1e-6 of a rejection boundary | 4.4 | `tools/health_golden.mjs` |
-| HREQ-V-12 | One harness row per registered expectation, count asserted (refines HREQ-P-05) | 5.2 | `src/health/engine/validate.py` |
-| HREQ-V-13 | Status pass/fail/not_checked; non-finite is fail; not_checked has a reason | 5.2 | `src/health/engine/validate.py` |
-| HREQ-V-14 | Counted only if quantitative or semi-quantitative, role validation, status pass or fail | 5.2 | `src/health/engine/validate.py` |
-| HREQ-V-15 | Status published with band, in-range share, n, seed and versions | 5.2 | `src/health/engine/validate.py` |
-| HREQ-V-16 | KB checker enforces every §6 rule and blocks merge | 6 | `src/health/kb/check.py` (11 of 16 rules enforced in Phase 0; 5 deferred by name, tracker W-18) |
-| HREQ-V-17 | Every KB rule has a planted violation; meta-test enforces it | 6 | `tests/health_kb_selftest.py` |
-| HREQ-V-18 | Append-only check against the last released snapshot | 6 | `src/health/kb/check.py` |
-| HREQ-V-19 | Influence screen rerun on every model change; difference reviewed | 7.4 | Review record |
-| HREQ-V-20 | ±20 % (range-clipped) perturbation never flips a countable sign | 7.4 | Robustness run |
-| HREQ-V-21 | Seed stability: band edges vary ≤ 20 % of median width at n = 256 | 7.4 | Robustness run |
-| HREQ-V-22 | Rejection share > 5 % fails the robustness layer | 7.4 | Robustness run |
-| HREQ-V-23 | No merge where reviewer is author | 8.2 | Commit metadata check |
-| HREQ-V-24 | Clinical-safety checklist passed before release, by a non-author | 8.2 | Review record; string lint |
-| HREQ-V-25 | Every §9 fixture under version control; tests never write fixtures | 9 | `tests/health_selftest.py` |
+| ID | Requirement (short form) | § | Enforced by | Status |
+|---|---|---|---|---|
+| HREQ-V-01 | Layers run bottom-up; a lower failure blocks publication above it | 2 | CI ordering in `tests/health_selftest.py` | Partial: a failure anywhere in `tests/health_selftest.py` fails its CI step, and every later step is skipped; inside the suite the layers are not ordered (an exception in one test is recorded and the rest still run), and nothing publishes |
+| HREQ-V-02 | Baseline drift < 1e-6 at default and every reporting sample | 3.6 | `tests/health_selftest.py` | Partial: default parameters and the stiff corner over 24 h, and 3 sampled sets over 6 h, in `test_baseline_is_a_steady_state`; n = 256 × 24 h only under `--robust`, which no gate runs [VERIFY-AFTER-MERGE] |
+| HREQ-V-03 | Water, sodium, potassium and cell-solute invariants to 1e-9 | 3.6 | `tests/health_selftest.py` | Enforced: `test_water_and_sodium_mass_balance_closes` (all 7 scenarios and 2 stiff-corner runs) |
+| HREQ-V-04 | Step bound, no straddled breakpoint, bolus exact to 1e-12; traps fail | 3.6 | Instrumented solver; trap fixtures | Enforced: bolus exactness, breakpoint trap and instability trap in the default suite; step count and `maxStep` equal to the reference's on every golden run (`test_default_params_trajectories_match_javascript_reference`) [VERIFY-AFTER-MERGE] |
+| HREQ-V-05 | Step-halving change ≤ 1e-5 of peak (1e-3 for ADH, Thirst) | 3.6 | `tests/health_selftest.py` | Partial: `drink_water_1L` and `salt_load_10g` at step factors 0.25 and 0.0625 in the default suite; `chronic_high_salt_30d` under `--robust`; the other scenarios are not run [VERIFY-AFTER-MERGE] |
+| HREQ-V-06 | Stiff corner passes every numerical gate | 3.6 | Stiff fixture | Partial: steady state, mass balance and golden equivalence at the corner (`chronic_high_salt_30d`, `drink_water_3L_fast`); not every scenario, and no stiff-corner convergence in the default suite |
+| HREQ-V-07 | Non-finite trajectory fails and is never displayed | 3.6 | Engine; result schema | Enforced: `simulate` raises `NonFiniteTrajectoryError`, so no non-finite trajectory reaches a summary or a display [VERIFY-AFTER-MERGE] |
+| HREQ-V-08 | Golden fixture only from `tools/health_golden.mjs`, byte-reproducible, never hand-edited, covering every scenario and the stiff corner | 4.4 | `tools/health_golden.mjs --check` | Partial: `tools/gates.py` runs `--check` where a Node binary exists and prints a loud SKIPPED otherwise; CI does not; `test_reference_engine_files_match_the_fixture_hashes` catches a reference change without Node; the stiff corner covers 2 of 7 scenarios [VERIFY-AFTER-MERGE] |
+| HREQ-V-09 | Port matches golden to max(1e-9 rel, 1e-12 abs), samples to 1e-12; integers, strings, non-finite positions exact (refines HREQ-P-02) | 4.4 | `tests/health_selftest.py` | Enforced: the golden comparisons of `tests/health_selftest.py` (the `test_*_matches_javascript_reference` functions and the sweep check in `test_salt_dose_sweep_is_monotonic`; 12,822 values) |
+| HREQ-V-10 | Divergence stops engine merges; never resolved by changing tolerance or fixture | 4.4 | Merge gate | Partial: a divergence fails the golden tests and so the CI step; not loosening the tolerance or regenerating to match is review (the tolerance lives in the suite and its config mirror, `test_config_agrees_with_engine_and_reference`) |
+| HREQ-V-11 | Fixture generator refuses samples within 1e-6 of a rejection boundary | 4.4 | `tools/health_golden.mjs` | Enforced: `assertNoKnifeEdge` in `tools/health_golden.mjs` exits 1 before writing; smallest recorded margin 0.00125 |
+| HREQ-V-12 | One harness row per registered expectation, count asserted (refines HREQ-P-05) | 5.2 | `src/health/engine/validate.py` | Enforced: `evaluate_expectations` raises `ExpectationSkippedError` on a dropped row; `test_scenario_expectations_harness_evaluates_every_quantitative_expectation` asserts 24 rows |
+| HREQ-V-13 | Status pass/fail/not_checked; non-finite is fail; not_checked has a reason | 5.2 | `src/health/engine/validate.py` | Enforced: `test_scenario_expectations_harness_evaluates_every_quantitative_expectation`; the planted NaN extractor in `test_calibration_and_structural_rows_are_never_counted_as_validation` |
+| HREQ-V-14 | Counted only if quantitative or semi-quantitative, role validation, status pass or fail | 5.2 | `src/health/engine/validate.py` | Enforced: `test_calibration_and_structural_rows_are_never_counted_as_validation` |
+| HREQ-V-15 | Status published with band, in-range share, n, seed and versions | 5.2 | `src/health/engine/validate.py` | Partial: every row carries `band`, `in_range_share`, `n`, `seed`, `rejected`, `band_reason`, `model_version` and `registry_version`; the band is filled only when a Monte Carlo set is passed, and `health.cli status` passes none [VERIFY-AFTER-MERGE] |
+| HREQ-V-16 | KB checker enforces every §6 rule and blocks merge | 6 | `src/health/kb/check.py` (11 of 16 rules enforced in Phase 0; 5 deferred by name, tracker W-18) | Partial: 11 of the 16 §6 rules enforced as errors, 5 deferred (W-18); `test_every_documented_rule_is_implemented_or_deferred` |
+| HREQ-V-17 | Every KB rule has a planted violation; meta-test enforces it | 6 | `tests/health_kb_selftest.py` | Enforced: `tests/health_kb_selftest.py::test_every_contract_rule_fires_on_a_planted_violation` |
+| HREQ-V-18 | Append-only check against the last released snapshot | 6 | `src/health/kb/check.py` | Planned (M1, W-18) |
+| HREQ-V-19 | Influence screen rerun on every model change; difference reviewed | 7.4 | Review record | Planned (M1, W-15) |
+| HREQ-V-20 | ±20 % (range-clipped) perturbation never flips a countable sign | 7.4 | Robustness run | Planned (M1, W-21) |
+| HREQ-V-21 | Seed stability: band edges vary ≤ 20 % of median width at n = 256 | 7.4 | Robustness run | Planned (M1, W-21) |
+| HREQ-V-22 | Rejection share > 5 % fails the robustness layer | 7.4 | Robustness run | Planned (M1, W-21) |
+| HREQ-V-23 | No merge where reviewer is author | 8.2 | Commit metadata check | Not enforced: no commit-metadata check exists |
+| HREQ-V-24 | Clinical-safety checklist passed before release, by a non-author | 8.2 | Review record; string lint | Not enforced: the string lint does not exist; the review is by hand |
+| HREQ-V-25 | Every §9 fixture under version control; tests never write fixtures | 9 | `tests/health_selftest.py` (golden and engine fixtures); `tests/health_kb_selftest.py` (planted KB violations) | Partial: the §9 fixtures are in the repository (the infeasible-parameter, bolus and trap fixtures from this round); nothing checks that tests never write a fixture [VERIFY-AFTER-MERGE] |

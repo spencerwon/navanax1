@@ -1,11 +1,11 @@
 %% docs/health/06_ARCHITECTURE.md §4 — the validation pipeline from push to approval
 flowchart LR
-  subgraph CI["CI on every push and pull request"]
+  subgraph CI["CI: push to main, pull request to main"]
     direction LR
-    c1["selftest.py<br/>(stdlib, market)"] --> c2["health_selftest.py<br/>(stdlib)"] --> c3["health_kb_selftest.py<br/>(stdlib)"] --> c4["pip install"] --> c5["all three, --no-skips"] --> c6["health.cli kb-check"] --> c7["ruff"] --> c8["buglog.py --check"] --> c9["secrets_check.py"]
+    c1["selftest.py<br/>(stdlib, market)"] --> c2["health_selftest.py<br/>(stdlib)"] --> c3["health_kb_selftest.py<br/>(stdlib)"] --> c4["pip install"] --> c5["all three, --no-skips"] --> c6["health.cli kb-check"] --> c7["zstd probe · codec contract<br/>(market)"] --> c8["buglog.py --check"] --> c9["ruff"] --> c10["pytest"] --> c11["secrets_check.py"] --> c12["signing grep · error-swallow checks"]
   end
-  subgraph REF["Model changes only"]
-    r1["node tools/health_golden.mjs"] --> r2["golden_v1.json regenerated"] --> r3["diff explained line by line"]
+  subgraph REF["Model change, or new fixture sections"]
+    r1["node tools/health_golden.mjs"] --> r2["golden_v1.json regenerated<br/>(old sections byte-identical when only sections are added)"] --> r3["diff explained line by line"]
   end
   subgraph REV["Review"]
     v1["health-rigor-lead<br/>re-derive · perturb · plant violations"] --> v2["tech-lead<br/>traceability · reality · PR description"] --> v3["health-safety-reviewer<br/>disclaimer · labels · framing"] --> v4(("⛔ Spencer"))

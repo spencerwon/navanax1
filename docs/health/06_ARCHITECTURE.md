@@ -73,7 +73,8 @@ flowchart TB
 ```
 
 Counts are from the vendored V1 files (`reference/metabolic-map-v1/kb/*.json`,
-`engine/params.json`) and are recomputed by `health.cli status`, never hand-maintained.
+`engine/params.json`) at model 1.0.1. `health.cli status` recomputes them from the data on
+every run; the figure is a snapshot of that output, not a second source.
 
 **Cost of the split.** The JavaScript reference stays authoritative for the browser and
 the Python engine for the gates, so a model change is made twice. That is deliberate
@@ -99,10 +100,11 @@ flowchart LR
   P -.->|"paramsFor(key): influence screen"| C
 ```
 
-Every arrow is a place a number can go wrong, and each has a gate: verification
+Every arrow is a place a number can go wrong, and each has a check: verification
 (`02 §2.2`), the engineParam mirror (`kb-check`), the M-block audit against the JS
-reference (golden test), the band (`HREQ-U`), the harness row count
-(`ExpectationSkippedError`), and the surface checklist (safety review).
+reference (golden test), the band (`HREQ-U`; a requirement with no result-schema gate yet,
+`01` Appendix A), the harness row count (`ExpectationSkippedError`), and the surface
+checklist (safety review, by hand).
 
 ---
 
@@ -110,12 +112,12 @@ reference (golden test), the band (`HREQ-U`), the harness row count
 
 ```mermaid
 flowchart LR
-  subgraph CI["CI on every push and pull request"]
+  subgraph CI["CI: push to main, pull request to main"]
     direction LR
-    c1["selftest.py<br/>(stdlib, market)"] --> c2["health_selftest.py<br/>(stdlib)"] --> c3["health_kb_selftest.py<br/>(stdlib)"] --> c4["pip install"] --> c5["all three, --no-skips"] --> c6["health.cli kb-check"] --> c7["ruff"] --> c8["buglog.py --check"] --> c9["secrets_check.py"]
+    c1["selftest.py<br/>(stdlib, market)"] --> c2["health_selftest.py<br/>(stdlib)"] --> c3["health_kb_selftest.py<br/>(stdlib)"] --> c4["pip install"] --> c5["all three, --no-skips"] --> c6["health.cli kb-check"] --> c7["zstd probe · codec contract<br/>(market)"] --> c8["buglog.py --check"] --> c9["ruff"] --> c10["pytest"] --> c11["secrets_check.py"] --> c12["signing grep · error-swallow checks"]
   end
-  subgraph REF["Model changes only"]
-    r1["node tools/health_golden.mjs"] --> r2["golden_v1.json regenerated"] --> r3["diff explained line by line"]
+  subgraph REF["Model change, or new fixture sections"]
+    r1["node tools/health_golden.mjs"] --> r2["golden_v1.json regenerated<br/>(old sections byte-identical when only sections are added)"] --> r3["diff explained line by line"]
   end
   subgraph REV["Review"]
     v1["health-rigor-lead<br/>re-derive · perturb · plant violations"] --> v2["tech-lead<br/>traceability · reality · PR description"] --> v3["health-safety-reviewer<br/>disclaimer · labels · framing"] --> v4(("⛔ Spencer"))
@@ -123,8 +125,17 @@ flowchart LR
   CI --> REF --> REV
 ```
 
-The stdlib-only steps run **before** `pip install` on purpose (`docs/03 §4.6`): a suite
-that cannot run until the environment is built cannot tell you the environment is broken.
+The triggers and the step order are those of `.github/workflows/ci.yml`: the job runs on
+a push to `main` and on a pull request to `main` (each push to its branch re-runs it), and
+a failed step stops the job, so every step after it is skipped. A push to a branch with no
+pull request open against `main` runs no CI; `tools/gates.py`, run by the agent before
+claiming green, is then the only gate. The
+stdlib-only steps run **before** `pip install` on purpose (`docs/03 §4.6`): a suite that
+cannot run until the environment is built cannot tell you the environment is broken.
+This round adds `tests/health_errors_selftest.py` and a golden `--check` step in
+`tools/gates.py` that runs where a Node binary exists and prints a loud SKIPPED otherwise;
+the figure shows the workflow before any CI step for either, and is redrawn if the merge
+adds one. [VERIFY-AFTER-MERGE]
 
 ---
 
@@ -225,8 +236,9 @@ flowchart LR
   SI[" "] -.-> VI
 ```
 
-Thirteen states, as in `model.js` `STATE_KEYS`; the block labels (M1–M10) match the
-code comments in both implementations so the audit path is: diagram → block → two
+Thirteen states, as in `model.js` `STATE_KEYS`; the block labels (M0–M8 and M10; neither
+implementation has an M9, BUG-20261003-099) match the code comments in both
+implementations so the audit path is: diagram → block → two
 implementations → golden test. The kidney strain index (M10) is a derived quantity, not
 a state, and is deliberately absent from this figure: it summarises four of these loads,
 it is not a loop.

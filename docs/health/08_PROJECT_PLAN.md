@@ -52,7 +52,7 @@ Modules: `body-scaling` (volumes and GFR scale with mass and BSA; the reference 
 becomes a parameter set), `potassium` (plasma K as a state with its own expectations),
 `sodium-storage` (the compartment the chronic-salt known divergence points at), and
 `viewer-review-1` (D-1, D-4, D-7 applied; evidence drawer shows grade E as a red pill
-and a banner; narratives for the six registered scenarios).
+and a banner; narratives for the seven registered scenarios).
 **Exit:** the known-divergence row for `chronic_high_salt_30d` is resolved or re-stated
 with new evidence; design review on the Operator's machine passed; the Suckling SEM/SD
 question (Q4) answered from the full text or left `unverified` with the attempt logged.
@@ -121,7 +121,7 @@ cite them rather than guess.
 | A plausible wrong number reaches a learner | Safety review on every surface; disclaimer in-band; indices and thresholds labelled; S0a halts the surface | health-safety-reviewer |
 | Assumptions quietly become "facts" | Grade E loud (HREQ-S-06); curator and modeler own different fields of the same row; calibration never counts as validation | health-literature-curator |
 | The two implementations drift | Golden fixture, 1e-9, regenerated on every model change, S0b on divergence | health-physiology-modeler |
-| The knowledge base rots | 40 contract rules, each with a planted-violation test; append-only records | health-rigor-lead |
+| The knowledge base rots | 54 checker codes (47 blocking), each with a planted violation that fires alone; 11 of the 16 documented rules enforced, 5 deferred until their data fields exist (W-18), so append-only is checked only for deleted entities | health-rigor-lead |
 | Scope grows without a record | Module registry, two-PR enable, ADR per module | orchestrator |
 | The project lives in two places (this repo and the Mac) | Q1 decided before M1; until then the Mac repo is the Operator's and this branch is the platform | Spencer |
 

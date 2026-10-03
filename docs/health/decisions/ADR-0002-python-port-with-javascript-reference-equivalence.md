@@ -40,3 +40,26 @@ pull request (HREQ-X-05). Divergence beyond tolerance is `ReferenceDivergenceErr
 Remove module `engine-v1` per `config/health/modules.yaml` (delete the engine, the
 selftest, the fixture and the generator; remove the gate and CI steps). The JavaScript
 reference remains the only implementation.
+
+## Errata (2026-10-03)
+
+The decision stands. Three sentences above say more than the code does; the accepted
+text is left as written (`04 §6.4`) and corrected here.
+
+1. **"the same identifiers".** The port keeps the JavaScript's identifiers for every
+   state, derived quantity, ledger entry, parameter and scenario, and the JavaScript's
+   keys in the result dictionaries the two share (`maxStep`, `outEvery`, `modelVersion`,
+   `q05`, ...); `test_results_carry_the_disclaimer_and_reproducibility_fields` checks the
+   `simulate()` keys. Its functions and arguments are snake_case: `simulate_mc` for
+   `simulateMC`, `draw_samples` for `drawSamples`, `t_end` for `tEnd`. `00` HREQ-P-01 is
+   reworded to say so.
+2. **"at the tolerances in `config/health/base.yaml`".** The tolerances are constants in
+   `tests/health_selftest.py` (`REL_TOL = 1e-9`, `ABS_TOL = 1e-12`,
+   `SAMPLE_REL_TOL = 1e-12`). `config/health/base.yaml` mirrors the first two, and
+   `test_config_agrees_with_engine_and_reference` fails if the mirror and the constants
+   differ. The suite does not read its tolerances from the configuration.
+3. **"Divergence beyond tolerance is `ReferenceDivergenceError`, S0b".** The class exists
+   in `src/health/errors.py` and nothing raises it. A divergence fails the golden
+   comparison tests of `tests/health_selftest.py`, and so the CI step and
+   `tools/gates.py`, and is treated as S0b under the stop-the-line procedure of
+   `03 §4.4`.

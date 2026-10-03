@@ -219,7 +219,7 @@ A draw is rejected and counted when its analytic steady state is infeasible (M0)
 
 ### 5.3 What n is enough
 
-A sample 5th percentile estimates the true 5th percentile with a standard error, in probability, of √(0.05 × 0.95 / n). At n = 64 that is 0.027: the reported "5th percentile" lies somewhere between the 2.3rd and 7.7th at ±1 SE. At n = 256 it is 0.014 (3.6th–6.4th); at n = 1024, 0.007. Measured on the plasma-sodium nadir of `drink_water_1L` across seeds 1–5 (2026-10-03): at n = 64 the lower band edge moved by 0.83 mmol/L, half of the median band width of 1.60 mmol/L; at n = 256 it moved by 0.23 mmol/L, 14 % of the median width of 1.67 mmol/L. The V1 default of 64 is a speed default for the interactive viewer. Any band used to decide an expectation status or to support a written claim uses n ≥ 256 (chosen: on the measured case this brings seed-to-seed movement of the band edge under the 20 % gate of `03` §7). Cost: four times the computation. The 30-day scenario takes 159 ms per run in Node (measured), so about 41 s at n = 256.
+A sample 5th percentile estimates the true 5th percentile with a standard error, in probability, of √(0.05 × 0.95 / n). At n = 64 that is 0.027: the reported "5th percentile" lies somewhere between the 2.3rd and 7.7th at ±1 SE. At n = 256 it is 0.014 (3.6th–6.4th); at n = 1024, 0.007. Measured on the plasma-sodium nadir of `drink_water_1L` across seeds 1–5 (2026-10-03): at n = 64 the lower band edge moved by 0.83 mmol/L, half of the median band width of 1.60 mmol/L; at n = 256 it moved by 0.23 mmol/L, 14 % of the median width of 1.67 mmol/L. The V1 default of 64 is a speed default for the interactive viewer. Any band used to decide an expectation status or to support a written claim uses n ≥ 256 (chosen: on the measured case this brings seed-to-seed movement of the band edge under the 20 % gate of `03` §7). Cost: four times the computation. The 30-day scenario takes 151–159 ms per run in Node (two measurements, 2026-10-03), so about 40 s at n = 256; in the Python port it takes 1.91 s per run, so about 8 min (`03` §2).
 
 ### 5.4 What the band is, and what it is not
 
@@ -257,7 +257,7 @@ Salt rises from 8.8 to 15 g/day at t = 24 h and is held for 30 days. The scenari
 | Expectation | Kind | Role | Why |
 |---|---|---|---|
 | ΔMAP at day 30 per +100 mmol/day sodium: 0.7–3.2 mmHg (He 2013 normotensive band) | quantitative | **calibration** | `map_vol_exp`, `pn_gain` and `aldo_vol_exp` were tuned jointly so the model lands in this band |
-| MAP still rising at day 14; ≥ 95 % of plateau by day 30; < 60 % by day 3 | design-target | design target | `map_auto_tau_h` was chosen for this shape (D-2; its record says "calibration, not independent validation") |
+| MAP still rising at day 14; ≥ 95 % of plateau by day 30; < 60 % by day 3 | design-target | **calibration** (calibrates `map_auto_tau_h`) [VERIFY-AFTER-MERGE] | `map_auto_tau_h` was chosen for this shape (D-2; its record says "calibration, not independent validation") |
 | Sodium excretion within 2 % of intake by day 30 | quantitative | structural | Holds for any parameter set that reaches balance within 30 days |
 | ECF expands (model) versus no gain in total body water (Heer 2000) | known-divergence | — | No sodium storage compartment in V1 |
 
@@ -267,16 +267,18 @@ Independent validation of the MAP–salt slope would need a source not used in t
 
 ### 6.3 The record format
 
-V1 states calibration only in free-text notes. The port makes it structural, on both sides:
+V1 states calibration only in free-text notes. Phase 0 makes it structural on the Python side only: the expectation record in `src/health/engine/scenarios.py` carries its id, its role and the parameters it calibrates (BUG-20261003-097). The record, with its note shortened:
 
 ```json
-{ "id": "chronic_high_salt_30d:0", "metric": "dMAP at day 30 per +100 mmol/day Na", "unit": "mmHg",
-  "kind": "quantitative", "range": [0.7, 3.2], "evidence": ["ev:he-2013"], "role": "calibration",
-  "calibrates": ["map_vol_exp", "pn_gain", "aldo_vol_exp"],
-  "registered": "V1: co-developed with the model; pre-registration not demonstrable" }
+{ "id": "chronic_high_salt_30d/01", "metric": "ΔMAP at day 30 per +100 mmol/day Na",
+  "target": "normotensive meta-analysis ≈2 mmHg (95% CI-derived band 0.7-3.2)",
+  "range": [0.7, 3.2], "kind": "quantitative", "evidence": ["ev:he-2013"], "note": "…",
+  "role": "calibration", "calibrates": ["map_vol_exp", "pn_gain", "aldo_vol_exp"] }
 ```
 
-and each named parameter carries `"calibratedAgainst": ["chronic_high_salt_30d:0"]`. The knowledge-base gates (`03` §6) check that the two sides agree.
+The id is `<scenario>/<NN>`: the scenario id and the expectation's 1-based position in registration order, two digits. Every shipped expectation carries it explicitly, and the harness refuses a registry with a duplicate id. [VERIFY-AFTER-MERGE]
+
+The harness adds `registered: "co-developed"` to every V1 row (§7.1). Two parts are planned, not built. On the parameter side, each named `params.json` row will carry `"calibratedAgainst": ["chronic_high_salt_30d/01"]`, and the deferred `calibration-link` rule (`03` §6) will check that the two lists agree (M1, W-18). The JavaScript mirror of `role` and `calibrates` comes with the next `MODEL_VERSION` bump (M1, W-13). Until then nothing checks the parameter side: a parameter tuned to a target that no `calibrates` list names is invisible to every gate.
 
 - **HREQ-E-10** A parameter whose value was chosen to make an output match a target SHALL list that expectation in `calibratedAgainst`, and the expectation SHALL list the parameter in `calibrates`. The two lists SHALL agree.
 - **HREQ-E-11** An expectation that any parameter was calibrated against SHALL carry role `calibration` and SHALL NOT be counted as a validation pass, whatever its outcome.
@@ -339,7 +341,7 @@ The claim holds for how failures are handled, not for the screen as a whole. Mea
 - **Direction and kinks.** `thirst_vol_gain` has exactly zero effect on Thirst in the salt screen, because the hypovolemic term is max(0, 1 − vr) and salt expands the ECF. In `no_water_24h` at −10 % it feeds Thirst. For `V_ecf`, the dehydration screen adds 9 parameters the default screen does not list.
 - **Interactions.** A one-at-a-time screen cannot see a parameter that matters only when another has also moved.
 
-The screen therefore runs for every registered scenario at its own horizon, in both directions, and reports the union. Cost: with 54 parameters, 2 directions and 7 scenarios, 756 runs instead of 55; the 30-day scenario dominates, at about 17 s for its 108 runs (estimate from the measured 159 ms per run). This is still a screen, not a global sensitivity analysis: it ranks effects at ±10 % and does not decompose variance. Variance-based analysis is deferred, and until it exists interactions are unseen.
+The screen SHALL therefore run for every registered scenario at its own horizon, in both directions, and report the union (HREQ-U-12). Not yet: the port runs the default screen only (BUG-20261003-096, W-15). Cost: with 54 parameters, 2 directions and 7 scenarios, 756 runs instead of 55; the 30-day scenario dominates, at about 17 s for its 108 runs (estimate from the measured 159 ms per run). This is still a screen, not a global sensitivity analysis: it ranks effects at ±10 % and does not decompose variance. Variance-based analysis is deferred, and until it exists interactions are unseen.
 
 - **HREQ-U-11** Lists of the parameters that feed a displayed quantity SHALL come from the influence screen and never from hand-written lists.
 - **HREQ-U-12** The influence screen SHALL run for every registered scenario at that scenario's horizon, with perturbations in both directions, and SHALL report the union.
@@ -428,7 +430,7 @@ Hypertension and cardiovascular disease, chronic kidney disease, type 2 diabetes
 
 ## 12. Interpretation Discipline
 
-Every rule below is enforced in code or schema. None relies on goodwill.
+Every rule below SHALL be enforced in code or schema, not left to goodwill. Phase 0 enforces rules 2 and 8, and carries the label of rule 4 into result metadata (`meta.label`); the others wait for a surface that renders them (M1). The Status column of Appendix A says which.
 
 | # | Rule | Enforced by |
 |---|---|---|
@@ -451,50 +453,50 @@ Every rule below is enforced in code or schema. None relies on goodwill.
 
 ## Appendix A. Requirements Minted in This Document
 
-For import into `00_REQUIREMENTS.md`. "Enforced by" names the module or test expected to carry the check.
+For import into `00_REQUIREMENTS.md`. "Enforced by" names the module or test expected to carry the check. "Status" says whether that check exists, checked against the code on 2026-10-03: `Enforced` names the test function or code path that fails when the requirement is violated; `Partial` says which part is checked; `Planned` names the milestone and tracker item; `Not enforced` means nothing fails today. A requirement is never read as enforced from the "Enforced by" column alone.
 
-| ID | Requirement (short form) | § | Enforced by |
-|---|---|---|---|
-| HREQ-M-01 | Disclaimer and `MODEL_VERSION` are fields of every result object; absence is ≥ S1 | 1.2 | Result constructor; `tests/health_selftest.py` |
-| HREQ-M-02 | No output framed as a recommendation to an individual | 1.2 | Clinical-safety lint (`03` §8) |
-| HREQ-M-03 | Units declared on every parameter, state, derived and ledger key; conversions named | 2.2 | Schema; `tests/health_selftest.py` |
-| HREQ-M-04 | Every equation block labelled and documented | 2.4 | Review checklist (`03` §10) |
-| HREQ-M-05 | Analytic steady state; raise on infeasible parameters | 2.4 | Engine; infeasible-parameter fixtures (`03` §9) |
-| HREQ-M-06 | Output-only states labelled "no feedback" | 2.4 | Display schema; clinical-safety review |
-| HREQ-M-07 | No numeric constant in engine code except named physical constants and unit conversions | 4.7 | Lint over engine source; review |
-| HREQ-M-08 | Index labelled as model construct, unitless; colour breakpoints labelled as display choices | 9.2 | Display schema; clinical-safety review |
-| HREQ-M-09 | No clinical terms for an index; no cross-version comparison unless its constants are unchanged | 9.2 | Clinical-safety lint |
-| HREQ-M-10 | Index band states that definition constants are fixed | 9.2 | Result metadata |
-| HREQ-M-11 | No module shown to readers before the §10.2 sequence is complete | 10.2 | Module enablement record |
-| HREQ-M-12 | Independent countable expectations ≥ calibrated parameters per module | 10.2 | `src/health/engine/validate.py` summary |
-| HREQ-M-13 | Outcome layers validated on cohort/trial outcomes, population-level only | 10.2 | Module review |
-| HREQ-M-14 | Classification thresholds labelled as definitions | 12 | Display schema |
-| HREQ-M-15 | No direction stated when the change band spans zero | 12 | Text generator; `tests/health_selftest.py` |
-| HREQ-E-01 | Value, unit, range, resolvable evidence and grade on every parameter and quantity | 3.3 | `src/health/kb/check.py` |
-| HREQ-E-02 | `sourceType` and `defaultGrade` on every evidence record, per the §3.2 mapping | 3.3 | `src/health/kb/check.py` |
-| HREQ-E-03 | Grade ceiling: no grade above the best `defaultGrade` of its evidence | 3.3 | `src/health/kb/check.py` |
-| HREQ-E-04 | E count and ≥ B share computed at render and shown on every view | 3.3 | Engine summary function; display schema |
-| HREQ-E-05 | Conflicts kept beside adopted values; unsourced conflicts say so | 3.3 | `src/health/kb/check.py` |
-| HREQ-E-06 | KB and evidence ledger append-only; corrections supersede | 3.3 | `src/health/kb/check.py` against the last released snapshot |
-| HREQ-E-07 | External ids only when verified with `resolved: true` | 3.3 | `src/health/kb/check.py` |
-| HREQ-E-08 | Structured range kind on every sampled parameter; the weaker kind governs | 4.7 | `src/health/kb/check.py` |
-| HREQ-E-09 | Dispersion type and n recorded; unconfirmed types not used | 4.7 | `src/health/kb/check.py`; review |
-| HREQ-E-10 | `calibrates` and `calibratedAgainst` recorded and in agreement | 6.3 | `src/health/kb/check.py` |
-| HREQ-E-11 | Calibration role never counted as validation | 6.3 | `src/health/engine/validate.py` |
-| HREQ-E-12 | Design targets and structural checks never counted | 6.3 | `src/health/engine/validate.py` |
-| HREQ-E-13 | Stable ids; registration before results; unproven registrations marked and reported separately | 7.4 | Registry; git history audit |
-| HREQ-E-14 | Only quantitative and semi-quantitative kinds count | 7.4 | `src/health/engine/validate.py` |
-| HREQ-E-15 | Expectations change only by supersession; no widening to admit a fail | 7.4 | Registry append-only check |
-| HREQ-E-16 | Known divergences name mechanism, evidence and affected outputs, and are displayed with them | 7.4 | Registry schema; display schema |
-| HREQ-U-01 | Fixed only as scenario condition, classification threshold or index constant; reason recorded | 4.7 | `src/health/kb/check.py` |
-| HREQ-U-02 | Sampling mode derived from the range | 4.7 | Engine; `tests/health_selftest.py` |
-| HREQ-U-03 | Independence assumption stated in every Monte Carlo result | 4.7 | Result metadata |
-| HREQ-U-04 | Band, n, rejected count and seed with every number; missing band is S1 | 5.4 | Result schema |
-| HREQ-U-05 | Seeded mulberry32 in table order; seeds fixed before the run | 5.4 | Golden fixture (`03` §4) |
-| HREQ-U-06 | Rejection rules; count reported; > 5 % rejected raised as a finding | 5.4 | Engine; `03` §7 |
-| HREQ-U-07 | Bands labelled as parameter-range bands, never as CI or population range | 5.4 | Display schema |
-| HREQ-U-08 | n ≥ 256 for status and claims; smaller n displayed | 5.4 | `src/health/engine/validate.py` |
-| HREQ-U-09 | Summaries and changes computed per sample, never from quantile curves | 5.4 | Engine; `tests/health_selftest.py` |
-| HREQ-U-10 | Common random numbers across sweep values | 5.4 | Engine; golden fixture |
-| HREQ-U-11 | Parameter lists for displayed quantities come from the influence screen | 8.2 | Display code review |
-| HREQ-U-12 | Influence screen per scenario, at its horizon, both directions, union reported | 8.2 | Engine; `03` §7 |
+| ID | Requirement (short form) | § | Enforced by | Status |
+|---|---|---|---|---|
+| HREQ-M-01 | Disclaimer and `MODEL_VERSION` are fields of every result object; absence is ≥ S1 | 1.2 | Result constructor; `tests/health_selftest.py` | Enforced: `tests/health_selftest.py::test_every_public_result_carries_disclaimer_and_validation_status` (33 result objects, `meta.disclaimer` and `meta.modelVersion`) [VERIFY-AFTER-MERGE] |
+| HREQ-M-02 | No output framed as a recommendation to an individual | 1.2 | Clinical-safety lint (`03` §8) | Not enforced: the clinical-safety lint of `03` §8.2 does not exist; the safety review is by hand |
+| HREQ-M-03 | Units declared on every parameter, state, derived and ledger key; conversions named | 2.2 | Schema; `tests/health_selftest.py` | Partial: `kb-check` code `param-field` requires a unit on every `params.json` row (`test_every_contract_rule_fires_on_a_planted_violation`); state, derived and ledger units are comments in `model.py`, unchecked |
+| HREQ-M-04 | Every equation block labelled and documented | 2.4 | Review checklist (`03` §10) | Not enforced: review only; neither implementation has an M9 block (BUG-20261003-099) |
+| HREQ-M-05 | Analytic steady state; raise on infeasible parameters | 2.4 | Engine; infeasible-parameter fixtures (`03` §9) | Enforced: `test_infeasible_params_are_refused_not_silently_accepted` (`initial_state` and `simulate` raise `InfeasibleParametersError`); `test_steady_state_constants_match_javascript_reference` |
+| HREQ-M-06 | Output-only states labelled "no feedback" | 2.4 | Display schema; clinical-safety review | Not enforced: no Python surface displays a state; the V1 app is vendored verbatim |
+| HREQ-M-07 | No numeric constant in engine code except named physical constants and unit conversions | 4.7 | Lint over engine source; review | Not enforced: no lint over engine source; one known violation (BUG-20261003-095, W-14) |
+| HREQ-M-08 | Index labelled as model construct, unitless; colour breakpoints labelled as display choices | 9.2 | Display schema; clinical-safety review | Not enforced: nothing reads `display.index_label` (reserved in `config/health/base.yaml`); the V1 surface omits the label (BUG-20261003-100) |
+| HREQ-M-09 | No clinical terms for an index; no cross-version comparison unless its constants are unchanged | 9.2 | Clinical-safety lint | Not enforced: the clinical-term lint does not exist |
+| HREQ-M-10 | Index band states that definition constants are fixed | 9.2 | Result metadata | Not enforced: no Monte Carlo result carries the statement |
+| HREQ-M-11 | No module shown to readers before the §10.2 sequence is complete | 10.2 | Module enablement record | Partial: `health.cli status` shows a module whose `config/health/modules.yaml` entry is `enabled: false` as unavailable; nothing checks the §10.2 record behind the enabling pull request (ADR-0003) [VERIFY-AFTER-MERGE] |
+| HREQ-M-12 | Independent countable expectations ≥ calibrated parameters per module | 10.2 | `src/health/engine/validate.py` summary | Partial: `summarize()` reports `independent_vs_calibrated`; nothing fails on it (V1: 0 pre-registered independent against 4 calibrated) [VERIFY-AFTER-MERGE] |
+| HREQ-M-13 | Outcome layers validated on cohort/trial outcomes, population-level only | 10.2 | Module review | Not enforced: no outcome layer exists (M2) |
+| HREQ-M-14 | Classification thresholds labelled as definitions | 12 | Display schema | Planned (M1, W-19) |
+| HREQ-M-15 | No direction stated when the change band spans zero | 12 | Text generator; `tests/health_selftest.py` | Not enforced: no text generator exists |
+| HREQ-E-01 | Value, unit, range, resolvable evidence and grade on every parameter and quantity | 3.3 | `src/health/kb/check.py` | Enforced: `kb-check` codes `param-field` and `missing-field` (`test_every_contract_rule_fires_on_a_planted_violation`) |
+| HREQ-E-02 | `sourceType` and `defaultGrade` on every evidence record, per the §3.2 mapping | 3.3 | `src/health/kb/check.py` | Enforced: `evidence-grading-missing`, `default-grade-mapping` (`test_every_contract_rule_fires_on_a_planted_violation`) |
+| HREQ-E-03 | Grade ceiling: no grade above the best `defaultGrade` of its evidence | 3.3 | `src/health/kb/check.py` | Enforced: `grade-ceiling` (`test_every_contract_rule_fires_on_a_planted_violation`) |
+| HREQ-E-04 | E count and ≥ B share computed at render and shown on every view | 3.3 | Engine summary function; display schema | Partial: `health.cli status` computes both from `params.json` on every run (`test_summary_counts_match_the_data`); no other view exists |
+| HREQ-E-05 | Conflicts kept beside adopted values; unsourced conflicts say so | 3.3 | `src/health/kb/check.py` | Partial: `conflict-unsourced-note` enforces the unsourced note; keeping a disagreeing source is curation review |
+| HREQ-E-06 | KB and evidence ledger append-only; corrections supersede | 3.3 | `src/health/kb/check.py` against the last released snapshot | Partial: only `entity-removed` runs; the snapshot comparison waits for W-18 |
+| HREQ-E-07 | External ids only when verified with `resolved: true` | 3.3 | `src/health/kb/check.py` | Enforced: `external-id-unverified` (`test_verification_log_latest_record_governs`) |
+| HREQ-E-08 | Structured range kind on every sampled parameter; the weaker kind governs | 4.7 | `src/health/kb/check.py` | Planned (M1, W-18) |
+| HREQ-E-09 | Dispersion type and n recorded; unconfirmed types not used | 4.7 | `src/health/kb/check.py`; review | Planned (M1, W-18) |
+| HREQ-E-10 | `calibrates` and `calibratedAgainst` recorded and in agreement | 6.3 | `src/health/kb/check.py` | Planned (M1, W-18): expectations carry `calibrates` on the Python side; no `params.json` row has `calibratedAgainst` |
+| HREQ-E-11 | Calibration role never counted as validation | 6.3 | `src/health/engine/validate.py` | Enforced: `test_calibration_and_structural_rows_are_never_counted_as_validation` |
+| HREQ-E-12 | Design targets and structural checks never counted | 6.3 | `src/health/engine/validate.py` | Enforced: `test_calibration_and_structural_rows_are_never_counted_as_validation` (structural); `design-target` is a non-countable kind (`test_scenario_expectations_harness_evaluates_every_quantitative_expectation`) |
+| HREQ-E-13 | Stable ids; registration before results; unproven registrations marked and reported separately | 7.4 | Registry; git history audit | Partial: every shipped expectation carries an explicit `<scenario>/<NN>` id, duplicates are refused, and rows carry `registered`; nothing checks that registration preceded results [VERIFY-AFTER-MERGE] |
+| HREQ-E-14 | Only quantitative and semi-quantitative kinds count | 7.4 | `src/health/engine/validate.py` | Enforced: `validate.COUNTABLE_KINDS`; `test_calibration_and_structural_rows_are_never_counted_as_validation` (planted qualitative row), `test_config_agrees_with_engine_and_reference` |
+| HREQ-E-15 | Expectations change only by supersession; no widening to admit a fail | 7.4 | Registry append-only check | Not enforced: no registry append-only check; expectations have no `supersedes` field |
+| HREQ-E-16 | Known divergences name mechanism, evidence and affected outputs, and are displayed with them | 7.4 | Registry schema; display schema | Not enforced: the known divergence is a registry row with a note; nothing checks its fields or its display |
+| HREQ-U-01 | Fixed only as scenario condition, classification threshold or index constant; reason recorded | 4.7 | `src/health/kb/check.py` | Planned (M1, W-18) |
+| HREQ-U-02 | Sampling mode derived from the range | 4.7 | Engine; `tests/health_selftest.py` | Enforced: `mc.sampling_mode` derives the mode from the range and no field can set it; pinned by `test_draw_samples_matches_javascript_reference` |
+| HREQ-U-03 | Independence assumption stated in every Monte Carlo result | 4.7 | Result metadata | Not enforced: no Monte Carlo result states it |
+| HREQ-U-04 | Band, n, rejected count and seed with every number; missing band is S1 | 5.4 | Result schema | Partial: `simulate_mc` and `monte_carlo_runs` return n, seed and rejected, and every harness row carries the band fields; no result schema refuses a number without its band [VERIFY-AFTER-MERGE] |
+| HREQ-U-05 | Seeded mulberry32 in table order; seeds fixed before the run | 5.4 | Golden fixture (`03` §4) | Enforced: `test_mulberry32_matches_javascript_reference`, `test_draw_samples_matches_javascript_reference`; the default seed by `test_config_agrees_with_engine_and_reference` |
+| HREQ-U-06 | Rejection rules; count reported; > 5 % rejected raised as a finding | 5.4 | Engine; `03` §7 | Partial: rejections are counted and returned (`test_infeasible_params_are_refused_not_silently_accepted`); the > 5 % finding needs the robustness run (W-21) |
+| HREQ-U-07 | Bands labelled as parameter-range bands, never as CI or population range | 5.4 | Display schema | Not enforced: no surface displays a band |
+| HREQ-U-08 | n ≥ 256 for status and claims; smaller n displayed | 5.4 | `src/health/engine/validate.py` | Partial: `evaluate_expectations` refuses a Monte Carlo set with n < 256 unless `allow_small_n`, and a set for another scenario, `t_end` or `dt`; the n behind a written claim is review [VERIFY-AFTER-MERGE] |
+| HREQ-U-09 | Summaries and changes computed per sample, never from quantile curves | 5.4 | Engine; `tests/health_selftest.py` | Partial: harness bands and sweep metrics are per sample, pinned to the reference (`test_failing_expectation_is_pinned_to_the_reference_with_its_band`, `test_salt_dose_sweep_is_monotonic`); nothing stops a future surface reading a quantile curve |
+| HREQ-U-10 | Common random numbers across sweep values | 5.4 | Engine; golden fixture | Enforced: `test_salt_dose_sweep_is_monotonic` compares `simulate_sweep` with the reference's common-random-number sweep |
+| HREQ-U-11 | Parameter lists for displayed quantities come from the influence screen | 8.2 | Display code review | Partial: `api.params_for` reads its lists from the screen (`test_influence_screen_matches_javascript_reference`); no surface lists feeders yet |
+| HREQ-U-12 | Influence screen per scenario, at its horizon, both directions, union reported | 8.2 | Engine; `03` §7 | Not enforced: the port runs the default screen only (BUG-20261003-096, W-15) |
