@@ -50,12 +50,33 @@ python3 tests/selftest.py --no-skips   # strict: a skip is a failure. What gates
 
 ```
 config/       thresholds, watchlist, intervals -- never in code (REQ-N-09)
+config/health/   the health subsystem's tolerances, seeds and module registry
 docs/         the contract: requirements, methodology, agents, validation,
               environments, bug taxonomy, time/units, storage
-.claude/      agent definitions (11), with model tiering for cost control
+docs/health/  the health subsystem's contract, architecture diagrams, ADRs, process log
+.claude/      agent definitions (15 shared + 4 health), with model tiering for cost control
 src/navanax/  errors · codec · landing · governor · opstore · stream · cli
+src/health/   errors · engine (solver, model, scenarios, mc, validate) · kb · cli
+reference/metabolic-map-v1/   the Operator's Metabolic Map V1, vendored verbatim
 tests/        selftest.py runs with zero third-party deps; tests that need one skip loudly
+              health_selftest.py and health_kb_selftest.py follow the same rule
 data/         landing zone + stores (gitignored -- irreplaceable, back up separately)
+```
+
+## The health subsystem
+
+The same discipline applied to mechanistic models of human physiology, beginning with
+the Metabolic Map V1 (water, sodium, the kidney, arterial pressure): every parameter
+with a source and a grade, every output with an uncertainty band, every expectation
+registered before the result, one model in two implementations proven equivalent, and
+every module removable by a written recipe. **Educational and research only; never
+medical advice.** Start at [`docs/health/README.md`](docs/health/README.md).
+
+```bash
+PYTHONPATH=src python3 -m health.cli status      # versions, counts, grade share, the disclaimer
+PYTHONPATH=src python3 -m health.cli kb-check    # every knowledge-base contract rule
+python3 tests/health_selftest.py --no-skips      # engine: golden equivalence, conservation, expectations
+python3 tests/health_kb_selftest.py --no-skips   # knowledge base: every rule, each with a planted violation
 ```
 
 ## Storage, in one line each

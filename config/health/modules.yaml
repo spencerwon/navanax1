@@ -1,0 +1,123 @@
+# Health module registry -- THE SOURCE OF TRUTH for docs/health/07_MODULE_REGISTRY.md.
+#
+# A module is the unit of adding and undoing (docs/health/00 §7, 04 §6.5). Every entry
+# carries the written removal recipe; a module whose recipe has not been tried on a
+# scratch branch is not finished. `health.cli status` prints every module and its state,
+# so a disabled module is visible rather than merely absent.
+#
+# Removal order follows the dependency edges backwards: cli -> engine-v1 / kb-v1 ->
+# errors -> reference-v1. `process` can go at any time; nothing imports it.
+
+version: 1
+
+modules:
+  - id: reference-v1
+    enabled: true
+    phase: 0
+    owner: operator
+    adr: ADR-0001
+    description: >
+      The Metabolic Map V1 artifact, vendored byte for byte: engine (JavaScript), knowledge
+      base, app. Read-only; the golden fixture and the Python knowledge-base data derive
+      from it.
+    paths: [reference/metabolic-map-v1/]
+    depends_on: []
+    tests: [tests/health_selftest.py]
+    removal: >
+      Only after engine-v1 and kb-v1 are removed. Delete reference/metabolic-map-v1/;
+      remove this entry. The original stays at the artifact URL recorded in
+      reference/metabolic-map-v1/README.md.
+
+  - id: engine-v1
+    enabled: true
+    phase: 0
+    owner: health-physiology-modeler
+    adr: ADR-0002
+    description: >
+      Pure-stdlib Python port of the V1 engine (solver, model, scenarios, Monte Carlo,
+      expectation harness) proven equivalent to the JavaScript reference by a golden
+      fixture regenerated with tools/health_golden.mjs.
+    paths:
+      - src/health/engine/
+      - tests/health_selftest.py
+      - tests/fixtures/health/golden_v1.json
+      - tools/health_golden.mjs
+    depends_on: [reference-v1, errors]
+    tests: [tests/health_selftest.py]
+    removal: >
+      Remove cli first. Set enabled: false; delete the four paths; remove the
+      health_selftest steps from tools/gates.py and .github/workflows/ci.yml; remove this
+      entry; run tools/gates.py.
+
+  - id: kb-v1
+    enabled: true
+    phase: 0
+    owner: health-literature-curator
+    adr: ADR-0003
+    description: >
+      The knowledge base (entities, relations, evidence, verification log, schema) as
+      package data, with the contract checker (every schema rule plus the cross-file
+      rules) and the summary report.
+    paths:
+      - src/health/kb/
+      - tests/health_kb_selftest.py
+    depends_on: [reference-v1, errors]
+    tests: [tests/health_kb_selftest.py]
+    removal: >
+      Remove cli first. Set enabled: false; delete the two paths; remove the
+      health_kb_selftest and kb-check steps from tools/gates.py and
+      .github/workflows/ci.yml; remove this entry; run tools/gates.py.
+
+  - id: cli
+    enabled: true
+    phase: 0
+    owner: platform-engineer
+    adr: ADR-0003
+    description: >
+      python -m health.cli: status (versions, counts, grade share, module states, the
+      disclaimer), kb-check (exit 1 on an error finding), kb-summary.
+    paths: [src/health/cli.py]
+    depends_on: [engine-v1, kb-v1]
+    tests:
+      - tests/health_kb_selftest.py::test_cli_kb_check_exit_codes
+      - tests/health_kb_selftest.py::test_status_prints_the_disclaimer
+    removal: >
+      Set enabled: false; delete src/health/cli.py and its two tests; remove the kb-check
+      step from tools/gates.py and .github/workflows/ci.yml; remove this entry; run
+      tools/gates.py.
+
+  - id: errors
+    enabled: true
+    phase: 0
+    owner: health-physiology-modeler
+    adr: ADR-0001
+    description: >
+      The runtime error hierarchy of docs/health/05 §6: severity and halt behaviour in
+      the type system so the halt rules execute without a human deciding.
+    paths: [src/health/errors.py]
+    depends_on: []
+    tests: [tests/health_selftest.py]
+    removal: >
+      Only after engine-v1, kb-v1 and cli are removed (they import it). Delete
+      src/health/errors.py; remove the SurfaceIntegrityError grep from
+      .github/workflows/ci.yml; remove this entry.
+
+  - id: process
+    enabled: true
+    phase: 0
+    owner: orchestrator
+    adr: ADR-0001
+    description: >
+      The documents, the four health agent definitions, the configuration files, the
+      process log, the ADRs, and the health steps in gates and CI.
+    paths:
+      - docs/health/
+      - .claude/agents/
+      - config/health/
+    depends_on: []
+    tests: [tools/buglog.py]
+    removal: >
+      Delete docs/health/, .claude/agents/health-*.md and config/health/; remove the
+      health steps from tools/gates.py and .github/workflows/ci.yml; mark health ledger
+      entries wont_fix with a reason (never delete them); remove the health rows from
+      docs/README.md and README.md.

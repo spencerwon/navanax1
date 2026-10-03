@@ -20,6 +20,7 @@ operator's machine with --corpus before any PR is opened.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run(label: str, cmd: list[str], *, optional: bool = False) -> str:
+def run(label: str, cmd: list[str], *, optional: bool = False,
+        env: dict[str, str] | None = None) -> str:
     print(f"\n=== {label}: {' '.join(cmd)}")
     t0 = time.time()
     if shutil.which(cmd[0]) is None:
@@ -37,7 +39,7 @@ def run(label: str, cmd: list[str], *, optional: bool = False) -> str:
             print(f"--- {label}: SKIPPED ({cmd[0]} not installed here; CI runs it)")
             return ""
         raise SystemExit(f"gate failed: {label} ({cmd[0]} not installed)")
-    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
     out = (p.stdout + p.stderr)
     tail = "\n".join(out.strip().splitlines()[-6:])
     print(tail)
@@ -117,9 +119,20 @@ def main() -> int:
         out = run("selftest", [py, "tests/selftest.py", "--no-skips"])
         line = next((ln for ln in out.splitlines() if "test functions" in ln), "")
         print(f"    {line.strip()}")
+        # Health subsystem (docs/health/03 §2): the engine port against the JavaScript
+        # golden fixture, and every knowledge-base rule against a planted violation.
+        for label, script in (("health selftest", "tests/health_selftest.py"),
+                              ("health kb selftest", "tests/health_kb_selftest.py")):
+            out = run(label, [py, script, "--no-skips"])
+            line = next((ln for ln in out.splitlines() if "test functions" in ln), "")
+            print(f"    {line.strip()}")
     run("ruff", ["ruff", "check", "src", "tests", "tools"], optional=True)   # lint; CI is the hard gate
     run("bug ledger", [py, "tools/buglog.py", "--check"])
     run("secrets", [py, "tools/secrets_check.py"])
+    # HREQ-D-03: the knowledge base conforms to its contract. PYTHONPATH=src so the gate
+    # runs on a checkout that has not been pip-installed, exactly as CI's first steps do.
+    run("health kb-check", [py, "-m", "health.cli", "kb-check"],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
     if a.corpus:
         corpus_fold(Path(a.corpus[0]), Path(a.corpus[1]))
     print("\nALL GATES GREEN")

@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Strain Colour Options</title>
+<meta name="description" content="Design review page: three kidney-strain colour rules side by side, driven by the real salt-dose sweep. Educational model, not medical advice.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3c5 7 9 11.5 9 17a9 9 0 0 1-18 0c0-5.5 4-10 9-17z' fill='%231f5fe0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650&family=Hanken+Grotesk:wght@400;500;600;700&display=swap">
+<script type="importmap">
+{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }
+</script>
+<style>
+/* Design review page for DESIGN_DECISIONS O1 / TRACKER D-1 (task T-120).
+   Theme tokens are copied from app/index.html so both pages look the same. */
+:root {
+  --bg: #eef1f5; --surface: #ffffff; --surface-2: #f5f7fa; --viewer-bg: #e6ebf1;
+  --ink: #0f1722; --ink-2: #445064; --muted: #6f7b8c; --grid: #e7ebf0; --axis: #c3cbd6;
+  --line: rgba(15, 23, 34, 0.1); --accent: #1f5fe0; --accent-ink: #ffffff; --accent-wash: rgba(31, 95, 224, 0.08);
+  --s1: #2a78d6; --s2: #eb6834;
+  --critical: #d03b3b; --warning: #fab219; --good: #0ca30c;
+  --gA: #0f7b3f; --gB: #1f5fe0; --gC: #6a4fc9; --gD: #a65411; --gE: #c62f2f;
+  --font-display: "Bricolage Grotesque", "Hanken Grotesk", system-ui, sans-serif;
+  --font-body: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --r-sm: 6px; --r-md: 10px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0a0f16; --surface: #111823; --surface-2: #172130; --viewer-bg: #0d141e;
+    --ink: #edf1f7; --ink-2: #aab5c5; --muted: #8592a5; --grid: #1e2938; --axis: #34425a;
+    --line: rgba(255, 255, 255, 0.09); --accent: #5a8dff; --accent-ink: #08101c; --accent-wash: rgba(90, 141, 255, 0.12);
+    --s1: #3987e5; --s2: #d95926;
+    --gA: #3cc27a; --gB: #6a9bff; --gC: #a08cf0; --gD: #e08a3c; --gE: #ff6b6b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a0f16; --surface: #111823; --surface-2: #172130; --viewer-bg: #0d141e;
+  --ink: #edf1f7; --ink-2: #aab5c5; --muted: #8592a5; --grid: #1e2938; --axis: #34425a;
+  --line: rgba(255, 255, 255, 0.09); --accent: #5a8dff; --accent-ink: #08101c; --accent-wash: rgba(90, 141, 255, 0.12);
+  --s1: #3987e5; --s2: #d95926;
+  --gA: #3cc27a; --gB: #6a9bff; --gC: #a08cf0; --gD: #e08a3c; --gE: #ff6b6b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 var(--font-body); -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { font-family: var(--font-display); font-weight: 650; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.num { font-variant-numeric: tabular-nums; }
+
+.page { max-width: 1480px; margin: 0 auto; padding: 16px 16px 28px; display: grid; gap: 14px; }
+.top { display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: flex-end; justify-content: space-between; }
+.top h1 { font-size: 22px; }
+.top p { margin: 4px 0 0; color: var(--ink-2); max-width: 760px; }
+.theme { display: inline-flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--line); padding: 3px; border-radius: 8px; }
+.theme label { position: relative; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.theme input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.theme label:has(input:checked) { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.1); }
+.theme label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.theme-wrap { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-weight: 600; }
+
+.bar { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; display: grid; grid-template-columns: auto minmax(160px, 1fr) auto; gap: 8px 14px; align-items: center; }
+.btn { border: 1px solid var(--axis); background: var(--surface); padding: 7px 12px; border-radius: var(--r-sm); cursor: pointer; font-weight: 600; font-size: 13px; }
+.btn:hover { border-color: var(--accent); }
+.btn.play { width: 38px; height: 34px; padding: 0; display: grid; place-items: center; }
+.btn.play svg { width: 14px; height: 14px; fill: currentColor; }
+input[type="range"] { width: 100%; accent-color: var(--accent); margin: 0; }
+.readout { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.readout strong { color: var(--ink); }
+.bar .note { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+.progress { grid-column: 1 / -1; height: 3px; background: var(--grid); border-radius: 2px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; align-items: start; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px; display: grid; gap: 10px; min-width: 0; }
+.card.picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash), 0 0 0 1px var(--accent) inset; }
+.card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.card-head h2 { font-size: 17px; }
+.card-head h2 .letter { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--ink); color: var(--surface); font-size: 13px; margin-right: 6px; vertical-align: 2px; font-family: var(--font-body); font-weight: 700; }
+.tag { font-size: 11px; font-weight: 600; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--line); padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.rule { font-size: 12px; color: var(--muted); margin-top: -6px; }
+
+.stage { position: relative; height: 200px; border-radius: var(--r-sm); overflow: hidden; background: var(--viewer-bg); }
+.stage canvas { display: block; width: 100%; height: 100%; }
+.stage .chip { position: absolute; top: 8px; left: 8px; display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.stage .chip i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.stage .chip strong { color: var(--ink); }
+.stage .webgl-msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; color: var(--ink-2); font-size: 13px; }
+
+.scale { display: grid; gap: 3px; padding-top: 18px; position: relative; }
+.scale .ramp { height: 12px; border-radius: 4px; position: relative; }
+.scale .mark { position: absolute; top: -18px; transform: translateX(-50%); display: grid; justify-items: center; pointer-events: none; }
+.scale .mark span { font-size: 11px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1; padding-bottom: 2px; }
+.scale .mark b { width: 2px; height: 20px; background: var(--ink); border-radius: 1px; box-shadow: 0 0 0 1px var(--surface); }
+.scale .ticks { position: relative; height: 14px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.scale .ticks span { position: absolute; transform: translateX(-50%); }
+.scale .ticks span:first-child { transform: none; }
+.scale .ticks span:last-child { transform: translateX(-100%); }
+.scale .reach { position: relative; height: 22px; }
+.scale .reach i { position: absolute; top: 0; height: 5px; border-left: 1px solid var(--axis); border-right: 1px solid var(--axis); border-bottom: 1px solid var(--axis); }
+.scale .reach span { position: absolute; top: 7px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+.chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.chart-head h3 { font-family: var(--font-body); font-size: 13px; font-weight: 700; }
+.chart-head .unit { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+.chart-box { position: relative; height: 150px; cursor: ew-resize; touch-action: none; }
+.chart-box canvas { display: block; }
+
+.caption { display: grid; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.caption .says { color: var(--ink); }
+.caption ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.caption li { display: grid; grid-template-columns: 38px 1fr; gap: 6px; }
+.caption li b { font-size: 11px; font-weight: 700; color: var(--muted); padding-top: 1px; }
+.facts { display: grid; gap: 2px; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; background: var(--surface-2); border-radius: var(--r-sm); padding: 7px 9px; }
+.facts .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.pick { display: grid; gap: 6px; }
+.pick .btn { justify-self: start; }
+.pick .btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.tell { border: 1px dashed var(--accent); background: var(--accent-wash); border-radius: var(--r-sm); padding: 8px 10px; font-size: 13px; color: var(--ink); display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.tell code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 600; }
+.tell .copy { border: 0; background: transparent; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; padding: 0; }
+
+/* fourth panel: E-assumption context (copies the approved C6 styles from index.html) */
+.ctx-chart { border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px; display: grid; gap: 6px; }
+.ctx-chart .chart-head { flex-wrap: wrap; }
+.ctx-chart .chart-head h3 { white-space: nowrap; }
+.chart-tools { display: flex; gap: 6px; flex: none; align-items: center; }
+.tbl-btn { border: 0; background: transparent; font-size: 11px; color: var(--muted); padding: 1px 4px; text-decoration: underline; text-underline-offset: 2px; }
+.ev-chip { border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 1px 8px 1px 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); display: inline-flex; gap: 5px; align-items: center; }
+.ev-chip .e { color: var(--gE); }
+.alert { border: 1px solid var(--gE); background: color-mix(in srgb, var(--gE) 9%, var(--surface)); color: var(--ink); border-radius: var(--r-sm); padding: 8px 10px; font-size: 13px; display: flex; gap: 8px; align-items: flex-start; }
+.alert svg { flex: none; width: 16px; height: 16px; fill: var(--gE); margin-top: 2px; }
+.prm { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 10px; display: grid; gap: 4px; }
+.prm.is-e { border-color: color-mix(in srgb, var(--gE) 55%, var(--line)); background: color-mix(in srgb, var(--gE) 5%, var(--surface)); }
+.prm .h { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.prm code { font-size: 12px; font-weight: 600; color: var(--ink); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.prm .val { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink); }
+.prm .val span { color: var(--muted); }
+.prm p { margin: 0; font-size: 12px; color: var(--ink-2); }
+.grade { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; border-radius: 4px; padding: 1px 6px; border: 1px solid currentColor; white-space: nowrap; }
+.grade.A { color: var(--gA); } .grade.B { color: var(--gB); } .grade.C { color: var(--gC); } .grade.D { color: var(--gD); }
+.grade.E { color: var(--surface); background: var(--gE); border-color: var(--gE); }
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--ink-2); }
+.swatches span { display: inline-flex; align-items: center; gap: 5px; }
+.swatches i { width: 14px; height: 14px; border-radius: 3px; display: inline-block; border: 1px solid var(--line); }
+
+.foot { font-size: 12px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.foot strong { color: var(--ink); }
+.foot a { color: var(--accent); }
+
+@media (max-width: 560px) {
+  .bar { grid-template-columns: auto 1fr; }
+  .readout { grid-column: 1 / -1; white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="top">
+    <div>
+      <h1>Kidney strain colours: three options</h1>
+      <p>The same simulation drives all three. Salt dose climbs from 0 to 30 g, and the kidney strain index climbs with it to about 0.6. Only the colour rule differs. Pick the one that reads best to you. The breakpoints are display choices: the index has no clinical thresholds.</p>
+    </div>
+    <div class="theme-wrap">Preview theme
+      <div class="theme" role="radiogroup" aria-label="Preview theme">
+        <label><input type="radio" name="theme" value="light">Light</label>
+        <label><input type="radio" name="theme" value="dark">Dark</label>
+      </div>
+    </div>
+  </header>
+
+  <section class="bar" aria-label="Playback">
+    <button class="btn play" id="playBtn" type="button" aria-label="Pause"></button>
+    <input type="range" id="dose" min="0" max="30" step="0.1" value="0" aria-label="Salt dose, grams NaCl">
+    <div class="readout" id="readout" aria-live="off">Running the salt sweep…</div>
+    <div class="progress" aria-hidden="true"><i id="prog"></i></div>
+    <div class="note" id="note">Simulation: <code>salt_load_sweep</code>. One salt load at 1 h with 0.5 L water, followed for 48 h per dose, 13 doses from 0 to 30 g. Monte Carlo n = 64, seed 1. Median line, 90 % band (q05 to q95). Drag the slider or a chart to stop on a dose.</div>
+  </section>
+
+  <main class="grid" id="grid"></main>
+
+  <footer class="foot">
+    <strong id="disclaimer"></strong>
+    <span>Review page for DESIGN_DECISIONS O1 and TRACKER D-1. Colours come from <code>strainColor()</code> in <code>app/viewer.js</code>, so each panel matches what the app would show.</span>
+    <a href="./index.html">Back to the app</a>
+  </footer>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { strainColor, STRAIN_RULES, STRAIN_COLOR_RULE } from './viewer.js';
+import { SCENARIOS, simulateSweep, paramTable, DISCLAIMER } from '../engine/index.js';
+import { niceTicks, fmt, rgba, token } from './charts.js';
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+$('disclaimer').textContent = DISCLAIMER;
+
+// ---------------------------------------------------------------------------
+// The three rules. Stops come from viewer.js; the words are the design rationale.
+const OPTIONS = [
+  { letter: 'A', rule: 'thirds', name: 'Thirds', ruleText: 'Normal → amber at 0.33 → red at 0.66',
+    says: 'Low, moderate and high in three equal bands. Reads like a traffic light.',
+    pro: 'Change shows early. A heavy salt day already moves the kidney toward amber, so the animation tells a story.',
+    con: 'Equal thirds look like clinical cut-offs, which this index does not have.' },
+  { letter: 'B', rule: 'gradient', name: 'Continuous', ruleText: 'Normal → red, smooth, no breakpoints',
+    says: 'More strain, more red. No step suggests a threshold.',
+    pro: 'The most honest match for an index with no validated cut-offs.',
+    con: 'The kidney’s normal colour is already red-brown, so low and moderate strain look alike. There is no "attention" colour.' },
+  { letter: 'C', rule: 'conservative', name: 'Conservative', ruleText: 'Normal → amber at 0.5 → red at 0.8',
+    says: 'Only large strain gets attention.',
+    pro: 'Calm for everyday scenarios. Amber and red are saved for the top of the range.',
+    con: 'Red needs 0.8, which the median in this sweep never reaches, so users would almost never see red. It still implies cut-offs.' },
+];
+OPTIONS.forEach((o) => { o.stops = STRAIN_RULES[o.rule]; });
+
+const hexOf = (s, rule) => `#${strainColor(Math.max(0, Math.min(1, s)), rule).getHexString()}`;
+function rampCss(rule) {
+  const parts = [];
+  for (let i = 0; i <= 40; i++) { const v = i / 40; parts.push(`${hexOf(v, rule)} ${(v * 100).toFixed(1)}%`); }
+  return `linear-gradient(90deg, ${parts.join(', ')})`;
+}
+/** Breakpoints of a rule = interior stops where the colour changes (amber / red). */
+function breakpoints(o) {
+  return o.stops.slice(1).filter(([s], i) => s < 1 && o.stops[i + 2]).map(([s, hex]) => ({ s, name: hex.toLowerCase() === '#f0a020' ? 'amber' : 'red' }));
+}
+
+// ---------------------------------------------------------------------------
+// Sweep: same jobs as the app's dose chart (app/worker.js, one dose per job).
+const SW = SCENARIOS.salt_load_sweep.sweep;
+const VALUES = [...SW.values];
+const N = 64, SEED = 1;
+let SWEEP = null; // { values, q05, q50, q95 }
+
+async function runSweep(onProgress) {
+  const size = Math.max(1, Math.min(VALUES.length, navigator.hardwareConcurrency || 4));
+  let workers = [];
+  try {
+    workers = Array.from({ length: size }, () => new Worker(new URL('./worker.js', import.meta.url), { type: 'module' }));
+  } catch { workers = []; }
+  const results = new Array(VALUES.length);
+  let done = 0;
+  const local = (i) => new Promise((res) => setTimeout(() => {
+    const r = simulateSweep({ n: N, seed: SEED, values: [VALUES[i]] }); res(r.metrics);
+  }, 0));
+  if (workers.length) {
+    let next = 0; let seq = 0;
+    await Promise.all(workers.map((w) => new Promise((resolve, reject) => {
+      const go = () => {
+        if (next >= VALUES.length) { w.terminate(); resolve(); return; }
+        const i = next++;
+        w.onmessage = (e) => {
+          if (!e.data.ok) { reject(new Error(e.data.error)); return; }
+          results[i] = e.data.metrics; done++; onProgress(done / VALUES.length); go();
+        };
+        w.onerror = (e) => { e.preventDefault?.(); reject(new Error(e.message || 'worker error')); };
+        w.postMessage({ type: 'sweep', id: ++seq, n: N, seed: SEED, values: [VALUES[i]] });
+      };
+      go();
+    }))).catch(async (err) => {
+      console.warn('Workers failed, finishing on the main thread:', err);
+      workers.forEach((w) => w.terminate());
+      for (let i = 0; i < VALUES.length; i++) if (!results[i]) { results[i] = await local(i); done++; onProgress(done / VALUES.length); }
+    });
+  } else {
+    for (let i = 0; i < VALUES.length; i++) { results[i] = await local(i); done++; onProgress(done / VALUES.length); }
+  }
+  const m = (q) => results.map((r) => r.peak_strain_index[q][0]);
+  return { values: VALUES, q05: m('q05'), q50: m('q50'), q95: m('q95') };
+}
+
+/** Linear interpolation of a sweep quantile at dose g. */
+function at(q, g) {
+  if (!SWEEP) return 0;
+  const v = SWEEP.values; const a = SWEEP[q];
+  if (g <= v[0]) return a[0];
+  for (let i = 1; i < v.length; i++) if (g <= v[i]) { const f = (g - v[i - 1]) / (v[i] - v[i - 1]); return a[i - 1] + f * (a[i] - a[i - 1]); }
+  return a[a.length - 1];
+}
+/** First dose (g) at which the median reaches strain s, or null. */
+function doseFor(s) {
+  if (!SWEEP) return null;
+  const v = SWEEP.values; const a = SWEEP.q50;
+  for (let i = 1; i < v.length; i++) if (a[i] >= s) { const f = (s - a[i - 1]) / (a[i] - a[i - 1]); return v[i - 1] + f * (v[i] - v[i - 1]); }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Mini 3D kidney pair (geometry, materials and lights copied from viewer.js).
+const ORGAN = { kidney: '#9c4a44', ureter: '#d9c27a' };
+class KidneyStage {
+  constructor(host, rule) {
+    this.host = host; this.rule = rule;
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    this.renderer.domElement.setAttribute('aria-hidden', 'true');
+    host.prepend(this.renderer.domElement);
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
+    this.camera.position.set(0, 0.15, 6.2); this.camera.lookAt(0, -0.25, 0);
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.4));
+    const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(1.5, 3, 2.5); this.scene.add(key);
+    const rim = new THREE.DirectionalLight(0x9fc4ff, 0.8); rim.position.set(-2, 1.5, -2.5); this.scene.add(rim);
+    const mat = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.62, metalness: 0.02, flatShading: true, ...extra });
+    this.kidneyMat = mat(ORGAN.kidney, { emissive: 0x000000 });
+    this.pair = new THREE.Group();
+    for (const s of [1, -1]) {
+      const k = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 2), this.kidneyMat);
+      k.scale.set(0.58, 1.0, 0.44); k.position.set(1.05 * s, 0.25, 0); k.rotation.z = 0.18 * s;
+      this.pair.add(k);
+      const curve = new THREE.CatmullRomCurve3([new THREE.Vector3(0.62 * s, -0.15, 0.2), new THREE.Vector3(0.55 * s, -0.9, 0.3), new THREE.Vector3(0.3 * s, -1.6, 0.4)]);
+      this.pair.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 20, 0.06, 6), mat(ORGAN.ureter)));
+    }
+    this.scene.add(this.pair);
+    this.applyTheme();
+    new ResizeObserver(() => this.resize()).observe(host);
+    this.resize();
+  }
+  applyTheme() { this.scene.background = new THREE.Color(token('--viewer-bg') || '#e6ebf1'); }
+  resize() {
+    const w = this.host.clientWidth, h = this.host.clientHeight;
+    if (!w || !h) return;
+    this.renderer.setSize(w, h, false); this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
+  }
+  /** Same overlay rule as Viewer.setState() in viewer.js. */
+  set(strain, time) {
+    const c = strainColor(strain, this.rule);
+    this.kidneyMat.color.copy(c);
+    this.kidneyMat.emissive.copy(c).multiplyScalar(Math.min(0.5, strain * 0.6));
+    this.kidneyMat.emissiveIntensity = 1;
+    this.pair.rotation.y = REDUCED ? 0 : Math.sin(time * 0.6) * 0.35;
+    this.renderer.render(this.scene, this.camera);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Chart: peak strain vs dose; band and median coloured by the rule.
+class RuleChart {
+  constructor(host, option, onScrub) {
+    this.host = host; this.o = option; this.onScrub = onScrub;
+    this.canvas = document.createElement('canvas');
+    this.canvas.setAttribute('role', 'img');
+    this.canvas.setAttribute('aria-label', `Peak kidney strain index versus salt dose, coloured with rule ${option.letter}`);
+    host.append(this.canvas);
+    this.dose = 0; this.pad = { l: 36, r: 10, t: 8, b: 22 };
+    new ResizeObserver(() => this.draw()).observe(host);
+    const scrub = (e) => {
+      if (!SWEEP) return;
+      const r = this.canvas.getBoundingClientRect();
+      const f = (e.clientX - r.left - this.pad.l) / (r.width - this.pad.l - this.pad.r);
+      onScrub(Math.max(0, Math.min(30, f * 30)));
+    };
+    this.canvas.addEventListener('pointerdown', (e) => { this.canvas.setPointerCapture(e.pointerId); scrub(e); });
+    this.canvas.addEventListener('pointermove', (e) => { if (e.buttons) scrub(e); });
+  }
+  setDose(g) { if (g !== this.dose) { this.dose = g; this.draw(); } }
+  draw() {
+    const w = this.host.clientWidth, h = this.host.clientHeight; if (!w) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1); const c = this.canvas;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+      c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); c.style.width = `${w}px`; c.style.height = `${h}px`;
+    }
+    const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const muted = token('--muted'), grid = token('--grid'), axis = token('--axis'), ink = token('--ink'), surf = token('--surface');
+    const font = token('--font-body') || 'sans-serif';
+    if (!SWEEP) { g.fillStyle = muted; g.font = `12px ${font}`; g.textAlign = 'center'; g.fillText('Running Monte Carlo…', w / 2, h / 2); return; }
+    const pad = this.pad, ph = h - pad.t - pad.b, pw = w - pad.l - pad.r;
+    const hi = Math.max(...SWEEP.q95);
+    const nt = niceTicks(0, hi, 4);
+    const y = (v) => pad.t + ph - ((v - nt.lo) / (nt.hi - nt.lo)) * ph;
+    const x = (d) => pad.l + (d / 30) * pw;
+    g.font = `11px ${font}`; g.lineWidth = 1;
+    g.textAlign = 'right'; g.textBaseline = 'middle';
+    for (const v of nt.ticks) {
+      const yy = Math.round(y(v)) + 0.5;
+      g.strokeStyle = grid; g.beginPath(); g.moveTo(pad.l, yy); g.lineTo(w - pad.r, yy); g.stroke();
+      g.fillStyle = muted; g.fillText(fmt(v, 1), pad.l - 6, yy);
+    }
+    g.textAlign = 'center'; g.textBaseline = 'top';
+    for (const d of [0, 5, 10, 15, 20, 25, 30]) {
+      const xx = Math.round(x(d)) + 0.5;
+      g.strokeStyle = axis; g.beginPath(); g.moveTo(xx, pad.t + ph); g.lineTo(xx, pad.t + ph + 4); g.stroke();
+      g.fillStyle = muted; g.fillText(d === 0 ? '0 g' : String(d), xx, pad.t + ph + 6);
+    }
+    g.strokeStyle = axis; g.beginPath(); g.moveTo(pad.l, Math.round(pad.t + ph) + 0.5); g.lineTo(w - pad.r, Math.round(pad.t + ph) + 0.5); g.stroke();
+
+    // breakpoint guides: where this rule changes colour
+    g.setLineDash([3, 3]);
+    for (const b of breakpoints(this.o)) {
+      if (b.s > nt.hi) continue;
+      const yy = Math.round(y(b.s)) + 0.5;
+      g.strokeStyle = hexOf(b.s, this.o.rule); g.globalAlpha = 0.8;
+      g.beginPath(); g.moveTo(pad.l, yy); g.lineTo(w - pad.r, yy); g.stroke(); g.globalAlpha = 1;
+      g.fillStyle = muted; g.textAlign = 'left';
+      const below = yy - 14 < pad.t; g.textBaseline = below ? 'top' : 'bottom';
+      g.fillText(`${b.name} ${b.s}`, pad.l + 4, below ? yy + 2 : yy - 2);
+    }
+    g.setLineDash([]);
+
+    // vertical colour ramp in data space: colour at height y = rule(strain at y)
+    const ramp = (alpha) => {
+      const gr = g.createLinearGradient(0, y(0), 0, y(nt.hi));
+      for (let i = 0; i <= 24; i++) { const v = (i / 24) * nt.hi; gr.addColorStop(i / 24, rgba(hexOf(v, this.o.rule), alpha)); }
+      return gr;
+    };
+    const V = SWEEP.values;
+    g.fillStyle = ramp(0.32);
+    g.beginPath();
+    V.forEach((d, i) => (i ? g.lineTo(x(d), y(SWEEP.q95[i])) : g.moveTo(x(d), y(SWEEP.q95[i]))));
+    for (let i = V.length - 1; i >= 0; i--) g.lineTo(x(V[i]), y(SWEEP.q05[i]));
+    g.closePath(); g.fill();
+    g.strokeStyle = ramp(1); g.lineWidth = 2.5; g.lineJoin = 'round'; g.lineCap = 'round';
+    g.beginPath(); V.forEach((d, i) => (i ? g.lineTo(x(d), y(SWEEP.q50[i])) : g.moveTo(x(d), y(SWEEP.q50[i])))); g.stroke();
+    for (let i = 0; i < V.length; i++) {
+      g.beginPath(); g.arc(x(V[i]), y(SWEEP.q50[i]), 3, 0, Math.PI * 2);
+      g.fillStyle = hexOf(SWEEP.q50[i], this.o.rule); g.fill(); g.lineWidth = 1.5; g.strokeStyle = surf; g.stroke();
+    }
+    // playhead
+    const X = Math.round(x(this.dose)) + 0.5; const s = at('q50', this.dose);
+    g.strokeStyle = ink; g.lineWidth = 1; g.beginPath(); g.moveTo(X, pad.t); g.lineTo(X, pad.t + ph); g.stroke();
+    g.beginPath(); g.arc(X, y(s), 5, 0, Math.PI * 2); g.fillStyle = hexOf(s, this.o.rule); g.fill();
+    g.lineWidth = 2; g.strokeStyle = surf; g.stroke();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build the panels
+const panels = [];
+const grid = $('grid');
+for (const o of OPTIONS) {
+  const card = el('article', 'card'); card.id = `opt-${o.letter}`;
+  const head = el('div', 'card-head');
+  const h = el('h2'); h.append(el('span', 'letter', o.letter), document.createTextNode(o.name));
+  head.append(h);
+  if (o.rule === STRAIN_COLOR_RULE) head.append(el('span', 'tag', 'In the app today'));
+  card.append(head, el('div', 'rule', o.ruleText));
+
+  const stage = el('div', 'stage');
+  const chip = el('span', 'chip'); const sw = el('i'); const val = el('strong', '', '–');
+  chip.append(sw, document.createTextNode('Strain '), val);
+  stage.append(chip); card.append(stage);
+
+  const scale = el('div', 'scale');
+  const rampEl = el('div', 'ramp'); rampEl.style.background = rampCss(o.rule);
+  rampEl.setAttribute('role', 'meter'); rampEl.setAttribute('aria-valuemin', '0'); rampEl.setAttribute('aria-valuemax', '1');
+  rampEl.setAttribute('aria-label', `Colour scale for rule ${o.letter}, strain 0 to 1`);
+  const mark = el('div', 'mark'); const markVal = el('span', '', '0.00'); mark.append(markVal, el('b'));
+  rampEl.append(mark);
+  const ticks = el('div', 'ticks');
+  for (const v of [...new Set([0, ...o.stops.map(([s]) => s), 1])]) { const t = el('span', '', String(v)); t.style.left = `${v * 100}%`; ticks.append(t); }
+  const reach = el('div', 'reach'); reach.hidden = true;
+  scale.append(rampEl, ticks, reach); card.append(scale);
+
+  const ch = el('div', 'chart-head');
+  const ct = el('h3', '', 'Peak strain vs salt dose'); ct.append(el('span', 'unit', 'model index'));
+  ch.append(ct); card.append(ch);
+  const box = el('div', 'chart-box'); card.append(box);
+
+  const cap = el('div', 'caption');
+  cap.append(el('div', 'says', o.says));
+  const ul = el('ul');
+  for (const [k, t] of [['Pro', o.pro], ['Con', o.con]]) { const li = el('li'); li.append(el('b', '', k), el('span', '', t)); ul.append(li); }
+  cap.append(ul);
+  const facts = el('div', 'facts'); facts.textContent = 'Waiting for the sweep…';
+  cap.append(facts); card.append(cap);
+
+  const pick = el('div', 'pick');
+  const btn = el('button', 'btn', 'Pick this'); btn.type = 'button'; btn.setAttribute('aria-pressed', 'false');
+  const tell = el('div', 'tell'); tell.hidden = true; tell.setAttribute('aria-live', 'polite');
+  const msg = `strain colors = ${o.letter}`;
+  const tellText = el('span'); tellText.append(document.createTextNode('Tell Fable: '), el('code', '', `"${msg}"`));
+  const copy = el('button', 'copy', 'Copy'); copy.type = 'button';
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(msg); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the text to copy'; }
+  });
+  tell.append(tellText, copy);
+  btn.addEventListener('click', () => {
+    for (const p of panels) { const on = p === panel; p.card.classList.toggle('picked', on); p.btn.setAttribute('aria-pressed', String(on)); p.tell.hidden = !on; p.btn.textContent = on ? 'Picked' : 'Pick this'; }
+  });
+  pick.append(btn, tell); card.append(pick);
+  grid.append(card);
+
+  const panel = { o, card, btn, tell, chip: sw, val, mark, markVal, rampEl, facts, reach, stage: null, chart: null };
+  try { panel.stage = new KidneyStage(stage, o.rule); } catch (err) {
+    console.warn('WebGL unavailable for the mini kidneys:', err);
+    stage.append(el('div', 'webgl-msg', 'The 3D kidneys need WebGL, which this browser has turned off. The colour bar and chart below still show the rule.'));
+  }
+  panel.chart = new RuleChart(box, o, (g) => { setPlaying(false); setDose(g); });
+  panels.push(panel);
+}
+
+// Fourth panel: the approved E-assumption pill and banner, in context.
+{
+  const TABLE = paramTable();
+  const STRAIN_P = ['strain_w_transport', 'strain_w_excretion', 'strain_w_glomerular', 'strain_w_concentrating',
+    'strain_scale_transport', 'strain_scale_excretion', 'strain_scale_pressure', 'GFR_0', 'MAP_0', 'gfr_map_exp', 'gfr_vol_exp', 'U_osm_max'];
+  const names = STRAIN_P.filter((n) => TABLE[n]);
+  const isE = (n) => /^E/.test(TABLE[n].grade);
+  const eCount = names.filter(isE).length;
+  const card = el('article', 'card'); card.id = 'opt-E';
+  const head = el('div', 'card-head');
+  const h = el('h2', '', 'In context: the E pill'); head.append(h, el('span', 'tag', 'Approved (C6)'));
+  card.append(head, el('div', 'rule', 'How the strain chart’s evidence looks today, next to these colours'));
+  const cc = el('div', 'ctx-chart');
+  const chd = el('div', 'chart-head'); const t = el('h3', '', 'Kidney strain index'); t.append(el('span', 'unit', 'index, 0–1'));
+  const tools = el('div', 'chart-tools'); tools.append(el('span', 'tbl-btn', 'Table'));
+  const chipE = el('span', 'ev-chip', `Evidence · ${names.length}`); chipE.append(el('span', 'e', `${eCount} E`)); tools.append(chipE);
+  chd.append(t, tools); cc.append(chd);
+  const alert = el('div', 'alert');
+  alert.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1l7.5 13H.5zM7.2 6v4.2h1.6V6zm0 5.4V13h1.6v-1.6z"/></svg>';
+  alert.append(el('span', '', `${eCount} of ${names.length} values behind this quantity are our own assumptions (grade E), not measurements. The shape of this curve is illustrative until those are replaced with sourced values.`));
+  cc.append(alert);
+  const prm = (n) => {
+    const p = TABLE[n]; const e = isE(n);
+    const c = el('div', `prm${e ? ' is-e' : ''}`);
+    const hh = el('div', 'h'); const code = el('code', '', n);
+    const gc = p.grade.charAt(0);
+    const badge = el('span', `grade ${gc}`, gc === 'E' ? 'E · assumption' : `${gc} · ${p.grade.split('-')[1] || ''}`);
+    hh.append(code, badge); c.append(hh);
+    const v = el('div', 'val'); v.append(document.createTextNode(`${p.value} ${p.unit}`));
+    if (p.range) v.append(el('span', '', `  ·  range ${p.range[0]} to ${p.range[1]}`));
+    c.append(v, el('p', '', p.description));
+    return c;
+  };
+  const firstE = names.find(isE); const firstB = names.find((n) => !isE(n));
+  if (firstE) cc.append(prm(firstE));
+  if (firstB) cc.append(prm(firstB));
+  card.append(cc);
+  const cap = el('div', 'caption');
+  cap.append(el('div', 'says', 'Already approved. Shown here so you can judge the strain colours beside it.'));
+  const ul = el('ul'); const li = el('li');
+  li.append(el('b', '', 'Note'), el('span', '', 'The strain red and the E-pill red are close in hue, so a deep-red kidney and a red "assumption" pill could read as related. Worth a look in both themes.'));
+  ul.append(li); cap.append(ul);
+  const sws = el('div', 'swatches');
+  const swatch = (label, color) => { const s = el('span'); const i = el('i'); i.style.background = color; s.append(i, document.createTextNode(label)); return s; };
+  const eSw = swatch('E pill', ''); const redSw = swatch('Strain red #d03b3b', '#d03b3b'); const amSw = swatch('Strain amber #f0a020', '#f0a020');
+  sws.append(eSw, redSw, amSw); cap.append(sws);
+  const paintE = () => { eSw.querySelector('i').style.background = token('--gE'); eSw.lastChild.textContent = `E pill ${token('--gE')}`; };
+  paintE(); card.append(cap);
+  grid.append(card);
+  new MutationObserver(paintE).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+}
+
+// ---------------------------------------------------------------------------
+// Playback: rise 0 → 30 g, hold, fall back, hold, repeat.
+const RISE = 9, HOLD_TOP = 1.6, FALL = 3, HOLD_LOW = 1;
+const CYCLE = RISE + HOLD_TOP + FALL + HOLD_LOW;
+let playing = !REDUCED, clockT = 0, dose = 0, last = performance.now();
+const PLAY = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2l11 6-11 6z"/></svg>';
+const PAUSE = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h4v12H3zM9 2h4v12H9z"/></svg>';
+function setPlaying(p) {
+  playing = p; $('playBtn').innerHTML = p ? PAUSE : PLAY; $('playBtn').setAttribute('aria-label', p ? 'Pause' : 'Play');
+  if (p) { clockT = (dose / 30) * RISE; last = performance.now(); }
+}
+function doseAt(tc) {
+  const t = tc % CYCLE;
+  if (t < RISE) return (t / RISE) * 30;
+  if (t < RISE + HOLD_TOP) return 30;
+  if (t < RISE + HOLD_TOP + FALL) return 30 * (1 - (t - RISE - HOLD_TOP) / FALL);
+  return 0;
+}
+function setDose(g) { dose = g; $('dose').value = String(g); }
+$('playBtn').addEventListener('click', () => setPlaying(!playing));
+$('dose').addEventListener('input', (e) => { setPlaying(false); setDose(+e.target.value); });
+setPlaying(playing);
+
+function updateReadout() {
+  if (!SWEEP) return;
+  const s = at('q50', dose);
+  $('readout').replaceChildren(
+    document.createTextNode('Salt '), el('strong', '', `${fmt(dose, 1)} g`),
+    document.createTextNode('  ·  peak strain '), el('strong', '', fmt(s, 2)),
+    document.createTextNode(`  ·  90 % band ${fmt(at('q05', dose), 2)} to ${fmt(at('q95', dose), 2)}`));
+}
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  if (playing && SWEEP) { clockT += dt; setDose(doseAt(clockT)); }
+  const s = SWEEP ? at('q50', dose) : 0;
+  for (const p of panels) {
+    const hex = hexOf(s, p.o.rule);
+    p.chip.style.background = hex; p.val.textContent = fmt(s, 2);
+    p.mark.style.left = `${Math.min(100, s * 100)}%`; p.markVal.textContent = fmt(s, 2);
+    p.rampEl.setAttribute('aria-valuenow', s.toFixed(2));
+    p.stage?.set(s, now / 1000);
+    p.chart.setDose(dose);
+  }
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------------------------------------------------------------------------
+// Theme preview
+const themeInputs = [...document.querySelectorAll('input[name="theme"]')];
+const systemDark = matchMedia('(prefers-color-scheme: dark)').matches;
+const initial = document.documentElement.dataset.theme || (systemDark ? 'dark' : 'light');
+themeInputs.forEach((i) => { i.checked = i.value === initial; });
+function applyTheme(v) {
+  document.documentElement.dataset.theme = v;
+  for (const p of panels) { p.stage?.applyTheme(); p.chart.draw(); }
+}
+themeInputs.forEach((i) => i.addEventListener('change', () => applyTheme(i.value)));
+
+// ---------------------------------------------------------------------------
+function fillFacts() {
+  const s10 = at('q50', 10); const sMax = Math.max(...SWEEP.q50);
+  for (const p of panels) {
+    const f = p.facts; f.replaceChildren();
+    const line = (...kids) => { const d = el('div'); d.append(...kids); f.append(d); };
+    const sw = (s) => { const i = el('i', 'sw'); i.style.background = hexOf(s, p.o.rule); return i; };
+    line(sw(s10), document.createTextNode(`10 g salt (a heavy day): strain ${fmt(s10, 2)}`));
+    const bps = breakpoints(p.o);
+    if (!bps.length) {
+      line(document.createTextNode(`Colour is ${fmt(100 * s10, 0)} % of the way to red at 10 g, ${fmt(100 * sMax, 0)} % at 30 g.`));
+    } else {
+      for (const b of bps) {
+        const d = doseFor(b.s);
+        line(sw(b.s), document.createTextNode(`Full ${b.name} (${b.s}): ${d === null ? `never in 0–30 g (median tops out at ${fmt(sMax, 2)})` : `from ${fmt(d, 1)} g`}`));
+      }
+    }
+    // bracket under the colour bar: the median range this sweep covers
+    p.reach.hidden = false; p.reach.replaceChildren();
+    const i = el('i'); i.style.left = `${SWEEP.q50[0] * 100}%`; i.style.width = `${(sMax - SWEEP.q50[0]) * 100}%`;
+    const sp = el('span', '', `Median range in this sweep: 0 to ${fmt(sMax, 2)}`); sp.style.left = `${SWEEP.q50[0] * 100}%`;
+    p.reach.append(i, sp);
+  }
+}
+
+const t0 = performance.now();
+runSweep((f) => { $('prog').style.width = `${f * 100}%`; $('readout').textContent = `Running the salt sweep: ${Math.round(f * VALUES.length)} of ${VALUES.length} doses…`; })
+  .then((r) => {
+    SWEEP = r;
+    $('prog').style.width = '100%'; setTimeout(() => { $('prog').parentElement.style.visibility = 'hidden'; }, 400);
+    fillFacts();
+    for (const p of panels) p.chart.draw();
+    clockT = 0; last = performance.now();
+    window.__opts.ready = true; window.__opts.ms = performance.now() - t0;
+  })
+  .catch((err) => { console.error('Sweep failed:', err); $('readout').textContent = 'The sweep failed. See the console.'; });
+
+// test hook (Playwright)
+window.__opts = { ready: false, setDose: (g) => { setPlaying(false); setDose(g); }, setTheme: (v) => { themeInputs.forEach((i) => { i.checked = i.value === v; }); applyTheme(v); }, at };
+</script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+%% docs/health/06_ARCHITECTURE.md §2 — layers and the files that implement them
+flowchart TB
+  subgraph L6["PROCESS"]
+    A1[".claude/agents/health-*.md"] --- A2["docs/logs/bugs.yaml (area: health)"] --- A3["docs/health/logs/PROCESS_LOG.md"] --- A4["docs/health/decisions/ADR-*.md"] --- A5["tools/gates.py · .github/workflows/ci.yml"]
+  end
+  subgraph L5["SURFACES"]
+    S1["reference/metabolic-map-v1/index.html + app/ (V1, verbatim)"] --- S2["src/health/cli.py<br/>status · kb-check · kb-summary"]
+  end
+  subgraph L4["VALIDATION"]
+    V1["tests/health_selftest.py"] --- V2["tests/health_kb_selftest.py"] --- V3["tests/fixtures/health/golden_v1.json<br/>← tools/health_golden.mjs (Node, JS reference)"] --- V4["src/health/engine/validate.py<br/>evaluate_expectations"]
+  end
+  subgraph L3["ENGINE  src/health/engine/"]
+    E1["solver.py<br/>RK4 · breakpoints · max_step"] --- E2["model.py<br/>13 states · M0–M10 · strain index"] --- E3["scenarios.py<br/>events · overrides · expects"] --- E4["mc.py<br/>mulberry32 · sampling · quantiles"] --- E5["params.py"]
+  end
+  subgraph L2["PARAMETERS"]
+    P1["src/health/engine/params.json — 54 rows"]
+  end
+  subgraph L1["KNOWLEDGE  src/health/kb/"]
+    K1["data/entities.json (107)"] --- K2["data/relations.json (203)"] --- K3["data/evidence.json (57)"] --- K4["data/VERIFICATION_LOG.json (154)"] --- K5["data/schema.json"] --- K6["check.py · report.py"]
+  end
+  L1 --> L2 --> L3 --> L4 --> L5
+  L6 -.->|"gates everything"| L4

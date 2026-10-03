@@ -1,0 +1,71 @@
+# Health base configuration. HREQ-N-06: no tolerance, seed, threshold or display rule
+# lives in code. Every change here is a logged change with a rationale in the commit
+# message (docs/00 REQ-N-10 applies).
+#
+# The parameter table itself is src/health/engine/params.json (values, units, ranges,
+# grades, sources); this file holds the rules the engine, the harness and the surfaces
+# apply AROUND those parameters.
+
+version: 1
+
+model:
+  # Mirrors MODEL_VERSION in src/health/engine/__init__.py and in
+  # reference/metabolic-map-v1/engine/index.js. tests/health_selftest.py checks the
+  # three agree (a bump in one place and not the others is a CFG defect, docs/health/05 §3).
+  version: "1.0.1"
+  disclaimer: "Educational model — not medical advice."
+  reference_person:
+    name: "reference adult (70 kg)"
+    mass_kg: 70
+    bsa_m2: 1.73
+
+equivalence:
+  # docs/health/03 §4. Chosen, not measured: 1e-9 relative is far below any physiological
+  # meaning and far above double-precision noise for a 13-state RK4 over 744 h. A
+  # divergence beyond this is an S0b (ReferenceDivergenceError), never "tolerated".
+  relative_tolerance: 1.0e-9
+  absolute_tolerance: 1.0e-12     # for values whose reference is ~0 (ledgers at t = 0)
+  golden_fixture: tests/fixtures/health/golden_v1.json
+  generator: tools/health_golden.mjs
+
+numerics:
+  steady_state_drift_max: 1.0e-6  # max |Δstate| / scale over 24 h of baseline (scenarios.js, baseline.validation)
+  mass_balance_tolerance: 1.0e-9  # Δ(compartments) vs ledger in − out, water and sodium
+  max_step_fraction_of_tau_min: 0.25   # solver sub-step bound: 0.25 × fastest time constant (index.js simulate)
+
+monte_carlo:
+  default_n: 64
+  default_seed: 1
+  quantiles: [0.05, 0.5, 0.95]
+  log_uniform_ratio: 5            # hi/lo above this and lo > 0 -> log-uniform sampling (mc.js samplingMode)
+  max_tries_per_sample: 50        # drawSamples gives up after 50·n draws
+  # Tests use small n so the stdlib-only suite stays under HREQ-N-04's two minutes.
+  test_n: 8
+  test_n_sweep: 4
+
+influence:
+  # index.js INFLUENCE_DEFAULTS: one-at-a-time +10 % screen on salt_load_10g, 24 h.
+  scenario: salt_load_10g
+  t_end_h: 24
+  dt_h: 0.05
+  relative_perturbation: 0.10
+  threshold: 0.01
+
+expectations:
+  # docs/health/01 §7: only these kinds can count as passes. Every other kind yields a
+  # not_checked row with its reason; a missing row is ExpectationSkippedError.
+  countable_kinds: [quantitative, semi-quantitative]
+  reported_kinds: [qualitative, design-target, known-divergence, unverified, numerical]
+  evaluate_on: default_params     # or: mc_median -- the surface must say which
+
+grades:
+  order: [A-meta, A-primary, B-textbook, C-model, D-animal, E-assumption]
+  headline_at_least: B-textbook   # "share of parameters graded >= B" on the status line
+
+display:
+  timezone: "America/Chicago"
+  usd_decimals: 2                 # unused by health; kept so display rules stay one shape across the repo
+  show_assumption_count: true
+  show_grade_share: true
+  index_label: "an index, not a clinical measure"
+  threshold_label: "classification threshold, not a physiological parameter"

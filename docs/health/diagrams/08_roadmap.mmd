@@ -1,0 +1,11 @@
+%% docs/health/06_ARCHITECTURE.md §8 — the scientific roadmap as modules (docs/health/00 §10)
+flowchart LR
+  P0["Phase 0<br/>V1 slice: water · Na · ADH · Aldo · ANP · MAP · kidney<br/>(this PR)"]
+  P1["Phase 1<br/>body-size scaling · plasma K · Na storage compartment"]
+  P2["Phase 2<br/>chronic pressure → outcomes · CKD progression"]
+  P3["Phase 3<br/>glucose–insulin · obesity–hypertension coupling"]
+  P4["Phase 4<br/>population layer · intervention comparison with bands"]
+  P5["Phase 5<br/>Python surface from an approved design spec"]
+  P0 --> P1 --> P2 --> P4
+  P1 --> P3 --> P4
+  P4 --> P5

@@ -1,0 +1,1546 @@
+{
+ "generated": "2026-10-01",
+ "note": "Every externalIds value in entities.json, re-resolved against its source registry by the Literature Curator. sourceLabel is the label returned by the source. Curator compared each label with the entity name before inclusion (see RIGOR_STANDARD.md §5).",
+ "records": [
+  {
+   "entity": "organism:body",
+   "entityName": "Whole body",
+   "db": "UBERON",
+   "id": "UBERON:0000468",
+   "sourceLabel": "multicellular organism",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:cardiovascular",
+   "entityName": "Cardiovascular system",
+   "db": "UBERON",
+   "id": "UBERON:0004535",
+   "sourceLabel": "cardiovascular system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:renal",
+   "entityName": "Renal and urinary system",
+   "db": "UBERON",
+   "id": "UBERON:0001008",
+   "sourceLabel": "renal system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:gi",
+   "entityName": "Digestive system",
+   "db": "UBERON",
+   "id": "UBERON:0001007",
+   "sourceLabel": "digestive system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:endocrine",
+   "entityName": "Endocrine system",
+   "db": "UBERON",
+   "id": "UBERON:0000949",
+   "sourceLabel": "endocrine system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:nervous",
+   "entityName": "Nervous system",
+   "db": "UBERON",
+   "id": "UBERON:0001016",
+   "sourceLabel": "nervous system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:musculoskeletal",
+   "entityName": "Musculoskeletal system",
+   "db": "UBERON",
+   "id": "UBERON:0002204",
+   "sourceLabel": "musculoskeletal system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:integumentary",
+   "entityName": "Integumentary system",
+   "db": "UBERON",
+   "id": "UBERON:0002416",
+   "sourceLabel": "integumental system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "system:respiratory",
+   "entityName": "Respiratory system",
+   "db": "UBERON",
+   "id": "UBERON:0001004",
+   "sourceLabel": "respiratory system",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:heart",
+   "entityName": "Heart",
+   "db": "UBERON",
+   "id": "UBERON:0000948",
+   "sourceLabel": "heart",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:aorta",
+   "entityName": "Aorta",
+   "db": "UBERON",
+   "id": "UBERON:0000947",
+   "sourceLabel": "aorta",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:vena-cava",
+   "entityName": "Venae cavae",
+   "db": "UBERON",
+   "id": "UBERON:0004087",
+   "sourceLabel": "vena cava",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:kidney",
+   "entityName": "Kidneys",
+   "db": "UBERON",
+   "id": "UBERON:0002113",
+   "sourceLabel": "kidney",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:ureters",
+   "entityName": "Ureters",
+   "db": "UBERON",
+   "id": "UBERON:0000056",
+   "sourceLabel": "ureter",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:bladder",
+   "entityName": "Bladder",
+   "db": "UBERON",
+   "id": "UBERON:0001255",
+   "sourceLabel": "urinary bladder",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:stomach",
+   "entityName": "Stomach",
+   "db": "UBERON",
+   "id": "UBERON:0000945",
+   "sourceLabel": "stomach",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:intestine",
+   "entityName": "Intestines",
+   "db": "UBERON",
+   "id": "UBERON:0000160",
+   "sourceLabel": "intestine",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:small-intestine",
+   "entityName": "Small intestine",
+   "db": "UBERON",
+   "id": "UBERON:0002108",
+   "sourceLabel": "small intestine",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:liver",
+   "entityName": "Liver",
+   "db": "UBERON",
+   "id": "UBERON:0002107",
+   "sourceLabel": "liver",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:lung",
+   "entityName": "Lung",
+   "db": "UBERON",
+   "id": "UBERON:0002048",
+   "sourceLabel": "lung",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:pituitary",
+   "entityName": "Posterior pituitary",
+   "db": "UBERON",
+   "id": "UBERON:0002198",
+   "sourceLabel": "neurohypophysis",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:hypothalamus",
+   "entityName": "Hypothalamus",
+   "db": "UBERON",
+   "id": "UBERON:0001898",
+   "sourceLabel": "hypothalamus",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:adrenal",
+   "entityName": "Adrenal glands",
+   "db": "UBERON",
+   "id": "UBERON:0002369",
+   "sourceLabel": "adrenal gland",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:brain",
+   "entityName": "Brain",
+   "db": "UBERON",
+   "id": "UBERON:0000955",
+   "sourceLabel": "brain",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organ:skin",
+   "entityName": "Skin and interstitium",
+   "db": "UBERON",
+   "id": "UBERON:0002097",
+   "sourceLabel": "skin of body",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:muscle",
+   "entityName": "Skeletal muscle",
+   "db": "UBERON",
+   "id": "UBERON:0001134",
+   "sourceLabel": "skeletal muscle tissue",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:cardiac-atrium",
+   "entityName": "Cardiac atria",
+   "db": "UBERON",
+   "id": "UBERON:0002081",
+   "sourceLabel": "cardiac atrium",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:supraoptic-nucleus",
+   "entityName": "Supraoptic nucleus",
+   "db": "UBERON",
+   "id": "UBERON:0001929",
+   "sourceLabel": "supraoptic nucleus",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:paraventricular-nucleus",
+   "entityName": "Paraventricular nucleus",
+   "db": "UBERON",
+   "id": "UBERON:0001930",
+   "sourceLabel": "paraventricular nucleus of hypothalamus",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:ovlt",
+   "entityName": "OVLT",
+   "db": "UBERON",
+   "id": "UBERON:0002689",
+   "sourceLabel": "supraoptic crest",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:subfornical-organ",
+   "entityName": "Subfornical organ",
+   "db": "UBERON",
+   "id": "UBERON:0002219",
+   "sourceLabel": "subfornical organ",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:adrenal-cortex",
+   "entityName": "Adrenal cortex",
+   "db": "UBERON",
+   "id": "UBERON:0001235",
+   "sourceLabel": "adrenal cortex",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:zona-glomerulosa",
+   "entityName": "Zona glomerulosa",
+   "db": "UBERON",
+   "id": "UBERON:0002053",
+   "sourceLabel": "zona glomerulosa of adrenal gland",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:renal-cortex",
+   "entityName": "Renal cortex",
+   "db": "UBERON",
+   "id": "UBERON:0001225",
+   "sourceLabel": "cortex of kidney",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:renal-medulla",
+   "entityName": "Renal medulla",
+   "db": "UBERON",
+   "id": "UBERON:0000362",
+   "sourceLabel": "renal medulla",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:nephron",
+   "entityName": "Nephron",
+   "db": "UBERON",
+   "id": "UBERON:0001285",
+   "sourceLabel": "nephron",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:glomerulus",
+   "entityName": "Glomerulus",
+   "db": "UBERON",
+   "id": "UBERON:0000074",
+   "sourceLabel": "renal glomerulus",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:proximal-tubule",
+   "entityName": "Proximal tubule",
+   "db": "UBERON",
+   "id": "UBERON:0004134",
+   "sourceLabel": "proximal tubule",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:loop-of-henle",
+   "entityName": "Loop of Henle",
+   "db": "UBERON",
+   "id": "UBERON:0001288",
+   "sourceLabel": "loop of Henle",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:thick-ascending-limb",
+   "entityName": "Thick ascending limb",
+   "db": "UBERON",
+   "id": "UBERON:0001291",
+   "sourceLabel": "thick ascending limb of loop of Henle",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:distal-tubule",
+   "entityName": "Distal tubule",
+   "db": "UBERON",
+   "id": "UBERON:0004135",
+   "sourceLabel": "distal tubule",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:distal-convoluted-tubule",
+   "entityName": "Distal convoluted tubule",
+   "db": "UBERON",
+   "id": "UBERON:0001292",
+   "sourceLabel": "distal convoluted tubule",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:collecting-duct",
+   "entityName": "Collecting duct",
+   "db": "UBERON",
+   "id": "UBERON:0001232",
+   "sourceLabel": "collecting duct of renal tubule",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:juxtaglomerular-apparatus",
+   "entityName": "Juxtaglomerular apparatus",
+   "db": "UBERON",
+   "id": "UBERON:0002303",
+   "sourceLabel": "juxtaglomerular apparatus",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "tissue:macula-densa",
+   "entityName": "Macula densa",
+   "db": "UBERON",
+   "id": "UBERON:0002335",
+   "sourceLabel": "macula densa",
+   "source": "OBO uberon/releases/2026-10-01 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:principal",
+   "entityName": "Principal cell (collecting duct)",
+   "db": "CL",
+   "id": "CL:1001431",
+   "sourceLabel": "kidney collecting duct principal cell",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:intercalated",
+   "entityName": "Intercalated cell",
+   "db": "CL",
+   "id": "CL:0005010",
+   "sourceLabel": "renal intercalated cell",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:podocyte",
+   "entityName": "Podocyte",
+   "db": "CL",
+   "id": "CL:0000653",
+   "sourceLabel": "podocyte",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:juxtaglomerular",
+   "entityName": "Juxtaglomerular cell",
+   "db": "CL",
+   "id": "CL:0000648",
+   "sourceLabel": "kidney granular cell",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:pt-epithelial",
+   "entityName": "Proximal tubule cell",
+   "db": "CL",
+   "id": "CL:0002306",
+   "sourceLabel": "epithelial cell of proximal tubule",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:tal-epithelial",
+   "entityName": "Thick ascending limb cell",
+   "db": "CL",
+   "id": "CL:1001106",
+   "sourceLabel": "kidney loop of Henle thick ascending limb epithelial cell",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:dct-epithelial",
+   "entityName": "Distal convoluted tubule cell",
+   "db": "CL",
+   "id": "CL:1000849",
+   "sourceLabel": "kidney distal convoluted tubule epithelial cell",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:macula-densa",
+   "entityName": "Macula densa cell",
+   "db": "CL",
+   "id": "CL:1000850",
+   "sourceLabel": "macula densa epithelial cell",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:magnocellular",
+   "entityName": "Magnocellular vasopressin neuron",
+   "db": "CL",
+   "id": "CL:4023109",
+   "sourceLabel": "vasopressin-secreting magnocellular cell",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:zona-glomerulosa",
+   "entityName": "Zona glomerulosa cell",
+   "db": "CL",
+   "id": "CL:0002099",
+   "sourceLabel": "type I cell of adrenal cortex",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:atrial-myocyte",
+   "entityName": "Atrial cardiomyocyte",
+   "db": "CL",
+   "id": "CL:0002129",
+   "sourceLabel": "regular atrial cardiac myocyte",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "cell:skeletal-muscle-fiber",
+   "entityName": "Skeletal muscle fibre",
+   "db": "CL",
+   "id": "CL:0008002",
+   "sourceLabel": "skeletal muscle fiber",
+   "source": "OBO cl/releases/2026-06-08 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organelle:principal-apical-membrane",
+   "entityName": "Apical membrane (principal cell)",
+   "db": "GO",
+   "id": "GO:0016324",
+   "sourceLabel": "apical plasma membrane",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organelle:principal-basolateral-membrane",
+   "entityName": "Basolateral membrane (principal cell)",
+   "db": "GO",
+   "id": "GO:0016323",
+   "sourceLabel": "basolateral plasma membrane",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organelle:aqp2-vesicle",
+   "entityName": "AQP2 storage vesicles",
+   "db": "GO",
+   "id": "GO:0030133",
+   "sourceLabel": "transport vesicle",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organelle:principal-nucleus",
+   "entityName": "Nucleus (principal cell)",
+   "db": "GO",
+   "id": "GO:0005634",
+   "sourceLabel": "nucleus",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organelle:avp-neurosecretory-vesicle",
+   "entityName": "Vasopressin neurosecretory vesicles",
+   "db": "GO",
+   "id": "GO:1990008",
+   "sourceLabel": "neurosecretory vesicle",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "organelle:jg-secretory-granule",
+   "entityName": "Renin granules",
+   "db": "GO",
+   "id": "GO:0030141",
+   "sourceLabel": "secretory granule",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:adh-aqp2",
+   "entityName": "ADH → V2R → cAMP → AQP2",
+   "db": "GO",
+   "id": "GO:0070295",
+   "sourceLabel": "renal water absorption",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:adh-aqp2",
+   "entityName": "ADH → V2R → cAMP → AQP2",
+   "db": "KEGG",
+   "id": "hsa04962",
+   "sourceLabel": "Vasopressin-regulated water reabsorption - Homo sapiens (human)",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:adh-aqp2",
+   "entityName": "ADH → V2R → cAMP → AQP2",
+   "db": "Reactome",
+   "id": "R-HSA-432040",
+   "sourceLabel": "Vasopressin regulates renal water homeostasis via Aquaporins | Homo sapiens",
+   "source": "reactome.org ContentService",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:raas",
+   "entityName": "Renin–angiotensin–aldosterone system",
+   "db": "GO",
+   "id": "GO:0003081",
+   "sourceLabel": "regulation of systemic arterial blood pressure by renin-angiotensin",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:raas",
+   "entityName": "Renin–angiotensin–aldosterone system",
+   "db": "KEGG",
+   "id": "hsa04614",
+   "sourceLabel": "Renin-angiotensin system - Homo sapiens (human)",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:raas",
+   "entityName": "Renin–angiotensin–aldosterone system",
+   "db": "Reactome",
+   "id": "R-HSA-2022377",
+   "sourceLabel": "Metabolism of Angiotensinogen to Angiotensins | Homo sapiens",
+   "source": "reactome.org ContentService",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:aldosterone-mr-enac",
+   "entityName": "Aldosterone → MR → ENaC",
+   "db": "GO",
+   "id": "GO:0031959",
+   "sourceLabel": "nuclear receptor-mediated mineralocorticoid signaling pathway",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:aldosterone-mr-enac",
+   "entityName": "Aldosterone → MR → ENaC",
+   "db": "KEGG",
+   "id": "hsa04960",
+   "sourceLabel": "Aldosterone-regulated sodium reabsorption - Homo sapiens (human)",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "pathway:anp-npra-cgmp",
+   "entityName": "ANP → NPR-A → cGMP",
+   "db": "GO",
+   "id": "GO:0007168",
+   "sourceLabel": "receptor guanylyl cyclase signaling pathway",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:osmoreception",
+   "entityName": "Osmoreception",
+   "db": "GO",
+   "id": "GO:0043575",
+   "sourceLabel": "detection of osmotic stimulus",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:thirst",
+   "entityName": "Thirst",
+   "db": "GO",
+   "id": "GO:0042756",
+   "sourceLabel": "drinking behavior",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:pressure-natriuresis",
+   "entityName": "Pressure natriuresis",
+   "db": "GO",
+   "id": "GO:0035813",
+   "sourceLabel": "regulation of renal sodium excretion",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:na-k-atpase-cycle",
+   "entityName": "Na-K-ATPase pump cycle",
+   "db": "GO",
+   "id": "GO:0036376",
+   "sourceLabel": "sodium ion export across plasma membrane",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:na-k-atpase-cycle",
+   "entityName": "Na-K-ATPase pump cycle",
+   "db": "Reactome",
+   "id": "R-HSA-936837",
+   "sourceLabel": "Ion transport by P-type ATPases | Homo sapiens",
+   "source": "reactome.org ContentService",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:glomerular-filtration",
+   "entityName": "Glomerular filtration",
+   "db": "GO",
+   "id": "GO:0003094",
+   "sourceLabel": "glomerular filtration",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:tubular-na-reabsorption",
+   "entityName": "Tubular sodium reabsorption",
+   "db": "GO",
+   "id": "GO:0070294",
+   "sourceLabel": "renal sodium ion absorption",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:renin-secretion",
+   "entityName": "Renin secretion",
+   "db": "KEGG",
+   "id": "hsa04924",
+   "sourceLabel": "Renin secretion - Homo sapiens (human)",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "process:aldosterone-synthesis",
+   "entityName": "Aldosterone synthesis",
+   "db": "GO",
+   "id": "GO:0032342",
+   "sourceLabel": "aldosterone biosynthetic process",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:water",
+   "entityName": "Water",
+   "db": "ChEBI",
+   "id": "CHEBI:15377",
+   "sourceLabel": "water",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:water",
+   "entityName": "Water",
+   "db": "KEGG",
+   "id": "C00001",
+   "sourceLabel": "H2O;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:na",
+   "entityName": "Sodium ion (Na+)",
+   "db": "ChEBI",
+   "id": "CHEBI:29101",
+   "sourceLabel": "sodium(1+)",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:na",
+   "entityName": "Sodium ion (Na+)",
+   "db": "KEGG",
+   "id": "C01330",
+   "sourceLabel": "Sodium cation;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:k",
+   "entityName": "Potassium ion (K+)",
+   "db": "ChEBI",
+   "id": "CHEBI:29103",
+   "sourceLabel": "potassium(1+)",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:k",
+   "entityName": "Potassium ion (K+)",
+   "db": "KEGG",
+   "id": "C00238",
+   "sourceLabel": "Potassium cation;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:cl",
+   "entityName": "Chloride ion (Cl-)",
+   "db": "ChEBI",
+   "id": "CHEBI:17996",
+   "sourceLabel": "chloride",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:cl",
+   "entityName": "Chloride ion (Cl-)",
+   "db": "KEGG",
+   "id": "C00698",
+   "sourceLabel": "Cl-;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:urea",
+   "entityName": "Urea",
+   "db": "ChEBI",
+   "id": "CHEBI:16199",
+   "sourceLabel": "urea",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:urea",
+   "entityName": "Urea",
+   "db": "KEGG",
+   "id": "C00086",
+   "sourceLabel": "Urea;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:glucose",
+   "entityName": "Glucose",
+   "db": "ChEBI",
+   "id": "CHEBI:17234",
+   "sourceLabel": "glucose",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:glucose",
+   "entityName": "Glucose",
+   "db": "KEGG",
+   "id": "C00031",
+   "sourceLabel": "D-Glucose;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:avp",
+   "entityName": "Vasopressin (ADH)",
+   "db": "ChEBI",
+   "id": "CHEBI:34543",
+   "sourceLabel": "argipressin",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:avp",
+   "entityName": "Vasopressin (ADH)",
+   "db": "KEGG",
+   "id": "C13662",
+   "sourceLabel": "Arg-vasopressin;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:avp",
+   "entityName": "Vasopressin (ADH)",
+   "db": "UniProt",
+   "id": "P01185",
+   "sourceLabel": "Vasopressin-neurophysin 2-copeptin | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:avp",
+   "entityName": "Vasopressin (ADH)",
+   "db": "HGNC",
+   "id": "HGNC:894",
+   "sourceLabel": "AVP | arginine vasopressin",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:aldosterone",
+   "entityName": "Aldosterone",
+   "db": "ChEBI",
+   "id": "CHEBI:27584",
+   "sourceLabel": "aldosterone",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:aldosterone",
+   "entityName": "Aldosterone",
+   "db": "KEGG",
+   "id": "C01780",
+   "sourceLabel": "Aldosterone;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:anp",
+   "entityName": "Atrial natriuretic peptide (ANP)",
+   "db": "UniProt",
+   "id": "P01160",
+   "sourceLabel": "Natriuretic peptides A | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:anp",
+   "entityName": "Atrial natriuretic peptide (ANP)",
+   "db": "HGNC",
+   "id": "HGNC:7939",
+   "sourceLabel": "NPPA | natriuretic peptide A",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:anp",
+   "entityName": "Atrial natriuretic peptide (ANP)",
+   "db": "KEGG",
+   "id": "C16003",
+   "sourceLabel": "Atrial natriuretic peptide;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:angiotensinogen",
+   "entityName": "Angiotensinogen",
+   "db": "UniProt",
+   "id": "P01019",
+   "sourceLabel": "Angiotensinogen | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:angiotensinogen",
+   "entityName": "Angiotensinogen",
+   "db": "HGNC",
+   "id": "HGNC:333",
+   "sourceLabel": "AGT | angiotensinogen",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:angiotensin-i",
+   "entityName": "Angiotensin I",
+   "db": "ChEBI",
+   "id": "CHEBI:2718",
+   "sourceLabel": "angiotensin I",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:angiotensin-ii",
+   "entityName": "Angiotensin II",
+   "db": "ChEBI",
+   "id": "CHEBI:2719",
+   "sourceLabel": "Ile5-angiotensin II",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:angiotensin-ii",
+   "entityName": "Angiotensin II",
+   "db": "KEGG",
+   "id": "C02135",
+   "sourceLabel": "Angiotensin II;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:renin",
+   "entityName": "Renin",
+   "db": "UniProt",
+   "id": "P00797",
+   "sourceLabel": "Renin | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:renin",
+   "entityName": "Renin",
+   "db": "HGNC",
+   "id": "HGNC:9958",
+   "sourceLabel": "REN | renin",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:ace",
+   "entityName": "Angiotensin-converting enzyme (ACE)",
+   "db": "UniProt",
+   "id": "P12821",
+   "sourceLabel": "Angiotensin-converting enzyme | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:ace",
+   "entityName": "Angiotensin-converting enzyme (ACE)",
+   "db": "HGNC",
+   "id": "HGNC:2707",
+   "sourceLabel": "ACE | angiotensin I converting enzyme",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:camp",
+   "entityName": "cAMP",
+   "db": "ChEBI",
+   "id": "CHEBI:17489",
+   "sourceLabel": "3',5'-cyclic AMP",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:camp",
+   "entityName": "cAMP",
+   "db": "KEGG",
+   "id": "C00575",
+   "sourceLabel": "3',5'-Cyclic AMP;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:cgmp",
+   "entityName": "cGMP",
+   "db": "ChEBI",
+   "id": "CHEBI:16356",
+   "sourceLabel": "3',5'-cyclic GMP",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:cgmp",
+   "entityName": "cGMP",
+   "db": "KEGG",
+   "id": "C00942",
+   "sourceLabel": "3',5'-Cyclic GMP;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:atp",
+   "entityName": "ATP",
+   "db": "ChEBI",
+   "id": "CHEBI:15422",
+   "sourceLabel": "ATP",
+   "source": "ebi.ac.uk/chebi backend API",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:atp",
+   "entityName": "ATP",
+   "db": "KEGG",
+   "id": "C00002",
+   "sourceLabel": "ATP;",
+   "source": "rest.kegg.jp",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:aqp2",
+   "entityName": "Aquaporin-2 (AQP2)",
+   "db": "UniProt",
+   "id": "P41181",
+   "sourceLabel": "Aquaporin-2 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:aqp2",
+   "entityName": "Aquaporin-2 (AQP2)",
+   "db": "HGNC",
+   "id": "HGNC:634",
+   "sourceLabel": "AQP2 | aquaporin 2",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:aqp3",
+   "entityName": "Aquaporin-3 (AQP3)",
+   "db": "UniProt",
+   "id": "Q92482",
+   "sourceLabel": "Aquaporin-3 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:aqp3",
+   "entityName": "Aquaporin-3 (AQP3)",
+   "db": "HGNC",
+   "id": "HGNC:636",
+   "sourceLabel": "AQP3 | aquaporin 3 (Gill blood group)",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:enac",
+   "entityName": "Epithelial sodium channel (ENaC)",
+   "db": "UniProt",
+   "id": "P37088",
+   "sourceLabel": "Epithelial sodium channel subunit alpha | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:enac",
+   "entityName": "Epithelial sodium channel (ENaC)",
+   "db": "UniProt",
+   "id": "P51168",
+   "sourceLabel": "Epithelial sodium channel subunit beta | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:enac",
+   "entityName": "Epithelial sodium channel (ENaC)",
+   "db": "UniProt",
+   "id": "P51170",
+   "sourceLabel": "Epithelial sodium channel subunit gamma | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:enac",
+   "entityName": "Epithelial sodium channel (ENaC)",
+   "db": "HGNC",
+   "id": "HGNC:10599",
+   "sourceLabel": "SCNN1A | sodium channel epithelial 1 subunit alpha",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:enac",
+   "entityName": "Epithelial sodium channel (ENaC)",
+   "db": "HGNC",
+   "id": "HGNC:10600",
+   "sourceLabel": "SCNN1B | sodium channel epithelial 1 subunit beta",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:enac",
+   "entityName": "Epithelial sodium channel (ENaC)",
+   "db": "HGNC",
+   "id": "HGNC:10602",
+   "sourceLabel": "SCNN1G | sodium channel epithelial 1 subunit gamma",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:na-k-atpase",
+   "entityName": "Na-K-ATPase",
+   "db": "UniProt",
+   "id": "P05023",
+   "sourceLabel": "Sodium/potassium-transporting ATPase subunit alpha-1 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:na-k-atpase",
+   "entityName": "Na-K-ATPase",
+   "db": "UniProt",
+   "id": "P05026",
+   "sourceLabel": "Sodium/potassium-transporting ATPase subunit beta-1 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:na-k-atpase",
+   "entityName": "Na-K-ATPase",
+   "db": "HGNC",
+   "id": "HGNC:799",
+   "sourceLabel": "ATP1A1 | ATPase Na+/K+ transporting subunit alpha 1",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:na-k-atpase",
+   "entityName": "Na-K-ATPase",
+   "db": "HGNC",
+   "id": "HGNC:804",
+   "sourceLabel": "ATP1B1 | ATPase Na+/K+ transporting subunit beta 1",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:na-k-atpase",
+   "entityName": "Na-K-ATPase",
+   "db": "GO",
+   "id": "GO:0005890",
+   "sourceLabel": "sodium:potassium-exchanging ATPase complex",
+   "source": "OBO go releases/2026-07-26 (purl.obolibrary.org basic release)",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:nkcc2",
+   "entityName": "NKCC2",
+   "db": "UniProt",
+   "id": "Q13621",
+   "sourceLabel": "Solute carrier family 12 member 1 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:nkcc2",
+   "entityName": "NKCC2",
+   "db": "HGNC",
+   "id": "HGNC:10910",
+   "sourceLabel": "SLC12A1 | solute carrier family 12 member 1",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:ncc",
+   "entityName": "NCC",
+   "db": "UniProt",
+   "id": "P55017",
+   "sourceLabel": "Solute carrier family 12 member 3 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:ncc",
+   "entityName": "NCC",
+   "db": "HGNC",
+   "id": "HGNC:10912",
+   "sourceLabel": "SLC12A3 | solute carrier family 12 member 3",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:v2r",
+   "entityName": "Vasopressin V2 receptor",
+   "db": "UniProt",
+   "id": "P30518",
+   "sourceLabel": "Vasopressin V2 receptor | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:v2r",
+   "entityName": "Vasopressin V2 receptor",
+   "db": "HGNC",
+   "id": "HGNC:897",
+   "sourceLabel": "AVPR2 | arginine vasopressin receptor 2",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:at1r",
+   "entityName": "Angiotensin II type 1 receptor",
+   "db": "UniProt",
+   "id": "P30556",
+   "sourceLabel": "Type-1 angiotensin II receptor | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:at1r",
+   "entityName": "Angiotensin II type 1 receptor",
+   "db": "HGNC",
+   "id": "HGNC:336",
+   "sourceLabel": "AGTR1 | angiotensin II receptor type 1",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:mr",
+   "entityName": "Mineralocorticoid receptor",
+   "db": "UniProt",
+   "id": "P08235",
+   "sourceLabel": "Mineralocorticoid receptor | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:mr",
+   "entityName": "Mineralocorticoid receptor",
+   "db": "HGNC",
+   "id": "HGNC:7979",
+   "sourceLabel": "NR3C2 | nuclear receptor subfamily 3 group C member 2",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:npr-a",
+   "entityName": "NPR-A (guanylyl cyclase A)",
+   "db": "UniProt",
+   "id": "P16066",
+   "sourceLabel": "Atrial natriuretic peptide receptor 1 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:npr-a",
+   "entityName": "NPR-A (guanylyl cyclase A)",
+   "db": "HGNC",
+   "id": "HGNC:7943",
+   "sourceLabel": "NPR1 | natriuretic peptide receptor 1",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:gs-alpha",
+   "entityName": "Gs alpha subunit",
+   "db": "UniProt",
+   "id": "P63092",
+   "sourceLabel": "Guanine nucleotide-binding protein G(s) subunit alpha isoforms short | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:gs-alpha",
+   "entityName": "Gs alpha subunit",
+   "db": "HGNC",
+   "id": "HGNC:4392",
+   "sourceLabel": "GNAS | GNAS complex locus",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:ac6",
+   "entityName": "Adenylyl cyclase 6",
+   "db": "UniProt",
+   "id": "O43306",
+   "sourceLabel": "Adenylate cyclase type 6 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:ac6",
+   "entityName": "Adenylyl cyclase 6",
+   "db": "HGNC",
+   "id": "HGNC:237",
+   "sourceLabel": "ADCY6 | adenylate cyclase 6",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:pka",
+   "entityName": "Protein kinase A (catalytic alpha)",
+   "db": "UniProt",
+   "id": "P17612",
+   "sourceLabel": "cAMP-dependent protein kinase catalytic subunit alpha | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:pka",
+   "entityName": "Protein kinase A (catalytic alpha)",
+   "db": "HGNC",
+   "id": "HGNC:9380",
+   "sourceLabel": "PRKACA | protein kinase cAMP-activated catalytic subunit alpha",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:romk",
+   "entityName": "ROMK",
+   "db": "UniProt",
+   "id": "P48048",
+   "sourceLabel": "ATP-sensitive inward rectifier potassium channel 1 | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:romk",
+   "entityName": "ROMK",
+   "db": "HGNC",
+   "id": "HGNC:6255",
+   "sourceLabel": "KCNJ1 | potassium inwardly rectifying channel subfamily J member 1",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:cyp11b2",
+   "entityName": "Aldosterone synthase (CYP11B2)",
+   "db": "UniProt",
+   "id": "P19099",
+   "sourceLabel": "Cytochrome P450 11B2, mitochondrial | Homo sapiens | UniProtKB reviewed (Swiss-Prot)",
+   "source": "rest.uniprot.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  },
+  {
+   "entity": "molecule:cyp11b2",
+   "entityName": "Aldosterone synthase (CYP11B2)",
+   "db": "HGNC",
+   "id": "HGNC:2592",
+   "sourceLabel": "CYP11B2 | cytochrome P450 family 11 subfamily B member 2",
+   "source": "rest.genenames.org",
+   "checkedOn": "2026-10-01",
+   "resolved": true
+  }
+ ]
+}
