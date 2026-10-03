@@ -740,7 +740,7 @@ def test_scenario_records_match_javascript_reference():
     py_only: list[str] = []
 
     def js_view(validation: Mapping[str, Any] | None) -> Any:
-        """The validation record minus the Python-only annotations (role, calibrates)."""
+        """The validation record minus the Python-only annotations (id, role, calibrates)."""
         if validation is None:
             return None
         out = dict(validation)
@@ -783,12 +783,15 @@ def test_scenario_records_match_javascript_reference():
                         break
                 check(f"scenario {sid}: sweep.make(g) builds the JS scenario for all "
                       f"{len(sw.values)} doses", d is None, d or "")
-    check("scenarios: the only Python-only annotations are the chronic calibration and "
-          "structural roles (docs/health/03 §5.1)",
-          sorted(py_only) == sorted([
-              "ΔMAP at day 30 per +100 mmol/day Na.role",
-              "ΔMAP at day 30 per +100 mmol/day Na.calibrates",
-              "Na excretion ≈ intake by day 30.role"]), str(py_only))
+    check("scenarios: the only Python-only annotations are one explicit id per expectation "
+          "(HREQ-E-13) and the chronic calibration and structural roles (docs/health/03 §5.1)",
+          sorted(py_only) == sorted(
+              [f"{e['metric']}.id" for sc in SCENARIOS.values()
+               for e in (sc.validation or {}).get("expects") or []]
+              + ["ΔMAP at day 30 per +100 mmol/day Na.role",
+                 "ΔMAP at day 30 per +100 mmol/day Na.calibrates",
+                 "MAP time course.role", "MAP time course.calibrates",
+                 "Na excretion ≈ intake by day 30.role"]), str(py_only))
     made = [make_water_load(1), make_water_load(0.5, 5, 2, 6), make_water_load(1.5, 30),
             make_salt_load(2.5), make_salt_load(6, 0.25, 10, 3, 24), make_salt_load(0)]
     for sc, exp in zip(made, g["made"], strict=True):
