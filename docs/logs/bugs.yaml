@@ -6024,3 +6024,203 @@ bugs:
   monitor_gap: >-
     Only the generator knew the budget, and only when it refused; no test reported the
     headroom.
+- id: BUG-20261003-180
+  area: health
+  summary: "naIn_base_mmold (150 mmol/day, a scenario condition) was graded A-meta from He 2013, whose pooled estimates are blood-pressure effects, not an intake (V1 audit F-12)"
+  severity: S2
+  priority: P2
+  error_class: EVD
+  status: open
+  logged_at: "2026-10-03T14:55:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "V1 audit F-12 (the row's own notes said grade B would be more honest); confirmed by the health-literature-curator against docs/health/01 §3.1-3.2 while working tracker W-7"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-2
+  locations:
+  - {file: src/health/engine/params.json, line: 40}
+  - {file: reference/metabolic-map-v1/engine/params.json, line: 40}
+  requirement: HREQ-E-03
+  data_impact: >-
+    Reader-facing wherever a grade is shown: the A-meta grade beside the baseline intake
+    overstated its evidence. No computed value changed (the row is mc: false and its value
+    is unchanged). Grade counts move A-meta 3 -> 2 and B-textbook 15 -> 16; the >= B share
+    stays 24 of 54.
+  root_cause: >-
+    The row took the default grade of the strongest source in view. The grade-ceiling rule
+    admits any grade at or below the best cited defaultGrade, so it cannot tell a pooled
+    estimate from a sentence in the same paper.
+  resolution: >-
+    Open until its regression test lands. On this branch: grade superseded to B-textbook,
+    with the old grade, the date and the reason appended to the row's notes (04 §6.1) and
+    fixedReason scenario-condition, in both params.json copies, params.data.js regenerated;
+    VERIFICATION_LOG.json curationRecords #18. Proposed test (outside the curator's files):
+    tests/health_kb_selftest.py::test_scenario_condition_rows_are_not_graded_as_pooled_estimates,
+    which fails on b181c4b and passes on the branch. The Operator may choose E-assumption.
+  monitor_gap: No rule related a row's grade to the kind of number it is; the fixedReason field now lets a test say a scenario condition is never a pooled estimate.
+
+- id: BUG-20261003-181
+  area: health
+  summary: "The chronic_high_salt_30d/01 band [0.7, 3.2] mmHg is the perfect-correlation limit of the He 2013 SBP and DBP intervals, not a MAP confidence interval (V1 audit F-06)"
+  severity: S2
+  priority: P2
+  error_class: EVD
+  status: open
+  logged_at: "2026-10-03T14:56:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "V1 audit F-06 (V1 BUG-0054, 'not a true MAP CI'); quantified by the health-literature-curator from the ev:he-2013 record while working tracker W-8"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-2
+  locations:
+  - {file: src/health/engine/scenarios.py, line: 271}
+  - {file: src/health/kb/data/evidence.json, line: 756}
+  requirement: HREQ-E-13
+  data_impact: >-
+    The row is a calibration target (not counted), so no validation total changes; three
+    parameters (map_vol_exp, pn_gain, aldo_vol_exp) were tuned to it. Its meaning was
+    overstated: with standard errors back-calculated from the CIs, the 95% interval per
+    +100 mmol/day is [1.06, 2.87] mmHg if the pooled SBP and DBP estimates were uncorrelated
+    and [0.70, 3.22] if perfectly correlated; [0.7, 3.2] is the latter, rounded (upper end
+    inward by 0.02). The point estimate is 1.96 mmHg.
+  root_cause: >-
+    The end-points of two intervals were combined as if they were the end-points of the
+    derived quantity's interval; a MAP interval needs the covariance of the pooled SBP and
+    DBP estimates, which the record does not hold. Linear scaling from 75 to 100 mmol/day
+    and the symmetry of a rise with the trials' reduction are further unquantified
+    assumptions.
+  resolution: >-
+    Open -- the expectation is not the curator's to change (01 §7.4) and the range is an
+    Operator decision. Findings are in the ev:he-2013 notes, VERIFICATION_LOG.json
+    curationRecords #25-26 and V1_AUDIT_ITEMS.md F-06; the four calibrated parameters now
+    carry calibratedAgainst. Recommendation in the curator's M1 report.
+  monitor_gap: No check reads how an expectation band was constructed from its source's dispersion (HREQ-E-09's rule is deferred, W-18).
+
+- id: BUG-20261003-182
+  area: health
+  summary: Every literature registry and publisher host is refused by the build environment's egress policy, so no source can be fetched, re-read or re-verified in a curator session (HREQ-D-02)
+  severity: S2
+  priority: P1
+  error_class: INF
+  status: open
+  logged_at: "2026-10-03T14:57:00-05:00"
+  occurred_at: "2026-10-03T14:37:29-05:00"
+  detected_by: "health-literature-curator fetching He 2013, Suckling 2012, Baylis 1986 and Crowe 1987 for tracker W-8, W-9, D-10 and D-11 (HTTP 403 on CONNECT; the fetch tool reported EGRESS_BLOCKED)"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-2
+  locations:
+  - {file: src/health/kb/data/VERIFICATION_LOG.json, line: 1872}
+  - {file: docs/health/logs/TRACKER.md, line: 34}
+  requirement: HREQ-D-02
+  data_impact: >-
+    No value changed. Four curator tasks stay open: Suckling 2012 SEM versus SD (Q4, W-9);
+    the He 2013 all-trial and hypertensive figures (W-8); Baylis 1986's water-load protocol
+    and minimum urine osmolality (D-10, BUG-20261003-127); Crowe 1987's plasma sodium time
+    course (D-11, BUG-20261003-128). Retraction and errata status of the 57 evidence records
+    cannot be re-checked.
+  root_cause: >-
+    The session's egress policy does not admit eutils.ncbi.nlm.nih.gov,
+    pubmed.ncbi.nlm.nih.gov, the PMC hosts, europepmc.org, www.ebi.ac.uk, api.crossref.org,
+    doi.org, bmj.com, cochranelibrary.com, onlinelibrary.wiley.com, academic.oup.com,
+    kidney-international.org, semanticscholar.org or openalex.org. A policy denial is not
+    routed around.
+  resolution: >-
+    Open -- Operator decision: admit the registries for curator sessions, or fetch the four
+    full texts and attach them to the repository. Every attempt is logged in
+    VERIFICATION_LOG.json curationRecords #25 and #27-29 and in the four records' notes.
+  monitor_gap: Nothing probes registry reachability before a curator task starts; the V1 records were verified from a session that could reach PubMed.
+
+- id: BUG-20261003-183
+  area: health
+  summary: The knowledge base had no structured way to say a source is cited only by the engine, or to log a verification that is not an external identifier, so six unused-evidence warnings could never clear
+  severity: S3
+  priority: P2
+  error_class: KBI
+  status: open
+  logged_at: "2026-10-03T14:58:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: "health-literature-curator working tracker W-6 (six unused-evidence warnings: shafiee-2005, crowe-1987, heer-2000, rakova-2017, suckling-2012, uttamsingh-1985)"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-2
+  locations:
+  - {file: src/health/kb/check.py, line: 1286}
+  - {file: src/health/kb/data/schema.json, line: 135}
+  requirement: HREQ-E-06
+  data_impact: >-
+    None on any value. Every kb-check carried six warnings that could not clear, which
+    teaches a reader to skip warnings; and VERIFICATION_LOG.json keys every record to an
+    entity, so a record for an evidence id would have been an entity-removed error, and
+    re-verifications could only be written into the evidence record's verification block,
+    in place (HREQ-E-06).
+  root_cause: >-
+    unused-evidence scans knowledge-base records and params.json, not scenario
+    expectations, and the schema had no field for a deliberate engine-only source; the
+    verification log was designed for external identifiers only.
+  resolution: >-
+    Open until the checker reads the new field and its test lands. On this branch:
+    ev:suckling-2012 is cited by rel:gut:na-absorption, where it is true (warnings 6 -> 5);
+    the other five carry Evidence.engineOnly {reason, citedBy, recordedOn, by}; schema.json
+    gains #/definitions/CurationRecord and VERIFICATION_LOG.json a curationRecords array
+    (31 records). Proposed: the checker skips engineOnly records in unused-evidence and
+    checks citedBy against the scenario registry (builder K); test
+    tests/health_kb_selftest.py::test_engine_only_evidence_and_curation_records_are_structured.
+  monitor_gap: The shipped-KB test pinned the six warnings as expected, which made a permanent warning look intended.
+
+- id: BUG-20261003-184
+  area: health
+  summary: "Four evidence records quote a mean +/- dispersion without its type and did not say SEM/SD unverified; Suckling 2012's record also did not say its quote is the abstract's (V1 audit F-02/F-03)"
+  severity: S2
+  priority: P2
+  error_class: EVD
+  status: open
+  logged_at: "2026-10-03T14:59:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-literature-curator reading the Suckling 2012 record for tracker W-9, then every quote with an untyped +/- among the water and salt expectation sources"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-2
+  locations:
+  - {file: src/health/kb/data/evidence.json, line: 639}
+  - {file: src/health/kb/data/evidence.json, line: 294}
+  - {file: src/health/kb/data/evidence.json, line: 332}
+  - {file: src/health/kb/data/evidence.json, line: 566}
+  requirement: HREQ-E-09
+  data_impact: >-
+    None on any value: none of the four dispersions builds a range or a band
+    (salt_load_sweep/02 is unverified and uncounted). A reader of the knowledge-base record
+    saw +3.13 ± 0.75 mmol/L with no caveat; the caveat lived only on the scenario note.
+  root_cause: The caveat was written on the expectation, not on the evidence record, and no rule ties a quoted +/- to a dispersion type.
+  resolution: >-
+    Open until its regression test lands, and for Suckling until the full text settles the
+    type (BUG-20261003-182). On this branch: the four records' notes say 'SEM/SD unverified
+    (HREQ-E-09)'; ev:suckling-2012 verification.quoteSource 'abstract'. Proposed test
+    tests/health_kb_selftest.py::test_untyped_dispersions_are_marked_unverified.
+  monitor_gap: HREQ-E-09's dispersion rule is deferred (W-18); five more records quote an untyped +/- (hughes-2018, andersen-1999, andersen-2002, wang-2020, flamion-1995) and are left for it.
+
+- id: BUG-20261003-185
+  area: health
+  summary: A grade, notes or structured-field change to params.json makes the golden fixture stale, and docs/health/03 §4 allows regeneration only on a MODEL_VERSION bump or new sections, so curator metadata cannot land on its own
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: open
+  logged_at: "2026-10-03T15:00:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: "health-literature-curator: tests/health_selftest.py failed 4 fixture checks after metadata-only edits to params.json; a scratch regeneration changed only hash and grade-count lines"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-2
+  locations:
+  - {file: tools/health_golden.mjs, line: 50}
+  - {file: tests/health_selftest.py, line: 389}
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 184}
+  requirement: HREQ-X-05
+  data_impact: >-
+    None on any value: the regeneration changes four lines (the SHA-256 of params.json and
+    params.data.js; A-meta 3 -> 2 and B-textbook 15 -> 16 in paramSummary). Until the
+    fixture is regenerated the engine self-test fails 4 checks on this branch.
+  root_cause: >-
+    The fixture hashes params.json whole and records paramSummary, so metadata counts as
+    model input; the document's regeneration rule assumes only the modeler edits that file.
+  resolution: >-
+    Open -- the regenerated fixture is not committed here (a regeneration without a version
+    bump is S2 by 05 §2). Regenerate it in the merge that carries builder R1a's
+    MODEL_VERSION bump (W-14), or add a third case to 03 §4 for a metadata-only change whose
+    diff touches only the hash and paramSummary lines.
+  monitor_gap: No gate tells a metadata-only params.json change from a value change.

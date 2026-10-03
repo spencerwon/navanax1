@@ -1656,6 +1656,25 @@ quantile between two equal infinities is that infinity; four non-finite fixture 
 moved from NaN. The generator then refused the new fixture: the old one had used 98.4 % of
 a 400 KB budget (BUG-173, raised to 448 KB, the Operator's to confirm). Every new test was
 shown to fail without its change: 17 single-change mutants, 17 killed.
+**The curator's M1 slice (BUG-20261003-180 … BUG-20261003-185).** The literature
+curator gave the parameter table its two missing structured fields — `fixedReason` on the
+twelve `mc: false` rows and `calibratedAgainst` on the four calibrated ones, both in
+`schema.json` — and worked the open audit items. `naIn_base_mmold` was graded A-meta from
+He 2013 although 150 mmol/day is a scenario condition: superseded to B-textbook with the
+old grade and the reason in its notes (BUG-20261003-180, V1 F-12; the Operator may choose
+E-assumption). The He 2013 band [0.7, 3.2] mmHg turns out to be exactly the
+perfect-correlation limit of the SBP and DBP intervals — [1.06, 2.87] if they were
+uncorrelated — a conservative envelope, not a MAP confidence interval; the range is the
+Operator's (BUG-20261003-181, V1 F-06). Every literature registry and publisher was refused
+by the session's egress policy, so Suckling, Baylis, Crowe and He could not be re-read and
+W-9, D-10 and D-11 stay open with each attempt logged (BUG-20261003-182). The six
+unused-evidence warnings had no structured exit: Suckling 2012 is now cited where it is true
+and the other five carry an `engineOnly` block, and the verification log gained
+`curationRecords` for checks that are not external identifiers (BUG-20261003-183). Four
+quotes carried an untyped ± with no "SEM/SD unverified" on the record (BUG-20261003-184), and
+a metadata-only edit to `params.json` stales the golden fixture, which 03 §4 lets be
+regenerated only with a version bump (BUG-20261003-185). All six are open: their regression
+tests and the checker change are proposed to the files' owners.
 
 ### Still open
 

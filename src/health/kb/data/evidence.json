@@ -205,7 +205,7 @@
       "url": "https://doi.org/10.1111/j.1365-2265.1986.tb01642.x",
       "accessed": "2026-10-01",
       "quote": "fall in plasma osmolality from a basal of 286.5 +/- 2.0 (mean +/- SEM) to 279.2 +/- 2.4 mmol/kg",
-      "notes": "Sustained water load, 8 healthy men; urine osmolality fell 867 -> 69 mOsm/kg. Used for water-load validation and U_osm_min plausibility. Metadata verified via PubMed E-utilities esummary.",
+      "notes": "Sustained water load, 8 healthy men; urine osmolality fell 867 -> 69 mOsm/kg. Used for water-load validation and U_osm_min plausibility. Metadata verified via PubMed E-utilities esummary. [2026-10-03, health-literature-curator; tracker D-10; BUG-20261003-127, BUG-20261003-182] Full-text read attempted (doi.org, onlinelibrary.wiley.com, PubMed, Europe PMC): every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED); the full text was not read. What this record holds on minimum urine osmolality: urine osmolality fell from 867 to 69 mOsm/kg during a sustained water load in 8 healthy men (2026-10-01 note, from the abstract). Not known without the full text: the load protocol (volume, rate, how it was sustained), when 69 was reached, individual minima, and the dispersion type of the abstract's +/- 3 (if SEM, the SD is about 8.5 at n = 8). History of the shared citation: U_osm_min's value 50 is the textbook's ('Textbook ~50 mOsm/L'); 69 is quoted beside it as a plausibility observation and lies inside its range [40, 80]; the row's notes do not say the value or the range was tuned to drink_water_1L/05.",
       "sourceType": "primary-human",
       "defaultGrade": "A-primary",
       "pubTypes": [
@@ -292,7 +292,7 @@
       "url": "https://doi.org/10.1111/j.1523-1755.2005.67117.x",
       "accessed": "2026-10-01",
       "quote": "When 20 mL water/kg was consumed in <15 minutes, the peak urine flow rate was 11 +/- 0.6 mL/min",
-      "notes": "Water-load validation: peak urine flow ~0.66 L/h for ~1.4 L load. Metadata verified via PubMed E-utilities esummary.",
+      "notes": "Water-load validation: peak urine flow ~0.66 L/h for ~1.4 L load. Metadata verified via PubMed E-utilities esummary. [2026-10-03, health-literature-curator; BUG-20261003-184] Dispersion: the quote's +/- 0.6 is untyped in the quoted text; SEM/SD unverified (HREQ-E-09); not used to build a range or a band (drink_water_1L/04 uses the mean only).",
       "sourceType": "primary-human",
       "defaultGrade": "A-primary",
       "pubTypes": [
@@ -306,6 +306,16 @@
         "titleMatch": true,
         "retraction": "none found (PubMed publication types and linked notices)",
         "errata": []
+      },
+      "engineOnly": {
+        "reason": "Whole-body water-load response (peak urine flow after 20 mL/kg), cited by the water-load expectations. No knowledge-base record states the water-diuresis response it measures: the water relations are mechanism steps (AVP, V2R, AQP2) this study is not recorded as measuring, so citing it there would claim what its quote does not show. Cite it from the knowledge base when a water-diuresis process record exists.",
+        "citedBy": [
+          "drink_water_1L/03",
+          "drink_water_1L/04",
+          "drink_water_3L_fast/01"
+        ],
+        "recordedOn": "2026-10-03",
+        "by": "health-literature-curator (M1 slice, builder CUR)"
       }
     },
     {
@@ -320,7 +330,7 @@
       "url": "https://doi.org/10.1093/ageing/16.5.285",
       "accessed": "2026-10-01",
       "quote": "After 2 h, the old group had excreted 41 +/- 2.4% ... compared to 100.7 +/- 8.8% in the water-replete young group",
-      "notes": "20 mL/kg oral water load; young peak free-water clearance 8.4 ± 0.72 mL/min. Metadata verified via PubMed E-utilities esummary.",
+      "notes": "20 mL/kg oral water load; young peak free-water clearance 8.4 ± 0.72 mL/min. Metadata verified via PubMed E-utilities esummary. [2026-10-03, health-literature-curator; trackers D-11, D-9; BUG-20261003-128, BUG-20261003-182, BUG-20261003-184] Full-text read attempted (doi.org/10.1093/ageing/16.5.285, academic.oup.com, PubMed, Europe PMC): every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED); the full text was not read. This record holds no plasma sodium or plasma osmolality time course and no recovery time: only the share of a 20 mL/kg oral load excreted by 2 h (young water-replete 100.7 +/- 8.8 %, old 41 +/- 2.4 %) and the young group's peak free-water clearance 8.4 +/- 0.72 mL/min. The '< 6 h' bound of drink_water_1L/02 is not traceable to any value this record holds. 20 mL/kg is 1.4 L at the 70 kg reference adult, not the scenario's 1 L. Dispersion: the +/- values are untyped in the quoted text; SEM/SD unverified (HREQ-E-09); none is used to build a range or a band.",
       "sourceType": "primary-human",
       "defaultGrade": "A-primary",
       "pubTypes": [
@@ -333,6 +343,17 @@
         "titleMatch": true,
         "retraction": "none found (PubMed publication types and linked notices)",
         "errata": []
+      },
+      "engineOnly": {
+        "reason": "Whole-body water-load excretion in young and elderly men, cited by the water-load expectations. As for Shafiee 2005, no knowledge-base record states the response it measures; the AVP and AQP2 relations are steps it is not recorded as measuring.",
+        "citedBy": [
+          "drink_water_1L/02",
+          "drink_water_1L/03",
+          "drink_water_1L/04",
+          "drink_water_1L/06"
+        ],
+        "recordedOn": "2026-10-03",
+        "by": "health-literature-curator (M1 slice, builder CUR)"
       }
     },
     {
@@ -441,6 +462,12 @@
         "titleMatch": true,
         "retraction": "none found (PubMed publication types and linked notices)",
         "errata": []
+      },
+      "engineOnly": {
+        "reason": "A C-model structural reference listed in the V1 engine bibliography (reference/metabolic-map-v1/engine/evidence.engine.json); cited by no expectation, parameter or knowledge-base record and supplies no number. Kept because records are never deleted (HREQ-E-06) and it documents where the engine's structure came from; a model is never a validation source (docs/health/01 §3.1).",
+        "citedBy": [],
+        "recordedOn": "2026-10-03",
+        "by": "health-literature-curator (M1 slice, builder CUR)"
       }
     },
     {
@@ -537,7 +564,7 @@
       "url": "https://doi.org/10.1152/ajprenal.2000.278.4.F585",
       "accessed": "2026-10-01",
       "quote": "Plasma volume dose dependently increased (P < 0.01), being elevated by 315 +/- 37 ml in the 550-meq-NaCl-intake group",
-      "notes": "Total body water did NOT increase. This model (Guyton-type) does expand ECF with salt -> documented divergence/limitation. Metadata verified via PubMed E-utilities esummary.",
+      "notes": "Total body water did NOT increase. This model (Guyton-type) does expand ECF with salt -> documented divergence/limitation. Metadata verified via PubMed E-utilities esummary. [2026-10-03, health-literature-curator; BUG-20261003-184] Dispersion: the quote's +/- 37 ml is untyped in the quoted text; SEM/SD unverified (HREQ-E-09); not used to build a range or a band (chronic_high_salt_30d/04 is a known divergence, not scored).",
       "sourceType": "primary-human",
       "defaultGrade": "A-primary",
       "pubTypes": [
@@ -552,6 +579,14 @@
         "titleMatch": true,
         "retraction": "none found (PubMed publication types and linked notices)",
         "errata": []
+      },
+      "engineOnly": {
+        "reason": "Cited for a known divergence (plasma volume rose, total body water did not, at very high salt intake, against the model's ECF expansion). The records it might attach to (organ:skin, system:integumentary) state that skin or interstitial sodium storage is reported; this record's quote and notes do not locate any storage, and Wiig 2018 already carries that claim.",
+        "citedBy": [
+          "chronic_high_salt_30d/04"
+        ],
+        "recordedOn": "2026-10-03",
+        "by": "health-literature-curator (M1 slice, builder CUR)"
       }
     },
     {
@@ -580,6 +615,14 @@
         "titleMatch": true,
         "retraction": "none found (PubMed publication types and linked notices)",
         "errata": []
+      },
+      "engineOnly": {
+        "reason": "Reports lower free-water clearance and higher urine osmolyte excretion at higher salt intake, cited by the urine-osmolality expectation. The only candidate knowledge-base record is the AVP-AQP2 pathway relation, and this record does not say AVP was measured (its notes infer 'ADH-mediated'); citing it there would claim a mechanism the quote does not show.",
+        "citedBy": [
+          "salt_load_10g/05"
+        ],
+        "recordedOn": "2026-10-03",
+        "by": "health-literature-curator (M1 slice, builder CUR)"
       }
     },
     {
@@ -594,7 +637,7 @@
       "url": "https://doi.org/10.1038/ki.2011.369",
       "accessed": "2026-10-01",
       "quote": "The plasma sodium concentration was significantly increased by 3.13±0.75 mmol/l with salted compared with unsalted soup",
-      "notes": "6 g salt in soup, 10 normotensive volunteers. Salt-load [Na] validation. Metadata verified via PubMed E-utilities esummary.",
+      "notes": "6 g salt in soup, 10 normotensive volunteers. Salt-load [Na] validation. Metadata verified via PubMed E-utilities esummary. [2026-10-03, health-literature-curator; V1 audit F-02/F-03; tracker W-9, Q4; BUG-20261003-182, BUG-20261003-184] Full-text read attempted (doi.org/10.1038/ki.2011.369, kidney-international.org, PubMed, Europe PMC, Crossref): every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED); the full text was not read. SEM/SD unverified: the quote is the abstract's (verification.quoteSource, recorded today from audit F-02/F-03), and whether 0.75 mmol/L is an SD or an SEM is not settled (n = 10 per these notes; the two differ by a factor of about 3.2). It is not used to build a range or a band (HREQ-E-09). Cited from 2026-10-03 by rel:gut:na-absorption for direction only (ingested salt reached plasma); no number taken.",
       "sourceType": "primary-human",
       "defaultGrade": "A-primary",
       "pubTypes": [
@@ -607,7 +650,8 @@
         "by": "Literature Curator (re-check of Physiology Modeler record)",
         "titleMatch": true,
         "retraction": "none found (PubMed publication types and linked notices)",
-        "errata": []
+        "errata": [],
+        "quoteSource": "abstract"
       }
     },
     {
@@ -710,7 +754,7 @@
       "url": "https://doi.org/10.1136/bmj.f1325",
       "accessed": "2026-10-01",
       "quote": "In normotensive people, the figures were -2.42 mm Hg (-3.56 to -1.29, I(2)=66%) and -1.00 mm Hg (-1.85 to -0.15",
-      "notes": "Cochrane meta-analysis, 34 RCTs; -75 mmol/24 h urinary Na. Full text read 2026-10-01 (bmj.com, Results): the normotensive subgroup (12 trials, 2240 people) also had a pooled urinary Na change of -75 mmol/24 h (range -40 to -118), so the [0.7, 3.2] mmHg per 100 mmol band is scaled by the subgroup's own value (audit F-06). Used for chronic MAP salt-sensitivity validation and baseline intake context (9-12 g/day). Metadata verified via PubMed E-utilities esummary.",
+      "notes": "Cochrane meta-analysis, 34 RCTs; -75 mmol/24 h urinary Na. Full text read 2026-10-01 (bmj.com, Results): the normotensive subgroup (12 trials, 2240 people) also had a pooled urinary Na change of -75 mmol/24 h (range -40 to -118), so the [0.7, 3.2] mmHg per 100 mmol band is scaled by the subgroup's own value (audit F-06). Used for chronic MAP salt-sensitivity validation and baseline intake context (9-12 g/day). Metadata verified via PubMed E-utilities esummary. [2026-10-03, health-literature-curator; V1 audit F-06; tracker W-8; BUG-20261003-181] Re-read attempted (PubMed E-utilities, pubmed.ncbi.nlm.nih.gov, doi.org, bmj.com, cochranelibrary.com, api.crossref.org, europepmc.org): every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED), so nothing here was re-read today; the figures are this record's quote and its 2026-10-01 full-text note. What the paper gives, as recorded: normotensive subgroup, 12 trials, 2240 people, pooled urinary sodium change -75 mmol/24 h (trials -40 to -118); SBP -2.42 mmHg (95% CI -3.56 to -1.29, I2 66%); DBP -1.00 mmHg (95% CI -1.85 to -0.15); 34 RCTs in all. The all-trial and hypertensive-subgroup effects are not in this record and were not read. MAP CI: cannot be derived honestly from these figures. The point estimate (SBP + 2 DBP)/3 = -1.47 mmHg per -75 mmol/24 h (1.96 mmHg per 100 mmol) can; its standard error needs the covariance of the pooled SBP and DBP estimates, which the paper is not recorded as reporting. With SEs back-calculated from the CIs (0.579, 0.434 mmHg) the 95% half-width is 0.68 mmHg if the two were uncorrelated and 0.95 mmHg if perfectly correlated: per +100 mmol, [1.06, 2.87] to [0.70, 3.22] mmHg. The registered band [0.7, 3.2] is the perfect-correlation limit (the CI end-points combined), the widest interval for any non-negative correlation, rounded to one decimal (upper end 3.22 rounded inward to 3.2): a conservative envelope, not a CI. Unquantified beneath it: MAP ~ DBP + (SBP - DBP)/3; linear scaling from 75 to 100 mmol/day; and that raising intake moves pressure as much as the trials' reduction lowered it. Range decision is the Operator's (expectation chronic_high_salt_30d/01).",
       "sourceType": "meta-analysis",
       "defaultGrade": "A-meta",
       "pubTypes": [

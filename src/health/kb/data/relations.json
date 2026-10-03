@@ -2530,8 +2530,10 @@
         "notes": "E-assumption: surfaced in the UI."
       },
       "evidence": [
-        "ev:leiper-2015"
-      ]
+        "ev:leiper-2015",
+        "ev:suckling-2012"
+      ],
+      "notes": "2026-10-03 (health-literature-curator, tracker W-6): ev:suckling-2012 added for direction only. Plasma sodium rose after salted versus unsalted soup, so ingested sodium reached plasma; no number is taken (its dispersion is SEM/SD unverified) and the quantity's evidence and grade are unchanged."
     }
   ]
 }

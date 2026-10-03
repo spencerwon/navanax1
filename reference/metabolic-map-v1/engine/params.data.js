@@ -363,6 +363,9 @@ export default {
    "ev:hall-2016"
   ],
   "grade": "E-assumption",
+  "calibratedAgainst": [
+   "chronic_high_salt_30d/01"
+  ],
   "notes": "ASSUMPTION. Structure from Guyton volume-pressure coupling; magnitude chosen so the chronic MAP-salt slope falls inside the He 2013 normotensive meta-analysis band (see chronic_high_salt_30d validation). Since D-2 (v1.0.1) this long-term elasticity is split into a fast share and a slow share (map_auto_frac) delivered through the state R_auto; the steady-state value is unchanged. He 2013 band [0.7, 3.2] recomputed with the normotensive subgroup's own urinary Na change (−75 mmol/24 h, BMJ full text, read 2026-10-01): unchanged; still approximate because SBP/DBP CI end-points are combined (audit F-06)."
  },
  "map_tau_h": {
@@ -393,6 +396,9 @@ export default {
    "ev:karaaslan-2005"
   ],
   "grade": "E-assumption",
+  "calibratedAgainst": [
+   "chronic_high_salt_30d/01"
+  ],
   "notes": "ASSUMPTION for magnitude; mechanism is the renal function curve (Guyton 1972; Hall 2016). Calibrated jointly with map_vol_exp and aldo_vol_exp against He 2013 chronic BP-salt slope. He 2013 band [0.7, 3.2] recomputed with the normotensive subgroup's own urinary Na change (−75 mmol/24 h, BMJ full text, read 2026-10-01): unchanged; still approximate because SBP/DBP CI end-points are combined (audit F-06)."
  },
  "na_osm_gain": {
@@ -437,6 +443,9 @@ export default {
    "ev:hallow-2017"
   ],
   "grade": "E-assumption",
+  "calibratedAgainst": [
+   "chronic_high_salt_30d/01"
+  ],
   "notes": "ASSUMPTION for magnitude. Direction supported by He 2013 (aldosterone rises when salt intake falls). Lumps renin-angiotensin-aldosterone axis into one volume-sensing gain. Calibrated jointly with map_vol_exp and pn_gain against the He 2013 chronic BP-salt band; He 2013 band [0.7, 3.2] recomputed with the normotensive subgroup's own urinary Na change (−75 mmol/24 h, BMJ full text, read 2026-10-01): unchanged; still approximate because SBP/DBP CI end-points are combined (audit F-06)."
  },
  "aldo_effect_exp": {
@@ -546,6 +555,7 @@ export default {
    2.1
   ],
   "mc": false,
+  "fixedReason": "scenario-condition",
   "description": "Baseline ingested water (drinks + food water), continuous.",
   "evidence": [
    "ev:guyton-hall-2021"
@@ -561,12 +571,13 @@ export default {
    150
   ],
   "mc": false,
+  "fixedReason": "scenario-condition",
   "description": "Baseline dietary sodium intake (≈8.8 g NaCl/day), continuous.",
   "evidence": [
    "ev:he-2013"
   ],
-  "grade": "A-meta",
-  "notes": "150 mmol/day (8.8 g salt) is a scenario condition (not sampled). He 2013 states in its conclusions that intakes are typically 9-12 g/day; that is a policy statement, not a measured trial intake, and 8.8 g is below that range, not within it. Grade B would be more honest for a scenario-condition intake (audit F-12); grade left unchanged until a source is chosen."
+  "grade": "B-textbook",
+  "notes": "150 mmol/day (8.8 g salt) is a scenario condition (not sampled). He 2013 states in its conclusions that intakes are typically 9-12 g/day; that is a policy statement, not a measured trial intake, and 8.8 g is below that range, not within it. Grade B would be more honest for a scenario-condition intake (audit F-12); grade left unchanged until a source is chosen. SUPERSEDED 2026-10-03 (health-literature-curator; V1 audit F-12; BUG-20261003-180): grade A-meta -> B-textbook. Value 150, range [150, 150], unit and evidence unchanged. Reason: 150 mmol/day is a scenario condition, not a pooled estimate; the number it rests on is He 2013's statement that intakes are typically 9-12 g/day salt (154-205 mmol/day at 58.44 g/mol NaCl; read in the BMJ full text on 2026-10-01, not re-read on 2026-10-03 because every literature host was blocked by the egress policy), and 150 mmol/day (8.77 g) is the lower end of that statement rounded down by 2.6 %. A secondary, rounded statement is graded B-textbook (01 §3.1); A-meta belongs to He 2013's pooled blood-pressure effects, not to this sentence. If the rounding is judged a curator choice rather than the source's value, the honest grade is E-assumption (Operator decision). Held fixed as a scenario condition (fixedReason, HREQ-U-01)."
  },
  "kIn_base_mmold": {
   "value": 80,
@@ -576,6 +587,7 @@ export default {
    80
   ],
   "mc": false,
+  "fixedReason": "scenario-condition",
   "description": "Baseline dietary potassium intake, continuous.",
   "evidence": [
    "ev:guyton-hall-2021"
@@ -633,6 +645,7 @@ export default {
    135
   ],
   "mc": false,
+  "fixedReason": "classification-threshold",
   "description": "Lower bound of normal plasma Na; hyponatremia boundary shown in drink_water_3L_fast. Also used to reject implausible Monte Carlo baselines.",
   "evidence": [
    "ev:hew-butler-2015",
@@ -649,6 +662,7 @@ export default {
    145
   ],
   "mc": false,
+  "fixedReason": "classification-threshold",
   "description": "Upper bound of normal plasma Na; used to reject implausible Monte Carlo baselines.",
   "evidence": [
    "ev:guyton-hall-2021"
@@ -664,6 +678,7 @@ export default {
    0.25
   ],
   "mc": false,
+  "fixedReason": "index-constant",
   "description": "Kidney strain index weight: tubular Na transport (reabsorptive) work above baseline.",
   "evidence": [
    "ev:brezis-rosen-1995",
@@ -680,6 +695,7 @@ export default {
    0.25
   ],
   "mc": false,
+  "fixedReason": "index-constant",
   "description": "Kidney strain index weight: Na excretory burden above baseline.",
   "evidence": [
    "ev:andersen-1999"
@@ -695,6 +711,7 @@ export default {
    0.25
   ],
   "mc": false,
+  "fixedReason": "index-constant",
   "description": "Kidney strain index weight: glomerular pressure/hyperfiltration proxy.",
   "evidence": [
    "ev:brenner-1982"
@@ -710,6 +727,7 @@ export default {
    0.25
   ],
   "mc": false,
+  "fixedReason": "index-constant",
   "description": "Kidney strain index weight: urine concentrating work (medullary transport demand).",
   "evidence": [
    "ev:brezis-rosen-1995"
@@ -725,6 +743,7 @@ export default {
    0.1
   ],
   "mc": false,
+  "fixedReason": "index-constant",
   "description": "Relative rise in tubular Na reabsorption that counts as one 'unit' of transport load.",
   "evidence": [
    "ev:sejersted-1982"
@@ -740,6 +759,7 @@ export default {
    3
   ],
   "mc": false,
+  "fixedReason": "index-constant",
   "description": "Rise in Na excretion (multiples of baseline excretion) that counts as one unit of excretory load.",
   "evidence": [
    "ev:andersen-1999"
@@ -755,6 +775,7 @@ export default {
    10
   ],
   "mc": false,
+  "fixedReason": "index-constant",
   "description": "MAP rise above MAP_0 counted as one unit of glomerular-pressure load (averaged with the relative GFR rise / 0.1).",
   "evidence": [
    "ev:brenner-1982",
@@ -839,6 +860,9 @@ export default {
    "ev:he-2013"
   ],
   "grade": "E-assumption",
+  "calibratedAgainst": [
+   "chronic_high_salt_30d/02"
+  ],
   "notes": "ASSUMPTION (D-2, approved by Spencer 2026-10-01). Chosen so the chronic high-salt MAP rise is still developing at day 14 and near its plateau by day 30 (design target, not independent validation). Context only: the salt-reduction trials in He 2013 measured BP after at least 4 weeks; Guyton 1972 describes long-term autoregulation acting over days to weeks. No numeric time constant was taken from either. Range kind: curator assumption (5 to 20 days); sampled uniformly (hi/lo = 4)."
  }
 };

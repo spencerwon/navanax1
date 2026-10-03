@@ -1542,5 +1542,434 @@
    "checkedOn": "2026-10-01",
    "resolved": true
   }
+ ],
+ "curationNote": "curationRecords (from 2026-10-03): checks, fetch attempts and changes to evidence records, relation citations, params.json grade, notes and structured fields, and schema.json, one record each (schema.json#/definitions/CurationRecord). Append-only: a correction is a new record naming the one it corrects in supersedes. The records array above holds only external-identifier checks and keeps its own rules.",
+ "curationRecords": [
+  {
+   "seq": 1,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "schema:src/health/kb/data/schema.json",
+   "action": "schema-change",
+   "method": "Edited schema.json by addition only; validated with the checker's own draft-07 validator (health.kb.check._Schema): lint 0 schema-drift; params.json against #/definitions/EngineParams 0 violations; six planted violations (mc false without fixedReason, fixedReason on a sampled row, a reason outside the enum, a malformed and an empty calibratedAgainst, an undeclared key) one violation each; kb-check 0 errors.",
+   "result": "Added definitions isoDate, expectationId, fixedReason, Param, EngineParams and CurationRecord, and the optional Evidence property engineOnly. Param makes fixedReason (one of scenario-condition, classification-threshold, index-constant) required exactly when mc is false, and calibratedAgainst an array of '<scenario_id>/<NN>' ids. The root object is unchanged, so the three KB documents validate as before; params.json is not yet validated against EngineParams by kb-check (the checker is builder K's).",
+   "reason": "Structured fields for the deferred fixed-reason and calibration-link rules (HREQ-U-01, HREQ-E-10), a structured engine-only marker for W-6, and a place for non-identifier verification records.",
+   "refs": [
+    "W-18",
+    "W-6",
+    "HREQ-U-01",
+    "HREQ-E-10",
+    "HREQ-E-06",
+    "BUG-20261003-183"
+   ]
+  },
+  {
+   "seq": 2,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:waterIn_base_Ld",
+   "action": "field-added",
+   "method": "Read the row's notes ('Scenario condition (not sampled).') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: scenario-condition. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 3,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:naIn_base_mmold",
+   "action": "field-added",
+   "method": "Read the row's notes ('150 mmol/day (8.8 g salt) is a scenario condition (not sampled).') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: scenario-condition. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 4,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:kIn_base_mmold",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION (typical diet). Scenario condition (not sampled).') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: scenario-condition. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 5,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:na_normal_low",
+   "action": "field-added",
+   "method": "Read the row's notes ('Classification threshold, not a physiological parameter.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: classification-threshold. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 6,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:na_normal_high",
+   "action": "field-added",
+   "method": "Read the row's notes ('Classification threshold, not a physiological parameter.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: classification-threshold. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 7,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:strain_w_transport",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION. Index definition, not physiology: equal weights.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: index-constant. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 8,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:strain_w_excretion",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION. Index definition.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: index-constant. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 9,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:strain_w_glomerular",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION. Index definition.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: index-constant. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 10,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:strain_w_concentrating",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION. Index definition.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: index-constant. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 11,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:strain_scale_transport",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION. Index normalisation.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: index-constant. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 12,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:strain_scale_excretion",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION. Index normalisation.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: index-constant. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 13,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:strain_scale_pressure",
+   "action": "field-added",
+   "method": "Read the row's notes ('ASSUMPTION. Index normalisation.') and docs/health/01 §4.4; mc is false.",
+   "result": "fixedReason: index-constant. Value, range, grade, evidence and notes unchanged; params.json and the reference copy byte-identical; params.data.js regenerated.",
+   "refs": [
+    "HREQ-U-01",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 14,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:map_vol_exp",
+   "action": "field-added",
+   "method": "Read the engine scenario registry (scenarios.py): chronic_high_salt_30d/01 carries role calibration and lists map_vol_exp in calibrates; the row's notes say 'magnitude chosen so the chronic MAP-salt slope falls inside the He 2013 normotensive meta-analysis band'.",
+   "result": "calibratedAgainst: ['chronic_high_salt_30d/01']. Value, range, grade, evidence and notes unchanged.",
+   "refs": [
+    "HREQ-E-10",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 15,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:pn_gain",
+   "action": "field-added",
+   "method": "Read the engine scenario registry (scenarios.py): chronic_high_salt_30d/01 carries role calibration and lists pn_gain in calibrates; the row's notes say 'Calibrated jointly with map_vol_exp and aldo_vol_exp against He 2013 chronic BP-salt slope'.",
+   "result": "calibratedAgainst: ['chronic_high_salt_30d/01']. Value, range, grade, evidence and notes unchanged.",
+   "refs": [
+    "HREQ-E-10",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 16,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:aldo_vol_exp",
+   "action": "field-added",
+   "method": "Read the engine scenario registry (scenarios.py): chronic_high_salt_30d/01 carries role calibration and lists aldo_vol_exp in calibrates; the row's notes say 'Calibrated jointly with map_vol_exp and pn_gain against the He 2013 chronic BP-salt band'.",
+   "result": "calibratedAgainst: ['chronic_high_salt_30d/01']. Value, range, grade, evidence and notes unchanged.",
+   "refs": [
+    "HREQ-E-10",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 17,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:map_auto_tau_h",
+   "action": "field-added",
+   "method": "Read the engine scenario registry (scenarios.py): chronic_high_salt_30d/02 carries role calibration and lists map_auto_tau_h in calibrates; the row's notes say 'Chosen so the chronic high-salt MAP rise is still developing at day 14 and near its plateau by day 30'.",
+   "result": "calibratedAgainst: ['chronic_high_salt_30d/02']. Value, range, grade, evidence and notes unchanged.",
+   "refs": [
+    "HREQ-E-10",
+    "W-18"
+   ]
+  },
+  {
+   "seq": 18,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "param:naIn_base_mmold",
+   "action": "grade-superseded",
+   "method": "Read the row's notes (V1 audit F-12) and ev:he-2013 (notes: full text read 2026-10-01); docs/health/01 §3.1-3.2; re-read of He 2013 attempted and blocked (seq 25).",
+   "result": "grade B-textbook. Value, range, unit and evidence unchanged; the notes keep the old text and add the SUPERSEDED line with the old grade, the date and the reason.",
+   "previous": "A-meta",
+   "reason": "150 mmol/day is a scenario condition: He 2013's statement that intakes are typically 9-12 g/day (154-205 mmol/day) rounded down by 2.6 %, a secondary statement (B), not the meta-analysis's pooled estimate (A-meta). E-assumption is the alternative if the rounding is judged a curator choice (Operator).",
+   "refs": [
+    "F-12",
+    "W-7",
+    "BUG-20261003-180",
+    "HREQ-E-03"
+   ]
+  },
+  {
+   "seq": 19,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "relation:rel:gut:na-absorption",
+   "action": "citation-added",
+   "method": "Read ev:suckling-2012 (quote, notes; abstract-level, 2026-10-01) and the relation (organ:intestine transports molecule:na).",
+   "result": "evidence ['ev:leiper-2015'] -> ['ev:leiper-2015', 'ev:suckling-2012']; notes added saying why. The quantity (gut_na_thalf_h mirror) is unchanged.",
+   "previous": "evidence: ['ev:leiper-2015']; no notes",
+   "reason": "Suckling 2012 shows ingested salt raising plasma sodium against a matched unsalted control, which is the relation's claim (direction only).",
+   "refs": [
+    "W-6",
+    "BUG-20261003-183"
+   ]
+  },
+  {
+   "seq": 20,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:shafiee-2005",
+   "action": "engine-only-marked",
+   "method": "Searched entities.json and relations.json for every record whose claim the source's quote and notes support; read every expectation in the engine scenario registry (scenarios.py) that cites it.",
+   "result": "engineOnly added; citedBy ['drink_water_1L/03', 'drink_water_1L/04', 'drink_water_3L_fast/01']. No knowledge-base record cites it; kb-check still warns unused-evidence until the checker reads engineOnly (proposed to builder K).",
+   "refs": [
+    "W-6",
+    "BUG-20261003-183"
+   ]
+  },
+  {
+   "seq": 21,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:crowe-1987",
+   "action": "engine-only-marked",
+   "method": "Searched entities.json and relations.json for every record whose claim the source's quote and notes support; read every expectation in the engine scenario registry (scenarios.py) that cites it.",
+   "result": "engineOnly added; citedBy ['drink_water_1L/02', 'drink_water_1L/03', 'drink_water_1L/04', 'drink_water_1L/06']. No knowledge-base record cites it; kb-check still warns unused-evidence until the checker reads engineOnly (proposed to builder K).",
+   "refs": [
+    "W-6",
+    "BUG-20261003-183"
+   ]
+  },
+  {
+   "seq": 22,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:heer-2000",
+   "action": "engine-only-marked",
+   "method": "Searched entities.json and relations.json for every record whose claim the source's quote and notes support; read every expectation in the engine scenario registry (scenarios.py) that cites it.",
+   "result": "engineOnly added; citedBy ['chronic_high_salt_30d/04']. No knowledge-base record cites it; kb-check still warns unused-evidence until the checker reads engineOnly (proposed to builder K).",
+   "refs": [
+    "W-6",
+    "BUG-20261003-183"
+   ]
+  },
+  {
+   "seq": 23,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:rakova-2017",
+   "action": "engine-only-marked",
+   "method": "Searched entities.json and relations.json for every record whose claim the source's quote and notes support; read every expectation in the engine scenario registry (scenarios.py) that cites it.",
+   "result": "engineOnly added; citedBy ['salt_load_10g/05']. No knowledge-base record cites it; kb-check still warns unused-evidence until the checker reads engineOnly (proposed to builder K).",
+   "refs": [
+    "W-6",
+    "BUG-20261003-183"
+   ]
+  },
+  {
+   "seq": 24,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:uttamsingh-1985",
+   "action": "engine-only-marked",
+   "method": "Searched entities.json and relations.json for every record whose claim the source's quote and notes support; read every expectation in the engine scenario registry (scenarios.py) that cites it.",
+   "result": "engineOnly added; citedBy []. No knowledge-base record cites it; kb-check still warns unused-evidence until the checker reads engineOnly (proposed to builder K).",
+   "refs": [
+    "W-6",
+    "BUG-20261003-183"
+   ]
+  },
+  {
+   "seq": 25,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:he-2013",
+   "action": "fetch-attempt",
+   "method": "Requested PubMed E-utilities efetch (eutils.ncbi.nlm.nih.gov) by curl; pubmed.ncbi.nlm.nih.gov, www.bmj.com/content/346/bmj.f1325, cochranelibrary.com (CD004937.pub2), api.crossref.org, europepmc.org and www.ebi.ac.uk by the fetch tool; doi.org by curl.",
+   "result": "Every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED). Nothing was read. A web-search engine's summary (not a source read; not used) repeated the normotensive figures already in the record (-2.42 and -1.00 mmHg). Retraction and errata status could not be re-checked today; the 2026-10-01 verification block stands.",
+   "refs": [
+    "W-8",
+    "F-06",
+    "BUG-20261003-182"
+   ]
+  },
+  {
+   "seq": 26,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:he-2013",
+   "action": "finding",
+   "method": "Arithmetic on the record's own figures: SE = CI width / 3.92; MAP = (SBP + 2 DBP)/3; Var(MAP) = (Var S + 4 Var D + 4 rho SE_S SE_D)/9 for rho in {0, 0.5, 1}; scaled by 100/75.",
+   "result": "Point estimate 1.96 mmHg per +100 mmol/day. 95% interval [1.06, 2.87] at rho 0, [0.87, 3.06] at rho 0.5, [0.70, 3.22] at rho 1. The registered [0.7, 3.2] is the rho = 1 limit (CI end-points combined), the widest for any non-negative correlation; upper end rounded inward by 0.02. A true MAP CI needs the SBP-DBP covariance, which is not recorded; the band is a conservative envelope, not a CI. Notes appended to ev:he-2013; audit item F-06 updated; the range decision is the Operator's.",
+   "refs": [
+    "W-8",
+    "F-06",
+    "BUG-20261003-181",
+    "chronic_high_salt_30d/01"
+   ]
+  },
+  {
+   "seq": 27,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:suckling-2012",
+   "action": "fetch-attempt",
+   "method": "doi.org/10.1038/ki.2011.369 and the kidney-international.org full text by curl and the fetch tool; PubMed, Europe PMC and Crossref by the fetch tool; one web search.",
+   "result": "Every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED). The full text was not read; SEM versus SD stays unverified and the expectation rows stay as registered (salt_load_sweep/02 unverified). The web-search summary did not state the dispersion type. verification.quoteSource set to 'abstract' (what audit F-02/F-03 records); notes appended with 'SEM/SD unverified'.",
+   "previous": "verification.quoteSource absent",
+   "refs": [
+    "W-9",
+    "Q4",
+    "F-02",
+    "F-03",
+    "BUG-20261003-182",
+    "BUG-20261003-184"
+   ]
+  },
+  {
+   "seq": 28,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:baylis-1986",
+   "action": "fetch-attempt",
+   "method": "doi.org/10.1111/j.1365-2265.1986.tb01642.x and onlinelibrary.wiley.com by the fetch tool; PubMed E-utilities by curl; one web search.",
+   "result": "Every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED). The full text was not read. A web-search summary (not a source read; not used) gave the abstract's figures as 867 +/- 54 to 69 +/- 3 mmol/kg in eight healthy men, dispersion type not stated in that summary. Findings and the parameter history appended to the record's notes; drink_water_1L/05 and U_osm_min unchanged.",
+   "refs": [
+    "D-10",
+    "BUG-20261003-127",
+    "BUG-20261003-182"
+   ]
+  },
+  {
+   "seq": 29,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:crowe-1987",
+   "action": "fetch-attempt",
+   "method": "doi.org/10.1093/ageing/16.5.285 and academic.oup.com by the fetch tool; PubMed E-utilities by curl; one web search.",
+   "result": "Every host refused by the environment's egress policy (HTTP 403 on CONNECT from the agent proxy; the fetch tool reports EGRESS_BLOCKED). The full text was not read; the web-search summary gave only the citation (Age Ageing 16:285-293). No plasma sodium or osmolality time course and no recovery time is held in the record; the '< 6 h' bound of drink_water_1L/02 stays untraced. Notes appended; the expectation unchanged.",
+   "refs": [
+    "D-11",
+    "D-9",
+    "BUG-20261003-128",
+    "BUG-20261003-182"
+   ]
+  },
+  {
+   "seq": 30,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "evidence:ev:crowe-1987 ev:shafiee-2005 ev:heer-2000",
+   "action": "notes-appended",
+   "method": "Read each record's quote for a mean +/- dispersion and whether its type is stated.",
+   "result": "Each quote's +/- is untyped; notes now say 'SEM/SD unverified (HREQ-E-09)' and that no range or band is built from it (as for ev:suckling-2012).",
+   "refs": [
+    "BUG-20261003-184",
+    "HREQ-E-09"
+   ]
+  },
+  {
+   "seq": 31,
+   "checkedOn": "2026-10-03",
+   "by": "health-literature-curator (M1 slice, builder CUR)",
+   "subject": "params:params.json",
+   "action": "finding",
+   "method": "Ran the golden-fixture generator (Node v22.22.0) on the edited table and diffed the fixture.",
+   "result": "Four lines change: the SHA-256 of params.json and params.data.js, and the grade counts (A-meta 3 -> 2, B-textbook 15 -> 16; >= B unchanged at 24 of 54); no simulated value changes. docs/health/03 §4 allows regeneration only on a MODEL_VERSION bump or when the fixture gains sections, so a grade or notes change cannot land on its own; the regenerated fixture is not committed with this change.",
+   "refs": [
+    "BUG-20261003-185",
+    "HREQ-X-05",
+    "W-18"
+   ]
+  }
  ]
 }
