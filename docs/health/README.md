@@ -4,8 +4,10 @@
 
 The health subsystem applies the discipline this repository already enforces for market
 data — every number with a source, severity by consequence, append-only records,
-independent validation, config not code — to mechanistic models of human physiology,
-starting from the Operator's **Metabolic Map V1** (water, sodium, the kidney and
+independent validation, config not code — to the Operator's goal (`00 §1.2`, in his
+words): a 3D, multi-scale, citation-backed model of the human body that educates, that
+serves as a virtual lab for acute and chronic effects, and that shows all of its
+uncertainty — starting from his **Metabolic Map V1** (water, sodium, the kidney and
 arterial pressure) and growing, module by module, toward the largest causes of death
 and disability in the world.
 
@@ -25,11 +27,14 @@ result the engine returns, and is the first thing a reviewer checks.
 | 5 | [`05_BUG_TAXONOMY.md`](05_BUG_TAXONOMY.md) | Severity hierarchy for a system whose failure mode is a plausible wrong number |
 | 6 | [`06_ARCHITECTURE.md`](06_ARCHITECTURE.md) | The layers, the data flow from citation to chart, every diagram |
 | 7 | [`07_MODULE_REGISTRY.md`](07_MODULE_REGISTRY.md) | Every module: files, owner, flag, dependencies, how to remove it |
+| 8 | [`08_PROJECT_PLAN.md`](08_PROJECT_PLAN.md) | Mission, workstreams and owners, milestones with exit criteria, cadence, compute plan, risks |
 
 Supporting records:
 
 - [`decisions/`](decisions/) — architecture decision records (ADR-0001 onward). A decision is reversed by a new ADR, never by editing an old one.
+- [`logs/TRACKER.md`](logs/TRACKER.md) — open decisions for the Operator, open work by milestone, what is blocked on whom.
 - [`logs/PROCESS_LOG.md`](logs/PROCESS_LOG.md) — append-only record of what was done, what was tried, what failed, and why.
+- [`logs/V1_AUDIT_ITEMS.md`](logs/V1_AUDIT_ITEMS.md) — the V1 build's own audit items, bugs and decisions, with status.
 - [`diagrams/`](diagrams/) — the Mermaid sources and the SVG for every figure in `06_ARCHITECTURE.md`.
 - The bug ledger is shared with the rest of the repository: `docs/logs/bugs.yaml` (entries carry `area: health`).
 - The V1 origin, byte-for-byte: [`reference/metabolic-map-v1/`](../../reference/metabolic-map-v1/README.md).

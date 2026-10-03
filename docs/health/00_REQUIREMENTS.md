@@ -27,7 +27,31 @@ changes by this much, what happens to pressure, over what time, with what confid
 and which parts of that answer are evidence versus guess?" cannot do so from the
 literature in a reasonable time, and cannot audit the answer once given.
 
-### 1.2 Thesis
+### 1.2 The Operator's goals, verbatim
+
+These are the reference points every requirement below traces to (ADR-0006):
+
+> "a 3D intractable model … visualize at various scale a full technical repository of
+> metabolic and molecular biology effects … an accurate and digestable model of the human
+> body — better than any one system that has been created so far … educate, test and
+> have our own accurate virtual lab … What does drinking water do to blood electrolyte
+> levels, how much salt does it take to strain the kidney, how can we model acute effects
+> generally. How can we see chronic risks grow in the body in real time … an educational
+> resource for the ages … research insights and disease cure as well as better trained
+> doctors, nurses, and scientists … heavily relying upon published papers and showing all
+> uncertainty. Extreme data rigor, efficient system design, use any resource … this new
+> laptop of mine can process and store. Test its very limits."
+
+Four product ideas live in that paragraph, and each is a surface or a layer here:
+
+| Idea | What it is in this system |
+|---|---|
+| **The body, at every scale** | The 3D viewer with its scale ladder (Body → Organ → Tissue → Cell → Pathway → Molecule) bound to the knowledge base's entities and relations |
+| **A technical repository of effects** | The knowledge base (entities, relations, evidence, verification) plus the engine's modules, each a graded, cited mechanism |
+| **A virtual lab** | Scenarios and the intervention builder: acute loads (water, salt), chronic exposures (30 days of salt), dose sweeps, with Monte Carlo bands and literature expectations |
+| **Chronic risk in real time** | Long-horizon states (the slow autoregulation state today; pressure→outcome and kidney-progression modules in Phase 2) rendered as modelled trajectories, labelled as such |
+
+### 1.3 Thesis
 
 **Auditable understanding is the product.** A mechanistic model whose every parameter
 carries a source and a grade, whose every output carries an uncertainty band, whose
@@ -45,7 +69,7 @@ The platform grows by **modules**, each a small, removable, independently valida
 extension of the model, the knowledge base, or the tooling, in the order the evidence
 supports (§10).
 
-### 1.3 Non-goals (explicit)
+### 1.4 Non-goals (explicit)
 
 The following are **out of scope** and any proposal to add them requires a written
 amendment and the clinical-safety reviewer's sign-off:
@@ -56,7 +80,7 @@ amendment and the clinical-safety reviewer's sign-off:
 - Presenting a model index (the kidney strain index) as a clinical measure.
 - Claims of clinical validation. The V1 app's own disclaimer — "Educational model — not medical advice. Not clinically validated." — is the standard.
 
-### 1.4 Honest statement of difficulty
+### 1.5 Honest statement of difficulty
 
 Thirty of the fifty-four V1 parameters are assumptions (grade `E-assumption`). Three of
 them — the ones that set the chronic pressure response to salt — were calibrated to a
@@ -82,13 +106,21 @@ a later reader can tell measured from assumed from calibrated in one glance.
 
 ### 2.2 Users and modes
 
-One human Operator (Spencer) in three modes:
+One human Operator (Spencer), who approves everything, and three audiences the product
+is for. The audiences never get a different model; they get the same model with the same
+bands and the same labels.
 
-| Mode | Need | Surface |
+| User | Need | Surface |
 |---|---|---|
-| **Audit** | Which numbers are evidence, which are assumptions, what changed and why | `health.cli status`, `kb-check`, the bug ledger, the process log |
-| **Explore** | Run a scenario, see the band, see what drives it | The reference app today; a Python surface later |
-| **Extend** | Add a parameter, a scenario, an expectation, a module, safely and reversibly | The workflows in `02` and the registry in `07` |
+| **Operator — Audit** | Which numbers are evidence, which are assumptions, what changed and why | `health.cli status`, `kb-check`, the bug ledger, the process log |
+| **Operator — Explore** | Run a scenario, see the band, see what drives it, see the body respond at every scale | The 3D app (viewer, charts, evidence drawer) |
+| **Operator — Extend** | Add a parameter, a scenario, an expectation, a module, safely and reversibly | The workflows in `02` and the registry in `07` |
+| **Learner** (student, nurse, clinician in training) | Understand a mechanism by watching it: drink a litre, follow the water from gut to urine, see why sodium dips and recovers; know which parts are textbook and which are guesses | The 3D app's scale ladder, scenario descriptions, the evidence drawer with grades |
+| **Researcher** | A reproducible, cited, perturbable model to form and test hypotheses against; every assumption visible; every expectation's provenance one click away | The engine API, the expectation harness, the knowledge base, the sensitivity screen |
+
+The Operator conceptualises data visually and asked to be shown choices as pictures
+(ADR-0006). Design questions go to him with rendered options, never as prose alone
+(`02 §3`, design-lead).
 
 ### 2.3 Deployment scope
 
@@ -105,6 +137,7 @@ class of security and privacy obligations from v1 and is deliberate.
 - **HREQ-S-03** Classification thresholds (for example the 135–145 mmol/L plasma sodium range) SHALL be stored as `mc: false` parameters labelled *classification threshold, not a physiological parameter*, and SHALL be rendered as reference lines with that label.
 - **HREQ-S-04** Any index that is not a clinical measure SHALL be named as an index, SHALL carry the sentence "an index, not a clinical measure" in its definition and on every surface, and SHALL have its weights and scales listed as `E-assumption` parameters.
 - **HREQ-S-05** The clinical-safety reviewer (`02 §3.4`) SHALL review every user-facing claim before it reaches the Operator. Their sign-off is recorded in the PR description.
+- **HREQ-S-06** Grade-E (assumption) parameters SHALL be loud on every surface: a red pill on the parameter and a banner on every chart they influence (per the sensitivity screen), with the count visible. Decided by the Operator (ADR-0006); V1 ships at 30 of 54 and the number is never hidden.
 
 ## 4. Data and Knowledge Requirements
 
@@ -135,6 +168,19 @@ class of security and privacy obligations from v1 and is deliberate.
 - **HREQ-P-08** `health.cli kb-check` SHALL exit non-zero on any `error`-severity finding and SHALL print `warn` and `info` findings without failing.
 - **HREQ-P-09** The reference app SHALL remain runnable from `reference/metabolic-map-v1/index.html` unchanged; it is the V1 surface and the fixture for design review.
 
+### 5.4 The 3D body and the virtual lab
+
+- **HREQ-P-10** The viewer SHALL present the body on a scale ladder — Body, Organ, Tissue, Cell, Pathway, Molecule — where every rung is a knowledge-base entity with its ontology id, summary, evidence and the live quantities the engine computes for it. A rung with no entity behind it is not shown.
+- **HREQ-P-11** Every live overlay on the body (a colour, a badge, a pulse) SHALL be a display rule over an engine quantity, named in config, labelled on screen with the quantity and its unit, and never a value with no model behind it. Colour breakpoints on an index are display choices and SHALL say so (V1 decision D-1).
+- **HREQ-P-12** The virtual lab SHALL let a user compose an intervention — amounts, timing, duration, chronic overrides — from the same primitives the registered scenarios use, and SHALL run it with Monte Carlo bands; a custom run is labelled *custom, no registered expectations*.
+- **HREQ-P-13** Chronic trajectories SHALL be rendered with the label "modelled risk trajectory, not a prediction" in-band, the horizon stated, and the slow states that produce them named (today `R_auto`).
+- **HREQ-P-14** Every chart SHALL offer the evidence drawer: the parameters that influence it (from the sensitivity screen), each with grade, range, source and verification date.
+
+### 5.5 Education
+
+- **HREQ-P-15** Each registered scenario SHALL carry a plain-language narrative of the mechanism ("the water is absorbed within minutes; plasma sodium dips; vasopressin is suppressed; urine dilutes; the load is excreted in three to four hours") whose every sentence maps to a block of the model and to an expectation row, so a learner can click from the sentence to the evidence.
+- **HREQ-P-16** A learner-facing surface SHALL show the same bands, grades and labels as the Operator's; there is no simplified mode that hides uncertainty.
+
 ## 6. Non-Functional Requirements
 
 - **HREQ-N-01** Correctness over completeness. Where a number cannot be supported, the system shows "unavailable", never a plausible substitute (as in `docs/00` REQ-N-01).
@@ -143,6 +189,7 @@ class of security and privacy obligations from v1 and is deliberate.
 - **HREQ-N-04** The engine self-test SHALL complete in under two minutes in pure Python; Monte Carlo tests use small `n` and say so.
 - **HREQ-N-05** No network listener beyond localhost; no credentials of any kind in v1; CI's secret scan and transaction-capability checks apply to `src/health` unchanged.
 - **HREQ-N-06** Every threshold, tolerance, seed default and flag lives in `config/health/*.yaml` or `params.json`, never in code (as `docs/00` REQ-N-09).
+- **HREQ-N-07** Compute SHALL scale to the Operator's machine: Monte Carlo and sweeps run on a worker pool sized to the available cores, with a stress test that reports samples per second and frame rate at 64, 256 and 1,024 samples (V1 `app/worker.js` and the stress panel), and the numbers are recorded in `docs/health/measurements/` when the Operator runs it. "Use any resource this laptop can process and store" is a budget, not a licence: nothing runs on the Operator's machine that he has not launched.
 
 ## 7. Extensibility and Undo Requirements
 
@@ -232,9 +279,11 @@ which the platform can say something about a *policy* rather than a person. *Exi
 independent review by the rigor-lead and the clinical-safety reviewer, and an Operator
 decision on publication.
 
-**Phase 5 — Surface.** A Python dashboard built from an approved design spec, with the
-reference app retired only when the new surface passes design review on the Operator's
-machine.
+**The viewer in every phase.** The 3D app is not a late phase; it is the surface every
+phase lands on. Each phase adds its entities to the scale ladder, its quantities to the
+overlays, its scenarios to the lab and its narrative to the education layer, and passes
+design review on the Operator's machine before it is enabled. The full plan with
+milestones, owners and exit criteria is `08_PROJECT_PLAN.md`.
 
 **Dependency note.** Phase 0 is the only phase that may not be deferred: every later
 module is validated against the equivalence and expectation harness it delivers. Phases
@@ -247,11 +296,15 @@ module is validated against the equivalence and expectation harness it delivers.
 
 | # | Question | Needed by | Default if unanswered |
 |---|---|---|---|
-| Q1 | Does the reference app stay in this repository or move to its own? | Phase 5 | Stays, vendored, until a replacement passes design review |
+| Q1 | Which repository is home: this one (`navanax1`, branch `claude/health-system-architecture-i9qgip`), the Mac repo `Desktop/The Human Body`, or a new `spencerwon/metabolic-map`? The Operator intended `metabolic-map` (ADR-0006) | Before Phase 1 | Stays here until the Operator publishes the Mac repo; then its history is attached or this subsystem migrates, by ADR |
 | Q2 | Which disease module comes first after the body is scoped — pressure/kidney or energy metabolism? | Phase 2 | Pressure/kidney: it is continuous with V1 and its evidence base is the largest |
 | Q3 | Will any future module need personal data (for example a user's own labs)? | Before Phase 4 | Assume no; a yes is a separate amendment with its own safety document |
-| Q4 | Is the Suckling 2012 dispersion SEM or SD? (audit items F-02/F-03 in `scenarios.js`) | Phase 1 | The expectation stays `unverified` and is not counted |
+| Q4 | Is the Suckling 2012 dispersion SEM or SD? (V1 audit items F-02/F-03) | Phase 1 | The expectation stays `unverified` and is not counted |
 | Q5 | Numerical tolerance for golden equivalence if a future module needs an adaptive solver | Phase 2 | 1e-9 relative stays; an adaptive solver is a new ADR |
+| D-1 | Kidney strain colour rule — A, B or C (`reference/metabolic-map-v1/app/design-options.html`) | Phase 1 viewer work | The rule currently in `viewer.js strainColor()`; breakpoints are display choices and say so |
+| D-4 | Bladder display: grow-and-void at 0.4 L (display rule, not model) or hide | Phase 1 viewer work | Keep, labelled as a display rule |
+| D-6 | Repository visibility and licence | Before publishing | Private until the Operator decides; licence undecided |
+| D-7 | Theme: dark always, or follow the system | Phase 1 viewer work | Follow the system (both themes are designed) |
 
 ---
 

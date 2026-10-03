@@ -7,6 +7,9 @@
 # Data -- the landing zone is irreplaceable but it is NOT source code.
 # Back it up separately; never commit it.
 data/
+# ...except the health knowledge base, which IS source: curated, append-only JSON the
+# health package ships (pyproject package-data) and kb-check gates.
+!src/health/kb/data/
 *.duckdb
 *.db
 *.sqlite.lock
