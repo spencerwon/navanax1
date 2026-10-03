@@ -20,7 +20,7 @@ is not finished.
 | `kb-v1` | true | 0 | health-literature-curator | `reference-v1`<br>`process` | `src/health/kb/`<br>`tests/health_kb_selftest.py` | `tests/health_kb_selftest.py` | ADR-0003 |
 | `cli` | true | 0 | platform-engineer | `engine-v1`<br>`kb-v1`<br>`process` | `src/health/cli.py` | `tests/health_kb_selftest.py::test_cli_kb_check_exit_codes`<br>`tests/health_kb_selftest.py::test_status_prints_the_disclaimer`<br>`tests/health_kb_selftest.py::test_status_expectations_line`<br>`tests/health_kb_selftest.py::test_cli_constants_match_engine_and_config`<br>`tests/health_kb_selftest.py::test_status_lists_every_registered_module`<br>`tests/health_kb_selftest.py::test_status_honours_the_module_flags` | ADR-0003 |
 | `errors` | true | 0 | health-physiology-modeler | `process` | `src/health/errors.py`<br>`tests/health_errors_selftest.py` | `tests/health_errors_selftest.py` | ADR-0001 |
-| `process` | true | 0 | orchestrator | — | `docs/health/`<br>`.claude/agents/health-physiology-modeler.md`<br>`.claude/agents/health-literature-curator.md`<br>`.claude/agents/health-rigor-lead.md`<br>`.claude/agents/health-safety-reviewer.md`<br>`config/health/`<br>`src/health/__init__.py`<br>`src/health/registry.py` | `tests/health_kb_selftest.py::test_registry_entries_are_well_formed`<br>`tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference`<br>`tests/health_kb_selftest.py::test_registry_reader_reads_the_yaml_subset`<br>`tests/health_kb_selftest.py::test_registry_reader_agrees_with_pyyaml`<br>`tests/health_kb_selftest.py::test_buglog_removed_with_module_exempts_deleted_files` | ADR-0001 |
+| `process` | true | 0 | orchestrator | — | `docs/health/`<br>`.claude/agents/health-physiology-modeler.md`<br>`.claude/agents/health-literature-curator.md`<br>`.claude/agents/health-rigor-lead.md`<br>`.claude/agents/health-safety-reviewer.md`<br>`.claude/agents/health-protein-curator.md`<br>`.claude/agents/health-dna-curator.md`<br>`.claude/agents/health-rna-curator.md`<br>`config/health/`<br>`src/health/__init__.py`<br>`src/health/registry.py` | `tests/health_kb_selftest.py::test_registry_entries_are_well_formed`<br>`tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference`<br>`tests/health_kb_selftest.py::test_registry_reader_reads_the_yaml_subset`<br>`tests/health_kb_selftest.py::test_registry_reader_agrees_with_pyyaml`<br>`tests/health_kb_selftest.py::test_buglog_removed_with_module_exempts_deleted_files` | ADR-0001 |
 
 ### Removal recipes
 
@@ -185,7 +185,7 @@ kb-v1's test file, so step 4 edits a file this module does not own.
 3. Run `python3 tools/buglog.py --mark-removed process` (adds
    `removed_with_module: process` to every ledger entry citing these paths that has
    no such field yet; in 07's order on 2026-10-03: none left).
-4. Delete `docs/health/`, the four `.claude/agents/health-*.md` files,
+4. Delete `docs/health/`, the seven `.claude/agents/health-*.md` files,
    `config/health/` (the registry: this removes this entry with it),
    `src/health/__init__.py` and `src/health/registry.py`.
 5. `tools/gates.py`: delete `HEALTH_SUITES` (empty by now), the loop in `main()` that

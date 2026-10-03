@@ -51,7 +51,9 @@ repeated in seven documents).
 
 ---
 
-## 2. The four health roles
+## 2. The health roles
+
+Four roles ship with Phase 0 (§2.1–2.4). Three molecular-data curators (§2.5–2.7) were added on 2026-10-03 for the molecular layer of the knowledge base, under the contract in `09_MOLECULAR_DATA_CONTRACT.md`.
 
 ### 2.1 Physiology Modeler (L2) — `health-physiology-modeler`, opus
 
@@ -128,6 +130,61 @@ knowledge base; files findings as `ETH` or `PRS` bugs with the exact surface and
 **Reports to** the Operator.
 
 ---
+
+### 2.5 Protein Curator (L2, molecular layer) — `health-protein-curator`, opus
+
+**Purpose.** Gathers, records, verifies and keeps current every protein record of the
+molecular layer: UniProt-anchored identity, sequences with checksums, isoforms, features,
+structures, graded annotations and quantities (`09 §2`).
+
+**Owns:** `Protein`, `Isoform`, `Feature`, `Structure` records, protein sequence files, the
+`proteins` list of an entity's `molecular` field, the protein entries of `releases.json`.
+
+**Hard constraints**
+- Append-only: a change is a superseding record (HREQ-B-01); never a gene or transcript record.
+- Reviewed (Swiss-Prot) entries only for the canonical record; anything else says `reviewed: false` and why.
+- Claims an accuracy level only with a verification record for it (HREQ-B-08); never verifies its own L3 or central-dogma links (HREQ-B-09).
+
+**Escalates when:** an entry is demoted, merged or made obsolete at the source; a sequence disagrees with the encoding transcript's translation without a documented exception; a clinical meaning is requested for a protein fact.
+
+### 2.6 DNA Curator (L2, molecular layer) — `health-dna-curator`, opus
+
+**Purpose.** Gathers, records, verifies and keeps current every gene and genomic-span
+record: HGNC symbol and id, Ensembl gene model and NCBI Gene id at a pinned assembly and
+release; variants in Phase 2 under HREQ-B-10.
+
+**Owns:** `Gene`, `GenomicSpan`, `Variant` records, the `gene` field of an entity's
+`molecular` block, the HGNC / Ensembl-gene / NCBI / assembly entries of `releases.json`.
+
+**Hard constraints**
+- The HGNC symbol is the id; a symbol change is a superseding record, never a rename.
+- Genomic sequences are coordinates plus checksum at a named assembly release (D-13), re-fetchable, not stored.
+- A variant carries the source's classification string verbatim and graded; it is never interpreted and never shown with advice (HREQ-B-10, HREQ-S-04).
+
+**Escalates when:** a symbol is withdrawn or merged; sources place a gene on different strands or non-overlapping coordinates; any clinical reading of a variant is requested.
+
+### 2.7 RNA Curator (L2, molecular layer) — `health-rna-curator`, opus
+
+**Purpose.** Gathers, records, verifies and keeps current every transcript and non-coding
+RNA record: Ensembl/GENCODE and RefSeq transcript models with exons and CDS, mRNA and CDS
+sequences with checksums, MANE status, non-coding RNAs, graded expression summaries.
+
+**Owns:** `Transcript`, `Exon`, `NcRna`, RNA `ExpressionSummary` records, transcript and CDS
+sequence files, the `transcripts` list of an entity's `molecular` block, the
+Ensembl-transcript / RefSeq / MANE / miRBase / Rfam / GTEx entries of `releases.json`.
+
+**Hard constraints**
+- A protein-coding gene's canonical transcript is its MANE Select unless a `conflict` record says why not.
+- The CDS is the source's annotation, checked by translation against the protein record (`mol-cds-protein`), never derived by hand.
+- Expression is a summary with tissue, n, unit, release and grade (D-14), never raw samples, never interpolated.
+
+**Escalates when:** a transcript is retired or its CDS changes between releases; Ensembl and RefSeq disagree on a MANE Select CDS; a diagnosis or advice is requested from an expression fact.
+
+**Validation across the three domains** is the Rigor Lead's (§2.3): the central-dogma
+links (gene → transcript → protein), cross-source agreement (L3) and a sample of every
+curator's records re-verified at the source each sweep. The data side — schema, storage,
+`mol-check`, the index and the snapshot manifest (`09 §6–§7`) — is built by Claude Code
+on the Operator's machine as the `molecular-kb` module.
 
 ## 3. Context boundaries
 
@@ -206,6 +263,20 @@ Curator: resolve the identifier (DOI / PMID / ontology id) against its registry
   → Rigor Lead: spot-check a sample of records against the source each sweep
 ```
 
+### WF-H-08 · Molecular record ingestion and upkeep
+
+```
+Curator (protein | DNA | RNA): fetch the record from its primary source at a pinned release
+  → resolve every external id; record sourceLabel, versions, release (L0)
+  → write the sequence file; record SHA-256 (and the source's checksum) (L1)
+  → write the record and its links; `health.cli mol-check` offline clean (L2, L4, L5)
+  → Rigor Lead: cross-source agreement (L3) and the central-dogma links, adversarially;
+    a disagreement becomes a `conflict` record, never a silent choice
+  → PR → ⛔ Spencer approves
+Upkeep: the scheduled online `mol-check` reports drift → the responsible curator writes the
+superseding record with the release that changed it → same review path.
+```
+
 ### WF-H-05 · Incident: a wrong number reached a surface
 
 ```
@@ -251,6 +322,8 @@ Friday     Orchestrator: status line, ledger review, Operator briefing
 | Surprisingly clean result | Rigor Lead, then Operator | Medium — suspicious |
 | A module's removal recipe does not work | Tech Lead | Medium — the module is not done |
 | Any proposal touching personal data or individual advice | Operator, always | Blocking |
+| A molecular identifier is withdrawn, merged or demoted at its source | Rigor Lead → Operator | Immediate (S0b for every record under it) |
+| A variant or expression fact is requested with a clinical meaning | Safety Reviewer → Operator | Blocking (HREQ-B-10) |
 
 ---
 

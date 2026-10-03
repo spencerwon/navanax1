@@ -19,6 +19,9 @@ the bottom with the date and the ADR or commit that closed them.
 | **D-9** | BUG-20261003-115: after 1 L of water the modelled sodium recovers in 7.05 h; the registered Crowe 1987 range is 6 h (in-range share 0.32 at n = 256). Supersede the row as a known divergence with the reason, or recalibrate the model through WF-H-01 with the row kept as a counted fail until it passes on its own | Recommend recalibration at M1 via WF-H-01 (the extractor and the reference agree; the curator first confirms the Crowe 1987 protocol: 20 mL/kg in young water-replete men vs the model's 1 L) | M1 | **Open** |
 | **D-10** | `drink_water_1L/05` (minimum urine osmolality, 40–150 mOsm/kg) cites Baylis 1986, and so does `U_osm_min` (50 mOsm/kg, range 40–80), whose notes quote Baylis's 69 ± 3 mOsm/kg. Is that row a calibration target counted as validation? | Curator to decide from the parameter's history: if `U_osm_min` was chosen with Baylis in view, the row takes role calibration and leaves the validation count (9 counted passes would become 8); if not, record why the shared source is independent | M1 | **Open** (curator; BUG-20261003-127, S1, open) |
 | **D-11** | Extends D-9: the registered "< 6 h" for `drink_water_1L/02` has no traceable source value: the `ev:crowe-1987` record (quote and notes) reports water excreted at 2 h and peak free-water clearance, no plasma-sodium recovery time, and the expectation carries no note saying where 6 h came from | Curator traces the bound to a figure or table of Crowe 1987, or the row is superseded as `unverified` with the attempt logged; decide together with D-9 | M1 | **Open** (curator; BUG-20261003-128, S2, open) |
+| **D-12** | Molecular layer, first data release (`09 §10` Phase 1b): may an engine parameter cite a molecular record before Phase 3? | Recommend no: the viewer's scale ladder is the only consumer until Phase 3 links fluxes to enzymes | Before W-25 | **Open** |
+| **D-13** | Genomic sequences: coordinates plus checksum at a named assembly release (re-fetchable), or store every sequence under Git LFS | Recommend coordinates plus checksum; transcript, CDS and protein sequences are stored | Before W-25 | **Open** |
+| **D-14** | Expression data as graded summaries (GTEx medians with tissue, n, unit, release), not raw samples | Recommend summaries | Before W-25 | **Open** |
 
 ## Open work
 
@@ -44,11 +47,15 @@ the bottom with the date and the ADR or commit that closed them.
 | W-20 | Reference engine gains `validation_status`, the `role`/`calibrates` fields and the title/description fixes with the next MODEL_VERSION bump (BUG-104, W-13) | M1 | health-physiology-modeler | open |
 | W-21 | Step-halving convergence, ±20 % perturbation, seed-stability and rejection-share runs (HREQ-V-05, V-20, V-21, V-22) as a robustness script and a scheduled check, not in the two-minute suite. Since 2026-10-03, step-halving on every scenario and the stiff corner, and the n = 256 baseline drift, run under `python3 tests/health_selftest.py --robust`; no gate or schedule runs it | M1 | health-rigor-lead | open |
 | W-23 | Move the six cli tests from `tests/health_kb_selftest.py` into `tests/health_cli_selftest.py` and list it as cli's test in `config/health/modules.yaml`, removing cli's documented exception to HREQ-X-02 (`07_MODULE_REGISTRY.md`, "Accepted exceptions to HREQ-X-02") | M1 | platform-engineer | open |
+| W-24 | Molecular layer structure (`09 §6–§7`): `schema.molecular.json`, JSON Lines stores, `health.cli mol-check` with a planted violation per rule, the index that resolves "current", the snapshot manifest, the `molecular-kb` module with a rehearsed removal recipe, flag off | M1 | Claude Code on the Operator's machine (structure); orchestrator reviews | open |
+| W-25 | Molecular layer, Phase 1b data release: the ~20 molecule / protein / enzyme / hormone entities of the V1 knowledge base with Gene, MANE Select Transcript and Protein records verified L0–L3; `entity.molecular` links | M1 | health-dna-curator, health-rna-curator, health-protein-curator; health-rigor-lead validates | open, after W-24 and D-12..D-14 |
+| W-26 | Scheduled online `mol-check` drift report (`09 §8`), same shape as the nightly robustness run | M1 | Claude Code (structure) | open, after W-24 |
 
 ## Blocked on
 
 - **Spencer:** A-1, A-2, Q1, D-1, D-4, D-6, D-7, D-8, D-9, W-12, and GitHub access for W-5.
 - **Curator:** D-10, D-11 (D-11 before D-9 is decided).
+- **Spencer, molecular layer:** D-12, D-13, D-14 before the first data release (W-25).
 
 ## Closed
 

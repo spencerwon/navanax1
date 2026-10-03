@@ -30,6 +30,7 @@ as of model 1.0.1; the status line recomputes them.
 | 6 | [`06_ARCHITECTURE.md`](06_ARCHITECTURE.md) | The layers, the data flow from citation to chart, every diagram |
 | 7 | [`07_MODULE_REGISTRY.md`](07_MODULE_REGISTRY.md) | Every module: files, owner, flag, dependencies, how to remove it |
 | 8 | [`08_PROJECT_PLAN.md`](08_PROJECT_PLAN.md) | Mission, workstreams and owners, milestones with exit criteria, cadence, compute plan, risks |
+| 9 | [`09_MOLECULAR_DATA_CONTRACT.md`](09_MOLECULAR_DATA_CONTRACT.md) | Genes, transcripts and proteins as append-only, release-pinned records: the six accuracy levels, the checks, the three curators |
 
 Supporting records:
 
