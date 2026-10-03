@@ -18,7 +18,12 @@
 // other registered scenario, (b2) the stiff parameter corner (HREQ-V-08) and (b3) the
 // divergence-localisation checkpoints; (f)-(k) are extra coverage of the same API (scenario
 // records, rejection sampling, sweep, sensitivity screen, steady-state constants, parameter
-// summary); (l) pins the one failing literature expectation to the reference. Every Monte
+// summary); (l) pins the one failing literature expectation to the reference; (m)
+// solverCoverage holds runs that move the potassium and sweat fluxes, thin the output grid
+// (outEvery 7 and 2.5), put breakpoints inside output intervals (dt 0.1 h) and pass unsorted
+// breakpoints; (n) nonFinite pins the JavaScript NaN/Infinity semantics the port emulates
+// (quantile sort, Math.max and Math.pow on NaN). Sections are only ever ADDED: an existing
+// section's bytes change only with a MODEL_VERSION bump. Every Monte
 // Carlo section first checks that no draw sits within 1e-6 of a rejection boundary
 // (HREQ-V-11) and records the smallest margin it saw (rejectionMargins). The header
 // carries the SHA-256 of every reference engine file the numbers came from.
@@ -36,6 +41,7 @@ const MAX_BYTES = 400 * 1024;
 
 const E = await import(pathToFileURL(ENGINE).href);
 const S = await import(pathToFileURL(resolve(ENGINE_DIR, 'solver.js')).href);
+const MC = await import(pathToFileURL(resolve(ENGINE_DIR, 'mc.js')).href);
 
 // SHA-256 of every reference engine source the fixture was computed from (every .js file
 // and params.json); tests/health_selftest.py compares them with the files on disk.
@@ -351,6 +357,108 @@ function goldenConstants() {
     fluxes0: E.fluxes(E.initialState(p), p, E.baselineInputs(p)) };
 }
 
+// (m) solver and port coverage the registered scenarios cannot give (review of 2026-10-03,
+// BUG-20261003-132, -133, -135). Every run records the required indices only
+// [0, 1, 10, 100, last] plus `extra`, to stay inside the size budget.
+//  * baseline with K_icf raised 2 % at t = 0: the potassium flux K_ur and k_excr_gain are
+//    exactly inert in every registered scenario (K_icf never leaves K_icf_0);
+//  * sweat_potassium: sweat 0.8 L/h over [2, 4) h and K intake x6 over [1, 3) h, the only
+//    run in which sweat, sweat Na and K intake are non-zero;
+//  * drink_water_1L recorded every 7th and every 2.5th grid point: the final-point rule and
+//    JavaScript's Math.round (2.5 -> 3, not 2) of the output thinning;
+//  * drink_water_1L and salt_load_10g at dt = 0.1 h: the bolus end (1.1667 h, 1.25 h) falls
+//    INSIDE an output interval, so the solver must split it there;
+//  * unsorted_breakpoints: a scenario object whose breakpoints array is not sorted.
+// A spec scenario is data, so the Python side builds the identical schedule from it:
+// inputs(t) = baselineInputs, then for each schedule entry with from <= t < to, `set`
+// assigns and `scale` multiplies.
+const SPEC_SCENARIOS = {
+  sweat_potassium: { id: 'sweat_potassium', tEnd: 12, dt: 1 / 60, outEvery: 1, breakpoints: [1, 2, 3, 4],
+    schedule: [{ from: 2, to: 4, set: { sweat_Lh: 0.8 } }, { from: 1, to: 3, scale: { kIn_mmolh: 6 } }] },
+  unsorted_breakpoints: { id: 'unsorted_breakpoints', tEnd: 12, dt: 0.1, outEvery: 1,
+    breakpoints: [3.05, 1.05, 2.25, 1.55],
+    schedule: [{ from: 1.05, to: 1.55, set: { waterIn_Lh: 2 } }, { from: 2.25, to: 3.05, scale: { naIn_mmolh: 20 } }] },
+};
+function specScenario(spec) {
+  return {
+    id: spec.id, tEnd: spec.tEnd, dt: spec.dt, outEvery: spec.outEvery, breakpoints: spec.breakpoints.slice(),
+    label: null,
+    inputs: (t, p) => {
+      const u = E.baselineInputs(p);
+      for (const s of spec.schedule) {
+        if (t >= s.from && t < s.to) {
+          for (const [k, v] of Object.entries(s.set || {})) u[k] = v;
+          for (const [k, f] of Object.entries(s.scale || {})) u[k] *= f;
+        }
+      }
+      return u;
+    },
+  };
+}
+function compactTrajectory(r, tEnd, outEvery, extra = []) {
+  const T = r.t.length;
+  const required = [0, 1, 10, 100, T - 1];
+  const indices = uniqSorted([...required, ...extra.filter((k) => k < T)]);
+  const sec = (obj, keys) => Object.fromEntries(keys.map((k) => [k, pick(obj[k], indices)]));
+  return {
+    dt: r.meta.dt, tEnd, outEvery: outEvery ?? null, length: T, steps: r.meta.steps,
+    maxStep: r.meta.maxStep, requiredIndices: required, indices, t: pick(r.t, indices),
+    states: sec(r.states, E.STATE_KEYS), derived: sec(r.derived, E.DERIVED_KEYS),
+    ledger: sec(r.ledger, E.LEDGER_KEYS),
+  };
+}
+function goldenSolverCoverage() {
+  const p = E.defaultParams();
+  const runs = {};
+  const y0 = E.initialState(p);
+  y0[E.IDX.K_icf] *= 1.02;
+  runs['baseline_K_icf_x1.02'] = { run: { scenario: 'baseline', tEnd: 24, y0Scale: { K_icf: 1.02 } },
+    ...compactTrajectory(E.simulate({ scenario: 'baseline', tEnd: 24, y0 }), 24, undefined, [60, 360]) };
+  for (const [name, spec] of Object.entries(SPEC_SCENARIOS)) {
+    runs[name] = { run: { spec },
+      ...compactTrajectory(E.simulate({ scenario: specScenario(spec) }), spec.tEnd, spec.outEvery,
+        name === 'sweat_potassium' ? [180, 240] : [12, 16, 23, 31]) };
+  }
+  for (const outEvery of [7, 2.5]) {
+    runs[`drink_water_1L_outEvery_${outEvery}`] = { run: { scenario: 'drink_water_1L', outEvery },
+      ...compactTrajectory(E.simulate({ scenario: 'drink_water_1L', outEvery }), 12, outEvery) };
+  }
+  for (const scenario of ['drink_water_1L', 'salt_load_10g']) {
+    runs[`${scenario}_dt_0.1`] = { run: { scenario, dt: 0.1 },
+      ...compactTrajectory(E.simulate({ scenario, dt: 0.1 }), E.SCENARIOS[scenario].tEnd, undefined, [12, 13]) };
+  }
+  return runs;
+}
+
+// (n) JavaScript non-finite semantics the port emulates (BUG-20261003-134): the NaN-last
+// Float64Array sort inside quantileBands, Math.max(0, NaN) = NaN in the fluxes (a state with
+// ADH = NaN), and Math.pow(1, NaN) = NaN (C99 says 1): at the initial state vr = 1 and
+// MAP/MAP_0 = 1, so aldo_vol_exp = NaN and gfr_map_exp = NaN reach pow(1, NaN). Numbers
+// only: -0 in the series is written as 0 by JSON, so the self-test carries its own copy.
+const QB_SERIES = [[1, NaN, 3], [Infinity, 2, -0], [-Infinity, NaN, 0], [5, 4, Infinity], [2, 3, Infinity]];
+const QB_QS = [0.05, 0.5, 0.95, 0, 1];
+function goldenNonFinite() {
+  const bands = MC.quantileBands(QB_SERIES.map((a) => Float64Array.from(a)), QB_QS).map(arr);
+  const at = (params, y) => {
+    const C = E.constants(params);
+    const inputs = E.baselineInputs(params);
+    const led = new Float64Array(E.LEDGER_KEYS.length);
+    const dy = E.rhs(0, y, params, inputs, null, led, C);
+    return { y: arr(y), dy: arr(dy), ledger: arr(led), fluxes: E.fluxes(y, params, inputs, C),
+      derived: E.derived(y, params, C) };
+  };
+  const p = E.defaultParams();
+  const yAdh = E.initialState(p);
+  yAdh[E.IDX.ADH] = NaN;
+  const pow1 = { aldo_vol_exp: NaN, gfr_map_exp: NaN };
+  const pPow = { ...p, ...pow1 };
+  return {
+    quantileBands: { series: QB_SERIES, qs: QB_QS, bands },
+    adhNaN: { overrides: {}, ...at(p, yAdh) },
+    pow1NaN: { overrides: pow1, ...at(pPow, E.initialState(pPow)) },
+  };
+}
+
 const golden = {
   generator: 'tools/health_golden.mjs',
   regenerate: '/opt/node22/bin/node tools/health_golden.mjs',
@@ -373,6 +481,8 @@ const golden = {
   steadyState: goldenConstants(),
   paramSummary: E.paramSummary(),
   findings: goldenFindings(),
+  solverCoverage: goldenSolverCoverage(),
+  nonFinite: goldenNonFinite(),
 };
 golden.rejectionMargins = MARGINS;
 

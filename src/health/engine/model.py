@@ -19,7 +19,12 @@ Port rules (what "the same model" means here):
     propagate NaN, Math.pow/Math.exp return NaN/Infinity instead of raising, and
     `x || 0` maps NaN to 0. Plain `/` in the hot path still raises ZeroDivisionError
     where JavaScript would return +-Infinity; that needs a zero volume or a degenerate
-    parameter and is refused loudly instead of yielding a NaN trajectory.
+    parameter and is refused loudly instead of yielding a NaN trajectory;
+  * the functions here return NaN exactly where model.js does (rhs(), derived() and
+    fluxes() are pinned to the reference on NaN inputs by the fixture section nonFinite),
+    but api.simulate() refuses a trajectory that holds one: it raises
+    NonFiniteTrajectoryError where index.js returns the NaN trajectory (HREQ-V-07; a
+    deliberate deviation, listed in api.py).
 State vectors are plain Python lists of floats (no numpy).
 """
 

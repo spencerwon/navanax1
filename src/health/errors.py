@@ -247,6 +247,14 @@ class StepControlError(NumericalError):
     """The solver was asked for a step that violates its stability bound."""
 
 
+class NonFiniteTrajectoryError(NumericalError):
+    """A simulated trajectory holds a NaN or infinite state, ledger or derived value
+    (HREQ-V-07): the run fails and nothing from it is displayed or summarised.
+
+    Context: scenario, the first output time and key that went non-finite, model version.
+    """
+
+
 class OperationalError(HealthError):
     severity = Severity.S3
 

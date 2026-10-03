@@ -6,6 +6,16 @@ Naming: functions take snake_case keyword arguments (`t_end`, `out_every`); the 
 dictionaries they return keep the JavaScript keys (`t`, `Y`, `states`, `derived`,
 `ledger`, `meta.maxStep`, `q05`, ...), so a consumer of the JavaScript engine reads a
 Python result unchanged. Every result carries the disclaimer as a field (HREQ-S-01).
+
+Deliberate deviations from index.js (each one refuses where the reference would return
+a number nobody should read; none changes a finite result):
+  * simulate() raises health.errors.NonFiniteTrajectoryError (S3/NUM) when any state,
+    ledger or derived value of the trajectory is NaN or infinite (HREQ-V-07); index.js
+    returns the NaN trajectory. Consequences: simulate_mc() and simulate_sweep() raise
+    instead of returning NaN bands, and compute_influence() counts such a perturbation as
+    infeasible (effect = Infinity on every key, listed in meta.infeasible), where index.js
+    lists only thrown errors there.
+  * model.py: a zero divisor in the hot path raises ZeroDivisionError (see its header).
 """
 
 from __future__ import annotations
@@ -16,7 +26,7 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
-from ..errors import HealthError, InfeasibleParametersError
+from ..errors import HealthError, InfeasibleParametersError, NonFiniteTrajectoryError
 from .mc import mulberry32, quantile_bands, sample_params
 from .model import (
     DERIVED_KEYS,
@@ -102,7 +112,9 @@ def simulate(*, params: Mapping[str, Any] | None = None, scenario: str | Scenari
 
     Returns {t, Y, states, derived, ledger, params, scenario, meta}: Y[i][k] is state
     STATE_KEYS[i] at time t[k]; states[key] is the same list by name.
-    Raises InfeasibleParametersError when the params have no reference steady state.
+    Raises InfeasibleParametersError when the params have no reference steady state, and
+    NonFiniteTrajectoryError when any state, ledger or derived value is NaN or infinite
+    (HREQ-V-07; a deliberate deviation: index.js returns the NaN trajectory).
     """
     sc = resolve_scenario(scenario)
     p = dict(params if params is not None else default_params())
@@ -135,6 +147,7 @@ def simulate(*, params: Mapping[str, Any] | None = None, scenario: str | Scenari
         for key in DERIVED_KEYS:
             der[key][k] = d[key]
     states = {k: Y[i] for i, k in enumerate(STATE_KEYS)}
+    _refuse_non_finite(res["t"], states, ledger, der, sc.id)
     return {
         "t": res["t"], "Y": Y, "states": states, "derived": der, "ledger": ledger, "params": p,
         "scenario": sc.id,
@@ -142,6 +155,41 @@ def simulate(*, params: Mapping[str, Any] | None = None, scenario: str | Scenari
                  "label": sc.label or None, "disclaimer": DISCLAIMER,
                  "validation_status": VALIDATION_STATUS, "modelVersion": MODEL_VERSION},
     }
+
+
+def _refuse_non_finite(t: Sequence[float], states: Mapping[str, list[float]],
+                       ledger: Mapping[str, list[float]], der: Mapping[str, list[float]],
+                       scenario_id: str) -> None:
+    """HREQ-V-07: a trajectory holding a NaN or infinite value fails its run.
+
+    Fast path: the sum of every series is finite exactly when no value is NaN or infinite
+    (barring an overflow of the sum itself, which the exact scan below then clears).
+    Raises NonFiniteTrajectoryError naming the FIRST output time, and the key, that went
+    non-finite, and how many values are non-finite in all.
+    """
+    sections = (("states", states), ("ledger", ledger), ("derived", der))
+    if all(math.isfinite(sum(v)) for _, sec in sections for v in sec.values()):
+        return
+    first: tuple[int, str, str, float] | None = None
+    count = 0
+    for name, sec in sections:
+        for key, vals in sec.items():
+            for k, v in enumerate(vals):
+                if not math.isfinite(v):
+                    count += 1
+                    if first is None or k < first[0]:
+                        first = (k, name, key, v)
+    if first is None:           # the sum overflowed; every value is finite
+        return
+    k, name, key, v = first
+    raise NonFiniteTrajectoryError(
+        f"simulate: {name}.{key} is {v!r} at t = {t[k]!r} h (output index {k}); "
+        f"{count} non-finite values in the trajectory. The run fails (HREQ-V-07).",
+        expected="every state, ledger and derived value finite",
+        received={"t": t[k], "index": k, "section": name, "key": key, "value": v,
+                  "non_finite_values": count},
+        scenario=scenario_id, model_version=MODEL_VERSION,
+        t=t[k], key=key, section=name, non_finite_values=count)
 
 
 def draw_samples(*, n: int = 64, seed: int = 1,

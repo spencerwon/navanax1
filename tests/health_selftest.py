@@ -43,6 +43,7 @@ from health import __version__ as HEALTH_VERSION  # noqa: E402
 from health.engine import (  # noqa: E402
     DERIVED_KEYS,
     DISCLAIMER,
+    IDX,
     INFLUENCE_DEFAULTS,
     LEDGER_KEYS,
     LOG_UNIFORM_RATIO,
@@ -69,6 +70,7 @@ from health.engine import (  # noqa: E402
     nearest_index,
     param_summary,
     param_table,
+    quantile_bands,
     rhs,
     salt_load_metrics,
     sampling_mode,
@@ -76,7 +78,9 @@ from health.engine import (  # noqa: E402
     simulate_mc,
     simulate_sweep,
 )
+from health.engine import api as api_module  # noqa: E402
 from health.engine import params as params_module  # noqa: E402
+from health.engine import solver as solver_module  # noqa: E402
 from health.engine.scenarios import PY_ONLY_EXPECTATION_KEYS  # noqa: E402
 from health.engine.solver import rk4_step, workspace  # noqa: E402
 from health.engine.validate import (  # noqa: E402
@@ -89,7 +93,12 @@ from health.engine.validate import (  # noqa: E402
     recovery_time_variants,
     summarize,
 )
-from health.errors import ConfigurationError, HealthError, InfeasibleParametersError  # noqa: E402
+from health.errors import (  # noqa: E402
+    ConfigurationError,
+    HealthError,
+    InfeasibleParametersError,
+    NonFiniteTrajectoryError,
+)
 
 GOLDEN_PATH = ROOT / "tests" / "fixtures" / "health" / "golden_v1.json"
 REFERENCE_ENGINE = ROOT / "reference" / "metabolic-map-v1" / "engine"
@@ -123,6 +132,17 @@ LITERATURE_FAILS = {
 PASS: list[str] = []
 FAIL: list[str] = []
 SKIPPED: list[tuple[str, tuple[str, ...]]] = []   # (test name, the modules that were missing)
+#: Set by `--robust`: run the slow gates too (docs/health/03 §3.1 n = 256 drift, §3.4
+#: convergence on every scenario and the stiff corner). Off by default to keep the suite
+#: well under a minute (HREQ-N-04); the summary line says whether they ran.
+ROBUST = False
+
+
+def robust(fn):
+    """Mark a test as a slow gate, run only under `--robust` (and then counted like any
+    other). Without the flag it is not run and the summary line says so, by count."""
+    fn.robust = True
+    return fn
 
 
 def needs(*modules: str):
@@ -478,6 +498,61 @@ def test_divergence_checkpoints_match_javascript_reference():
     note(w.summary())
 
 
+# Solver and port coverage the registered scenarios cannot give (fixture section
+# solverCoverage, BUG-20261003-132/-133/-135): potassium and sweat fluxes, output thinning,
+# breakpoints inside output intervals, unsorted breakpoints. These runs are built HERE from
+# the fixture's own description (never added to the shipped SCENARIOS registry).
+COVERAGE_RUNS = ("baseline_K_icf_x1.02", "sweat_potassium", "unsorted_breakpoints",
+                 "drink_water_1L_outEvery_7", "drink_water_1L_outEvery_2.5",
+                 "drink_water_1L_dt_0.1", "salt_load_10g_dt_0.1")
+_COVERAGE: dict[str, dict[str, Any]] = {}
+
+
+def spec_scenario(spec: Mapping[str, Any]) -> Any:
+    """The fixture's data-described scenario (tools/health_golden.mjs specScenario): the
+    baseline diet, then for each schedule entry with from <= t < to, `set` assigns and
+    `scale` multiplies. Breakpoints are kept in the given (possibly unsorted) order."""
+    schedule = [(e["from"], e["to"], dict(e.get("set", {})), dict(e.get("scale", {})))
+                for e in spec["schedule"]]
+
+    def inputs(t: float, p: Mapping[str, Any]) -> dict[str, float]:
+        u = baseline_inputs(p)
+        for lo, hi, assign, scale in schedule:
+            if t >= lo and t < hi:
+                for k, v in assign.items():
+                    u[k] = v
+                for k, f in scale.items():
+                    u[k] = u[k] * f
+        return u
+
+    return dataclasses.replace(
+        SCENARIOS["baseline"], id=spec["id"], title=spec["id"], description="self-test only",
+        t_end=spec["tEnd"], dt=spec["dt"], out_every=spec["outEvery"],
+        breakpoints=tuple(spec["breakpoints"]), events=(), overrides=(), inputs=inputs,
+        validation=None, label=None)
+
+
+def coverage_run(name: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Run one solverCoverage case as the generator did (memoised at default params)."""
+    if params is None and name in _COVERAGE:
+        return _COVERAGE[name]
+    run = golden()["solverCoverage"][name]["run"]
+    p = dict(params if params is not None else default_params())
+    if "spec" in run:
+        r = simulate(params=p, scenario=spec_scenario(run["spec"]))
+    elif "y0Scale" in run:
+        y0 = initial_state(p)
+        for k, f in run["y0Scale"].items():
+            y0[IDX[k]] *= f
+        r = simulate(params=p, scenario=run["scenario"], t_end=run["tEnd"], y0=y0)
+    else:
+        r = simulate(params=p, scenario=run["scenario"], dt=run.get("dt"),
+                     out_every=run.get("outEvery"))
+    if params is None:
+        _COVERAGE[name] = r
+    return r
+
+
 def test_default_params_trajectories_match_javascript_reference():
     gt = golden()["trajectories"]
     check("trajectories: fixture covers every registered scenario (HREQ-V-08), including the "
@@ -519,6 +594,58 @@ def test_default_params_trajectories_match_javascript_reference():
         total.n += w.n
         total.identical += w.identical
     note(f"all trajectories: {total.n} values, {total.identical} bit-identical")
+
+    # Solver and port coverage (fixture section solverCoverage).
+    gc = golden()["solverCoverage"]
+    check("solver coverage: the fixture holds the K-perturbed baseline, the sweat/potassium "
+          "run, outEvery 7 and 2.5, dt 0.1 runs and the unsorted-breakpoint scenario",
+          list(gc) == list(COVERAGE_RUNS), str(list(gc)))
+    for name in COVERAGE_RUNS:
+        if name not in gc:
+            continue
+        g, r = gc[name], coverage_run(name)
+        T = len(r["t"])
+        check(f"coverage {name}: grid length {g['length']}, {g['steps']} RK4 steps and maxStep "
+              "as in JS", T == g["length"] and r["meta"]["steps"] == g["steps"]
+              and r["meta"]["maxStep"] == g["maxStep"]
+              and g["requiredIndices"] == [0, 1, 10, 100, T - 1],
+              f"python length {T}, steps {r['meta']['steps']}, maxStep {r['meta']['maxStep']!r}")
+        w = compare_trajectory(r, g, name)
+        check(f"coverage {name}: every state, derived and ledger value matches JS", w.ok,
+              w.summary())
+        note(w.summary())
+    # What each case exists for, asserted on the run itself so a fixture that stopped
+    # exercising it cannot pass quietly.
+    k0 = default_params()["K_icf_0"]
+    sk = coverage_run("sweat_potassium")
+    kb = coverage_run("baseline_K_icf_x1.02")
+    base_k = default_params()["kIn_base_mmold"] / 24
+    check("coverage: potassium moves -- K_icf leaves K_icf_0 and urinary K departs from intake "
+          "in the sweat/potassium run and the K-perturbed baseline (every registered scenario "
+          "holds them exactly at baseline)",
+          max(abs(v - k0) for v in sk["states"]["K_icf"]) > 1e-3 * k0
+          and max(abs(v - base_k) for v in kb["derived"]["K_excr"]) > 1e-2 * base_k)
+    p0 = default_params()
+    sk_sc = spec_scenario(gc["sweat_potassium"]["run"]["spec"])
+    u_sweat, u_k = sk_sc.inputs(3.0, p0), sk_sc.inputs(1.5, p0)
+    f_sweat = fluxes(initial_state(p0), p0, u_sweat)
+    check("coverage: the sweat/potassium run sweats 0.8 L/h with its sodium over [2, 4) h and "
+          "takes 6x the K intake over [1, 3) h",
+          f_sweat["sweat"] == 0.8 and f_sweat["sweat_na"] == 0.8 * p0["sweat_na_mmolL"] > 0
+          and u_k["kIn_mmolh"] == base_k * 6 and u_k["sweat_Lh"] == 0,
+          f"{u_sweat}, {u_k}, sweat {f_sweat['sweat']}, sweat_na {f_sweat['sweat_na']}")
+    check("coverage: drink_water_1L recorded every 7th point has 104 points (the final point "
+          "is always recorded), every 2.5th 241 (JavaScript Math.round(2.5) = 3, not "
+          "Python's round(2.5) = 2)",
+          len(coverage_run("drink_water_1L_outEvery_7")["t"]) == 104
+          and len(coverage_run("drink_water_1L_outEvery_2.5")["t"]) == 241,
+          f"{len(coverage_run('drink_water_1L_outEvery_7')['t'])}, "
+          f"{len(coverage_run('drink_water_1L_outEvery_2.5')['t'])}")
+    spec = gc.get("unsorted_breakpoints", {}).get("run", {}).get("spec", {})
+    bps = spec.get("breakpoints", [])
+    check("coverage: the unsorted-breakpoint scenario really is unsorted, with breakpoints off "
+          "the 0.1 h grid", bool(bps) and bps != sorted(bps)
+          and all(abs(b * 10 - round(b * 10)) > 1e-6 for b in bps), str(bps))
 
 
 def _apply_table_edits(table: dict[str, Any], edits: Mapping[str, Any]) -> dict[str, Any]:
@@ -700,14 +827,18 @@ def test_golden_comparison_detects_a_perturbed_model_constant():
     model constant is perturbed. Each parameter is raised by 1e-6 relative and the golden
     trajectories are re-compared; every parameter must be caught except the ones that are
     provably inert in the golden scenarios, listed with the reason."""
+    # k_excr_gain and sweat_na_mmolL were inert here until the fixture gained the
+    # K-perturbed baseline and the sweat/potassium run (BUG-20261003-132); they must now
+    # be caught like every other model parameter.
     inert = {
-        "k_excr_gain": "K_icf never leaves K_icf_0 in V1 (constant K intake), so exp(gain·0) = 1",
-        "sweat_na_mmolL": "no V1 scenario sweats",
         "na_normal_low": "classification threshold: only the Monte Carlo rejection rule reads it",
         "na_normal_high": "classification threshold: only the Monte Carlo rejection rule reads it",
     }
     gt = golden()["trajectories"]
-    order = ["drink_water_1L", "no_water_24h", "salt_load_10g"]   # cheapest first
+    gc = golden()["solverCoverage"]
+    # cheapest first; the two coverage runs are the only ones where K and sweat fluxes move
+    order = ["drink_water_1L", "sweat_potassium", "baseline_K_icf_x1.02", "no_water_24h",
+             "salt_load_10g"]
     p0 = default_params()
     undetected = []
     for name, v in p0.items():
@@ -715,8 +846,11 @@ def test_golden_comparison_detects_a_perturbed_model_constant():
         for sid in order:
             p = dict(p0)
             p[name] = v * (1 + 1e-6)
-            r = simulate(params=p, scenario=sid, dt=gt[sid]["dt"])
-            if not compare_trajectory(r, gt[sid], sid).ok:
+            if sid in gc:
+                r, g = coverage_run(sid, p), gc[sid]
+            else:
+                r, g = simulate(params=p, scenario=sid, dt=gt[sid]["dt"]), gt[sid]
+            if not compare_trajectory(r, g, sid).ok:
                 caught = True
                 break
         if not caught:
@@ -735,6 +869,60 @@ def test_golden_comparison_detects_a_perturbed_model_constant():
     e = golden()["drawSamples"]["samples"][0]
     check("golden: a perturbed classification threshold fails the drawSamples comparison",
           err_ratio(s["na_normal_low"], e["na_normal_low"], SAMPLE_REL_TOL, 0.0) > 1)
+
+# The quantile series of fixture section nonFinite. JSON writes -0 as 0, so the self-test
+# carries the literal (with its -0) and checks it equals the fixture's copy.
+QB_SERIES = [[1.0, math.nan, 3.0], [math.inf, 2.0, -0.0], [-math.inf, math.nan, 0.0],
+             [5.0, 4.0, math.inf], [2.0, 3.0, math.inf]]
+QB_QS = [0.05, 0.5, 0.95, 0, 1]
+
+
+def test_non_finite_semantics_match_javascript_reference():
+    """The port emulates JavaScript where Python's maths differs on non-finite values
+    (BUG-20261003-134): Float64Array.sort puts NaN last; Math.max(0, NaN) is NaN, where
+    Python's max(0.0, nan) is 0.0; Math.pow(1, NaN) is NaN, where C99 pow says 1. The fixture
+    pins all three to the reference; a NaN must sit at the same position on both sides
+    (err_ratio: NaN against NaN is equal, NaN against a number is infinitely wrong)."""
+    g = golden()["nonFinite"]
+    qb = g["quantileBands"]
+    check("non-finite: the self-test's quantile series and qs are the fixture's (-0 aside)",
+          first_difference(QB_SERIES, qb["series"]) is None and QB_QS == qb["qs"],
+          str(first_difference(QB_SERIES, qb["series"])))
+    got = quantile_bands(QB_SERIES, QB_QS)
+    w = Worst()
+    for j, q in enumerate(QB_QS):
+        for k, e in enumerate(qb["bands"][j]):
+            w.add(f"quantileBands q={q}[{k}]", got[j][k], e)
+    check("non-finite: quantile_bands with NaN and +-Infinity in the samples equals JS "
+          "quantileBands (NaN sorted last; NaN positions identical)", w.ok, w.summary())
+    note(w.summary())
+    p0 = default_params()
+    for label, desc in (("adhNaN", "a state with ADH = NaN (Math.max(0, NaN) = NaN)"),
+                        ("pow1NaN", "aldo_vol_exp = gfr_map_exp = NaN at vr = MAP/MAP_0 = 1 "
+                                    "(Math.pow(1, NaN) = NaN)")):
+        e = g[label]
+        p = p0 | e["overrides"]
+        y = list(e["y"])
+        C = constants(p)
+        inputs = baseline_inputs(p)
+        led = [0.0] * len(LEDGER_KEYS)
+        dy = rhs(0.0, y, p, inputs, None, led, C)
+        f = fluxes(y, p, inputs, C)
+        d = derived(y, p, C)
+        w = Worst()
+        for i, v in enumerate(e["dy"]):
+            w.add(f"{label} rhs.d{STATE_KEYS[i]}", dy[i], v)
+        for i, v in enumerate(e["ledger"]):
+            w.add(f"{label} ledger.{LEDGER_KEYS[i]}", led[i], v)
+        for k, v in e["fluxes"].items():
+            w.add(f"{label} fluxes.{k}", f[k], v)
+        for k, v in e["derived"].items():
+            w.add(f"{label} derived.{k}", d[k], v)
+        n_nan = sum(1 for sec in ("dy", "ledger") for v in e[sec] if v != v) + sum(
+            1 for sec in ("fluxes", "derived") for v in e[sec].values() if v != v)
+        check(f"non-finite: rhs, ledger, fluxes and derived at {desc} equal JS, NaN for NaN",
+              w.ok and n_nan > 0, w.summary() + f"; {n_nan} NaN values in the fixture")
+        note(f"{label}: {w.summary()}; {n_nan} NaN values compared by position")
 
 
 # ---------------------------------------------------------------------------
@@ -762,6 +950,8 @@ def test_baseline_is_a_steady_state():
                   for s in samples)
     check("baseline: three Monte Carlo parameter sets also sit at their steady state (6 h)",
           worst_s < STEADY_STATE_DRIFT_MAX, f"{worst_s:.3g}")
+    note("3 samples x 6 h in the default suite; the n = 256 x 24 h gate of 03 §3.1 is "
+         "test_robust_steady_state_drift_over_the_reporting_set (--robust)")
     corner = max_relative_state_drift(simulate(params=stiff_corner_params(), scenario="baseline"))
     check("baseline: the stiff parameter corner (docs/health/03 §3.5) sits at its steady state "
           "over 24 h", corner[0] < STEADY_STATE_DRIFT_MAX, f"{corner[0]:.3g} at {corner[1]}")
@@ -780,6 +970,10 @@ def test_water_and_sodium_mass_balance_closes():
     runs = [(sid, sim(sid)) for sid in SCENARIOS]
     runs += [(f"{sid} at the stiff corner", stiff_corner_run(sid))
              for sid in golden()["stiffCorner"]["runs"]]
+    # The only runs in which the potassium and cell-solute invariants are not trivially
+    # constant (K and sweat fluxes are zero in every registered scenario), plus the
+    # off-grid breakpoint runs (BUG-20261003-132, -135).
+    runs += [(f"coverage {name}", coverage_run(name)) for name in COVERAGE_RUNS]
     for label, r in runs:
         s, L = r["states"], r["ledger"]
 
@@ -804,6 +998,217 @@ def test_water_and_sodium_mass_balance_closes():
             check(f"mass balance {label}: {name} invariant constant to {MASS_BALANCE_TOL:g} "
                   "relative", d <= MASS_BALANCE_TOL, f"{d:.3g} (value at t=0: {i0[name]:.6g})")
         note(f"{label}: " + ", ".join(f"{n} {d:.2g}" for n, d in rel.items()))
+
+
+# ---------------------------------------------------------------------------
+# Numerical gates of docs/health/03 §3.3-§3.6 (HREQ-V-04 .. V-07). Each gate is shown to
+# fail on the defect it exists for (the breakpoint trap and the instability trap).
+# ---------------------------------------------------------------------------
+#: HREQ-V-05 (03 §3.4, chosen): halving the step twice changes no state by more than this
+#: fraction of its peak magnitude; ADH and Thirst, whose targets pass through max(0, ·) and
+#: a [0, 1] clamp the solver does not locate, are held to the looser bound. Measured
+#: 2026-10-03 (default params): drink_water_1L ANP 7.2e-7, ADH 2.0e-5, Thirst 3.2e-4;
+#: salt_load_10g ANP 1.1e-7, ADH 2.6e-8, Thirst 9.2e-8 -- 14x and 3x inside the gates.
+CONVERGENCE_TOL = 1e-5
+CONVERGENCE_TOL_KINKED = 1e-3
+KINKED_STATES = ("ADH", "Thirst")
+PRODUCTION_STEP_FACTOR = 0.25      # index.js simulate: maxStep = min(dt, 0.25 · tau_min)
+FINE_STEP_FACTOR = 0.0625          # a quarter of it: the step halved twice
+#: HREQ-V-04 (03 §3.3, chosen): an off-grid bolus is delivered to 1e-12 relative.
+BOLUS_EXACTNESS_TOL = 1e-12
+#: 03 §3.3 / §9: the off-grid bolus (1 L over 7.3 min from 1.0037 h) and the instability
+#: trap's step factor (capped by dt at 0.25 h = 3.3 · tau_min on chronic_high_salt_30d).
+BOLUS = {"liters": 1, "dur_min": 7.3, "at": 1.0037, "t_end": 3}
+INSTABILITY_STEP_FACTOR = 3.5
+
+
+def with_step_factor(factor: float, fn: Callable[[], Any]) -> Any:
+    """Run fn() with api.MAX_STEP_FRACTION_OF_TAU_MIN set to `factor`, then restore it."""
+    old = api_module.MAX_STEP_FRACTION_OF_TAU_MIN
+    api_module.MAX_STEP_FRACTION_OF_TAU_MIN = factor
+    try:
+        return fn()
+    finally:
+        api_module.MAX_STEP_FRACTION_OF_TAU_MIN = old
+
+
+def convergence_errors(params: Mapping[str, Any], scenario: str,
+                       out_every: int | None = None) -> tuple[dict[str, float], int, int]:
+    """Peak-scaled max |x_coarse - x_fine| per state, production step factor vs a quarter
+    of it (03 §3.4), and the two RK4 step counts."""
+    a = with_step_factor(PRODUCTION_STEP_FACTOR,
+                         lambda: simulate(params=params, scenario=scenario, out_every=out_every))
+    b = with_step_factor(FINE_STEP_FACTOR,
+                         lambda: simulate(params=params, scenario=scenario, out_every=out_every))
+    errs = {}
+    for k in STATE_KEYS:
+        x, y = a["states"][k], b["states"][k]
+        peak = max(abs(v) for v in y) or 1.0
+        errs[k] = max(abs(u - v) for u, v in zip(x, y, strict=True)) / peak
+    return errs, a["meta"]["steps"], b["meta"]["steps"]
+
+
+def check_convergence(label: str, errs: Mapping[str, float], coarse: int, fine: int) -> None:
+    smooth = {k: v for k, v in errs.items() if k not in KINKED_STATES}
+    ks = max(smooth, key=lambda k: smooth[k])
+    kk = max(KINKED_STATES, key=lambda k: errs[k])
+    check(f"convergence {label}: halving the step twice ({coarse} -> {fine} RK4 steps) changes "
+          f"no state by more than {CONVERGENCE_TOL:g} of its peak ({CONVERGENCE_TOL_KINKED:g} for "
+          "ADH and Thirst) (HREQ-V-05)",
+          smooth[ks] <= CONVERGENCE_TOL and errs[kk] <= CONVERGENCE_TOL_KINKED
+          and fine >= 2 * coarse,
+          f"worst smooth {ks} {smooth[ks]:.3g}, worst kinked {kk} {errs[kk]:.3g}, "
+          f"steps {coarse} -> {fine}")
+    note(f"{label}: worst smooth {ks} {smooth[ks]:.2g}, ADH {errs['ADH']:.2g}, Thirst "
+         f"{errs['Thirst']:.2g}; steps {coarse} -> {fine}")
+
+
+def test_halving_the_step_twice_converges():
+    """HREQ-V-05 on the two scenarios with the sharpest transients (03 §3.4). Every other
+    scenario, and the stiff corner (HREQ-V-06), run under --robust."""
+    check("convergence: the production step factor is 0.25, as in index.js",
+          api_module.MAX_STEP_FRACTION_OF_TAU_MIN == PRODUCTION_STEP_FACTOR)
+    for sid in ("drink_water_1L", "salt_load_10g"):
+        check_convergence(sid, *convergence_errors(default_params(), sid))
+
+
+@robust
+def test_robust_convergence_on_every_scenario_and_the_stiff_corner():
+    """HREQ-V-05 and V-06: every registered scenario at default parameters and at the stiff
+    corner of 03 §3.5 (the 30-day runs dominate)."""
+    for label, params in (("default", default_params()), ("stiff corner", stiff_corner_params())):
+        for sid in SCENARIOS:
+            t0 = time.perf_counter()
+            check_convergence(f"{sid} ({label})", *convergence_errors(params, sid))
+            note(f"  took {time.perf_counter() - t0:.2f} s")
+
+
+@robust
+def test_robust_steady_state_drift_over_the_reporting_set():
+    """03 §3.1 / HREQ-V-02: the closed-form steady state holds for every accepted sample of
+    the reporting set (n = 256, seed 1), over the full 24 h of baseline."""
+    t0 = time.perf_counter()
+    samples = draw_samples(n=256, seed=1)["samples"]
+    worst, where = 0.0, ""
+    for i, s in enumerate(samples):
+        d, key, k = max_relative_state_drift(simulate(params=s, scenario="baseline", t_end=24))
+        if not (d <= worst):
+            worst, where = d, f"sample {i}, {key}[{k}]"
+    check(f"baseline: all 256 accepted samples of the reporting set sit at their steady state "
+          f"over 24 h (max |Δstate| / scale < {STEADY_STATE_DRIFT_MAX:g})",
+          len(samples) == 256 and worst < STEADY_STATE_DRIFT_MAX, f"{worst:.3g} at {where}")
+    note(f"n = 256 x 24 h: worst drift {worst:.3g} at {where}; took "
+         f"{time.perf_counter() - t0:.2f} s")
+
+
+def _bolus_delivered(r: Mapping[str, Any], p: Mapping[str, Any], t_end: float) -> float:
+    """Bolus volume in the ledger: total intake minus the continuous diet and metabolic water."""
+    C = constants(p)
+    return r["ledger"]["water_in"][-1] - (C["waterIn_h"] + C["metab_h"]) * t_end
+
+
+def test_off_grid_bolus_is_exact_and_the_breakpoint_trap_fails():
+    """HREQ-V-04 (03 §3.3): no step exceeds min(dt, 0.25·tau_min) or straddles a breakpoint;
+    an off-grid bolus is delivered to 1e-12 relative; and with its breakpoints removed the
+    same bolus MUST fail that test (the breakpoint trap)."""
+    p = default_params()
+    sc = make_water_load(BOLUS["liters"], BOLUS["dur_min"], BOLUS["at"], BOLUS["t_end"])
+    steps: list[tuple[float, float]] = []
+    real_step = solver_module.rk4_step
+
+    def recording_step(deriv: Any, t: float, z: list[float], h: float, inputs: Any,
+                       ws: Any) -> None:
+        steps.append((t, h))
+        real_step(deriv, t, z, h, inputs, ws)
+
+    solver_module.rk4_step = recording_step
+    try:
+        r = simulate(params=p, scenario=sc)
+    finally:
+        solver_module.rk4_step = real_step
+    max_step = r["meta"]["maxStep"]
+    dt, t_end = r["meta"]["dt"], sc.t_end
+    bps = sorted(sc.breakpoints)
+    n_grid = math.ceil(t_end / dt - 1e-9)
+    cuts = sorted({*(k * dt for k in range(n_grid)), t_end, *(b for b in bps if 0 < b < t_end)})
+    expected_steps = sum(max(1, math.ceil((b - a) / max_step - 1e-12))
+                         for a, b in zip(cuts, cuts[1:], strict=False) if b > a)
+    straddles = [(t, h, b) for t, h in steps for b in bps if t < b - 1e-12 and t + h > b + 1e-12]
+    largest = max(h for _, h in steps) if steps else math.nan
+    check("step control: every RK4 step <= maxStep = min(dt, 0.25·tau_min), none straddles a "
+          "breakpoint, and the step count is the sum over segments of ceil(length / maxStep)",
+          len(steps) == r["meta"]["steps"] == expected_steps
+          and largest <= max_step * (1 + 1e-12) and not straddles,
+          f"{len(steps)} steps recorded, meta {r['meta']['steps']}, expected {expected_steps}; "
+          f"largest {largest!r} vs maxStep {max_step!r}; straddles {straddles[:3]}")
+    got = _bolus_delivered(r, p, t_end)
+    err = abs(got - BOLUS["liters"]) / BOLUS["liters"]
+    check(f"bolus: 1 L over 7.3 min from 1.0037 h (off the 1/60 h grid) is delivered to "
+          f"{BOLUS_EXACTNESS_TOL:g} relative (HREQ-V-04)", err <= BOLUS_EXACTNESS_TOL,
+          f"delivered {got!r} L, relative error {err:.3g}")
+    trap = simulate(params=p, scenario=dataclasses.replace(sc, breakpoints=()))
+    got_t = _bolus_delivered(trap, p, t_end)
+    err_t = abs(got_t - BOLUS["liters"]) / BOLUS["liters"]
+    check("breakpoint trap: the same bolus with its breakpoints removed FAILS the exactness "
+          "gate, misplacing 9-10 % of the bolus (03 §3.3 reports 9.6 %)",
+          err_t > BOLUS_EXACTNESS_TOL and 0.09 < err_t < 0.10,
+          f"delivered {got_t!r} L, misplaced {100 * err_t:.3g} %")
+    note(f"bolus error with breakpoints {err:.2g}; without them {100 * err_t:.3g} % misplaced; "
+         f"{len(steps)} steps, maxStep {max_step:.6g} h")
+
+
+def test_simulate_refuses_a_non_finite_trajectory():
+    """HREQ-V-07 (03 §3.6): a trajectory holding a NaN or infinite value fails its run.
+    The instability trap (03 §3.3: step factor 3.5 on chronic_high_salt_30d, maxStep capped
+    by dt at 0.25 h = 3.3·tau_min) must raise NonFiniteTrajectoryError; a production run
+    must not. index.js returns the NaN trajectory: a deliberate, documented port deviation."""
+    p = default_params()
+    tau = constants(p)["tau_min"]
+    raised: NonFiniteTrajectoryError | None = None
+    try:
+        with_step_factor(INSTABILITY_STEP_FACTOR,
+                         lambda: simulate(params=p, scenario="chronic_high_salt_30d"))
+    except NonFiniteTrajectoryError as exc:
+        raised = exc
+    check("instability trap: step factor 3.5 (maxStep 0.25 h = 3.3·tau_min) on "
+          "chronic_high_salt_30d raises NonFiniteTrajectoryError instead of returning NaN",
+          raised is not None and min(0.25, INSTABILITY_STEP_FACTOR * tau) == 0.25
+          and 0.25 / tau > 3.3, str(raised))
+    if raised is not None:
+        ctx = raised.as_dict()
+        check("instability trap: the error is S3/NUM, a NumericalError, and names the scenario, "
+              "the first non-finite time (within 48 h), the key and the model version",
+              ctx["severity"] == "S3" and ctx["class"] == "NUM"
+              and isinstance(raised, HealthError)
+              and type(raised).__mro__[1].__name__ == "NumericalError"
+              and ctx["scenario"] == "chronic_high_salt_30d" and ctx["t"] <= 48
+              and ctx["key"] in (*STATE_KEYS, *LEDGER_KEYS, *DERIVED_KEYS)
+              and ctx["model_version"] == MODEL_VERSION and ctx["non_finite_values"] > 0
+              and "HREQ-V-07" in ctx["message"], str(ctx))
+        note(f"instability trap: {raised.message}")
+    check("instability trap: the step factor is restored afterwards",
+          api_module.MAX_STEP_FRACTION_OF_TAU_MIN == PRODUCTION_STEP_FACTOR)
+    try:
+        ok = simulate(params=p, scenario="chronic_high_salt_30d", t_end=48)
+        finite = all(math.isfinite(v) for sec in ("states", "derived", "ledger")
+                     for vals in ok[sec].values() for v in vals)
+        normal = None
+    except NonFiniteTrajectoryError as exc:
+        finite, normal = False, str(exc)
+    check("instability trap: the same 48 h at the production step factor runs, all values "
+          "finite, no exception", normal is None and finite, str(normal))
+    # The detector itself: one NaN deep in a derived series of an otherwise finite run.
+    r = sim("drink_water_1L")
+    der = {k: list(v) for k, v in r["derived"].items()}
+    der["U_osm"][300] = math.nan
+    try:
+        api_module._refuse_non_finite(r["t"], r["states"], r["ledger"], der, "drink_water_1L")
+        found = None
+    except NonFiniteTrajectoryError as exc:
+        found = exc.as_dict()
+    check("non-finite gate: a single NaN in one derived series is found, with its key and time",
+          found is not None and found["key"] == "U_osm" and found["section"] == "derived"
+          and found["t"] == r["t"][300] and found["non_finite_values"] == 1, str(found))
 
 
 def test_scenario_expectations_harness_evaluates_every_quantitative_expectation():
@@ -1062,6 +1467,9 @@ def test_infeasible_params_are_refused_not_silently_accepted():
         "required urine osmolality above U_osm_max (U_osm_max = 500)": {"U_osm_max": 500},
         "non-positive steady-state urine flow (water intake 0.5 L/day)": {"waterIn_base_Ld": 0.5},
         "degenerate concentrating range (U_osm_min = U_osm_max)": {"U_osm_min": 1200},
+        # docs/health/03 §9 fixture: inside every range but water intake 1.3 L/day.
+        "required urine osmolality 1,229 mOsm/kg above U_osm_max 1,200 (water intake "
+        "1.3 L/day, 03 §9)": {"waterIn_base_Ld": 1.3},
     }
     for label, edits in cases.items():
         p = default_params() | edits
@@ -1094,6 +1502,47 @@ def test_infeasible_params_are_refused_not_silently_accepted():
     check("infeasible: draw_samples raises InfeasibleParametersError when no feasible sample "
           "exists, after 50·n draws",
           gave_up is not None and "0/2 feasible samples after 100 draws" in gave_up, str(gave_up))
+
+    # docs/health/03 §9 fixtures, as numbers (HREQ-V-25).
+    u13 = constants(default_params() | {"waterIn_base_Ld": 1.3})
+    check("§9 fixture: water intake 1.3 L/day requires urine at 1228.57 mOsm/kg (> U_osm_max "
+          "1200), so it is infeasible",
+          round(u13["U_ss"], 2) == 1228.57 and u13["feasible"] is False, f"{u13['U_ss']!r}")
+    p296 = default_params() | {"adh_threshold": 296}
+    c296 = constants(p296)
+    try:
+        y296 = initial_state(p296)
+        det_ok = abs(y296[STATE_KEYS.index("Na_ecf")] / y296[STATE_KEYS.index("V_ecf")]
+                     - c296["Na_ss"]) < 1e-9
+    except InfeasibleParametersError:
+        det_ok = False
+    check("§9 fixture: adh_threshold = 296 mOsm/kg is FEASIBLE with baseline sodium 145.61 "
+          "mmol/L, above na_normal_high 145 (the deterministic path accepts it)",
+          c296["feasible"] is True and round(c296["Na_ss"], 2) == 145.61
+          and c296["Na_ss"] > p296["na_normal_high"] and det_ok, f"{c296['Na_ss']!r}")
+
+    def frozen_table(**values: float) -> dict[str, Any]:
+        """Every entry held fixed: each draw is exactly the default set with `values`."""
+        tab = param_table()
+        for e in tab.values():
+            e["mc"] = False
+        for k, v in values.items():
+            tab[k]["value"] = v
+        return tab
+
+    try:
+        draw_samples(n=2, seed=1, table=frozen_table(adh_threshold=296))
+        refused = None
+    except InfeasibleParametersError as exc:
+        refused = exc
+    check("§9 fixture: draw_samples REJECTS adh_threshold = 296 by its normonatremia rule "
+          "(every one of 100 draws rejected and counted, then it raises)",
+          refused is not None and refused.context.get("rejected") == 100
+          and "0/2 feasible samples after 100 draws" in refused.message, str(refused))
+    control = draw_samples(n=2, seed=1, table=frozen_table())
+    check("§9 fixture: the same frozen table at the default adh_threshold (281) is accepted "
+          "with no rejection, so the rejection above is the normonatremia rule's",
+          control["rejected"] == 0 and len(control["samples"]) == 2, str(control["rejected"]))
 
 
 def test_results_carry_the_disclaimer_and_reproducibility_fields():
@@ -1232,8 +1681,15 @@ def exit_code(n_failed: int, n_skipped: int, *, strict: bool) -> int:
     return 0
 
 
+def robust_status(ran: bool, n_robust: int) -> str:
+    """The summary line's statement of whether the slow gates ran (03 §3.1, §3.4)."""
+    if ran:
+        return f"robust gates ran ({n_robust} test functions, --robust)"
+    return f"robust gates NOT run ({n_robust} test functions need --robust)"
+
+
 def summary_lines(n_tests: int, n_passed: int, n_failed: int,
-                  skipped: list[tuple[str, tuple[str, ...]]]) -> list[str]:
+                  skipped: list[tuple[str, tuple[str, ...]]], robust_note: str = "") -> list[str]:
     """The end-of-run report. Skipped tests are LISTED by name above the counts."""
     lines: list[str] = []
     if skipped:
@@ -1243,11 +1699,13 @@ def summary_lines(n_tests: int, n_passed: int, n_failed: int,
         lines.append("")
     mods = sorted({m for _, ms in skipped for m in ms})
     tail = f", {len(skipped)} skipped (needs: {', '.join(mods)})" if skipped else ", 0 skipped"
-    lines.append(f"{n_tests} test functions, {n_passed} passed, {n_failed} failed{tail}")
+    lines.append(f"{n_tests} test functions, {n_passed} passed, {n_failed} failed{tail}"
+                 + (f"; {robust_note}" if robust_note else ""))
     return lines
 
 
-def run_suite(tests: list[tuple[str, Callable[[], None]]], *, strict: bool = False) -> int:
+def run_suite(tests: list[tuple[str, Callable[[], None]]], *, strict: bool = False,
+              robust_note: str = "") -> int:
     """Run `tests` in order, print the report, return the process exit code."""
     t_start = time.perf_counter()
     for name, fn in tests:
@@ -1274,7 +1732,7 @@ def run_suite(tests: list[tuple[str, Callable[[], None]]], *, strict: bool = Fal
               f"{h['calibration']['n']} {h['calibration']['statuses']} (calibrates "
               f"{', '.join(h['calibrated_parameters'])}); structural {h['structural']['n']} "
               f"{h['structural']['statuses']}")
-    for line in summary_lines(len(tests), len(PASS), len(FAIL), SKIPPED):
+    for line in summary_lines(len(tests), len(PASS), len(FAIL), SKIPPED, robust_note):
         print(line)
     print(f"wall time {time.perf_counter() - t_start:.1f} s")
     if FAIL:
@@ -1296,13 +1754,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-skips", action="store_true",
                     help="fail if ANY test was skipped for a missing module "
                          "(the mode gates.py and the post-Install CI step use)")
+    ap.add_argument("--robust", action="store_true",
+                    help="also run the slow gates: convergence on every scenario and the stiff "
+                         "corner, and the n = 256 x 24 h steady-state drift (docs/health/03 "
+                         "§3.1, §3.4)")
     a = ap.parse_args(argv)
+    global ROBUST
+    ROBUST = a.robust
     print("=" * 72)
     print(f"NAVANAX HEALTH ENGINE SELF-TEST  (model {MODEL_VERSION}; stdlib only; golden "
-          f"{GOLDEN_PATH.relative_to(ROOT)})" + ("  [--no-skips]" if a.no_skips else ""))
+          f"{GOLDEN_PATH.relative_to(ROOT)})" + ("  [--no-skips]" if a.no_skips else "")
+          + ("  [--robust]" if a.robust else ""))
     print(DISCLAIMER)
     print("=" * 72)
-    return run_suite(discover(), strict=a.no_skips)
+    every = discover()
+    n_robust = sum(1 for _, fn in every if getattr(fn, "robust", False))
+    tests = [(n, fn) for n, fn in every if ROBUST or not getattr(fn, "robust", False)]
+    return run_suite(tests, strict=a.no_skips, robust_note=robust_status(ROBUST, n_robust))
 
 
 if __name__ == "__main__":

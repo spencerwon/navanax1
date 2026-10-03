@@ -1395,6 +1395,54 @@ or recalibrate through WF-H-01 (tracker D-9).
 **BUG-20261003-116 (S4/P3).** Three latent quirks in the reference engine found while
 porting; none reachable with shipped data.
 
+**BUG-20261003-132 (S1/P1).** No golden or invariant test ever moved potassium or made
+the body sweat: every registered scenario holds K intake constant and sweat at zero, so
+eight port mutants of `model.py` (both K sign flips, the `k_excr_gain` sign, the `K_ur`
+exponential removed, both sweat signs, sweat sodium forced to 0, the sweat input ignored)
+passed the whole suite, and the potassium and cell-solute invariants "passed" because
+every K flux was identically zero. The fixture gains `solverCoverage` (a 24 h baseline
+from K_icf × 1.02, and a sweat/potassium run built in the test, not registered); all eight
+mutants are now killed. Fixed in this PR.
+
+**BUG-20261003-133 (S3/P2).** Output thinning at `outEvery` 7 and 2.5 had no golden, so
+dropping the final-point rule (103 points against JavaScript's 104) or using Python's
+banker's `round()` (361 against 241) survived. Both are now golden runs. Fixed in this PR.
+
+**BUG-20261003-134 (S3/P2).** The JavaScript NaN semantics the port emulates (NaN sorted
+last in quantiles, `Math.max(0, NaN)` = NaN, `Math.pow(1, NaN)` = NaN) had no golden; all
+three emulations could be deleted unseen. The fixture gains `nonFinite`, compared NaN for
+NaN by position. Fixed in this PR.
+
+**BUG-20261003-135 (S4/P3).** At dt = 1/60 h every shipped breakpoint sits on the output
+grid, so dropping all breakpoints passed the trajectory test and unsorted breakpoints were
+never exercised. Golden runs at dt = 0.1 h and an unsorted-breakpoint scenario close it.
+Fixed in this PR.
+
+**BUG-20261003-136 (S1/P1).** HREQ-V-07 was not enforced: the instability trap (step
+factor 3.5 on the 30-day scenario) returned tens of thousands of NaN values and no error.
+`simulate()` now raises `NonFiniteTrajectoryError` (S3/NUM) naming the first time and key;
+the JavaScript reference still returns the NaN trajectory, a documented port deviation.
+Fixed in this PR.
+
+**BUG-20261003-137 (S1/P1).** `03 §3.3–§3.4` read as enforced gates, but no test ran
+convergence, bolus exactness, the breakpoint trap or the instability trap. All four are now
+gates that fail: halving the step twice (1e-5 of peak, 1e-3 for ADH and Thirst), the
+off-grid bolus to 1e-12 (measured 2.4e-15), the trap without breakpoints misplacing 9.59 %,
+the instability trap raising; every scenario and the stiff corner under `--robust`. Fixed
+in this PR.
+
+**BUG-20261003-138 (S1/P1).** The n = 256 steady-state drift gate of `03 §3.1` was claimed
+while the test ran 3 samples for 6 h. The default suite keeps 3 × 6 h; n = 256 × 24 h runs
+under `--robust` (worst 4.1e-14), and the summary line says whether it ran. Fixed in this PR.
+
+**BUG-20261003-139 (S1/P1).** The `03 §9` fixtures (water 1.3 L/day: required urine
+1,228.57 mOsm/kg, infeasible; `adh_threshold` 296: sodium 145.61 mmol/L, feasible but
+rejected by Monte Carlo) were in no test. Both now are. Fixed in this PR.
+
+**BUG-20261003-140 (S4/P3).** The perturbation test exempted `k_excr_gain` and
+`sweat_na_mmolL` as inert only because no run let them act. After 132 the exempt set is the
+two `na_normal` thresholds, which the drawSamples golden catches. Fixed in this PR.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |

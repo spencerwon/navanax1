@@ -4396,3 +4396,308 @@ bugs:
   root_cause: Edge cases outside the data the reference was tested on.
   resolution: "Planned (M1, with the next reference change): count any NaN difference; read the frozen copies; return Inf between infinities; mirror in the port where it differs (the port already reads frozen copies and uses R's rule for the harness band)."
   monitor_gap: The golden fixture covers shipped data only; edge-case fixtures are a 03 §9 item.
+
+- id: BUG-20261003-132
+  area: health
+  summary: No golden or invariant test exercised the potassium or sweat fluxes, so eight port mutants of model.py survived
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:50:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review of the health subsystem (finding Q0, tests:703), mutation run on a
+    copy of the worktree. BEFORE: rhs_sign_K, rhs_sign_K_osm, k_excr_sign, k_excr_dropped,
+    rhs_sign_sweat_water, rhs_sign_sweat_na, sweat_na_dropped, sweat_input_ignored all
+    SURVIVED (23 test functions, 246 passed, 0 failed). AFTER: all eight KILLED by
+    test_default_params_trajectories_match_javascript_reference and
+    test_golden_comparison_detects_a_perturbed_model_constant; the four sign flips also by
+    test_water_and_sodium_mass_balance_closes (potassium invariant no longer trivially 0).
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/model.py, line: 397}
+  - {file: src/health/engine/model.py, line: 407}
+  - {file: src/health/engine/model.py, line: 440}
+  - {file: tools/health_golden.mjs, line: 410}
+  - {file: tests/health_selftest.py, line: 556}
+  requirement: HREQ-V-09
+  data_impact: >-
+    None on any shipped number: every registered scenario holds K intake constant and
+    sweat at zero, so K_ur = kIn_h exactly and the sweat terms are 0. But a port error in
+    any of these terms would have shipped unseen, and the potassium and cell-solute
+    invariants "passed" only because every K flux was identically zero.
+  root_cause: >-
+    The fixture covered the registered scenarios only, and none of them moves K_icf or
+    sweats; k_excr_gain and sweat_na_mmolL were listed as "inert" in the perturbation test
+    instead of being given a run in which they act.
+  resolution: >-
+    Golden section solverCoverage (fixture only GAINS sections, MODEL_VERSION 1.0.1
+    unchanged): baseline for 24 h from y0 with K_icf x 1.02, and a data-described scenario
+    with sweat 0.8 L/h over [2, 4) h and K intake x6 over [1, 3) h (breakpoints 1-4), built
+    in the self-test, not registered in SCENARIOS. Both are compared in the trajectory
+    test, added to the mass-balance run list, and to the 1e-6 perturbation test, whose
+    inert set loses k_excr_gain and sweat_na_mmolL.
+  monitor_gap: >-
+    The perturbation test accepted "inert" parameters without asking whether a run could
+    make them act; the inert set is now only the two classification thresholds, caught by
+    the drawSamples golden instead.
+  regression_test:
+    - tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+    - tests/health_selftest.py::test_golden_comparison_detects_a_perturbed_model_constant
+    - tests/health_selftest.py::test_water_and_sodium_mass_balance_closes
+
+- id: BUG-20261003-133
+  area: health
+  summary: Output-thinning edge cases had no golden; dropping the final-point rule or using Python's banker's round() passed the suite
+  severity: S3
+  priority: P2
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:51:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding Q1, solver.py:121). BEFORE: thin_drop_final and
+    thin_bankers_round SURVIVED; both diverge from JS (103 vs 104 points at outEvery 7, 361
+    vs 241 at outEvery 2.5). AFTER: both KILLED by
+    test_default_params_trajectories_match_javascript_reference (grid length and values).
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/solver.py, line: 81}
+  - {file: src/health/engine/solver.py, line: 121}
+  - {file: tools/health_golden.mjs, line: 410}
+  requirement: HREQ-V-09
+  data_impact: None on any shipped number; every shipped outEvery is an integer and divides the grid.
+  root_cause: The fixture recorded only integer outEvery values (1 and 3) that divide the grid exactly.
+  resolution: >-
+    Golden trajectories of drink_water_1L at outEvery 7 (104 points, the final point always
+    recorded) and 2.5 (241 points, Math.round(2.5) = 3); the self-test compares length,
+    steps and values, and asserts 104 and 241 literally.
+  monitor_gap: Edge-case fixtures were a 03 §9 item with no owner; the solver's rounding rule had no golden.
+  regression_test: tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+
+- id: BUG-20261003-134
+  area: health
+  summary: The JavaScript non-finite semantics the port emulates (NaN-last sort, Math.max and Math.pow on NaN) had no golden; three mutants survived
+  severity: S3
+  priority: P2
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:52:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding Q2, mc.py:116). BEFORE: q_nan_sort_plain, nan_max0_python
+    and pow_nan_rule_dropped SURVIVED. AFTER: all three KILLED by
+    test_non_finite_semantics_match_javascript_reference (15 quantile values and 2 x 71
+    rhs/ledger/fluxes/derived values, 11 and 24 of them NaN, compared by position).
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/mc.py, line: 109}
+  - {file: src/health/engine/model.py, line: 132}
+  - {file: src/health/engine/model.py, line: 158}
+  - {file: tools/health_golden.mjs, line: 440}
+  requirement: HREQ-V-09
+  data_impact: None on any shipped number (no shipped run produces a NaN); the emulation was untested code.
+  root_cause: The fixture held finite data only, so the emulation of JavaScript's NaN rules could be deleted without a failing test.
+  resolution: >-
+    Golden section nonFinite: quantileBands on [[1,NaN,3],[Inf,2,-0],[-Inf,NaN,0],[5,4,Inf],[2,3,Inf]]
+    with qs [0.05,0.5,0.95,0,1]; rhs, ledger, fluxes and derived at the initial state with
+    ADH = NaN, and with aldo_vol_exp = gfr_map_exp = NaN (pow(1, NaN) at vr = 1). Compared
+    with the suite's NaN-position rule (NaN only against NaN).
+  monitor_gap: A semantic the port deliberately emulates now has a golden of its own.
+  regression_test: tests/health_selftest.py::test_non_finite_semantics_match_javascript_reference
+
+- id: BUG-20261003-135
+  area: health
+  summary: No trajectory golden put a breakpoint inside an output interval; dropping every breakpoint passed the trajectory test and unsorted breakpoints were never tested
+  severity: S4
+  priority: P3
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:53:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding Q3, solver.py:82). BEFORE: bp_drop_all killed only by
+    the influence, sweep and salt-metric tests (never by the trajectory test); bp_no_sort
+    SURVIVED. AFTER: bp_drop_all KILLED by test_default_params_trajectories_match_javascript_reference
+    (and the bolus test); bp_no_sort KILLED by the trajectory test.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/solver.py, line: 85}
+  - {file: tools/health_golden.mjs, line: 410}
+  requirement: HREQ-V-04
+  data_impact: None on any shipped number.
+  root_cause: At dt = 1/60 h every shipped breakpoint lies on the output grid, so the interval-splitting code was never reached by a trajectory golden.
+  resolution: >-
+    Golden trajectories of drink_water_1L and salt_load_10g at dt = 0.1 h (the bolus ends
+    1.1667 h and 1.25 h fall inside output intervals) and a data-described scenario with
+    breakpoints [3.05, 1.05, 2.25, 1.55] (unsorted, off the 0.1 h grid).
+  monitor_gap: The trajectory test now fails on its own when breakpoints are mishandled.
+  regression_test: tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+
+- id: BUG-20261003-136
+  area: health
+  summary: HREQ-V-07 was not enforced; simulate() returned a non-finite trajectory without raising
+  severity: S1
+  priority: P1
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:54:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D3, api.py:127). BEFORE: MAX_STEP_FRACTION_OF_TAU_MIN = 3.5
+    on chronic_high_salt_30d returned 25,841 non-finite values (outEvery 3) and no
+    exception. AFTER: simulate() raises NonFiniteTrajectoryError ("states.V_ecf is nan at
+    t = 26.25 h (output index 105); 89022 non-finite values"); the production 48 h run does
+    not raise.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/api.py, line: 150}
+  - {file: src/health/engine/api.py, line: 160}
+  - {file: src/health/errors.py, line: 250}
+  requirement: HREQ-V-07
+  data_impact: >-
+    None on any shipped number (no shipped run is non-finite). Had one been, a NaN would
+    have reached quantile bands and plots, which 03 §3.6 forbids.
+  root_cause: The requirement was written as enforced, but no code checked the trajectory; the JavaScript reference returns NaN silently and the port copied it.
+  resolution: >-
+    New NonFiniteTrajectoryError(NumericalError), S3/NUM. simulate() checks every state,
+    ledger and derived value after integrate() and raises with scenario, first time, key,
+    section, count and model version. A deliberate port deviation (index.js returns the
+    NaN trajectory), documented in the api.py and model.py headers; simulate_mc/sweep
+    therefore raise, and compute_influence counts such a run as infeasible.
+  monitor_gap: The instability trap of 03 §3.3 now runs in the default suite and must raise.
+  regression_test: tests/health_selftest.py::test_simulate_refuses_a_non_finite_trajectory
+
+- id: BUG-20261003-137
+  area: health
+  summary: HREQ-V-04, V-05 and V-06 were listed as enforced but no convergence, bolus-exactness, breakpoint-trap or instability-trap test existed
+  severity: S1
+  priority: P1
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:55:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D4). BEFORE: grep found no such test; 03 §3.3-§3.4 figures
+    came from one-off scripts. AFTER: gates that fail -- convergence drink_water_1L ANP
+    7.2e-7, ADH 2.0e-5, Thirst 3.2e-4 and salt_load_10g ANP 1.1e-7 against 1e-5 / 1e-3;
+    off-grid bolus error 2.4e-15 (gate 1e-12); breakpoint trap 9.59 % misplaced (must fail);
+    instability trap raises. The maxstep_half mutant is now also killed by the convergence
+    test, and bp_inputs_at_s0 (previously surviving) by the bolus test.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 102}
+  - {file: tests/health_selftest.py, line: 1066}
+  - {file: tests/health_selftest.py, line: 1110}
+  requirement: HREQ-V-05
+  data_impact: None on any shipped number; the measured figures in 03 §3.3-§3.4 hold.
+  root_cause: The document recorded measurements as if they were gates; nothing re-ran them.
+  resolution: >-
+    test_halving_the_step_twice_converges (default suite, drink_water_1L and salt_load_10g,
+    peak-scaled, 1e-5 and 1e-3 for ADH/Thirst), test_off_grid_bolus_is_exact_and_the_breakpoint_trap_fails
+    (instrumented solver: step bound, no straddle, step count; bolus to 1e-12; without
+    breakpoints 9-10 % misplaced), test_simulate_refuses_a_non_finite_trajectory (instability
+    trap), and under --robust every scenario at default and stiff-corner parameters.
+  monitor_gap: The two traps prove the gates can see the failures they exist for.
+  regression_test:
+    - tests/health_selftest.py::test_halving_the_step_twice_converges
+    - tests/health_selftest.py::test_off_grid_bolus_is_exact_and_the_breakpoint_trap_fails
+    - tests/health_selftest.py::test_simulate_refuses_a_non_finite_trajectory
+    - tests/health_selftest.py::test_robust_convergence_on_every_scenario_and_the_stiff_corner
+
+- id: BUG-20261003-138
+  area: health
+  summary: The n = 256 steady-state drift gate of 03 §3.1 was claimed, but the test ran 3 samples for 6 h
+  severity: S1
+  priority: P1
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:56:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D5). BEFORE: test_baseline_is_a_steady_state drew 3 samples
+    (seed 11) for 6 h. AFTER: under --robust all 256 accepted samples of the reporting set
+    (seed 1) run 24 h; worst drift 4.1e-14 (gate 1e-6), about 39 s.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 87}
+  - {file: tests/health_selftest.py, line: 1087}
+  requirement: HREQ-V-02
+  data_impact: None; the gate passes with nine orders of margin.
+  root_cause: The full gate costs about 39 s of pure Python, so the suite ran a sample of it and the document described the full gate.
+  resolution: >-
+    The default suite keeps 3 samples x 6 h; the n = 256 x 24 h gate runs under the new
+    --robust flag, and the summary line states whether the robust gates ran.
+  monitor_gap: The summary line now says "robust gates NOT run" when they did not.
+  regression_test:
+    - tests/health_selftest.py::test_robust_steady_state_drift_over_the_reporting_set
+    - tests/health_selftest.py::test_baseline_is_a_steady_state
+
+- id: BUG-20261003-139
+  area: health
+  summary: The 03 §9 infeasible (water 1.3 L/day) and non-normal (adh_threshold 296) fixtures were in no test
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:57:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D9). BEFORE: neither value appeared in any test. AFTER:
+    1.3 L/day gives U_ss 1228.57 and InfeasibleParametersError from initial_state and
+    simulate; adh_threshold 296 gives Na_ss 145.61, is accepted deterministically, and
+    draw_samples rejects all 100 draws of it (its normonatremia rule) while the same frozen
+    table at 281 is accepted with 0 rejections.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 321}
+  - {file: tests/health_selftest.py, line: 1465}
+  requirement: HREQ-V-25
+  data_impact: None on any shipped number.
+  root_cause: The §9 table was written from reference measurements; the test kept its older cases.
+  resolution: Both fixtures added to the infeasible-params test, keeping the existing cases.
+  monitor_gap: Each §9 row now names a test that holds its number.
+  regression_test: tests/health_selftest.py::test_infeasible_params_are_refused_not_silently_accepted
+
+- id: BUG-20261003-140
+  area: health
+  summary: The golden perturbation test exempted four parameters as inert; two of them were inert only for lack of a run
+  severity: S4
+  priority: P3
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:58:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D14, 03 §4.3). BEFORE: inert set k_excr_gain,
+    sweat_na_mmolL, na_normal_low, na_normal_high. AFTER: a 1e-6 relative change to
+    k_excr_gain or sweat_na_mmolL fails the trajectory comparison; the exempt set is
+    na_normal_low and na_normal_high, which the drawSamples golden catches.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tests/health_selftest.py, line: 825}
+  requirement: HREQ-V-09
+  data_impact: None.
+  root_cause: Same as BUG-20261003-132 (no run moved K or sweated).
+  resolution: The inert set shrinks to the two classification thresholds; the test asserts it equals exactly that set.
+  monitor_gap: A parameter can be exempted only if it is a classification threshold caught elsewhere.
+  regression_test: tests/health_selftest.py::test_golden_comparison_detects_a_perturbed_model_constant
