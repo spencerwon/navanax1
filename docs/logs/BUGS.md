@@ -1359,6 +1359,42 @@ simulations"; the table has had 54 rows since D-2. No M9 block exists between M8
 M10. Cosmetic; logged because a stale count in a comment is the shape this project
 keeps catching.
 
+**BUG-20261003-100 (S0a/P0)**, **-101**, **-102**, **-103**, **-104 (S1/P1).** The
+clinical-safety review of the published V1 surface, from source: the strain index is
+framed as a dose answer without its label on the dose panel and the HUD gauge (100,
+S0a, the Operator's artifact to patch — tracker A-2); 135 mmol/L drawn as a red danger
+line labelled "hyponatremia threshold" (101); imperative scenario titles with no
+reference person (102); the chronic result shows neither its known divergence nor that
+its band is a calibration target (103); only the first sentence of the disclaimer is
+rendered — "Not clinically validated." lives in a comment (104; the Python side now
+carries `meta.validation_status`). The vendored copy is never edited (HREQ-P-09); each
+lands in the artifact and in every new surface at M1.
+
+**BUG-20261003-105, BUG-20261003-106, BUG-20261003-107, BUG-20261003-108, BUG-20261003-109, BUG-20261003-110, BUG-20261003-111, BUG-20261003-112, BUG-20261003-113.** The rigor-lead's attack on the knowledge-base checker:
+`report.py` tracebacks on a list-typed field and `status` then prints no disclaimer
+(105); the loader accepts `NaN`/`Infinity` the browser rejects (106); `re.ASCII` lets a
+DOI with a Unicode space through (107); any `resolved: true` record verifies an id
+forever, so the append-only log cannot retire one (108); `status` prints
+`E-assumption: 0` when params are unusable instead of "unavailable" (109); the
+registry scanner disagrees with PyYAML in 17 of 20 crafted cases (110); a schema
+tightening the data violates is only a warning (111); `03 §6` names sixteen rules and
+seven are unimplemented, four warn-only (112); checker hygiene (113). All being fixed in
+this PR with regression tests, except what needs data fields that do not exist yet,
+which `DEFERRED_RULES` names and a meta-test enforces.
+
+**BUG-20261003-114 (S4/P3).** `k_excr_gain` says "Log-uniform sampling"; its range is
+exactly 5-fold and the rule is `hi/lo > 5`, so it is uniform. Inert in every scenario.
+
+**BUG-20261003-115 (S1/P1).** The first real literature fail: after 1 L of water the
+modelled sodium takes **7.05 h** to recover within 0.5 mmol/L, outside Crowe 1987's
+6 h, in both implementations (Monte Carlo n = 256: q05 2.83 h, q50 8.73 h, q95 +∞,
+in-range share 0.32). V1's own tests never scored this row. It stays a counted fail; the
+range is not widened (01 §7.4). The Operator decides: supersede as a known divergence,
+or recalibrate through WF-H-01 (tracker D-9).
+
+**BUG-20261003-116 (S4/P3).** Three latent quirks in the reference engine found while
+porting; none reachable with shipped data.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
@@ -1369,8 +1405,25 @@ keeps catching.
 | BUG-20261003-097 | S1 | P1 | Harness could count a calibration target as validation | Being fixed in this PR (role field, regression test) |
 | BUG-20261003-098 | S3 | P1 | Golden fixture omitted the chronic scenario, stiff corner, checkpoints | Being fixed in this PR (fixture regenerated) |
 | BUG-20261003-099 | S4 | P3 | Stale parameter count in a reference comment; no M9 block | With the next reference change (M1) |
+| BUG-20261003-100 | S0a | P0 | Published V1 surface frames the strain index as a dose answer without its label | Operator decision A-2: patch the artifact or accept until M1 |
+| BUG-20261003-101 | S1 | P1 | 135 mmol/L drawn as a red danger line | M1 viewer review, both implementations |
+| BUG-20261003-102 | S1 | P1 | Imperative scenario titles, no reference person | Display-title map at M1 (W-19) |
+| BUG-20261003-103 | S1 | P1 | Chronic result hides its divergence and calibration status | M1 viewer review (HREQ-S-07) |
+| BUG-20261003-104 | S1 | P1 | Only the first disclaimer sentence is rendered in V1 | Python side fixed in this PR; reference at the next version bump (W-20) |
+| BUG-20261003-105 | S3 | P1 | report.py tracebacks on a list-typed field; status loses its disclaimer | Being fixed in this PR |
+| BUG-20261003-106 | S3 | P1 | Loader accepts NaN/Infinity the browser rejects | Being fixed in this PR |
+| BUG-20261003-107 | S2 | P1 | re.ASCII lets a DOI with a Unicode space through | Being fixed in this PR |
+| BUG-20261003-108 | S2 | P1 | Any resolved:true record verifies an id forever | Being fixed in this PR |
+| BUG-20261003-109 | S1 | P1 | status prints E-assumption: 0 instead of unavailable | Being fixed in this PR |
+| BUG-20261003-110 | S3 | P1 | Registry scanner disagrees with PyYAML | Being fixed in this PR |
+| BUG-20261003-111 | S3 | P1 | Schema tightening only warns | Being fixed in this PR |
+| BUG-20261003-112 | S1 | P1 | 03 §6 rules unimplemented or warn-only | Being fixed in this PR; deferred rules named |
+| BUG-20261003-113 | S4 | P2 | Checker hygiene: unvalidated arrays, cubic walk, surviving mutants | Being fixed in this PR |
+| BUG-20261003-114 | S4 | P3 | k_excr_gain sampling note wrong | Curator, M1 |
+| BUG-20261003-115 | S1 | P1 | 1 L water sodium recovery 7.05 h vs registered 6 h | Operator decision D-9 |
+| BUG-20261003-116 | S4 | P3 | Latent reference-engine quirks | Next reference change (M1) |
 
-93 of 99 logged bugs are fixed (the five health entries of 2026-10-03 are open; two close in the pull request that logged them).
+93 of 116 logged bugs are fixed (the twenty-two health entries of 2026-10-03 are open at logging; those marked "in this PR" close in the pull request that logged them, with their regression tests).
 
 ### The lesson
 

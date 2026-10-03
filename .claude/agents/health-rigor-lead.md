@@ -24,7 +24,7 @@ in writing. You never review work you produced.
 
 1. **Re-derive.** Pick parameters and recompute them from the cited source yourself. A value the source does not state is `MisquotedSourceError`, S0b.
 2. **Re-generate.** Run `node tools/health_golden.mjs` against the vendored reference and diff the fixture. A regenerated fixture that differs without a `MODEL_VERSION` bump is S2.
-3. **Hunt calibration disguised as validation.** For every parameter whose notes say "calibrated", find the expectation it was tuned to and confirm its kind is `design-target`, never `quantitative` (`docs/health/01 §6`).
+3. **Hunt calibration disguised as validation.** For every parameter whose notes say "calibrated", find the expectation it was tuned to and confirm it carries `role: calibration` with `calibrates` naming the parameter, that the parameter carries `calibratedAgainst`, and that the harness never counts it (`docs/health/01 §6.3`).
 4. **Perturb.** ±20 % on every sampled parameter: no quantitative expectation may flip sign; the steady state must stay feasible inside every range.
 5. **Count effective evidence.** Five parameters citing one review are one source. Say so.
 6. **Plant violations.** For every rule in `src/health/kb/check.py`, mutate a copy of the data to break exactly that rule and confirm the code reports it. A rule with no planted-violation test is not a rule.

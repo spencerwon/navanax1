@@ -32,7 +32,7 @@ flowchart LR
   KB -->|"quantities mirror rows"| PR
   PR --> EN
   EN --> VH
-  VH -->|"only what passed, with its band and its disclaimer"| SF
+  VH -->|"results with their band, labels and disclaimer; expectation status shown beside them, not used as a filter"| SF
   SF --> Op
   Op -.->|"direction · decisions · PR approval"| HP
 ```
@@ -239,7 +239,7 @@ it is not a loop.
 flowchart LR
   P0["Phase 0<br/>V1 slice: water · Na · ADH · Aldo · ANP · MAP · kidney<br/>(this PR)"]
   P1["Phase 1<br/>body-size scaling · plasma K · Na storage compartment"]
-  P2["Phase 2<br/>chronic pressure → outcomes · CKD progression"]
+  P2["Phase 2<br/>chronic pressure and kidney function (research)<br/>outcome layer population-only"]
   P3["Phase 3<br/>glucose–insulin · obesity–hypertension coupling"]
   P4["Phase 4<br/>population layer · intervention comparison with bands"]
   P5["Phase 5<br/>Python surface from an approved design spec"]
@@ -257,5 +257,5 @@ flag off, its expectations registered first, and its own ADR.
 
 - **No database.** JSON files with a schema and code-enforced cross-file rules are diffable, reviewable and append-only friendly. The day a query needs a database, that is an ADR.
 - **No service.** Nothing listens on a port. The reference app is static; the CLI is a process that exits.
-- **No personal data.** Not a field, not a column, not a plan. A module that needs it is a separate amendment (`00 §1.3`).
+- **No personal data.** Not a field, not a column, not a plan. A module that needs it is a separate amendment (`00 §1.4`).
 - **No adaptive solver.** Fixed-step RK4 bounded by the fastest time constant is what V1 validated; a stiff module later gets its own ADR and its own golden protocol.

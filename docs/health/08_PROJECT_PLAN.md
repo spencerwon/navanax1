@@ -8,12 +8,15 @@
 
 ## 1. Mission, and what "better than any one system" means here
 
-The mission is the Operator's paragraph in `00 §1.2`. The standard it sets is not "more
-features than other anatomy or physiology tools"; it is **auditable**: every number
-sourced and graded, every output banded, every expectation registered before the result,
-every assumption loud, every decision written, every module removable. No comparable
-system publishes its assumption count on the status line. That is the bar, and it is
-measurable.
+The mission is the Operator's paragraph in `00 §1.2`, bounded by `00 §1.4`. The standard
+it sets is not "more features than other anatomy or physiology tools", and it is not a
+claim to be more accurate than other models: accuracy is what the expectation record
+measures, and for V1 that record holds zero pre-registered independent passes against
+four calibrated parameters (`03 §12`). The standard is **auditability**: every number
+sourced and graded, every output banded, every new expectation registered before its
+result, every assumption loud, every decision written, every module removable. We know
+of no physiology tool that shows its assumption count on its status line, but we have
+not surveyed them; the claim is about this system, and it is measurable.
 
 ## 2. Workstreams and their owners
 
@@ -55,27 +58,36 @@ with new evidence; design review on the Operator's machine passed; the Suckling 
 question (Q4) answered from the full text or left `unverified` with the attempt logged.
 **Decisions for Spencer:** D-1, D-4, D-7; D-6 if publishing.
 
-### M2 — Pressure and the kidney over years (Phase 2)
+### M2 — Pressure and the kidney over years (Phase 2, research)
 
-Modules: `pressure-outcomes` (chronic blood pressure linked to outcome evidence from
-trials and cohorts, with the calibration/validation split per parameter) and
-`ckd-progression`. The lab gains year-scale horizons; the viewer gains the "chronic risk
-grows in real time" view with its label.
+Modules: `chronic-pressure` and `kidney-function-decline` for the reference adult and
+the parameter-range population. Any link from a model state (MAP, GFR) to an outcome is a
+separate `outcome-layer` module: population-level quantities only, validated against
+cohort or trial outcome data and graded separately (`01` HREQ-M-13), never computed from
+a user-composed intervention, never presented as a person's risk. The lab gains
+year-scale horizons; the viewer gains a long-horizon view of modelled states for the
+reference adult, labelled "modelled trajectory for a reference adult — not a prediction
+or a risk estimate for any person".
 **Exit:** a pre-registered expectation set drawn from at least one meta-analysis and
-one cohort; the rigor-lead's ±20 % perturbation flips no quantitative expectation.
+one cohort, with the calibration/validation split stated per parameter; the rigor-lead's
+±20 % perturbation flips no quantitative expectation; independent review by the
+rigor-lead and the clinical-safety reviewer; the `00 §1.4` non-goals re-affirmed in
+writing; an Operator decision before any outcome-linked view is enabled.
 
 ### M3 — Energy metabolism (Phase 3)
 
 Modules: `glucose-insulin`, `obesity-hypertension-coupling`. The scale ladder gains the
-pathways and molecules these need; the knowledge base grows under the same contract.
+pathways and molecules these need; the knowledge base grows under the same contract. No
+insulin or drug dosing and no glycaemic targets are produced.
 **Exit:** the same standard as M2.
 
 ### M4 — Populations and interventions (Phase 4)
 
 Modules: `population-layer` (distributions over the reference person), `interventions`
-(comparison with bands). This is the first point at which the platform can say
-something about a policy rather than a person; it is also the first point at which the
-clinical-safety reviewer's scope widens to population claims.
+(comparison with bands). This is the first point at which the platform compares modelled
+population-level scenarios — research for independent review, not a policy
+recommendation and not about any individual; it is also the point at which the
+clinical-safety reviewer's scope widens to intervention comparisons.
 **Exit:** independent review by rigor-lead and safety-reviewer; an Operator decision on
 publication; `00 §1.4` non-goals re-affirmed in writing.
 
@@ -94,7 +106,7 @@ same model with the same labels (HREQ-P-16).
 ## 5. Compute plan
 
 The engine is pure Python for the gates and JavaScript for the browser. Heavy work —
-Monte Carlo at `n` in the hundreds, dose sweeps, year-scale chronic runs — runs in the
+Monte Carlo at `n` in the hundreds, salt-load sweeps, year-scale chronic runs — runs in the
 browser's worker pool sized to the Operator's cores (V1 `app/worker.js`; the stress
 panel reports samples per second and frame rate at 64, 256 and 1,024 samples). The
 rule of HREQ-N-07: nothing runs on the Operator's machine that he has not launched

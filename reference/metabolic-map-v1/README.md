@@ -5,8 +5,9 @@
 
 This is the narrower-scope beginning of the health platform: an educational body-fluid,
 sodium and kidney model with a 3D body viewer and Monte Carlo uncertainty bands. The
-app's own words apply to everything here: **Educational model — not medical advice. Not
-clinically validated.**
+app renders "Educational model — not medical advice." on every surface; "Not clinically
+validated." exists only as a comment in `engine/model.js`, which is short of the
+two-sentence standard in `docs/health/00 §1.4` (V1 audit item, `docs/health/logs/V1_AUDIT_ITEMS.md`).
 
 ## What is in it
 
@@ -15,7 +16,7 @@ clinically validated.**
 | `engine/model.js` | 13-state ODE: ECF/ICF volume, Na, K, ICF solute, ADH, gut pools, thirst, aldosterone, ANP, MAP, slow autoregulation | Blocks M0–M10; the kidney strain index (M10) is an index, not a clinical measure |
 | `engine/solver.js` | Fixed-step RK4 with event breakpoints and a step bound from the fastest time constant | Linear invariants preserved to round-off |
 | `engine/mc.js` | Seeded Monte Carlo (mulberry32) over parameter ranges; log-uniform when hi/lo > 5; rejection of infeasible baselines | Independence between parameters is an assumption |
-| `engine/scenarios.js` | baseline · drink_water_1L · drink_water_3L_fast · salt_load_10g · salt_load_sweep · chronic_high_salt_30d · no_water_24h, each with pre-registered literature expectations | Expectation kinds: quantitative, semi-quantitative, qualitative, design-target, known-divergence, unverified |
+| `engine/scenarios.js` | baseline · drink_water_1L · drink_water_3L_fast · salt_load_10g · salt_load_sweep · chronic_high_salt_30d · no_water_24h; six carry literature expectations written alongside the model (co-developed, `docs/health/01 §7.1`) | Expectation kinds: quantitative, semi-quantitative, qualitative, design-target, known-divergence, unverified |
 | `engine/params.json` | 54 parameters: value, unit, range, evidence, grade, notes | Grades: 3 A-meta · 6 A-primary · 15 B-textbook · 30 E-assumption |
 | `engine/index.js` | Public API: simulate, drawSamples, simulateMC, simulateSweep, computeInfluence; MODEL_VERSION 1.0.1 | `params.data.js` is the same table as `params.json` for the browser |
 | `kb/schema.json` | Entity / Relation / Evidence contract with cross-file rules | Extensions marked EXTENSION |

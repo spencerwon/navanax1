@@ -135,6 +135,13 @@ class UnlabelledIndexError(SurfaceIntegrityError):
     error_class = ErrorClass.ETH
 
 
+class UnlabelledThresholdError(SurfaceIntegrityError):
+    """A classification threshold (135 or 145 mmol/L plasma sodium) is drawn as if it
+    were a physiological or safety limit, without the label HREQ-S-03 requires."""
+
+    error_class = ErrorClass.ETH
+
+
 # --------------------------------------------------------------------------
 # S0b - evidence or equivalence integrity. HALTS RELEASE, not computation.
 # --------------------------------------------------------------------------

@@ -112,7 +112,10 @@ modules:
       process log, the ADRs, and the health steps in gates and CI.
     paths:
       - docs/health/
-      - .claude/agents/
+      - .claude/agents/health-physiology-modeler.md
+      - .claude/agents/health-literature-curator.md
+      - .claude/agents/health-rigor-lead.md
+      - .claude/agents/health-safety-reviewer.md
       - config/health/
     depends_on: []
     tests: [tools/buglog.py]

@@ -17,7 +17,7 @@ A mechanistic model fails differently from a statistical one. The NFT platform's
 
 Three facts set the stance:
 
-1. **The reader may act on a number.** "Does 3 L of water in 30 minutes take plasma sodium below 135 mmol/L?" and "how much salt strains the kidney?" are the questions the V1 scenarios answer. A wrong answer delivered confidently is the worst outcome this subsystem can produce, and it produces no error message.
+1. **The reader may act on a number.** Readers will bring questions such as "does 3 L of water in 30 minutes take plasma sodium below 135 mmol/L?" or "how much salt strains the kidney?" to the V1 scenarios. The scenarios answer neither for any person: they show one modelled 70 kg reference adult, with 135 mmol/L drawn as a classification threshold, not a safety limit, and "strain" as a model index with no clinical meaning (§9). A reader who takes a confident model number as that answer is the worst outcome this subsystem can produce, and it produces no error message. A wrong answer delivered confidently is the worst outcome this subsystem can produce, and it produces no error message.
 2. **The model was partly built to hit its own checks.** Three parameters were chosen so that `chronic_high_salt_30d` lands inside the He 2013 band it is then compared with (§6). Without bookkeeping, that comparison reads as validation.
 3. **Much of the source literature describes small groups of young, healthy men** (Crowe 1987: "young water-replete men"; Baylis 1986: n = 8 men). A number that is right for them is not thereby right for the reference adult.
 
@@ -215,7 +215,7 @@ Model code may contain physical constants and unit conversions only, each named 
 
 ### 5.2 Rejection rules
 
-A draw is rejected and counted when its analytic steady state is infeasible (M0), or when its baseline plasma sodium falls outside [`na_normal_low`, `na_normal_high`] = [135, 145] mmol/L. Such a draw describes no healthy adult. After 50·n draws without n acceptances the run fails rather than returning a smaller sample. Measured 2026-10-03: seed 1 at n = 64 rejected 0 draws; seeds 1–5 at n = 256 rejected 1, 3, 2, 1 and 1 (0.4–1.2 %). Cost: the accepted distribution is not the stated ranges. Rejection reshapes them toward combinations that produce a normal plasma sodium. At about 1 % the reshaping is small. At a high rejection share, the ranges or the structure describe people who cannot exist, and the band is a band over something other than what the table says.
+A draw is rejected and counted when its analytic steady state is infeasible (M0), or when its baseline plasma sodium falls outside [`na_normal_low`, `na_normal_high`] = [135, 145] mmol/L. Such a draw falls outside the classification range the model uses for a normal baseline; rejecting it is a modelling choice, not a statement that no healthy adult has a plasma sodium there. After 50·n draws without n acceptances the run fails rather than returning a smaller sample. Measured 2026-10-03: seed 1 at n = 64 rejected 0 draws; seeds 1–5 at n = 256 rejected 1, 3, 2, 1 and 1 (0.4–1.2 %). Cost: the accepted distribution is not the stated ranges. Rejection reshapes them toward combinations that produce a normal plasma sodium. At about 1 % the reshaping is small. At a high rejection share, the ranges or the structure describe people who cannot exist, and the band is a band over something other than what the table says.
 
 ### 5.3 What n is enough
 
@@ -367,7 +367,7 @@ Each load is floored at zero; raw = Σ 0.25 × load; index = raw / (1 + raw). It
 
 The viewer colours the kidney by the index with breakpoints at 0.33 and 0.66 (`STRAIN_COLOR_RULE = 'thirds'`, `app/viewer.js`, decision D-1). The code says these "are display choices only". The reader must be told the same, because red reads as damage.
 
-- **HREQ-M-08** An index SHALL be displayed with the label "index (model construct), not a clinical measure", with no units, and any colour breakpoints SHALL be labelled as display choices, not thresholds.
+- **HREQ-M-08** An index SHALL be displayed with the label `display.index_label` from `config/health/base.yaml` ("an index, not a clinical measure"), with no units, and any colour breakpoints SHALL be labelled as display choices, not thresholds.
 - **HREQ-M-09** An index SHALL NOT be named or described with clinical terms (damage, injury, risk, function, health), and SHALL NOT be compared across model versions unless its definition constants are shown to be unchanged.
 - **HREQ-M-10** The band of an index SHALL state that its definition constants are held fixed, so that the band excludes uncertainty about what the index measures.
 
@@ -444,7 +444,7 @@ Every rule below is enforced in code or schema. None relies on goodwill.
 | 10 | No imperatives, no individual framing | Clinical-safety lint over user-facing strings (`03` §8, HREQ-M-02) |
 | 11 | An E-assumption is not evidence | E-graded values carry a visible marker; never used as a validation source (§3.1) |
 
-- **HREQ-M-14** A classification threshold SHALL be displayed with the label "classification threshold (definition), not a physiological parameter".
+- **HREQ-M-14** A classification threshold SHALL be displayed with the label `display.threshold_label` from `config/health/base.yaml` ("classification threshold, not a physiological parameter").
 - **HREQ-M-15** No output text SHALL state the direction of a change whose band spans zero (q05 < 0 < q95).
 
 ---

@@ -67,9 +67,10 @@ data/         landing zone + stores (gitignored -- irreplaceable, back up separa
 
 The same discipline applied to mechanistic models of human physiology, beginning with
 the Metabolic Map V1 (water, sodium, the kidney, arterial pressure): every parameter
-with a source and a grade, every output with an uncertainty band, every expectation
-registered before the result, one model in two implementations proven equivalent, and
-every module removable by a written recipe. **Educational and research only; never
+with a source and a grade, every output with an uncertainty band, every new expectation
+registered before its result (V1's were co-developed with the model), one model in two
+implementations held equal to 1e-9 on golden trajectories, and every module removable by
+a written recipe. **Educational and research only; never
 medical advice.** Start at [`docs/health/README.md`](docs/health/README.md).
 
 ```bash

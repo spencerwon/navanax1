@@ -66,8 +66,8 @@
   <rect x="300" y="346" width="860" height="110" class="layer"/>
   <text x="316" y="372" class="title">ENGINE  src/health/engine/</text>
   <text x="316" y="396" class="file">solver.py — RK4, breakpoints, step ≤ 0.25 × fastest time constant</text>
-  <text x="316" y="416" class="file">model.py — 13 states, blocks M0–M10, kidney strain index (an index, not a measure)</text>
-  <text x="316" y="436" class="file">scenarios.py — events, overrides, pre-registered expectations</text>
+  <text x="316" y="416" class="file">model.py — 13 states, blocks M0–M10, kidney strain index (an index, not a clinical measure)</text>
+  <text x="316" y="436" class="file">scenarios.py — events, overrides, registered expectations (V1: co-developed)</text>
   <text x="800" y="396" class="file">mc.py — mulberry32, log-uniform rule, quantiles</text>
   <text x="800" y="416" class="file">params.py — loads params.json</text>
   <text x="800" y="436" class="file">errors.py — severity in the type system</text>
@@ -93,7 +93,7 @@
   <line x1="730" y1="346" x2="730" y2="316" class="edge"/>
   <text x="740" y="336" class="gate">golden diff vs JS reference, 1e-9 relative</text>
   <line x1="730" y1="206" x2="730" y2="176" class="edge"/>
-  <text x="740" y="196" class="gate">only what passed, with its band and its disclaimer</text>
+  <text x="740" y="196" class="gate">results with band, labels, disclaimer; status beside them, not a filter</text>
 
   <!-- Operator -->
   <rect x="300" y="730" width="860" height="2" fill="#c3cbd6"/>

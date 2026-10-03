@@ -13,7 +13,15 @@ model:
   # reference/metabolic-map-v1/engine/index.js. tests/health_selftest.py checks the
   # three agree (a bump in one place and not the others is a CFG defect, docs/health/05 §3).
   version: "1.0.1"
+  # meta.disclaimer stays byte-equal to the V1 JavaScript DISCLAIMER (golden equivalence,
+  # HREQ-V-09); the second sentence of the surface standard (docs/health/00 §1.4) travels
+  # as meta.validation_status and every surface renders both (HREQ-S-01).
   disclaimer: "Educational model — not medical advice."
+  validation_status: "Not clinically validated."
+  intended_use: >-
+    Intended use: education and research about mechanisms in a modelled reference adult
+    and parameter-range populations. Not intended for use with any individual's data, or
+    for diagnosis, prognosis, treatment or any clinical decision.
   reference_person:
     name: "reference adult (70 kg)"
     mass_kg: 70
@@ -67,5 +75,9 @@ display:
   usd_decimals: 2                 # unused by health; kept so display rules stay one shape across the repo
   show_assumption_count: true
   show_grade_share: true
+  # The one copy of each mandated label (HREQ-S-03, S-04, P-12, P-13); documents quote these.
   index_label: "an index, not a clinical measure"
   threshold_label: "classification threshold, not a physiological parameter"
+  trajectory_label: "modeled risk trajectory — not a prediction"   # V1's string; wording is tracker D-8
+  custom_run_label: "custom intervention on the 70 kg reference adult — no registered expectations"
+  extrapolation_label: "extrapolation beyond the evidence"

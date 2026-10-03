@@ -15,8 +15,9 @@ is not a backtest, it is **a reader**. So the first question in triage is:
 > **Could a reader act on this number, and would they have any way to know it was wrong?**
 
 If yes, severity goes up. A crash in the solver is S3. A kidney strain index rendered
-without the words "an index, not a clinical measure" is S1 — nothing crashed, and
-somebody could read it as a diagnosis.
+without the words "an index, not a clinical measure" is S0a on a surface (the value is
+withheld, `§6`) and S1 in a document — nothing crashed, and somebody could read it as a
+diagnosis.
 
 ---
 

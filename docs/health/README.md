@@ -12,8 +12,10 @@ arterial pressure) and growing, module by module, toward the largest causes of d
 and disability in the world.
 
 **It is an educational and research platform. It never issues an individual clinical
-recommendation.** That sentence is a requirement (HREQ-S-01), is carried in-band by every
-result the engine returns, and is the first thing a reviewer checks.
+recommendation.** That sentence is a requirement (HREQ-S-01/S-02), the disclaimer and
+the validation status are carried in-band by every result the engine returns, and they
+are the first things a reviewer checks. Figures quoted in these documents are snapshots
+as of model 1.0.1; the status line recomputes them.
 
 ## Read in this order
 
@@ -49,7 +51,7 @@ design-lead, ui-designer, platform-engineer) are reused unchanged.
 2. **Every number has a source and a grade.** `A-meta`, `A-primary`, `B-textbook`, `C-model`, `D-animal`, `E-assumption`. Assumptions are counted and shown, never hidden. The share of parameters graded ≥ B is a headline metric of the whole project. V1 ships at 24 of 54 (44 %); the number is on the status line so nobody can forget it.
 3. **Calibration is never validation.** A parameter tuned to hit a literature target is recorded as *calibrated to* that target and can never be *validated by* it. The V1 chronic-salt pressure slope is the standing example.
 4. **No point estimate without a band.** Every quantity is a Monte Carlo distribution over the parameter ranges. A number without its band is an S1 defect, not a style issue.
-5. **Expectations are pre-registered.** Each scenario carries literature expectations written before results are examined, with kinds (`quantitative`, `semi-quantitative`, `qualitative`, `design-target`, `known-divergence`, `unverified`). Only the first two can count as passes; the harness never silently skips one.
+5. **Expectations are registered before results, from now on.** Each expectation has a kind (`quantitative`, `semi-quantitative`, `qualitative`, `design-target`, `known-divergence`, `unverified`, `numerical`) and a role (`validation`, `calibration`, `structural`). Only quantitative and semi-quantitative rows with role `validation` can count; the harness never silently skips one. V1's 24 expectations were co-developed with the model; none is demonstrably pre-registered, and they are reported separately (`01 §7.1`).
 6. **One model, two implementations.** The JavaScript reference and the Python port must agree to 1e-9 relative on golden trajectories. Divergence stops the line.
 7. **Append-only knowledge.** Entities, relations, evidence and verification records are never edited in place; corrections supersede, and the disagreeing source stays in `conflicts`.
 8. **Everything is removable.** Every module has a flag, a registry entry, an owner, tests, and a written removal recipe. Adding a module is a checklist; undoing one is a shorter checklist. Spencer approves every pull request; nothing auto-merges.

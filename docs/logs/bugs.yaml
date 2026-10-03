@@ -3884,3 +3884,474 @@ bugs:
   monitor_gap: >-
     Counts in comments are not computed from data; HREQ-E-04 covers surfaces, not
     comments. Accepted as cosmetic.
+
+# --- Findings of the clinical-safety review and the rigor-lead review, 2026-10-03 -------
+- id: BUG-20261003-100
+  area: health
+  summary: Published V1 surface frames the kidney strain index as a dose answer without its label (dose panel heading, HUD gauge)
+  severity: S0a
+  priority: P0
+  error_class: ETH
+  status: open
+  logged_at: "2026-10-03T03:30:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading reference/metabolic-map-v1/index.html and app/ui.js (source only, not rendered)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/index.html, line: 396}
+  - {file: reference/metabolic-map-v1/index.html, line: 353}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 607}
+  requirement: HREQ-S-04
+  data_impact: >-
+    Reader-facing, published: the dose panel is headed "How much salt strains the kidney?"
+    and shows peak strain-index values; "an index, not a clinical measure" appears only
+    inside the click-to-open evidence drawer. The HUD gauge shows "Kidney strain index"
+    with ticks 0 / 0.33 / 0.66 / 1 and no index or display-choice label. An unlabelled
+    model index is framed as answering a dose question on the Operator's published
+    artifact. No number is wrong; its framing is.
+  root_cause: >-
+    The label was written once, in the drawer, and the two surfaces that show the number
+    most prominently were built without it; nothing checked every surface for the label.
+  resolution: >-
+    Decision for the Operator (tracker A-2): patch the published artifact (heading "Salt
+    load sweep 0-30 g: the model's kidney strain index for the 70 kg reference adult --
+    an index, not a clinical measure; no amount here is safe or unsafe for any person";
+    gauge label "Kidney strain index -- a model index, not a clinical measure; colour
+    bands are display choices") or accept until M1's viewer review. The vendored copy is
+    not edited (HREQ-P-09); the fix lands in the artifact and in every new surface.
+  monitor_gap: >-
+    No surface-string lint and no rendered safety review before V1 published; WF-H-06
+    and the HREQ-S checklist now stand before every release.
+
+- id: BUG-20261003-101
+  area: health
+  summary: V1 surface draws the 135 mmol/L classification threshold as a red "critical" danger line labelled "hyponatremia threshold"
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:32:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading app/ui.js refLines and scenarios.js drink_water_3L_fast"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 47}
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 105}
+  - {file: src/health/engine/scenarios.py, line: 198}
+  requirement: HREQ-S-03
+  data_impact: >-
+    Reader-facing, published: "135 hyponatremia threshold" in the critical tone, and the
+    scenario text "Shows where plasma Na crosses the 135 mmol/L hyponatremia boundary",
+    present a definition as a physiological limit. The Python port carries the same
+    description verbatim (golden string equality).
+  root_cause: >-
+    The reference line was styled as a danger line because the scenario is a
+    "hyponatremia risk demo"; the label never said the number is a classification
+    definition. HREQ-S-03 did not exist when V1 was built.
+  resolution: >-
+    Planned (M1 viewer review, with the display-title map of BUG-102): neutral tone and
+    the config label display.threshold_label on both lines; the description reads "...
+    crosses 135 mmol/L, the classification threshold that defines hyponatremia (a
+    definition, not a safety limit)". Both implementations change together with the
+    version bump.
+  monitor_gap: >-
+    No string lint for thresholds; the safety checklist now names it.
+
+- id: BUG-20261003-102
+  area: health
+  summary: Scenario titles are imperatives with no reference person ("Drink 1 L of water in 10 min", "Eat 10 g salt")
+  severity: S1
+  priority: P1
+  error_class: ETH
+  status: open
+  logged_at: "2026-10-03T03:34:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading scenarios.js titles rendered as the scenario dropdown (app/ui.js)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 86}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 815}
+  - {file: src/health/engine/scenarios.py, line: 144}
+  requirement: HREQ-S-02
+  data_impact: >-
+    Reader-facing, published: the dropdown reads as instructions ("Drink 1 L", "Eat 10 g
+    salt"), and no scenario description names the 70 kg reference adult. Nothing is
+    wrong numerically; the framing addresses the reader.
+  root_cause: >-
+    Titles were written as scenario shorthand; the equivalence rule (HREQ-V-09) requires
+    the port's strings to match the JavaScript exactly, so the port cannot fix them alone.
+  resolution: >-
+    Decision taken (tracker W-19): a display-title map keyed by scenario id in the
+    surface layer at M1 ("1 L water over 10 min -- 70 kg reference adult", etc.), with the
+    engine strings unchanged until the next MODEL_VERSION bump mirrors them.
+  monitor_gap: >-
+    No imperative lint on user-facing strings; docs/health/03 §8.2 now requires one.
+
+- id: BUG-20261003-103
+  area: health
+  summary: The chronic-salt result shows neither its known divergence nor that its literature band is a calibration target
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:36:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading the Chronic tab (index.html) and the expectations list renderer (app/ui.js)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/index.html, line: 381}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 558}
+  requirement: HREQ-S-07
+  data_impact: >-
+    Reader-facing, published: the Chronic tab shows the description and the chip "Modeled
+    risk trajectory, not a prediction" only. The He 2013 row appears under "What the
+    literature expects" with no sign that three parameters were tuned to it, and the
+    Heer 2000 known divergence (no total-body-water gain) is not on the surface at all.
+    A reader can take agreement with the band as evidence.
+  root_cause: >-
+    Expectation rows render only metric and target; the note field, where V1 recorded
+    calibration and divergence, is not rendered.
+  resolution: >-
+    Planned (M1 viewer review): in-band text under the chronic chart -- "Calibration,
+    not validation: three model parameters were tuned so this result lands in the He
+    2013 band; agreement with it is not evidence. Known divergence: the model expands
+    extracellular fluid under chronic salt; a human study (Heer 2000) found no
+    total-body-water gain." -- fed from the harness rows' role and kind.
+  monitor_gap: >-
+    HREQ-S-07 did not exist; it does now, and the safety checklist names it.
+
+- id: BUG-20261003-104
+  area: health
+  summary: V1 renders only the first sentence of the disclaimer; "Not clinically validated." exists only as a code comment
+  severity: S1
+  priority: P1
+  error_class: ETH
+  status: open
+  logged_at: "2026-10-03T03:38:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer comparing engine/index.js DISCLAIMER with the model.js header comment and docs/health/00 §1.4"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 19}
+  - {file: reference/metabolic-map-v1/engine/model.js, line: 3}
+  - {file: src/health/cli.py, line: 23}
+  requirement: HREQ-S-01
+  data_impact: >-
+    Reader-facing, published: the one sentence that disclaims clinical validation is
+    missing from every result object and every surface, while the audience now includes
+    clinicians in training. docs/health/00 §1.4 and the vendored README misquoted V1 as
+    rendering both sentences (corrected in this PR).
+  root_cause: >-
+    DISCLAIMER was defined once as one sentence; the second sentence lived in a comment.
+  resolution: >-
+    In this PR on the Python side: meta.validation_status = "Not clinically validated."
+    on every result and expectation row, and the CLI prints both lines last (config
+    model.validation_status). The reference gains it with the next version bump (W-20).
+  monitor_gap: >-
+    No test asserted the surface standard against the rendered string; the safety
+    checklist and tests/health_selftest.py now do.
+
+- id: BUG-20261003-105
+  area: health
+  summary: report.py crashes with a traceback on a list- or object-typed field, and status then prints no disclaimer
+  severity: S3
+  priority: P1
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:40:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: entities[0].type = [\"organism\"] under --root; status tracebacks with empty stdout"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/report.py, line: 68}
+  - {file: src/health/cli.py, line: 95}
+  requirement: HREQ-S-01
+  data_impact: >-
+    Not reader-facing on shipped data. On a malformed KB the status surface fails without
+    its disclaimer, which HREQ-S-01 forbids even on failure (the KB-unavailable path
+    prints it; this path did not).
+  root_cause: >-
+    summary() uses field values as dict keys and sort keys; a list is unhashable and an
+    object is unorderable, and the garbage test only substituted whole documents.
+  resolution: >-
+    Being fixed in this PR: summary() buckets non-string values under "(invalid)"; status
+    prints findings and the disclaimer last with exit 1; regression test on an
+    array-typed field.
+  monitor_gap: >-
+    The never-raises test substituted whole documents, never single fields.
+
+- id: BUG-20261003-106
+  area: health
+  summary: The KB loader accepts NaN and Infinity JSON tokens that the reference app's JSON.parse rejects
+  severity: S3
+  priority: P1
+  error_class: KBI
+  status: open
+  logged_at: "2026-10-03T03:42:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: a quantity with value Infinity passes kb-check; Node JSON.parse throws on the same file"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/__init__.py, line: 81}
+  requirement: HREQ-P-09
+  data_impact: >-
+    None on shipped data. A KB file the Python gate passes could break the published app
+    at load, the opposite of what the gate is for.
+  root_cause: Python's json accepts the non-standard tokens by default.
+  resolution: "Being fixed in this PR: json.loads(parse_constant=...) raises; regression test."
+  monitor_gap: No test fed non-standard JSON to the loader.
+
+- id: BUG-20261003-107
+  area: health
+  summary: Schema patterns compiled with re.ASCII let a DOI containing a Unicode space pass doi-pattern
+  severity: S2
+  priority: P1
+  error_class: KBI
+  status: open
+  logged_at: "2026-10-03T03:44:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: DOI 10.1016/s0889<NBSP>8529 accepted in Python, rejected by ECMA-262 in Node"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 261}
+  requirement: HREQ-D-02
+  data_impact: >-
+    None on shipped data. An evidence id that does not resolve could pass the gate with
+    an invisible character in it, which is provenance loss by the back door.
+  root_cause: "re.ASCII changes \\S to match non-ASCII whitespace; the schema's patterns are ECMA-262."
+  resolution: "Being fixed in this PR: ECMA-262 class semantics for \\s \\S \\d \\w; regression test."
+  monitor_gap: No test used non-ASCII whitespace.
+
+- id: BUG-20261003-108
+  area: health
+  summary: Any verification record with resolved true verifies an external id forever; a later resolved false record is ignored
+  severity: S2
+  priority: P1
+  error_class: KBI
+  status: open
+  logged_at: "2026-10-03T03:46:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: appended a later resolved:false record for organism:body / UBERON; no finding"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 787}
+  requirement: HREQ-D-04
+  data_impact: >-
+    None on shipped data (all 154 records resolve). The append-only log cannot retire an
+    identifier, which defeats the point of supersession.
+  root_cause: The check tested membership of any resolved record rather than the latest.
+  resolution: "Being fixed in this PR: the latest record per (entity, db, id) governs; regression test."
+  monitor_gap: No plant appended a superseding record.
+
+- id: BUG-20261003-109
+  area: health
+  summary: 'status prints "E-assumption: 0" and a share of "n/a" when params.json is unusable, instead of "unavailable"'
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:48:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead: --params pointing at a file containing null; status exits 0 showing E-assumption: 0 (real count 30)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/cli.py, line: 104}
+  requirement: HREQ-N-01
+  data_impact: >-
+    Reader-facing on the status surface: a zero where the honest answer is "unavailable",
+    the exact substitution HREQ-N-01 forbids.
+  root_cause: The grade distribution defaults to zero counts when no rows load.
+  resolution: "Being fixed in this PR: both figures print unavailable with the reason on stderr; regression test."
+  monitor_gap: The CLI test only exercised a missing KB root, not a bad params file.
+
+- id: BUG-20261003-110
+  area: health
+  summary: Module-registry scanner disagrees with PyYAML in 17 of 20 crafted cases; a safe_dump round-trip reads as zero modules
+  severity: S3
+  priority: P1
+  error_class: CFG
+  status: open
+  logged_at: "2026-10-03T03:50:00-05:00"
+  occurred_at: "2026-10-03T02:45:00-05:00"
+  detected_by: "health-rigor-lead registry_probe.py: comments on flags, yes/on/TRUE, 4-space indent, id not first, flow mappings, quoted lists, ~, tabs"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/registry.py, line: 24}
+  requirement: HREQ-X-01
+  data_impact: >-
+    Reader-facing on the status surface before pip install: an edited registry could show
+    "modules (0): (none enabled)" or a disabled module that is enabled, and the shipped-file
+    test would not catch it.
+  root_cause: >-
+    A line-regex scanner for the shipped file's exact shape, compared with PyYAML only on
+    that file.
+  resolution: "Being fixed in this PR: a correct YAML-subset parser; tests compare it with PyYAML on five variants."
+  monitor_gap: The agreement test used one file.
+
+- id: BUG-20261003-111
+  area: health
+  summary: A schema tightening the shipped data violates is reported as a schema-drift warning and the gate passes
+  severity: S3
+  priority: P1
+  error_class: KBI
+  status: open
+  logged_at: "2026-10-03T03:52:00-05:00"
+  occurred_at: "2026-10-03T02:45:00-05:00"
+  detected_by: "health-rigor-lead mutation: maxLength 5 on Entity.name -> schema-drift warn, PASS"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 859}
+  requirement: HREQ-D-03
+  data_impact: None on shipped data; a changed contract would not be enforced on it.
+  root_cause: The checker mirrors the schema by hand and only warns when the mirror and the file differ.
+  resolution: "Being fixed in this PR: evaluate the live schema generically; a violation of it is an error."
+  monitor_gap: The drift check watched the file hash, not the data.
+
+- id: BUG-20261003-112
+  area: health
+  summary: docs/health/03 §6 names 16 knowledge-base rules; 7 are not implemented and 4 are warnings that never block
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T03:54:00-05:00"
+  occurred_at: "2026-10-03T03:00:00-05:00"
+  detected_by: "health-rigor-lead reconciliation of the 03 §6 table against check.py RULES (requested by the orchestrator)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 1}
+  - {file: src/health/kb/check.py, line: 106}
+  requirement: HREQ-V-16
+  data_impact: >-
+    Reader-facing in the documents: 03 §6 says "check.py enforces every rule" and HREQ-V-16
+    says each rule blocks a merge. Not implemented: params-mirror, grade-ceiling,
+    range-kind, dispersion, calibration-link, fixed-reason, append-only. Warn-only:
+    param-evidence-unresolved, conflict-unsourced-note, value-outside-range, range-order.
+    HREQ-E-01 (params rows) and HREQ-E-02 (sourceType/defaultGrade required) also
+    unimplemented. The document was committed after the code.
+  root_cause: >-
+    The document and the checker were written concurrently by different builders; the
+    meta-test compared plants with RULES, which cannot see a documented rule the code
+    never had.
+  resolution: >-
+    In this PR: the four warnings become errors; params-mirror, grade-ceiling, HREQ-E-01
+    and HREQ-E-02 implemented; the five rules that need data fields are listed in
+    DEFERRED_RULES, and a meta-test parses the 03 §6 table and fails if a documented rule
+    has neither a code nor a deferral. 03 §6 gains a status column (tracker W-17).
+  monitor_gap: >-
+    No test read the document; the gate now does.
+
+- id: BUG-20261003-113
+  area: health
+  summary: Checker hygiene — extra record arrays unvalidated, cubic cycle walk, seven surviving mutants, plants that cascade
+  severity: S4
+  priority: P2
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T03:56:00-05:00"
+  occurred_at: "2026-10-03T02:45:00-05:00"
+  detected_by: "health-rigor-lead mutants.py and edge.py"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 509}
+  - {file: src/health/kb/check.py, line: 731}
+  requirement: HREQ-V-17
+  data_impact: None. Test strength and performance only.
+  root_cause: First-pass tests pinned behaviour on the shipped file, not on boundaries.
+  resolution: "Being fixed in this PR: items validated; linear cycle walk (1,000-deep chain under 1 s); mutants killed; warning set pinned; one rule per plant."
+  monitor_gap: No mutation testing in the gates; the rigor-lead runs it per review.
+
+- id: BUG-20261003-114
+  area: health
+  summary: k_excr_gain notes say "Log-uniform sampling" but its 20-100 range is exactly 5-fold and the sampler's rule is hi/lo > 5, so it is sampled uniformly
+  severity: S4
+  priority: P3
+  error_class: PRM
+  status: open
+  logged_at: "2026-10-03T03:58:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer (passed to the rigor-lead): params.json k_excr_gain notes vs mc.js samplingMode"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/params.json, line: 1}
+  - {file: reference/metabolic-map-v1/engine/mc.js, line: 29}
+  requirement: HREQ-U-02
+  data_impact: >-
+    None on any number: the parameter is inert in every V1 scenario (no scenario varies
+    potassium). The note misdescribes the sampling.
+  root_cause: The note was written for a wider range that was later narrowed to exactly 5-fold.
+  resolution: "Planned (M1, curator): correct the note, or widen the range if log-uniform was intended; both implementations' sampling_mode already agree."
+  monitor_gap: Notes are free text; nothing compares them with the sampler.
+
+- id: BUG-20261003-115
+  area: health
+  summary: After 1 L of water the modelled plasma sodium takes 7.05 h to recover within 0.5 mmol/L, outside the registered Crowe 1987 range of 6 h, in both implementations
+  severity: S1
+  priority: P1
+  error_class: MDL
+  status: open
+  logged_at: "2026-10-03T04:00:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-physiology-modeler running the expectation harness on the Python port; confirmed on the JavaScript reference (fixture section findings): 7.05 h with default parameters; Monte Carlo n = 256 seed 1 band q05 2.83 h, q50 8.73 h, q95 +inf; in-range share 0.324"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 86}
+  - {file: src/health/engine/validate.py, line: 1}
+  requirement: HREQ-V-13
+  data_impact: >-
+    Reader-facing, published: the app lists this expectation under "What the literature
+    expects" beside a curve that does not meet it, with no status shown, so a learner
+    reads the expectation as met. The port's harness now reports it as a counted fail.
+    V1 reported its own tests passing; its test did not score this row.
+  root_cause: >-
+    Model structure or parameters: the water load is excreted on a time course slower
+    than Crowe 1987's 20 mL/kg load in young water-replete men. Whether the model, the
+    extractor's definition, or the registered range is at fault is the Operator's call
+    under WF-H-02 (a range is never widened to admit a fail).
+  resolution: >-
+    Decision for the Operator (tracker D-9): supersede the row as a known divergence with
+    the reason, or recalibrate the model through WF-H-01 with the row kept as a counted
+    fail until it passes on its own. Until then every surface showing drink_water_1L
+    must show the row's fail status (HREQ-S-07).
+  monitor_gap: >-
+    V1's test suite never scored its own expectation rows; the harness and
+    tests/health_selftest.py now do, and a passing or failing row cannot change status
+    silently (LITERATURE_FAILS is asserted).
+
+- id: BUG-20261003-116
+  area: health
+  summary: Three latent quirks in the reference engine (influence NaN only counted in a trailing run; inputs() reads mutable arrays; quantile NaN between two infinities)
+  severity: S4
+  priority: P3
+  error_class: NUM
+  status: open
+  logged_at: "2026-10-03T04:02:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-physiology-modeler while porting (index.js:223, scenarios.js:28, mc.js:52)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 223}
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 28}
+  - {file: reference/metabolic-map-v1/engine/mc.js, line: 52}
+  requirement: HREQ-P-01
+  data_impact: None on any shipped number; none of the three conditions arises in V1 data.
+  root_cause: Edge cases outside the data the reference was tested on.
+  resolution: "Planned (M1, with the next reference change): count any NaN difference; read the frozen copies; return Inf between infinities; mirror in the port where it differs (the port already reads frozen copies and uses R's rule for the harness band)."
+  monitor_gap: The golden fixture covers shipped data only; edge-case fixtures are a 03 §9 item.

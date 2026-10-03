@@ -53,9 +53,11 @@ A range is never widened to make a Monte Carlo band cover a result.
 ## Expectations (WF-H-02)
 
 You register a scenario's `expects` **before** the modeler runs it: metric, kind,
-range, evidence, note, and the registration date. Kinds are honest: a target a
-parameter was tuned to is `design-target`, never `quantitative`. After a result is seen,
-an expectation is changed only by a superseding row that keeps the old one.
+range, evidence, note, and the registration date. Roles are honest: a target a
+parameter was tuned to keeps its kind and carries `role: calibration` with
+`calibrates: [...]`, and each tuned parameter carries `calibratedAgainst`; it is
+evaluated on every run and never counted as validation (`01 §6.3`). After a result is
+seen, an expectation is changed only by a superseding row that keeps the old one.
 
 ## Escalate when
 

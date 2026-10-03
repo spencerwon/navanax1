@@ -161,8 +161,10 @@ Curator: find and verify the source; write the evidence record (WF-H-04)
 ```
 
 A parameter whose only source is "it makes the chronic scenario match He 2013" is
-`E-assumption` with `calibrated_to: ev:he-2013` in its notes, and the expectation it was
-tuned to is marked `design-target`, never `quantitative` (`01 §6`).
+`E-assumption` with `calibratedAgainst` naming the expectation; the expectation it was
+tuned to keeps its kind and carries `role: calibration` with `calibrates: [...]`
+(`01 §6.3`, HREQ-E-10/E-11). It is evaluated on every run and never counted as
+validation.
 
 ### WF-H-02 · New scenario or expectation (pre-registration)
 

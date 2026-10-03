@@ -14,6 +14,9 @@ the bottom with the date and the ADR or commit that closed them.
 | **D-6** | Repository visibility and licence | Recommend private until M1 review; licence to decide with the publication decision | Before publishing | **Open** (carried) |
 | **D-7** | Theme: dark always, or follow the system | Recommend follow the system; both themes are designed and the summary page shows both | M1 | **Open** (carried) |
 | **A-1** | Approve the M0 pull request | — | Now | **Open** |
+| **A-2** | BUG-20261003-100 (S0a): the published V1 artifact shows the strain index unlabelled on the dose panel and the HUD gauge. Patch the artifact now (orchestrator can republish it with the two labels and the dose-panel heading from the ledger entry), or accept until M1's viewer review | Patch now: the fix is two strings and a heading | Now | **Open** |
+| **D-8** | Chronic trajectory label: keep V1's "modeled risk trajectory — not a prediction" or drop "risk" as the safety review recommends ("modelled trajectory for a 70 kg reference adult — not a prediction or a risk estimate for any person") | Recommend dropping "risk": the label sits on a MAP trajectory and the model computes no outcome | M1 | **Open** |
+| **D-9** | BUG-20261003-115: after 1 L of water the modelled sodium recovers in 7.05 h; the registered Crowe 1987 range is 6 h (in-range share 0.32 at n = 256). Supersede the row as a known divergence with the reason, or recalibrate the model through WF-H-01 with the row kept as a counted fail until it passes on its own | Recommend recalibration at M1 via WF-H-01 (the extractor and the reference agree; the curator first confirms the Crowe 1987 protocol: 20 mL/kg in young water-replete men vs the model's 1 L) | M1 | **Open** |
 
 ## Open work
 
@@ -36,10 +39,14 @@ the bottom with the date and the ADR or commit that closed them.
 | W-15 | BUG-20261003-096: influence screen per scenario, both directions, union (HREQ-U-12); feeder-list diff in every model-change review (HREQ-V-19) | M1 | health-physiology-modeler | open |
 | W-16 | BUG-20261003-099: stale "52 parameters" comment and missing M9 label in the reference | M1 | health-physiology-modeler | open |
 | W-17 | Enforcement status of HREQ-M/E/U/V appendices: mark each row Phase 0 (enforced) or M1 (planned) so no requirement reads as enforced before its gate exists | M0 | orchestrator | open |
+| W-18 | DEFERRED knowledge-base rules that need data fields (range-kind, dispersion, calibration-link, fixed-reason, append-only snapshot) — add the fields through WF-H-01 and promote each rule to an error (BUG-20261003-112) | M1 | health-literature-curator + modeler | open |
+| W-19 | Display-title map keyed by scenario id in the surface layer (BUG-20261003-102), thresholds in neutral tone with the config label (BUG-101), divergence and calibration text under the chronic chart (BUG-103) | M1 | platform-engineer + design-lead | open |
+| W-20 | Reference engine gains `validation_status`, the `role`/`calibrates` fields and the title/description fixes with the next MODEL_VERSION bump (BUG-104, W-13) | M1 | health-physiology-modeler | open |
+| W-21 | Step-halving convergence, ±20 % perturbation and seed-stability runs (HREQ-V-05, V-20, V-21) as a robustness script and a scheduled check, not in the two-minute suite | M1 | health-rigor-lead | open |
 
 ## Blocked on
 
-- **Spencer:** A-1, Q1, D-1, D-4, D-6, D-7, W-12, and GitHub access for W-5.
+- **Spencer:** A-1, A-2, Q1, D-1, D-4, D-6, D-7, D-8, D-9, W-12, and GitHub access for W-5.
 
 ## Closed
 
