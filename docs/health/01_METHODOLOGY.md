@@ -13,7 +13,7 @@ The requirements document says *what* the health subsystem must do. This documen
 
 ### 1.1 Why it is written against itself
 
-A mechanistic model fails differently from a statistical one. The NFT platform's default failure is a false positive found by scanning noise. This model's default failure is a **plausible curve**. An ODE with 13 states and 54 parameters produces smooth, textbook-shaped trajectories almost whatever its numbers are: plasma sodium dips after water, rises after salt, and recovers. The structure fixes the shape; the parameters fix the magnitudes and timings, and 30 of the 54 parameters in `reference/metabolic-map-v1/engine/params.json` are curator assumptions (grade E). A curve that looks right is weak evidence that its numbers are right, and the numbers are what a reader acts on.
+A mechanistic model fails differently from a statistical one. The NFT platform's default failure is a false positive found by scanning noise. This model's default failure is a **plausible curve**. An ODE with 13 states and 57 parameters produces smooth, textbook-shaped trajectories almost whatever its numbers are: plasma sodium dips after water, rises after salt, and recovers. The structure fixes the shape; the parameters fix the magnitudes and timings, and 33 of the 57 parameters in `reference/metabolic-map-v1/engine/params.json` are curator assumptions (grade E; three of them, rows since model 1.1.0, are kidney-strain-index constants that V1 1.0.1 hard-coded, BUG-20261003-095). A curve that looks right is weak evidence that its numbers are right, and the numbers are what a reader acts on.
 
 Three facts set the stance:
 
@@ -120,7 +120,7 @@ Each row is a place where a reader could over-read an output, and a known direct
 
 **The grade belongs to the value, not to the range.** `gut_water_thalf_h` is A-primary because 0.2 h is the D2O study's half-life; its bounds were widened by assumption to cover drink volume and temperature. That is why the range carries its own kind (§4.2).
 
-The headline metric is the share of parameters graded ≥ B. V1: 24 of 54 (44.4 %): A-meta 3, A-primary 6, B-textbook 15, C-model 0, D-animal 0, E-assumption 30 (`paramSummary()` in `engine/index.js`).
+The headline metric is the share of parameters graded ≥ B. Model 1.1.0: 24 of 57 (42.1 %): A-meta 3, A-primary 6, B-textbook 15, C-model 0, D-animal 0, E-assumption 33 (`paramSummary()` in `engine/index.js`). V1 1.0.1 shipped 24 of 54 (44.4 %), E-assumption 30; the three rows added in 1.1.0 are strain-index constants the code already used (BUG-20261003-095), so the lower share is bookkeeping made honest, not weaker evidence.
 
 ### 3.2 Default grade per source type
 
@@ -134,7 +134,7 @@ Each evidence record carries `sourceType`, assigned from its PubMed publication 
 | model | C-model | 5 |
 | primary-animal; primary-in-vitro | D-animal | 6; 1 |
 
-The default grade is a ceiling, not an entitlement. A number may be graded below its source (a value read off a figure, a derived quantity), never above it. V1 passes that ceiling with zero violations across its 54 parameters (checked 2026-10-03). The ceiling is necessary but not sufficient: `naIn_base_mmold` is graded A-meta from He 2013, but 150 mmol/day is a scenario condition and He 2013's 9–12 g/day is a policy statement in its conclusions, and the record itself says B would be more honest (audit F-12).
+The default grade is a ceiling, not an entitlement. A number may be graded below its source (a value read off a figure, a derived quantity), never above it. The parameter table passes that ceiling with zero violations across its 57 parameters (checked 2026-10-03 at model 1.1.0 by `kb-check`). The ceiling is necessary but not sufficient: `naIn_base_mmold` is graded A-meta from He 2013, but 150 mmol/day is a scenario condition and He 2013's 9–12 g/day is a policy statement in its conclusions, and the record itself says B would be more honest (audit F-12).
 
 ### 3.3 Conflicts are kept, not resolved away
 
@@ -168,7 +168,7 @@ Monte Carlo treats each range as "the plausible span", but ranges are built in d
 | `mean-2sem` | Mean ± 2 × standard error, as reported | Uncertainty about a group mean, not the spread of people | `thirst_slope` 0.054 ± 2 × 0.007 |
 | `curator-assumption` | The curator's judgement around a point value | The curator's ignorance | `GFR_0`, `MAP_0`, `V_icf_0`, `map_auto_tau_h` |
 
-V1 records a range kind for only 11 of its 54 parameters, in free-text notes (audit F-10). Two V1 constructions fit none of the three kinds: a span across conflicting study values (`adh_threshold` 278.0–285.5 mOsm/kg, from 277.8, 281.0 and 285) and a textbook reference interval, which is a spread of individuals (`bun_mgdl` 8–20 mg/dL). Until the Operator decides whether to add kinds, both are recorded as `curator-assumption` with the construction stated in the notes. A range whose two ends have different bases takes the weaker kind: `anp_thalf_h` has a reported lower end and point value and an assumed upper end, so it is `curator-assumption`.
+V1 records a range kind for only 11 of its 57 parameters, in free-text notes (audit F-10). Two V1 constructions fit none of the three kinds: a span across conflicting study values (`adh_threshold` 278.0–285.5 mOsm/kg, from 277.8, 281.0 and 285) and a textbook reference interval, which is a spread of individuals (`bun_mgdl` 8–20 mg/dL). Until the Operator decides whether to add kinds, both are recorded as `curator-assumption` with the construction stated in the notes. A range whose two ends have different bases takes the weaker kind: `anp_thalf_h` has a reported lower end and point value and an assumed upper end, so it is `curator-assumption`.
 
 ### 4.3 Dispersion type: SD, SEM or CI
 
@@ -176,13 +176,13 @@ Mean ± 2 SEM and mean ± 2 SD differ by a factor of √n. A band built from an 
 
 ### 4.4 Parameters held fixed
 
-Twelve of the 54 parameters are `mc: false` and held at their value. There are three permitted reasons:
+Fifteen of the 57 parameters are `mc: false` and held at their value. There are three permitted reasons:
 
 | Reason | V1 parameters | Why not sampled |
 |---|---|---|
 | Scenario condition | `waterIn_base_Ld`, `naIn_base_mmold`, `kIn_base_mmold` | They define the experiment, not the person. Sampling them would blur "what happens at 150 mmol/day" into "what happens at some intake" |
 | Classification threshold | `na_normal_low`, `na_normal_high` | 135 and 145 mmol/L are definitions, used to label hyponatremia and to reject baselines, not physiology |
-| Index-definition constant | the four strain weights and three strain scales | They define what the index means; sampling them would make it a different quantity in every sample |
+| Index-definition constant | the four strain weights and three strain scales; since model 1.1.0 also the two glomerular sub-weights and the filtration scale (`strain_w_glomerular_pressure`, `strain_w_glomerular_filtration`, `strain_scale_filtration`, each with `fixedReason: "index-constant"`) | They define what the index means; sampling them would make it a different quantity in every sample |
 
 Cost: holding the index constants fixed removes definitional uncertainty from the strain-index band, so the band is narrower than the honest uncertainty about "strain" (§9). The influence screen still includes them (§8), so the reader can see that they feed the index.
 
@@ -267,7 +267,7 @@ Independent validation of the MAP–salt slope would need a source not used in t
 
 ### 6.3 The record format
 
-V1 states calibration only in free-text notes. Phase 0 makes it structural on the Python side only: the expectation record in `src/health/engine/scenarios.py` carries its id, its role and the parameters it calibrates (BUG-20261003-097). The record, with its note shortened:
+V1 states calibration only in free-text notes. Phase 0 made it structural on the Python side (BUG-20261003-097), and since model 1.1.0 the JavaScript reference carries the identical record (W-13): the expectation record in `src/health/engine/scenarios.py` and in `reference/metabolic-map-v1/engine/scenarios.js` carries its id, its role and the parameters it calibrates, and no key is Python-only (`PY_ONLY_EXPECTATION_KEYS` is empty; `tests/health_selftest.py::test_scenario_records_match_javascript_reference` compares every key). The record, with its note shortened:
 
 ```json
 { "id": "chronic_high_salt_30d/01", "metric": "ΔMAP at day 30 per +100 mmol/day Na",
@@ -278,7 +278,7 @@ V1 states calibration only in free-text notes. Phase 0 makes it structural on th
 
 The id is `<scenario>/<NN>`: the scenario id and the expectation's 1-based position in registration order, two digits. Every shipped expectation carries it explicitly, and the harness refuses a registry with a duplicate id (`ConfigurationError`; `tests/health_selftest.py::test_harness_refuses_registry_defects_and_scores_boundaries`).
 
-The harness adds `registered: "co-developed"` to every V1 row (§7.1). Two parts are planned, not built. On the parameter side, each named `params.json` row will carry `"calibratedAgainst": ["chronic_high_salt_30d/01"]`, and the deferred `calibration-link` rule (`03` §6) will check that the two lists agree (M1, W-18). The JavaScript mirror of `role` and `calibrates` comes with the next `MODEL_VERSION` bump (M1, W-13). Until then nothing checks the parameter side: a parameter tuned to a target that no `calibrates` list names is invisible to every gate.
+The harness adds `registered: "co-developed"` to every V1 row (§7.1). Two parts are planned, not built. On the parameter side, each named `params.json` row will carry `"calibratedAgainst": ["chronic_high_salt_30d/01"]`, and the deferred `calibration-link` rule (`03` §6) will check that the two lists agree (M1, W-18). The JavaScript mirror of `id`, `role` and `calibrates` came with `MODEL_VERSION` 1.1.0 (W-13). Until `calibratedAgainst` exists nothing checks the parameter side: a parameter tuned to a target that no `calibrates` list names is invisible to every gate.
 
 - **HREQ-E-10** A parameter whose value was chosen to make an output match a target SHALL list that expectation in `calibratedAgainst`, and the expectation SHALL list the parameter in `calibrates`. The two lists SHALL agree.
 - **HREQ-E-11** An expectation that any parameter was calibrated against SHALL carry role `calibration` and SHALL NOT be counted as a validation pass, whatever its outcome.
@@ -329,7 +329,7 @@ An expectation is changed only by superseding it. The new record names the old o
 
 ### 8.1 The screen
 
-`computeInfluence()` (`engine/index.js`, audit F-01 / BUG-0049) answers "which parameters move this quantity?" with a one-at-a-time screen instead of hand-written lists. Reference run: `salt_load_10g`, 24 h, dt = 1/20 h, default parameters. Each of the 54 parameters, including those held fixed in Monte Carlo, is raised by 10 % and the run repeated from its own steady state. Effect = max over time of |Δx| divided by the peak-to-peak range of the default trajectory, floored at 1e-6·max|x|. A parameter "feeds" a quantity when its effect exceeds 1 %. Cost: 55 simulations, under 2 s in Node by the code's own estimate. The code comment still says "all 52" and "~53 simulations"; the table has had 54 rows since D-2 added `map_auto_frac` and `map_auto_tau_h` (an instance of the count drift in §11).
+`computeInfluence()` (`engine/index.js`, audit F-01 / BUG-0049) answers "which parameters move this quantity?" with a one-at-a-time screen instead of hand-written lists. Reference run: `salt_load_10g`, 24 h, dt = 1/20 h, default parameters. Each of the 57 parameters (54 until model 1.1.0), including those held fixed in Monte Carlo, is raised by 10 % and the run repeated from its own steady state. Effect = max over time of |Δx| divided by the peak-to-peak range of the default trajectory, floored at 1e-6·max|x|. A parameter "feeds" a quantity when its effect exceeds 1 %. Cost: 58 simulations, one reference run plus one per parameter (0.34 s warm under Node 22.22, measured 2026-10-03). Until model 1.1.0 the code comment said "all 52" and "~53 simulations" although the table had had 54 rows since D-2 added `map_auto_frac` and `map_auto_tau_h` (an instance of the count drift in §11); the comment now states no count (BUG-20261003-099).
 
 **Why it over-counts within its design.** A perturbation that makes the steady state infeasible counts as influencing every quantity, and a non-finite difference counts as influence. Failures therefore add parameters to lists and never remove them. A threshold of 1 % of each quantity's own response range is also deliberately low.
 
@@ -341,7 +341,7 @@ The claim holds for how failures are handled, not for the screen as a whole. Mea
 - **Direction and kinks.** `thirst_vol_gain` has exactly zero effect on Thirst in the salt screen, because the hypovolemic term is max(0, 1 − vr) and salt expands the ECF. In `no_water_24h` at −10 % it feeds Thirst. For `V_ecf`, the dehydration screen adds 9 parameters the default screen does not list.
 - **Interactions.** A one-at-a-time screen cannot see a parameter that matters only when another has also moved.
 
-The screen SHALL therefore run for every registered scenario at its own horizon, in both directions, and report the union (HREQ-U-12). Not yet: the port runs the default screen only (BUG-20261003-096, W-15). Cost: with 54 parameters, 2 directions and 7 scenarios, 756 runs instead of 55; the 30-day scenario dominates, at about 17 s for its 108 runs (estimate from the measured 159 ms per run). This is still a screen, not a global sensitivity analysis: it ranks effects at ±10 % and does not decompose variance. Variance-based analysis is deferred, and until it exists interactions are unseen.
+The screen SHALL therefore run for every registered scenario at its own horizon, in both directions, and report the union (HREQ-U-12). Not yet: the port runs the default screen only (BUG-20261003-096, W-15). Cost: with 57 parameters, 2 directions and 7 scenarios, 798 runs instead of 58; the 30-day scenario dominates, at about 18 s for its 114 runs (estimate from the measured 159 ms per run). This is still a screen, not a global sensitivity analysis: it ranks effects at ±10 % and does not decompose variance. Variance-based analysis is deferred, and until it exists interactions are unseen.
 
 - **HREQ-U-11** Lists of the parameters that feed a displayed quantity SHALL come from the influence screen and never from hand-written lists.
 - **HREQ-U-12** The influence screen SHALL run for every registered scenario at that scenario's horizon, with perturbations in both directions, and SHALL report the union.
@@ -415,7 +415,7 @@ Hypertension and cardiovascular disease, chronic kidney disease, type 2 diabetes
 |---|---|---|
 | **Overfitting to targets** | Three E-graded gains tuned jointly to one He 2013 band; the comparison then reads as success | `calibration` role, never counted (§6); Monte Carlo over their ranges |
 | **Tautological expectations** | Sodium excretion ≈ intake at day 30 holds for any parameter set that reaches balance | `structural` role, never counted (§6.1) |
-| **Citation drift** | The sodium bands for `drink_water_1L` and `salt_load_10g` cite "Spec §8", an internal document, with Suckling 2012 kept as context only; the influence-screen comment says 52 parameters when there are 54 | Evidence ids must resolve; every count is computed from data (HREQ-E-04) |
+| **Citation drift** | The sodium bands for `drink_water_1L` and `salt_load_10g` cite "Spec §8", an internal document, with Suckling 2012 kept as context only; the influence-screen comment said 52 parameters when there were 54 (until model 1.1.0, BUG-20261003-099) | Evidence ids must resolve; every count is computed from data (HREQ-E-04) |
 | **Unit errors** | mmol vs mOsm (×2 for NaCl); AVP pmol/L vs pg/mL (molar mass 1084.25 g/mol, ChEBI); mg/dL to mOsm/kg; mL/min vs L/h; per-1.73 m² normalisation | Unit on every row (HREQ-M-03); named conversions; golden trajectories |
 | **Stiff-solver artefacts** | Explicit RK4 is unstable once a step exceeds about 2.8 time constants; measured NaN within 48 h at a step of 3.3 × the fastest time constant; clamps and max(0,·) lower the order of convergence (measured: error ratio 3 instead of about 16 per step halving for `Thirst`) | Step rule, convergence and stiff-case gates (`03` §3) |
 | **Hidden assumptions** | Constants 0.5, 0.5 and 0.1 in code; 1 kg water = 1 L; Thirst with no feedback; parameter independence; a single reference adult | HREQ-M-07, HREQ-M-06, HREQ-U-03, §2.4 table |

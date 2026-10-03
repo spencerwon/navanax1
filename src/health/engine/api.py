@@ -49,17 +49,20 @@ __all__ = [
     "resolve_scenario", "result_meta", "salt_load_metrics", "simulate", "simulate_mc", "simulate_sweep",
 ]
 
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.1.0"
 #: Byte-equal to DISCLAIMER in index.js (golden equivalence).
 DISCLAIMER = "Educational model — not medical advice."
 #: HREQ-S-01 as amended: carried beside the disclaimer on every result as
-#: meta.validation_status (config/health/base.yaml model.validation_status). Python only;
-#: in V1 the sentence exists only as a comment in model.js.
+#: meta.validation_status (config/health/base.yaml model.validation_status). Byte-equal to
+#: VALIDATION_STATUS in index.js since model 1.1.0 (BUG-20261003-104), which puts it in the
+#: same places: meta of every result, and top-level beside the top-level disclaimer of
+#: simulateMC / simulateSweep.
 VALIDATION_STATUS = "Not clinically validated."
 
 
 def result_meta(**extra: Any) -> dict[str, Any]:
-    """The `meta` every public result carries: disclaimer, validation status, model version."""
+    """The `meta` every public result carries: disclaimer, validation status, model version
+    (the same keys, in the same order, as resultMeta() in index.js)."""
     return {"disclaimer": DISCLAIMER, "validation_status": VALIDATION_STATUS,
             "modelVersion": MODEL_VERSION, **extra}
 
@@ -228,7 +231,7 @@ def simulate_mc(*, scenario: str | Scenario | None = None, t_end: float | None =
     """Monte Carlo over parameter ranges (spec §3 simulateMC).
 
     Returns {t, keys, q05, q50, q95, dq05, dq50, dq95, samples, rejected, n, seed, scenario,
-    disclaimer}: q**[key] are quantiles of the absolute value at each time point, dq**[key]
+    disclaimer, validation_status, meta}: q**[key] are quantiles of the absolute value at each time point, dq**[key]
     of the change from each sample's own t=0 value; samples are the accepted parameter sets
     (same order as runs).
     """
@@ -262,7 +265,7 @@ def simulate_mc(*, scenario: str | Scenario | None = None, t_end: float | None =
     sc_id = resolve_scenario(scenario).id
     return {"t": t, "keys": K, "q05": q05, "q50": q50, "q95": q95, "dq05": dq05, "dq50": dq50,
             "dq95": dq95, "samples": samples, "rejected": rejected, "n": n, "seed": seed,
-            "scenario": sc_id, "disclaimer": DISCLAIMER,
+            "scenario": sc_id, "disclaimer": DISCLAIMER, "validation_status": VALIDATION_STATUS,
             "meta": result_meta(n=n, seed=seed, scenario=sc_id, dt=dt, rejected=rejected)}
 
 
@@ -300,7 +303,7 @@ def simulate_sweep(*, n: int = 64, seed: int = 1, values: Sequence[float] | None
     samples are used at every dose, so the curve shape is not noise).
 
     Returns {values, unit, metrics: {metric: {q05: [...], q50: [...], q95: [...]}}, rejected,
-    n, seed, disclaimer}.
+    n, seed, disclaimer, validation_status, meta}.
     """
     sw = SCENARIOS["salt_load_sweep"].sweep
     assert sw is not None  # noqa: S101 - structural invariant of SCENARIOS, not input validation
@@ -322,7 +325,7 @@ def simulate_sweep(*, n: int = 64, seed: int = 1, values: Sequence[float] | None
             metrics[key]["q50"].append(b[0])
             metrics[key]["q95"].append(c[0])
     return {"values": vals, "unit": sw.unit, "metrics": metrics, "rejected": rejected, "n": n,
-            "seed": seed, "disclaimer": DISCLAIMER,
+            "seed": seed, "disclaimer": DISCLAIMER, "validation_status": VALIDATION_STATUS,
             "meta": result_meta(n=n, seed=seed, dt=dt, rejected=rejected)}
 
 
@@ -338,7 +341,12 @@ def simulate_sweep(*, n: int = 64, seed: int = 1, values: Sequence[float] | None
 #     (floored at 1e-6·max|x| so a flat quantity cannot divide by zero);
 #   * a parameter "feeds" a quantity when its effect exceeds INFLUENCE_DEFAULTS threshold (1 %).
 # A perturbation that makes the steady state infeasible counts as influencing every key
-# (effect = Infinity), so the screen can only over-count, never under-count.
+# (effect = Infinity), so the screen can only over-count, never under-count; so does a NaN
+# anywhere in a perturbed run's difference (BUG-20261003-116: before 1.1.0 only a NaN in
+# the trailing run of a series survived the running maximum). Here simulate() already
+# refuses a NaN trajectory (NonFiniteTrajectoryError -> infeasible), so the NaN rule matters
+# only for a run that reaches the comparison; it is kept identical to index.js.
+# Cost: one reference run plus one run per parameter row (meta.nParams).
 # ---------------------------------------------------------------------------
 INFLUENCE_DEFAULTS: Mapping[str, Any] = MappingProxyType({
     "scenario": "salt_load_10g", "tEnd": 24, "dt": 1 / 20, "rel": 0.10, "threshold": 0.01})
@@ -391,11 +399,15 @@ def compute_influence(*, scenario: str | Scenario | None = None, t_end: float | 
                 continue
             a, b = ref[k], run[k]
             m = 0.0
+            nan = False
             for i in range(len(a)):
                 dd = abs(b[i] - a[i])
-                if not (dd <= m):       # NaN -> counted (as in index.js)
+                if dd != dd:
+                    nan = True
+                elif dd > m:
                     m = dd
-            effects[k][name] = m / scale[k] if math.isfinite(m) else math.inf
+            # any NaN -> counted (as in index.js)
+            effects[k][name] = m / scale[k] if not nan and math.isfinite(m) else math.inf
     params: dict[str, list[str]] = {}
     for k in keys:
         hits = [(nm, e) for nm, e in effects[k].items() if e > o["threshold"]]
@@ -417,7 +429,8 @@ def prime_influence(result: Mapping[str, Any]) -> None:
 
 
 def influence() -> dict[str, Any]:
-    """Cached sensitivity screen at INFLUENCE_DEFAULTS (~55 simulations on first call)."""
+    """Cached sensitivity screen at INFLUENCE_DEFAULTS (1 + meta.nParams simulations on first
+    call)."""
     global _influence_cache
     if _influence_cache is None:
         _influence_cache = compute_influence()

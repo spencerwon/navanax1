@@ -3,19 +3,20 @@
  "regenerate": "/opt/node22/bin/node tools/health_golden.mjs",
  "reference": "reference/metabolic-map-v1/engine/index.js",
  "node": "v22.22.0",
- "modelVersion": "1.0.1",
+ "modelVersion": "1.1.0",
  "disclaimer": "Educational model — not medical advice.",
+ "validationStatus": "Not clinically validated.",
  "mulberry32": {
   "1": [0.6270739405881613,0.002735721180215478,0.5274470399599522,0.9810509674716741,0.9683778982143849],
   "42": [0.6011037519201636,0.44829055899754167,0.8524657934904099,0.6697340414393693,0.17481389874592423]
  },
  "engineSha256": {
-  "reference/metabolic-map-v1/engine/index.js": "a9fe39d824502fed80ee18f8f29edb29a391b645995362af08284c40ab9fa1d1",
-  "reference/metabolic-map-v1/engine/mc.js": "8b7ee2710586ccc10ffc33ef0481f6cc218c6521cbc4cec676bc78bc286fe453",
-  "reference/metabolic-map-v1/engine/model.js": "b62a77deca21fbb99b19502de64e31cb5a2ba42375ae3bb676cba938830afd49",
-  "reference/metabolic-map-v1/engine/params.data.js": "947646fa1401691730acbc1e295227d5beb70690713e9105aa5d55f553c029d2",
-  "reference/metabolic-map-v1/engine/params.json": "0c6ac72cf04e47e234e98b6e1748ee4c5194b4e1f34687699c5e9848d0c51238",
-  "reference/metabolic-map-v1/engine/scenarios.js": "023353169a9ff4c285f453bca797364f5d7420f39295adf84951287c78444e15",
+  "reference/metabolic-map-v1/engine/index.js": "6d1b9049bc055347a89b158c3a305f33731dfe5aada9d946a1d392f2094227a4",
+  "reference/metabolic-map-v1/engine/mc.js": "e1d6551c596dc903ede434f22c980af16723a517b3dc647616caefdea735e125",
+  "reference/metabolic-map-v1/engine/model.js": "fb4917a164255bfcaaceb04fd6f93069c5237dd74d3710ac513a952ac71a723c",
+  "reference/metabolic-map-v1/engine/params.data.js": "7b8b010e3a20dd0c6ac70ac300c25faae053ec0a1feded02f156e8f208146a12",
+  "reference/metabolic-map-v1/engine/params.json": "036ef6298e01e35454c5ffff30f8f3e40494677ae270f114982c44ac4d0f5ae2",
+  "reference/metabolic-map-v1/engine/scenarios.js": "b4c87381506f78997002acdc0663337ec1e683612b5f95f07973ce824b53b0e8",
   "reference/metabolic-map-v1/engine/solver.js": "a2c1b80f7ecffa939e42ad7118504cf1e0c049605307cfbb208d428d92e4190a"
  },
  "trajectories": {
@@ -628,6 +629,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.5479181850794703,
     "map_auto_tau_h": 209.7165572270751
    },
@@ -684,6 +688,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.6189264101441949,
     "map_auto_tau_h": 147.40048530511558
    },
@@ -740,6 +747,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.3894824670162052,
     "map_auto_tau_h": 267.11875308305025
    },
@@ -796,6 +806,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.5575014908798039,
     "map_auto_tau_h": 433.7856026273221
    },
@@ -852,6 +865,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.47053021467290823,
     "map_auto_tau_h": 467.7226220816374
    },
@@ -908,6 +924,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.7412221174221487,
     "map_auto_tau_h": 193.2340770587325
    },
@@ -964,6 +983,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.6533599555492402,
     "map_auto_tau_h": 330.5338279623538
    },
@@ -1020,6 +1042,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.3609616887755692,
     "map_auto_tau_h": 267.02723141759634
    }
@@ -1095,6 +1120,7 @@
      "summary": "All states remain at the analytic steady state (numerical drift only).",
      "expects": [
       {
+       "id": "baseline/01",
        "metric": "max |Δstate| / scale over 24 h",
        "target": "< 1e-6",
        "kind": "numerical"
@@ -1306,6 +1332,7 @@
      "summary": "Plasma Na dips ~2-4 mmol/L, ADH is suppressed, urine dilutes toward ~50-70 mOsm/kg, water diuresis peaks ~1-2 h after drinking and the load is largely excreted within ~3-4 h.",
      "expects": [
       {
+       "id": "drink_water_1L/01",
        "metric": "Na_plasma nadir − baseline",
        "target": "[-5, -1] mmol/L",
        "range": [-5,-1],
@@ -1314,6 +1341,7 @@
        "note": "Spec §8. Baylis: sustained water load lowered osmolality ~7 mOsm/kg (≈ −3.5 mmol/L Na)."
       },
       {
+       "id": "drink_water_1L/02",
        "metric": "time to recover |ΔNa| < 0.5 mmol/L after drinking starts",
        "target": "< 6 h",
        "range": [0,6],
@@ -1321,6 +1349,7 @@
        "evidence": ["ev:crowe-1987"]
       },
       {
+       "id": "drink_water_1L/03",
        "metric": "time of peak urine flow after drinking starts",
        "target": "~1-2 h (tolerance 0.5-2.5 h)",
        "range": [0.5,2.5],
@@ -1328,6 +1357,7 @@
        "evidence": ["ev:crowe-1987","ev:shafiee-2005"]
       },
       {
+       "id": "drink_water_1L/04",
        "metric": "peak urine flow",
        "target": "≈0.5-0.8 L/h (Shafiee 11 mL/min for ~1.4 L; Crowe ~0.76 L/h for 20 mL/kg)",
        "range": [0.35,0.9],
@@ -1336,6 +1366,7 @@
        "note": "Literature loads were ~1.4 L, so a 1 L load is expected at or below their peak."
       },
       {
+       "id": "drink_water_1L/05",
        "metric": "minimum urine osmolality",
        "target": "≈50-100 mOsm/kg",
        "range": [40,150],
@@ -1343,6 +1374,7 @@
        "evidence": ["ev:baylis-1986"]
       },
       {
+       "id": "drink_water_1L/06",
        "metric": "fraction of the 1 L excreted (above baseline urine) by 3 h after drinking",
        "target": "most of it (Crowe: ~100% of 20 mL/kg in 2 h in young water-replete men)",
        "range": [0.5,1.2],
@@ -1562,12 +1594,14 @@
      },
      "expects": [
       {
+       "id": "drink_water_3L_fast/01",
        "metric": "Na_plasma nadir − baseline",
        "target": "larger fall than 1 L (≈3x)",
        "kind": "qualitative",
        "evidence": ["ev:shafiee-2005"]
       },
       {
+       "id": "drink_water_3L_fast/02",
        "metric": "Na_plasma < 135 at any time",
        "target": "demonstrated in median trajectory (model behaviour, not a validated human threshold)",
        "kind": "qualitative",
@@ -1781,6 +1815,7 @@
      "summary": "Plasma Na rises ~1-3 mmol/L, ADH and thirst rise, urine concentrates, ECF expands by water drawn from cells, and the extra Na is excreted only gradually over ~24-48 h.",
      "expects": [
       {
+       "id": "salt_load_10g/01",
        "metric": "Na_plasma peak − baseline",
        "target": "[+0.5, +4] mmol/L",
        "range": [0.5,4],
@@ -1789,6 +1824,7 @@
        "note": "Spec §8. Suckling 2012: +3.13 ± 0.75 after 6 g in soup vs matched unsalted soup (SEM vs SD unverified; context only, not the source of this band); Andersen 1999: +2.7 after IV hypertonic load ≈10% ECF Na."
       },
       {
+       "id": "salt_load_10g/02",
        "metric": "ADH peak > baseline",
        "target": "rise",
        "kind": "qualitative",
@@ -1796,6 +1832,7 @@
        "note": "Andersen 2002: AVP 1.4 -> 3.1 pg/mL after hypertonic NaCl."
       },
       {
+       "id": "salt_load_10g/03",
        "metric": "fraction of the 171 mmol load excreted (above baseline) by 8 h",
        "target": "≈25% (Andersen 1999 IV load: 131 vs 81 mmol in 8 h)",
        "range": [0.1,0.6],
@@ -1804,6 +1841,7 @@
        "note": "IV not oral; supine; time-control also rose. Loose band."
       },
       {
+       "id": "salt_load_10g/04",
        "metric": "fraction excreted by 48 h",
        "target": "majority (delayed natriuresis over 24-48 h)",
        "range": [0.5,1.05],
@@ -1812,6 +1850,7 @@
        "note": "Spec §5 expectation; the multi-day rhythmicity reported by the Titze group is not modelled."
       },
       {
+       "id": "salt_load_10g/05",
        "metric": "urine osmolality rises",
        "target": "rise (free-water conservation)",
        "kind": "qualitative",
@@ -2025,12 +2064,14 @@
      "summary": "Peak kidney strain index, peak Δ[Na], peak ECF expansion and 24 h Na excretion should increase monotonically with dose. The strain index is a model index, not a clinical measure.",
      "expects": [
       {
+       "id": "salt_load_sweep/01",
        "metric": "peak strain_index vs dose",
        "target": "monotonic increase",
        "kind": "qualitative",
        "evidence": ["ev:brezis-rosen-1995","ev:brenner-1982"]
       },
       {
+       "id": "salt_load_sweep/02",
        "metric": "Context, not checked on this chart: 6 g salted minus matched-water control",
        "target": "+3.13 ± 0.75 mmol/L (Suckling 2012; SEM/SD unverified). This chart shows the rise from each person's own baseline, a different quantity; status: unverified, not counted as a pass",
        "kind": "unverified",
@@ -2512,29 +2553,38 @@
      "summary": "Na balance re-establishes within days at a slightly expanded ECF; MAP rises by a few mmHg over 2–4 weeks as slow whole-body autoregulation (state R_auto, decision D-2) adds to the pressure-natriuresis loop (Guyton/Hall), then plateaus.",
      "expects": [
       {
+       "id": "chronic_high_salt_30d/01",
        "metric": "ΔMAP at day 30 per +100 mmol/day Na",
        "target": "normotensive meta-analysis ≈2 mmHg (95% CI-derived band 0.7-3.2)",
        "range": [0.7,3.2],
        "kind": "quantitative",
        "evidence": ["ev:he-2013"],
-       "note": "MAP band derived from He 2013 normotensive SBP/DBP CIs (MAP ≈ DBP + (SBP−DBP)/3), scaled from 75 to 100 mmol/day. Scaling uses the normotensive subgroup's own urinary Na change, −75 mmol/24 h (BMJ full text, Results, read 2026-10-01; equal to the all-trial value, so the band is unchanged). Still approximate: combining SBP and DBP CI end-points is not a true MAP CI (audit F-06, BUG-0054). Parameters map_vol_exp, pn_gain, aldo_vol_exp were chosen with this target in mind (calibration, not independent validation)."
+       "note": "MAP band derived from He 2013 normotensive SBP/DBP CIs (MAP ≈ DBP + (SBP−DBP)/3), scaled from 75 to 100 mmol/day. Scaling uses the normotensive subgroup's own urinary Na change, −75 mmol/24 h (BMJ full text, Results, read 2026-10-01; equal to the all-trial value, so the band is unchanged). Still approximate: combining SBP and DBP CI end-points is not a true MAP CI (audit F-06, BUG-0054). Parameters map_vol_exp, pn_gain, aldo_vol_exp were chosen with this target in mind (calibration, not independent validation).",
+       "role": "calibration",
+       "calibrates": ["map_vol_exp","pn_gain","aldo_vol_exp"]
       },
       {
+       "id": "chronic_high_salt_30d/02",
        "metric": "MAP time course",
        "target": "still rising at day 14; ≥ 95 % of plateau by day 30; < 60 % of plateau by day 3",
        "kind": "design-target",
        "evidence": ["ev:he-2013","ev:guyton-1972"],
-       "note": "Decision D-2. Context: He 2013 trials measured BP after ≥ 4 weeks; Guyton 1972 long-term autoregulation acts over days to weeks. map_auto_tau_h was chosen for this shape (calibration, not independent validation). Test: tests/engine.test.mjs \"chronic high salt: MAP still rising at day 14\"."
+       "note": "Decision D-2. Context: He 2013 trials measured BP after ≥ 4 weeks; Guyton 1972 long-term autoregulation acts over days to weeks. map_auto_tau_h was chosen for this shape (calibration, not independent validation). Test: tests/engine.test.mjs \"chronic high salt: MAP still rising at day 14\".",
+       "role": "calibration",
+       "calibrates": ["map_auto_tau_h"]
       },
       {
+       "id": "chronic_high_salt_30d/03",
        "metric": "Na excretion ≈ intake by day 30",
        "target": "within 2%",
        "range": [0.98,1.02],
        "kind": "quantitative",
        "evidence": ["ev:guyton-1972"],
-       "note": "Steady-state balance is a structural property of the renal-body-fluid feedback."
+       "note": "Steady-state balance is a structural property of the renal-body-fluid feedback.",
+       "role": "structural"
       },
       {
+       "id": "chronic_high_salt_30d/04",
        "metric": "ECF volume change",
        "target": "model expands ECF (Guyton). Heer 2000 found plasma volume +315 mL but NO total body water gain at very high intake — known divergence (no Na storage compartment in V1).",
        "kind": "known-divergence",
@@ -2747,6 +2797,7 @@
      "summary": "Plasma osmolality and Na rise, ADH rises, urine concentrates toward its maximum, urine flow falls, thirst rises; ECF and ICF both shrink.",
      "expects": [
       {
+       "id": "no_water_24h/01",
        "metric": "osmolality rise",
        "target": "rise of a few mOsm/kg (qualitative; full-text values not verified)",
        "range": [2,15],
@@ -2754,18 +2805,21 @@
        "evidence": ["ev:phillips-1984"]
       },
       {
+       "id": "no_water_24h/02",
        "metric": "ADH at 24 h > baseline",
        "target": "rise",
        "kind": "qualitative",
        "evidence": ["ev:phillips-1984","ev:robertson-athar-1976"]
       },
       {
+       "id": "no_water_24h/03",
        "metric": "U_osm at 24 h",
        "target": "approaches U_osm_max",
        "kind": "qualitative",
        "evidence": ["ev:guyton-hall-2021"]
       },
       {
+       "id": "no_water_24h/04",
        "metric": "Thirst at 24 h > baseline",
        "target": "rise",
        "kind": "qualitative",
@@ -4236,6 +4290,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.5551894346717745,
     "map_auto_tau_h": 127.2634011413902
    },
@@ -4292,6 +4349,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.7532498116604984,
     "map_auto_tau_h": 471.6962250508368
    },
@@ -4348,6 +4408,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.4378640105947852,
     "map_auto_tau_h": 330.2427734155208
    },
@@ -4404,6 +4467,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.5141471837181598,
     "map_auto_tau_h": 451.3174741063267
    },
@@ -4460,6 +4526,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.435906692314893,
     "map_auto_tau_h": 472.3528773430735
    },
@@ -4516,6 +4585,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.36271977368742225,
     "map_auto_tau_h": 149.70791973173618
    },
@@ -4572,6 +4644,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.757501483289525,
     "map_auto_tau_h": 197.74788605980575
    },
@@ -4628,6 +4703,9 @@
     "strain_scale_transport": 0.1,
     "strain_scale_excretion": 3,
     "strain_scale_pressure": 10,
+    "strain_w_glomerular_pressure": 0.5,
+    "strain_w_glomerular_filtration": 0.5,
+    "strain_scale_filtration": 0.1,
     "map_auto_frac": 0.7948937024921179,
     "map_auto_tau_h": 217.6744203362614
    }
@@ -4682,8 +4760,10 @@
    "rel": 0.1,
    "threshold": 0.01,
    "infeasible": [],
-   "nParams": 54,
-   "modelVersion": "1.0.1"
+   "nParams": 57,
+   "modelVersion": "1.1.0",
+   "disclaimer": "Educational model — not medical advice.",
+   "validation_status": "Not clinically validated."
   },
   "effects": {
    "V_ecf": {
@@ -4739,6 +4819,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0004485712268452223,
     "map_auto_tau_h": 0.000001300368916465555
    },
@@ -4795,6 +4878,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00015096076845229301,
     "map_auto_tau_h": 4.52995981790304e-7
    },
@@ -4851,6 +4937,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.021687448373511938,
     "map_auto_tau_h": 0.000056492033301303454
    },
@@ -4907,6 +4996,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -4963,6 +5055,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -5019,6 +5114,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00017407129695446664,
     "map_auto_tau_h": 4.898299203597844e-7
    },
@@ -5075,6 +5173,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -5131,6 +5232,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -5187,6 +5291,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 3.9175719406842026e-9,
     "map_auto_tau_h": 2.034025609101427e-13
    },
@@ -5243,6 +5350,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00029926525171773374,
     "map_auto_tau_h": 6.76004226456647e-7
    },
@@ -5299,6 +5409,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00043637941858802446,
     "map_auto_tau_h": 0.0000012137226996148474
    },
@@ -5355,6 +5468,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.22990917432109365,
     "map_auto_tau_h": 0.0009975399955740895
    },
@@ -5411,6 +5527,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.10089464662785806,
     "map_auto_tau_h": 0.0905527506360064
    },
@@ -5467,6 +5586,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00015696465363115948,
     "map_auto_tau_h": 4.618499539802651e-7
    },
@@ -5523,6 +5645,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00015696465363115948,
     "map_auto_tau_h": 4.618499539802651e-7
    },
@@ -5579,6 +5704,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0001502058176907775,
     "map_auto_tau_h": 4.5148378850949407e-7
    },
@@ -5635,6 +5763,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0002615931564448275,
     "map_auto_tau_h": 7.742000838053642e-7
    },
@@ -5691,6 +5822,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.010239165907711787,
     "map_auto_tau_h": 0.000045055400968432924
    },
@@ -5747,6 +5881,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.010239165907711787,
     "map_auto_tau_h": 0.000045055400968432924
    },
@@ -5803,6 +5940,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.010239165907711689,
     "map_auto_tau_h": 0.00004505540095863904
    },
@@ -5859,6 +5999,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.011030466525990682,
     "map_auto_tau_h": 0.00004834957537786844
    },
@@ -5915,6 +6058,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.011397321778585122,
     "map_auto_tau_h": 0.00004997805433284322
    },
@@ -5971,6 +6117,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.011799553390047715,
     "map_auto_tau_h": 0.000051746450364137756
    },
@@ -6027,6 +6176,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -6083,6 +6235,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00012295331568507219,
     "map_auto_tau_h": 3.4608036278967053e-7
    },
@@ -6139,6 +6294,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0005979440976580547,
     "map_auto_tau_h": 0.0000015780873763993988
    },
@@ -6195,6 +6353,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0005979440976579498,
     "map_auto_tau_h": 0.000001578087376408145
    },
@@ -6251,6 +6412,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0004591376018933488,
     "map_auto_tau_h": 0.000001154963754621533
    },
@@ -6307,6 +6471,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.00023496106219333734,
     "map_auto_tau_h": 7.131040267441171e-7
    },
@@ -6363,6 +6530,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -6419,6 +6589,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0.09090909090909108,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.04303977669536831,
     "map_auto_tau_h": 0.00018874914963513283
    },
@@ -6475,6 +6648,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0.012324580056248235,
+    "strain_w_glomerular_pressure": 0.01355703806187315,
+    "strain_w_glomerular_filtration": 0.09452170289744882,
+    "strain_scale_filtration": 0.08592882081586273,
     "map_auto_frac": 0.04084710824890949,
     "map_auto_tau_h": 0.00017782400912475652
    },
@@ -6531,6 +6707,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -6587,6 +6766,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0.023883238718478597,
     "strain_scale_pressure": 0.012188328129626001,
+    "strain_w_glomerular_pressure": 0.013401905254703765,
+    "strain_w_glomerular_filtration": 0.09298222107417349,
+    "strain_scale_filtration": 0.08476024266372811,
     "map_auto_frac": 0.051732045678943,
     "map_auto_tau_h": 0.00022539526802304864
    },
@@ -6643,6 +6825,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -6699,6 +6884,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0002818921937812655,
     "map_auto_tau_h": 8.342762842224665e-7
    },
@@ -6755,6 +6943,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -6811,6 +7002,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0.0007841512055571203,
     "map_auto_tau_h": 0.0000020425776323114243
    },
@@ -6867,6 +7061,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    },
@@ -6923,6 +7120,9 @@
     "strain_scale_transport": 0,
     "strain_scale_excretion": 0,
     "strain_scale_pressure": 0,
+    "strain_w_glomerular_pressure": 0,
+    "strain_w_glomerular_filtration": 0,
+    "strain_scale_filtration": 0,
     "map_auto_frac": 0,
     "map_auto_tau_h": 0
    }
@@ -6959,9 +7159,9 @@
    "ADH_target": ["waterIn_base_Ld","adh_ec50","adh_slope","U_osm_max","adh_threshold","V_icf_0","V_ecf_0","adh_hill","gut_water_thalf_h","adh_thalf_h","insensible_Ld","urea_excr_mosmd","U_osm_min","naIn_base_mmold","osm_eq_tau_h","kIn_base_mmold","water_metabolic_Ld"],
    "strain_transport": [],
    "strain_excretion": ["aldo_effect_exp","na_osm_gain","aldo_vol_exp","adh_threshold","waterIn_base_Ld","aldo_tau_h","V_icf_0","adh_ec50","adh_slope","U_osm_max","adh_thalf_h","strain_scale_excretion","adh_hill","V_ecf_0","insensible_Ld","U_osm_min","gut_water_thalf_h","urea_excr_mosmd","osm_eq_tau_h","map_auto_frac","anp_vol_exp","anp_effect_exp","naIn_base_mmold","kIn_base_mmold","map_vol_exp","MAP_0","pn_gain","water_metabolic_Ld","gfr_vol_exp","map_tau_h","adh_vol_shift"],
-   "strain_glomerular": ["gfr_vol_exp","waterIn_base_Ld","V_icf_0","V_ecf_0","gut_water_thalf_h","U_osm_max","adh_ec50","adh_thalf_h","adh_hill","map_auto_frac","adh_slope","adh_threshold","insensible_Ld","osm_eq_tau_h","U_osm_min","urea_excr_mosmd","map_vol_exp","naIn_base_mmold","MAP_0","map_tau_h","strain_scale_pressure"],
+   "strain_glomerular": ["strain_w_glomerular_filtration","gfr_vol_exp","strain_scale_filtration","waterIn_base_Ld","V_icf_0","V_ecf_0","gut_water_thalf_h","U_osm_max","adh_ec50","adh_thalf_h","adh_hill","map_auto_frac","adh_slope","adh_threshold","insensible_Ld","osm_eq_tau_h","U_osm_min","urea_excr_mosmd","map_vol_exp","naIn_base_mmold","strain_w_glomerular_pressure","MAP_0","map_tau_h","strain_scale_pressure"],
    "strain_concentrating": [],
-   "strain_index": ["strain_w_glomerular","gfr_vol_exp","adh_threshold","aldo_effect_exp","aldo_vol_exp","na_osm_gain","V_icf_0","V_ecf_0","map_auto_frac","gut_water_thalf_h","adh_thalf_h","adh_hill","waterIn_base_Ld","aldo_tau_h","osm_eq_tau_h","strain_w_excretion","strain_scale_excretion","map_vol_exp","U_osm_max","U_osm_min","adh_ec50","MAP_0","insensible_Ld","map_tau_h","adh_slope","strain_scale_pressure"],
+   "strain_index": ["strain_w_glomerular","strain_w_glomerular_filtration","gfr_vol_exp","strain_scale_filtration","adh_threshold","aldo_effect_exp","aldo_vol_exp","na_osm_gain","V_icf_0","V_ecf_0","map_auto_frac","gut_water_thalf_h","adh_thalf_h","adh_hill","waterIn_base_Ld","aldo_tau_h","osm_eq_tau_h","strain_w_excretion","strain_scale_excretion","map_vol_exp","U_osm_max","U_osm_min","adh_ec50","MAP_0","insensible_Ld","map_tau_h","strain_w_glomerular_pressure","adh_slope","strain_scale_pressure"],
    "water_in": ["waterIn_base_Ld"],
    "water_out": ["waterIn_base_Ld","U_osm_max","adh_ec50","adh_thalf_h","adh_hill","adh_slope","insensible_Ld","adh_threshold","V_icf_0","U_osm_min","urea_excr_mosmd","naIn_base_mmold","V_ecf_0","water_metabolic_Ld"],
    "na_in": ["naIn_base_mmold"],
@@ -7057,13 +7257,13 @@
   }
  },
  "paramSummary": {
-  "count": 54,
+  "count": 57,
   "atLeastB": 24,
-  "pctAtLeastB": 44.44444444444444,
+  "pctAtLeastB": 42.10526315789474,
   "byGrade": {
    "B-textbook": 15,
    "A-primary": 6,
-   "E-assumption": 30,
+   "E-assumption": 33,
    "A-meta": 3
   }
  },
@@ -7665,25 +7865,25 @@
       "$float": "NaN"
      },
      {
-      "$float": "NaN"
+      "$float": "Infinity"
      }
     ],
     [
      {
-      "$float": "NaN"
+      "$float": "-Infinity"
      },
      2,
      0
     ],
     [
      {
-      "$float": "NaN"
+      "$float": "Infinity"
      },
      {
       "$float": "NaN"
      },
      {
-      "$float": "NaN"
+      "$float": "Infinity"
      }
     ]
    ]
@@ -7945,6 +8145,104 @@
     "strain_index": {
      "$float": "NaN"
     }
+   }
+  }
+ },
+ "resultLabels": {
+  "simulate": {
+   "scenario": "drink_water_1L",
+   "dt": 0.016666666666666666,
+   "meta": {
+    "steps": 720,
+    "maxStep": 0.016666666666666666,
+    "dt": 0.016666666666666666,
+    "outEvery": 1,
+    "label": null,
+    "disclaimer": "Educational model — not medical advice.",
+    "validation_status": "Not clinically validated.",
+    "modelVersion": "1.1.0"
+   }
+  },
+  "drawSamples": {
+   "n": 8,
+   "seed": 1,
+   "meta": {
+    "disclaimer": "Educational model — not medical advice.",
+    "validation_status": "Not clinically validated.",
+    "modelVersion": "1.1.0",
+    "n": 8,
+    "seed": 1,
+    "draws": 8
+   }
+  },
+  "simulateMC": {
+   "scenario": "drink_water_1L",
+   "n": 8,
+   "seed": 1,
+   "keys": ["Na_plasma","urine_flow","ADH"],
+   "disclaimer": "Educational model — not medical advice.",
+   "validation_status": "Not clinically validated.",
+   "meta": {
+    "disclaimer": "Educational model — not medical advice.",
+    "validation_status": "Not clinically validated.",
+    "modelVersion": "1.1.0",
+    "n": 8,
+    "seed": 1,
+    "scenario": "drink_water_1L",
+    "dt": null,
+    "rejected": 0
+   }
+  },
+  "saltLoadMetrics": {
+   "scenario": "salt_load_10g",
+   "dt": 0.03333333333333333,
+   "meta": {
+    "disclaimer": "Educational model — not medical advice.",
+    "validation_status": "Not clinically validated.",
+    "modelVersion": "1.1.0",
+    "scenario": "salt_load_10g"
+   }
+  },
+  "simulateSweep": {
+   "n": 4,
+   "seed": 1,
+   "values": [0,10,20],
+   "disclaimer": "Educational model — not medical advice.",
+   "validation_status": "Not clinically validated.",
+   "meta": {
+    "disclaimer": "Educational model — not medical advice.",
+    "validation_status": "Not clinically validated.",
+    "modelVersion": "1.1.0",
+    "n": 4,
+    "seed": 1,
+    "dt": 0.03333333333333333,
+    "rejected": 0
+   }
+  },
+  "computeInfluence": {
+   "opts": {
+    "scenario": "drink_water_1L",
+    "tEnd": 3,
+    "dt": 0.1
+   },
+   "meta": {
+    "scenario": "drink_water_1L",
+    "tEnd": 3,
+    "dt": 0.1,
+    "rel": 0.1,
+    "threshold": 0.01,
+    "infeasible": [],
+    "nParams": 57,
+    "modelVersion": "1.1.0",
+    "disclaimer": "Educational model — not medical advice.",
+    "validation_status": "Not clinically validated."
+   }
+  },
+  "paramSummary": {
+   "meta": {
+    "disclaimer": "Educational model — not medical advice.",
+    "validation_status": "Not clinically validated.",
+    "modelVersion": "1.1.0"
    }
   }
  },

@@ -3722,7 +3722,8 @@ bugs:
   severity: S2
   priority: P2
   error_class: PRM
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T15:20:00-05:00"
   logged_at: "2026-10-03T03:10:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "methodology builder reading reference/metabolic-map-v1/engine/model.js M10 while writing docs/health/01 §4.7 and §9"
@@ -3742,10 +3743,20 @@ bugs:
     live in params.json as E-assumptions. The index was written as code first and the
     table filled in after; three constants never made the trip.
   resolution: >-
-    Planned (M1, WF-H-01): three params.json rows (strain_w_glomerular_pressure,
-    strain_w_glomerular_filtration, strain_scale_filtration), grade E-assumption, mc:
-    false; both implementations read them; MODEL_VERSION bump; golden regenerated.
-    Until then the index band must say its definition constants are fixed (HREQ-M-10).
+    Fixed with MODEL_VERSION 1.1.0 (WF-H-01 rows, values unchanged): three params.json rows in
+    both byte-identical copies (and params.data.js regenerated): strain_w_glomerular_pressure
+    0.5, strain_w_glomerular_filtration 0.5 (unit 1) and strain_scale_filtration 0.1 (unit
+    fraction), range = value, grade E-assumption, mc false, fixedReason index-constant,
+    evidence ev:brenner-1982 (as strain_w_glomerular). M10 reads them in model.js and
+    model.py; at the defaults every strain value is bit-identical (the golden trajectories,
+    stiffCorner and solverCoverage sections are byte-identical to 1.0.1's, and the port equals
+    the 1.0.1 literal). Parameter count 54 -> 57, E-assumption 30 -> 33, >= B share 44.4 % ->
+    42.1 %. The influence screen now lists the three among the feeders of strain_glomerular
+    and strain_index. The viewer's fallback hand list STRAIN_P (app/ui.js, used only if the
+    screen throws) does not name them yet; that edit is the viewer builder's.
+  regression_test:
+    - tests/health_selftest.py::test_strain_index_constants_are_parameter_rows_that_m10_reads
+    - tests/health_selftest.py::test_golden_comparison_detects_a_perturbed_model_constant
   monitor_gap: >-
     No lint over engine source for numeric literals (HREQ-M-07 names one); the KB
     engineParam mirror can only check rows that exist.
@@ -3869,7 +3880,8 @@ bugs:
   severity: S4
   priority: P3
   error_class: PRS
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T15:20:00-05:00"
   logged_at: "2026-10-03T03:18:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "methodology builder counting params.json rows against the index.js comment (docs/health/01 §8.1)"
@@ -3887,8 +3899,17 @@ bugs:
     D-2 added map_auto_frac and map_auto_tau_h to the table; the comment that quoted the
     count was not revisited. M9 was never assigned a block.
   resolution: >-
-    Planned (M1, with the next reference change): fix the comment, add the M9 label or
-    renumber M10 to M9, mirror in model.py.
+    Fixed with MODEL_VERSION 1.1.0: the influence-screen comments in index.js and api.py state
+    no count (one reference run plus one per parameter row; meta.nParams reports it), and
+    the stale api.py "~55 simulations" went with them. M9 is added rather than M10
+    renumbered, because M10 is the strain index's name across the documents, the ledger and
+    the new rows' notes: M9 labels the outputs that do not feed back (the flux ledger in
+    rhs() and derived()), as docs/health/01 §2.3 already treated them, so M0..M10 are
+    continuous and each used once, identically in model.js and model.py. The model.js
+    header also pointed at engine/README.md (not vendored) and listed "M1 ... M10"; it now
+    names docs/health/01 §2.3 and M0 ... M10.
+  regression_test:
+    - tests/health_selftest.py::test_model_blocks_are_labelled_m0_to_m10_alike_in_both_implementations
   monitor_gap: >-
     Counts in comments are not computed from data; HREQ-E-04 covers surfaces, not
     comments. Accepted as cosmetic.
@@ -4038,7 +4059,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: ETH
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T15:20:00-05:00"
   logged_at: "2026-10-03T03:38:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "health-safety-reviewer comparing engine/index.js DISCLAIMER with the model.js header comment and docs/health/00 §1.4"
@@ -4057,9 +4079,20 @@ bugs:
   root_cause: >-
     DISCLAIMER was defined once as one sentence; the second sentence lived in a comment.
   resolution: >-
-    In this PR on the Python side: meta.validation_status = "Not clinically validated."
-    on every result and expectation row, and the CLI prints both lines last (config
-    model.validation_status). The reference gains it with the next version bump (W-20).
+    Engine side fixed in both implementations. The port (Phase 0): meta.validation_status on
+    every result and expectation row; the CLI prints both lines last. The reference, with
+    MODEL_VERSION 1.1.0 (W-20): index.js exports VALIDATION_STATUS = 'Not clinically
+    validated.' and resultMeta(), and puts validation_status beside the disclaimer in every
+    result it returns, in the same places as the port (meta of simulate, drawSamples,
+    simulateMC, saltLoadMetrics, simulateSweep, computeInfluence and paramSummary;
+    top-level beside the top-level disclaimer of simulateMC and simulateSweep). The golden
+    fixture's header carries validationStatus and its resultLabels section the labels of
+    every JavaScript result, compared key for key with the port. The vendored viewer's
+    rendering of the second sentence (reference/metabolic-map-v1/app) is the viewer
+    builder's and stays open until that builder's commit imports VALIDATION_STATUS.
+  regression_test:
+    - tests/health_selftest.py::test_reference_results_carry_validation_status_like_the_port
+    - tests/health_selftest.py::test_every_public_result_carries_disclaimer_and_validation_status
   monitor_gap: >-
     No test asserted the surface standard against the rendered string; the safety
     checklist and tests/health_selftest.py now do.
@@ -4381,7 +4414,8 @@ bugs:
   severity: S4
   priority: P3
   error_class: NUM
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T15:20:00-05:00"
   logged_at: "2026-10-03T04:02:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "health-physiology-modeler while porting (index.js:223, scenarios.js:28, mc.js:52)"
@@ -4394,7 +4428,20 @@ bugs:
   requirement: HREQ-P-01
   data_impact: None on any shipped number; none of the three conditions arises in V1 data.
   root_cause: Edge cases outside the data the reference was tested on.
-  resolution: "Planned (M1, with the next reference change): count any NaN difference; read the frozen copies; return Inf between infinities; mirror in the port where it differs (the port already reads frozen copies and uses R's rule for the harness band)."
+  resolution: >-
+    Fixed identically in the reference and the port with MODEL_VERSION 1.1.0. (a)
+    computeInfluence / compute_influence record any NaN difference (effect = Infinity),
+    where the running maximum let a later finite difference overwrite a NaN. (b)
+    makeScenario's inputs() reads the frozen copies it stores, not the caller's arrays (the
+    port already did). (c) quantileSorted / quantile_sorted interpolate only between
+    different order statistics (R type 7), so a quantile between two equal infinities is
+    that infinity. Values changed: only the fixture's nonFinite.quantileBands, four entries
+    NaN -> +/-Infinity (q = 0.95 column 2 -> Infinity; q = 0 column 0 -> -Infinity; q = 1
+    columns 0 and 2 -> Infinity); no shipped number moved.
+  regression_test:
+    - tests/health_selftest.py::test_reference_edge_semantics_of_model_1_1_0
+    - tests/health_selftest.py::test_reference_scenario_inputs_read_frozen_copies
+    - tests/health_selftest.py::test_non_finite_semantics_match_javascript_reference
   monitor_gap: The golden fixture covers shipped data only; edge-case fixtures are a 03 §9 item.
 
 - id: BUG-20261003-117
@@ -5902,3 +5949,78 @@ bugs:
     and is a counted skip, never a silent pass, where Node is absent).
   regression_test: tests/health_selftest.py::test_golden_check_ignores_the_recorded_node_version_but_not_a_value
   monitor_gap: The gate had run only in this container, under the Node that generated the fixture; the first run elsewhere found it.
+
+- id: BUG-20261003-172
+  area: health
+  summary: "Reference result objects broke HREQ-M-01: drawSamples, saltLoadMetrics and paramSummary carried neither the disclaimer nor MODEL_VERSION, simulateMC and simulateSweep no MODEL_VERSION, computeInfluence no disclaimer"
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-03T15:00:00-05:00"
+  resolved_at: "2026-10-03T15:20:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-physiology-modeler comparing every index.js return statement with result_meta() in src/health/engine/api.py while adding validation_status (W-20)"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-1
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 27}
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 109}
+  requirement: HREQ-M-01
+  data_impact: >-
+    None on any number. Five of the seven JavaScript result objects could be read without
+    the model version that produced them, four without the disclaimer; the V1 app shows
+    the disclaimer in its footer, so no rendered value lost it, but any other consumer of
+    the reference (a worker message, a saved result) did. The port had carried both on
+    every result since Phase 0, so the two implementations disagreed on what a result is.
+  root_cause: >-
+    V1 added the disclaimer to the results its charts used (simulate meta, simulateMC,
+    simulateSweep) and the version to two; there was no shared constructor, so each return
+    statement chose its own fields.
+  resolution: >-
+    index.js gains resultMeta(extra) (disclaimer, validation_status, modelVersion, then
+    extra: the same keys in the same order as the port's result_meta), and every result
+    carries it as meta: drawSamples {n, seed, draws}, simulateMC {n, seed, scenario, dt,
+    rejected}, saltLoadMetrics {scenario}, simulateSweep {n, seed, dt, rejected},
+    paramSummary {}; computeInfluence's meta gains disclaimer and validation_status. Existing
+    fields and exports are unchanged (the app's imports hold). The fixture's resultLabels
+    section pins every result's labels, and the port must equal them key for key.
+  regression_test: tests/health_selftest.py::test_reference_results_carry_validation_status_like_the_port
+  monitor_gap: >-
+    The golden fixture recorded numbers only; nothing compared the labelling fields of the
+    JavaScript results with the port's, so HREQ-M-01 was enforced on one implementation.
+
+- id: BUG-20261003-173
+  area: health
+  summary: "The golden generator refused to write the 1.1.0 fixture: the 1.0.1 fixture sat 6,460 bytes (1.6 %) under the 400 KB budget, and model 1.1.0 adds 10,457 bytes"
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: fixed
+  logged_at: "2026-10-03T15:02:00-05:00"
+  resolved_at: "2026-10-03T15:20:00-05:00"
+  occurred_at: "2026-10-03T05:09:31-05:00"
+  detected_by: "health-physiology-modeler regenerating the fixture for MODEL_VERSION 1.1.0 (health_golden: fixture is 413597 bytes, over the 409600-byte budget)"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-1
+  locations:
+  - {file: tools/health_golden.mjs, line: 48}
+  requirement: HREQ-V-08
+  data_impact: >-
+    None on any number. The generator exits 1 before writing, so the failure was loud; but
+    it blocked the model change it must accompany, and the budget had no stated basis, so
+    the obvious fixes (drop coverage to fit) would have weakened the equivalence proof.
+  root_cause: >-
+    The 400 KB budget was set when the fixture was small, and the sections added on
+    2026-10-03 (solverCoverage, nonFinite) were fitted under it without recording the
+    remaining headroom; the influence section grows by 40 values per parameter row.
+  resolution: >-
+    Budget raised to 448 KB (fixture 413,597 bytes, 9.8 % headroom), with the reason in the
+    generator; no section was thinned. A self-test reads MAX_BYTES from the generator,
+    fails when the fixture exceeds it, and prints the headroom on every run, so the next
+    model change sees the margin first. Whether 448 KB is the right budget is the
+    Operator's call.
+  regression_test: tests/health_selftest.py::test_golden_fixture_fits_the_generator_size_budget
+  monitor_gap: >-
+    Only the generator knew the budget, and only when it refused; no test reported the
+    headroom.

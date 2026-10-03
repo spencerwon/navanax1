@@ -22,7 +22,10 @@
 // solverCoverage holds runs that move the potassium and sweat fluxes, thin the output grid
 // (outEvery 7 and 2.5), put breakpoints inside output intervals (dt 0.1 h) and pass unsorted
 // breakpoints; (n) nonFinite pins the JavaScript NaN/Infinity semantics the port emulates
-// (quantile sort, Math.max and Math.pow on NaN). Sections are only ever ADDED: an existing
+// (quantile sort, Math.max and Math.pow on NaN); (o) resultLabels holds, for every public
+// result object of index.js, the labelling fields it carries (disclaimer, validation_status,
+// meta), taken from the same runs as the sections above (since model 1.1.0,
+// BUG-20261003-104). Sections are only ever ADDED: an existing
 // section's bytes change only with a MODEL_VERSION bump. Every Monte
 // Carlo section first checks that no draw sits within 1e-6 of a rejection boundary
 // (HREQ-V-11) and records the smallest margin it saw (rejectionMargins). The header
@@ -39,7 +42,10 @@ const ENGINE = resolve(ENGINE_DIR, 'index.js');
 // HEALTH_GOLDEN_OUT overrides the fixture path (the self-test uses it to check a planted copy).
 const OUT = process.env.HEALTH_GOLDEN_OUT ? resolve(process.env.HEALTH_GOLDEN_OUT)
   : resolve(ROOT, 'tests/fixtures/health/golden_v1.json');
-const MAX_BYTES = 400 * 1024;
+// Size budget: 400 KB until model 1.1.0, raised to 448 KB when the three strain-index
+// constants (BUG-20261003-095) added 3 x 40 effects to computeInfluence and 3 keys to every
+// drawn sample, and resultLabels was added (the 1.0.1 fixture was 403,140 bytes).
+const MAX_BYTES = 448 * 1024;
 
 const E = await import(pathToFileURL(ENGINE).href);
 const S = await import(pathToFileURL(resolve(ENGINE_DIR, 'solver.js')).href);
@@ -56,6 +62,11 @@ function engineHashes() {
 }
 
 const arr = (a) => Array.from(a);
+// (o) resultLabels: filled by the sections below from the result objects they compute.
+const LABELS = {};
+const labelsOf = (r) => Object.fromEntries(['disclaimer', 'validation_status', 'meta']
+  .filter((k) => k in r).map((k) => [k, r[k]]));
+const withoutMeta = (r) => Object.fromEntries(Object.entries(r).filter(([k]) => k !== 'meta'));
 const pick = (a, idx) => idx.map((k) => a[k]);
 const uniqSorted = (xs) => [...new Set(xs)].sort((a, b) => a - b);
 
@@ -100,8 +111,9 @@ function trajectory(r, tEnd, stride, outEvery) {
 function goldenTrajectories() {
   const out = {};
   for (const { scenario, dt, stride, outEvery } of TRAJ) {
-    out[scenario] = trajectory(E.simulate({ scenario, dt, outEvery }), E.SCENARIOS[scenario].tEnd,
-      stride, outEvery);
+    const r = E.simulate({ scenario, dt, outEvery });
+    if (scenario === 'drink_water_1L') LABELS.simulate = { scenario, dt, ...labelsOf(r) };
+    out[scenario] = trajectory(r, E.SCENARIOS[scenario].tEnd, stride, outEvery);
   }
   return out;
 }
@@ -191,7 +203,9 @@ function assertNoKnifeEdge(label, { n, seed, table = E.paramTable() }) {
 // (c) drawSamples({n: 8, seed: 1}).
 function goldenDrawSamples() {
   assertNoKnifeEdge('drawSamples', { n: 8, seed: 1 });
-  const { samples, rejected } = E.drawSamples({ n: 8, seed: 1 });
+  const d = E.drawSamples({ n: 8, seed: 1 });
+  LABELS.drawSamples = { n: 8, seed: 1, ...labelsOf(d) };
+  const { samples, rejected } = d;
   return { n: 8, seed: 1, samples, rejected };
 }
 
@@ -200,6 +214,7 @@ function goldenMC() {
   assertNoKnifeEdge('simulateMC', { n: 8, seed: 1 });
   const keys = ['Na_plasma', 'urine_flow', 'ADH'];
   const r = E.simulateMC({ scenario: 'drink_water_1L', n: 8, seed: 1, keys });
+  LABELS.simulateMC = { scenario: 'drink_water_1L', n: 8, seed: 1, keys, ...labelsOf(r) };
   const T = r.t.length;
   const indices = [0, 60, 120, 240, T - 1];
   const band = (q) => Object.fromEntries(keys.map((k) => [k, pick(q[k], indices)]));
@@ -213,7 +228,9 @@ function goldenMC() {
 // (e) saltLoadMetrics of the 10 g salt load at dt = 1/30 h.
 function goldenSaltMetrics() {
   const dt = 1 / 30;
-  return { scenario: 'salt_load_10g', dt, metrics: E.saltLoadMetrics(E.simulate({ scenario: 'salt_load_10g', dt })) };
+  const m = E.saltLoadMetrics(E.simulate({ scenario: 'salt_load_10g', dt }));
+  LABELS.saltLoadMetrics = { scenario: 'salt_load_10g', dt, ...labelsOf(m) };
+  return { scenario: 'salt_load_10g', dt, metrics: withoutMeta(m) };
 }
 
 // (f) scenario records (the literature-validation contract) and their input schedules.
@@ -265,6 +282,7 @@ function goldenSweep() {
   const o = { n: 4, seed: 1, values: [0, 10, 20] };
   assertNoKnifeEdge('simulateSweep', o);
   const r = E.simulateSweep(o);
+  LABELS.simulateSweep = { ...o, ...labelsOf(r) };
   return { ...o, dt: 1 / 30, metrics: r.metrics, rejected: r.rejected, unit: r.unit };
 }
 
@@ -272,6 +290,7 @@ function goldenSweep() {
 function goldenInfluence() {
   const opts = { scenario: 'drink_water_1L', tEnd: 3, dt: 0.1 };
   const r = E.computeInfluence(opts);
+  LABELS.computeInfluence = { opts, ...labelsOf(r) };
   return { opts, meta: r.meta, effects: r.effects, params: r.params };
 }
 
@@ -468,6 +487,7 @@ const golden = {
   node: process.version,
   modelVersion: E.MODEL_VERSION,
   disclaimer: E.DISCLAIMER,
+  validationStatus: E.VALIDATION_STATUS,
   mulberry32: goldenMulberry(),
   engineSha256: engineHashes(),
   trajectories: goldenTrajectories(),
@@ -481,10 +501,15 @@ const golden = {
   simulateSweep: goldenSweep(),
   computeInfluence: goldenInfluence(),
   steadyState: goldenConstants(),
-  paramSummary: E.paramSummary(),
+  paramSummary: (() => {
+    const s = E.paramSummary();
+    LABELS.paramSummary = labelsOf(s);
+    return withoutMeta(s);
+  })(),
   findings: goldenFindings(),
   solverCoverage: goldenSolverCoverage(),
   nonFinite: goldenNonFinite(),
+  resultLabels: LABELS,
 };
 golden.rejectionMargins = MARGINS;
 

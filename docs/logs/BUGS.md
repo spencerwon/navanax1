@@ -1636,6 +1636,27 @@ whole files, so the runner's Node 22.23.3 read a value-identical fixture as stal
 recorded version as provenance, names the first differing line when something real
 changed, and a test plants both cases on a copy.
 
+**Model 1.1.0, the reference change planned for M1 (BUG-20261003-095, BUG-20261003-099,
+BUG-20261003-104, BUG-20261003-116, BUG-20261003-172, BUG-20261003-173; W-13, W-14, W-16,
+W-20).** The JavaScript reference and the port moved
+together, with the golden fixture regenerated and a section-by-section comparison against
+the 1.0.1 fixture: 16 of 26 top-level sections byte-identical (every trajectory, the stiff
+corner, the solver coverage, the Monte Carlo bands, the sweep, the steady state and the
+findings), and the rest changed only as intended. The three strain-index constants that M10
+hard-coded are parameter rows (BUG-095): 57 parameters, 33 E-assumption, 24 of 57 graded at
+least B, every strain value unchanged. The expectation records in `scenarios.js` carry the
+same `id`, `role` and `calibrates` as the port's, so no key is Python-only (W-13). The
+reference exports `VALIDATION_STATUS` and puts it beside the disclaimer on every result
+(BUG-104); doing so showed that six of its seven results also lacked the model version, the
+disclaimer or both, which HREQ-M-01 requires (BUG-172, S1), now carried by one `resultMeta()` in
+both implementations. M9 now labels the outputs that do not feed back, and the comment
+counts are gone (BUG-099). Three latent edge cases are fixed on both sides (BUG-116): a
+NaN anywhere in an influence difference counts, scenario inputs read frozen copies, and a
+quantile between two equal infinities is that infinity; four non-finite fixture values
+moved from NaN. The generator then refused the new fixture: the old one had used 98.4 % of
+a 400 KB budget (BUG-173, raised to 448 KB, the Operator's to confirm). Every new test was
+shown to fail without its change: 17 single-change mutants, 17 killed.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |

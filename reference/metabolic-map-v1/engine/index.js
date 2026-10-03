@@ -15,8 +15,18 @@ export {
   MMOL_NA_PER_G_NACL, mulberry32, sampleParams, samplingMode, REFERENCE_PERSON, GFR_NORM_BSA_M2,
 };
 
-export const MODEL_VERSION = '1.0.1';
+export const MODEL_VERSION = '1.1.0';
 export const DISCLAIMER = 'Educational model — not medical advice.';
+/** HREQ-S-01: carried beside DISCLAIMER on every result (since 1.1.0; BUG-20261003-104). */
+export const VALIDATION_STATUS = 'Not clinically validated.';
+
+/**
+ * The `meta` every public result carries: disclaimer, validation status, model version, then
+ * `extra` (the same keys, in the same order, as result_meta() in src/health/engine/api.py).
+ */
+export function resultMeta(extra = {}) {
+  return { disclaimer: DISCLAIMER, validation_status: VALIDATION_STATUS, modelVersion: MODEL_VERSION, ...extra };
+}
 
 function resolveScenario(s) {
   if (!s) return SCENARIOS.baseline;
@@ -78,7 +88,7 @@ export function simulate(o = {}) {
   return {
     t: res.t, Y, states, derived: der, ledger, params: p, scenario: sc.id,
     meta: { steps: res.steps, maxStep, dt, outEvery, label: sc.label || null, disclaimer: DISCLAIMER,
-      modelVersion: MODEL_VERSION },
+      validation_status: VALIDATION_STATUS, modelVersion: MODEL_VERSION },
   };
 }
 
@@ -88,14 +98,15 @@ export function drawSamples({ n = 64, seed = 1, table = paramTable() } = {}) {
   const samples = [];
   let rejected = 0;
   const maxTries = 50 * n;
-  for (let tries = 0; samples.length < n; tries++) {
+  let tries = 0;
+  for (; samples.length < n; tries++) {
     if (tries >= maxTries) throw new Error(`drawSamples: only ${samples.length}/${n} feasible samples after ${tries} draws`);
     const p = sampleParams(table, rng);
     const C = constants(p);
     if (!C.feasible || !(C.Na_ss >= p.na_normal_low && C.Na_ss <= p.na_normal_high)) { rejected++; continue; }
     samples.push(p);
   }
-  return { samples, rejected };
+  return { samples, rejected, meta: resultMeta({ n, seed, draws: tries }) };
 }
 
 /**
@@ -128,8 +139,10 @@ export function simulateMC({ scenario, tEnd, n = 64, seed = 1, dt, outEvery, key
     [q05[k], q50[k], q95[k]] = quantileBands(series[k], [0.05, 0.5, 0.95]);
     [dq05[k], dq50[k], dq95[k]] = quantileBands(dseries[k], [0.05, 0.5, 0.95]);
   }
+  const scId = resolveScenario(scenario).id;
   return { t, keys: K, q05, q50, q95, dq05, dq50, dq95, samples, rejected, n, seed,
-    scenario: resolveScenario(scenario).id, disclaimer: DISCLAIMER };
+    scenario: scId, disclaimer: DISCLAIMER, validation_status: VALIDATION_STATUS,
+    meta: resultMeta({ n, seed, scenario: scId, dt: dt ?? null, rejected }) };
 }
 
 /** Summary metrics of one salt-load run (used by the dose sweep). */
@@ -146,7 +159,8 @@ export function saltLoadMetrics(r) {
   const k24 = nearestIndex(t, 25); // 24 h after the load at t = 1 h
   const base = r.params.naIn_base_mmold / 24;
   const na_excr_24h = r.ledger.na_out[k24] - r.ledger.na_out[nearestIndex(t, 1)] - 24 * base;
-  return { peak_strain_index: peakS, peak_dNa: peakdNa, peak_dV_ecf: peakdV, na_excr_24h, peak_MAP: peakMAP };
+  return { peak_strain_index: peakS, peak_dNa: peakdNa, peak_dV_ecf: peakdV, na_excr_24h, peak_MAP: peakMAP,
+    meta: resultMeta({ scenario: r.scenario ?? null }) };
 }
 
 /**
@@ -171,7 +185,8 @@ export function simulateSweep({ n = 64, seed = 1, values, dt = 1 / 30 } = {}) {
       metrics[key].q05.push(a[0]); metrics[key].q50.push(b[0]); metrics[key].q95.push(c[0]);
     }
   }
-  return { values: vals, unit: sw.unit, metrics, rejected, n, seed, disclaimer: DISCLAIMER };
+  return { values: vals, unit: sw.unit, metrics, rejected, n, seed, disclaimer: DISCLAIMER,
+    validation_status: VALIDATION_STATUS, meta: resultMeta({ n, seed, dt, rejected }) };
 }
 
 export function nearestIndex(t, x) {
@@ -184,7 +199,7 @@ export function nearestIndex(t, x) {
 // Which parameters influence each quantity (audit F-01 / BUG-0049).
 // One-at-a-time sensitivity screen instead of hand-written lists:
 //   * reference run: default parameters, scenario salt_load_10g, 24 h, dt = 1/20 h;
-//   * every parameter in the table (all 52, including the ones held fixed in Monte Carlo,
+//   * every parameter in the table (all of them, including the ones held fixed in Monte Carlo,
 //     because e.g. the strain-index weights are E-assumptions that define that curve)
 //     is raised by +10 % and the run repeated from its own steady state;
 //   * effect(param, key) = max_t |x_perturbed(t) − x_default(t)| / scale(key), where
@@ -192,8 +207,10 @@ export function nearestIndex(t, x) {
 //     (floored at 1e-6·max|x| so a flat quantity cannot divide by zero);
 //   * a parameter "feeds" a quantity when its effect exceeds INFLUENCE_DEFAULTS.threshold (1 %).
 // A perturbation that makes the steady state infeasible counts as influencing every key
-// (effect = Infinity), so the screen can only over-count, never under-count.
-// Result is cached; ~53 simulations (< 2 s in Node).
+// (effect = Infinity), so the screen can only over-count, never under-count; so does a NaN
+// anywhere in a perturbed run's difference (BUG-20261003-116: before 1.1.0 only a NaN in
+// the trailing run of a series survived the running maximum).
+// Result is cached; one reference run plus one run per parameter row (meta.nParams).
 export const INFLUENCE_DEFAULTS = Object.freeze({ scenario: 'salt_load_10g', tEnd: 24, dt: 1 / 20, rel: 0.10, threshold: 0.01 });
 let influenceCache = null;
 
@@ -219,16 +236,17 @@ export function computeInfluence(opts = {}) {
     for (const k of keys) {
       if (!run) { effects[k][name] = Infinity; continue; }
       const a = ref[k], b = run[k];
-      let m = 0;
-      for (let i = 0; i < a.length; i++) { const d = Math.abs(b[i] - a[i]); if (!(d <= m)) m = d; } // NaN -> counted
-      effects[k][name] = Number.isFinite(m) ? m / scale[k] : Infinity;
+      let m = 0, nan = false;
+      for (let i = 0; i < a.length; i++) { const d = Math.abs(b[i] - a[i]); if (d !== d) nan = true; else if (d > m) m = d; }
+      effects[k][name] = !nan && Number.isFinite(m) ? m / scale[k] : Infinity; // any NaN -> counted
     }
   }
   const params = {};
   for (const k of keys) {
     params[k] = Object.entries(effects[k]).filter(([, e]) => e > o.threshold).sort((x, y) => y[1] - x[1]).map(([n]) => n);
   }
-  return { meta: { ...o, infeasible, nParams: Object.keys(p0).length, modelVersion: MODEL_VERSION }, effects, params };
+  return { meta: { ...o, infeasible, nParams: Object.keys(p0).length, modelVersion: MODEL_VERSION,
+    disclaimer: DISCLAIMER, validation_status: VALIDATION_STATUS }, effects, params };
 }
 
 /** Install a precomputed screen (e.g. from a Web Worker) so paramsFor() does not recompute. */
@@ -261,5 +279,6 @@ export function paramSummary() {
   const good = entries.filter((e) => /^(A-|B-)/.test(e.grade)).length;
   const byGrade = {};
   for (const e of entries) byGrade[e.grade] = (byGrade[e.grade] || 0) + 1;
-  return { count: entries.length, atLeastB: good, pctAtLeastB: (100 * good) / entries.length, byGrade };
+  return { count: entries.length, atLeastB: good, pctAtLeastB: (100 * good) / entries.length, byGrade,
+    meta: resultMeta() };
 }

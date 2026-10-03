@@ -5,9 +5,11 @@
 // Units: time h, volume L, amount mmol (mOsm for osmoles), concentration mmol/L,
 // pressure mmHg, osmolality mOsm/kg (1 kg water ≈ 1 L assumed), ADH pg/mL.
 //
-// Every numbered block below ("M1" ... "M10") has a matching section in
-// engine/README.md so the code can be audited line by line. Every parameter
-// `p.xxx` is defined, with citation, range and evidence grade, in params.json.
+// Every numbered block below ("M0" ... "M10", each number used once) has a matching
+// section in docs/health/01_METHODOLOGY.md §2.3 (the V1 engine/README.md is not
+// vendored) and the same number in src/health/engine/model.py, so the code can be
+// audited line by line. Every parameter `p.xxx` is defined, with citation, range and
+// evidence grade, in params.json.
 //
 // Pure ES module, no imports beyond the parameter table: runs in Node and browsers.
 
@@ -301,6 +303,9 @@ export function rhs(t, y, p, inputs, out, ledgerOut, C = constants(p)) {
   dy[10] = C.k_anp * (f.ANP_target - y[10]);                                       // ANP
   dy[11] = (f.MAP_target - y[11]) / p.map_tau_h;                                   // MAP
   dy[12] = (f.R_auto_target - y[12]) / p.map_auto_tau_h;                           // R_auto (slow, days-weeks)
+  // M9. Outputs that do not feed back: the cumulative-flux ledger (integrated beside the
+  //     state for the mass-balance audit, LEDGER_KEYS) here, and derived() below, which
+  //     assembles DERIVED_KEYS from fluxes() and the strain index (M10).
   if (ledgerOut) {
     ledgerOut[0] = f.waterIn + f.metab;
     ledgerOut[1] = f.V_ur + f.insens + f.fecal + f.sweat;
@@ -323,7 +328,10 @@ export function rhs(t, y, p, inputs, out, ledgerOut, C = constants(p)) {
 //                   Sejersted 1982 [dog])
 //   excretion     — Na excretory burden relative to baseline excretion
 //   glomerular    — glomerular pressure / hyperfiltration proxy (Brenner 1982):
-//                   mean of (MAP − MAP_0)/scale and (GFR/GFR_0 − 1)/0.1
+//                   w_p·(MAP − MAP_0)/scale_pressure + w_f·(GFR/GFR_0 − 1)/scale_filtration,
+//                   w_p = w_f = 0.5 (a mean) and scale_filtration = 0.1 by default
+//                   (strain_w_glomerular_pressure, strain_w_glomerular_filtration,
+//                   strain_scale_filtration: params.json rows since 1.1.0, BUG-20261003-095)
 //   concentrating — fraction of the remaining urine-concentrating range in use
 //                   (medullary transport demand; Brezis & Rosen 1995)
 // raw   = Σ w_i · load_i        (weights and scales: params.json, all E-assumption)
@@ -332,15 +340,15 @@ export function rhs(t, y, p, inputs, out, ledgerOut, C = constants(p)) {
 function strain(f, p, C, MAP) {
   const transport = Math.max(0, (f.FL - f.Na_ur) / C.Treab_ss - 1) / p.strain_scale_transport;
   const excretion = Math.max(0, f.Na_ur / C.naIn_h - 1) / p.strain_scale_excretion;
-  const glomerular = 0.5 * Math.max(0, (MAP - p.MAP_0) / p.strain_scale_pressure) +
-    0.5 * Math.max(0, (f.GFR / C.GFR0_Lh - 1) / 0.1);
+  const glomerular = p.strain_w_glomerular_pressure * Math.max(0, (MAP - p.MAP_0) / p.strain_scale_pressure) +
+    p.strain_w_glomerular_filtration * Math.max(0, (f.GFR / C.GFR0_Lh - 1) / p.strain_scale_filtration);
   const concentrating = Math.max(0, (f.U_osm - C.U_ss) / (p.U_osm_max - C.U_ss));
   const raw = p.strain_w_transport * transport + p.strain_w_excretion * excretion +
     p.strain_w_glomerular * glomerular + p.strain_w_concentrating * concentrating;
   return { transport, excretion, glomerular, concentrating, index: raw / (1 + raw) };
 }
 
-/** Derived quantities for one state (spec §3 derived). Returns an object keyed by DERIVED_KEYS. */
+/** Derived quantities for one state (spec §3 derived; block M9). Returns an object keyed by DERIVED_KEYS. */
 export function derived(y, p, C = constants(p)) {
   const f = fluxes(y, p, null, C);
   const s = strain(f, p, C, y[11]);

@@ -21,7 +21,7 @@ model:
   # checks this value, the Python constant, the JavaScript constant and the golden fixture's
   # modelVersion agree (a bump in one place and not the others is a CFG defect,
   # docs/health/05 §3).
-  version: "1.0.1"
+  version: "1.1.0"
   # meta.disclaimer stays byte-equal to the V1 JavaScript DISCLAIMER (golden equivalence,
   # HREQ-V-09); the second sentence of the surface standard (docs/health/00 §1.4) travels
   # as meta.validation_status and every surface renders both (HREQ-S-01).

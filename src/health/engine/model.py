@@ -5,9 +5,10 @@ EDUCATIONAL MODEL -- NOT MEDICAL ADVICE. Not clinically validated.
 Units: time h, volume L, amount mmol (mOsm for osmoles), concentration mmol/L,
 pressure mmHg, osmolality mOsm/kg (1 kg water ~ 1 L assumed), ADH pg/mL.
 
-Every numbered block below ("M0" ... "M10") carries the same number as the block in
-reference/metabolic-map-v1/engine/model.js, so the port can be audited against the
-reference line by line. Every parameter p["xxx"] is defined, with citation, range and
+Every numbered block below ("M0" ... "M10", each number used once) carries the same
+number as the block in reference/metabolic-map-v1/engine/model.js and matches a section of
+docs/health/01_METHODOLOGY.md §2.3, so the port can be audited against the reference line
+by line. Every parameter p["xxx"] is defined, with citation, range and
 evidence grade, in params.json.
 
 Port rules (what "the same model" means here):
@@ -448,6 +449,9 @@ def rhs(t: float, y: Sequence[float], p: Mapping[str, Any], inputs: Mapping[str,
     dy[10] = C["k_anp"] * (f["ANP_target"] - y[10])              # ANP
     dy[11] = (f["MAP_target"] - y[11]) / p["map_tau_h"]          # MAP
     dy[12] = (f["R_auto_target"] - y[12]) / p["map_auto_tau_h"]  # R_auto (slow, days-weeks)
+    # M9. Outputs that do not feed back: the cumulative-flux ledger (integrated beside the
+    #     state for the mass-balance audit, LEDGER_KEYS) here, and derived() below, which
+    #     assembles DERIVED_KEYS from fluxes() and the strain index (M10).
     if ledger_out is not None:
         ledger_out[0] = f["waterIn"] + f["metab"]
         ledger_out[1] = f["V_ur"] + f["insens"] + f["fecal"] + f["sweat"]
@@ -469,7 +473,10 @@ def rhs(t: float, y: Sequence[float], p: Mapping[str, Any], inputs: Mapping[str,
 #                   Sejersted 1982 [dog])
 #   excretion     — Na excretory burden relative to baseline excretion
 #   glomerular    — glomerular pressure / hyperfiltration proxy (Brenner 1982):
-#                   mean of (MAP − MAP_0)/scale and (GFR/GFR_0 − 1)/0.1
+#                   w_p·(MAP − MAP_0)/scale_pressure + w_f·(GFR/GFR_0 − 1)/scale_filtration,
+#                   w_p = w_f = 0.5 (a mean) and scale_filtration = 0.1 by default
+#                   (strain_w_glomerular_pressure, strain_w_glomerular_filtration,
+#                   strain_scale_filtration: params.json rows since 1.1.0, BUG-20261003-095)
 #   concentrating — fraction of the remaining urine-concentrating range in use
 #                   (medullary transport demand; Brezis & Rosen 1995)
 # raw   = Σ w_i · load_i        (weights and scales: params.json, all E-assumption)
@@ -480,8 +487,10 @@ def strain(f: Mapping[str, float], p: Mapping[str, Any], C: Mapping[str, Any],
     """Strain-index components and the composite index (an index, not a clinical measure)."""
     transport = _max0((f["FL"] - f["Na_ur"]) / C["Treab_ss"] - 1) / p["strain_scale_transport"]
     excretion = _max0(f["Na_ur"] / C["naIn_h"] - 1) / p["strain_scale_excretion"]
-    glomerular = (0.5 * _max0((MAP - p["MAP_0"]) / p["strain_scale_pressure"])
-                  + 0.5 * _max0((f["GFR"] / C["GFR0_Lh"] - 1) / 0.1))
+    glomerular = (p["strain_w_glomerular_pressure"]
+                  * _max0((MAP - p["MAP_0"]) / p["strain_scale_pressure"])
+                  + p["strain_w_glomerular_filtration"]
+                  * _max0((f["GFR"] / C["GFR0_Lh"] - 1) / p["strain_scale_filtration"]))
     concentrating = _max0((f["U_osm"] - C["U_ss"]) / (p["U_osm_max"] - C["U_ss"]))
     raw = (p["strain_w_transport"] * transport + p["strain_w_excretion"] * excretion
            + p["strain_w_glomerular"] * glomerular + p["strain_w_concentrating"] * concentrating)
@@ -491,7 +500,7 @@ def strain(f: Mapping[str, float], p: Mapping[str, Any], C: Mapping[str, Any],
 
 def derived(y: Sequence[float], p: Mapping[str, Any],
             C: Mapping[str, Any] | None = None) -> dict[str, float]:
-    """Derived quantities for one state (spec §3 derived), keyed by DERIVED_KEYS in order."""
+    """Derived quantities for one state (spec §3 derived; block M9), keyed by DERIVED_KEYS in order."""
     if C is None:
         C = constants(p)
     f = fluxes(y, p, None, C)

@@ -97,12 +97,19 @@ def sample_params(table: Mapping[str, Mapping[str, Any]], rng: Callable[[], floa
 
 
 def quantile_sorted(sorted_: Sequence[float], q: float) -> float:
-    """Linear-interpolation quantile (R type 7) of an ascending-sorted sequence."""
+    """Linear-interpolation quantile (R type 7) of an ascending-sorted sequence.
+
+    As R does (and quantileSorted in mc.js since 1.1.0, BUG-20261003-116), it interpolates
+    only between DIFFERENT order statistics: a quantile between two equal infinities is that
+    infinity, not inf - inf = NaN. Between -inf and +inf, or next to a NaN, it is NaN.
+    """
     n = len(sorted_)
     if n == 0:
         return math.nan
     h = (n - 1) * q
     lo, hi = math.floor(h), math.ceil(h)
+    if sorted_[lo] == sorted_[hi]:
+        return sorted_[lo]
     return sorted_[lo] + (h - lo) * (sorted_[hi] - sorted_[lo])
 
 

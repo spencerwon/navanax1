@@ -763,6 +763,54 @@ export default {
   "grade": "E-assumption",
   "notes": "ASSUMPTION. Index normalisation."
  },
+ "strain_w_glomerular_pressure": {
+  "value": 0.5,
+  "unit": "1",
+  "range": [
+   0.5,
+   0.5
+  ],
+  "mc": false,
+  "fixedReason": "index-constant",
+  "description": "Kidney strain index: weight of the glomerular-pressure term (MAP rise above MAP_0 / strain_scale_pressure) within the glomerular load.",
+  "evidence": [
+   "ev:brenner-1982"
+  ],
+  "grade": "E-assumption",
+  "notes": "Index-definition constant of the kidney strain index (M10): fixed by definition, not physiology (HREQ-U-01, HREQ-M-10); value unchanged from V1 1.0.1 code"
+ },
+ "strain_w_glomerular_filtration": {
+  "value": 0.5,
+  "unit": "1",
+  "range": [
+   0.5,
+   0.5
+  ],
+  "mc": false,
+  "fixedReason": "index-constant",
+  "description": "Kidney strain index: weight of the hyperfiltration term (relative GFR rise above GFR_0 / strain_scale_filtration) within the glomerular load.",
+  "evidence": [
+   "ev:brenner-1982"
+  ],
+  "grade": "E-assumption",
+  "notes": "Index-definition constant of the kidney strain index (M10): fixed by definition, not physiology (HREQ-U-01, HREQ-M-10); value unchanged from V1 1.0.1 code"
+ },
+ "strain_scale_filtration": {
+  "value": 0.1,
+  "unit": "fraction",
+  "range": [
+   0.1,
+   0.1
+  ],
+  "mc": false,
+  "fixedReason": "index-constant",
+  "description": "Relative GFR rise above GFR_0 counted as one unit of hyperfiltration load (weighted with the MAP rise / strain_scale_pressure).",
+  "evidence": [
+   "ev:brenner-1982"
+  ],
+  "grade": "E-assumption",
+  "notes": "Index-definition constant of the kidney strain index (M10): fixed by definition, not physiology (HREQ-U-01, HREQ-M-10); value unchanged from V1 1.0.1 code"
+ },
  "map_auto_frac": {
   "value": 0.7,
   "unit": "1",

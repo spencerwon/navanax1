@@ -66,12 +66,14 @@ from health.engine import (  # noqa: E402
     imul,
     initial_state,
     make_salt_load,
+    make_scenario,
     make_water_load,
     mulberry32,
     nearest_index,
     param_summary,
     param_table,
     quantile_bands,
+    quantile_sorted,
     rhs,
     salt_load_metrics,
     sampling_mode,
@@ -367,8 +369,9 @@ def test_params_json_is_byte_identical_to_reference():
               "copy reference/metabolic-map-v1/engine/params.json over src/health/engine/params.json")
     tab = param_table()
     p = default_params()
-    check("params: 54 parameters, default_params() in table key order",
-          list(p) == list(tab) and len(p) == 54, f"{len(p)} params")
+    check("params: 57 parameters (54 of V1 1.0.1 + the three strain-index constants of "
+          "1.1.0), default_params() in table key order",
+          list(p) == list(tab) and len(p) == 57, f"{len(p)} params")
     check("params: default_params() values are the table values",
           all(p[k] == tab[k]["value"] for k in tab))
     p["V_ecf_0"] = -1.0
@@ -378,11 +381,16 @@ def test_params_json_is_byte_identical_to_reference():
     g = golden()
     d = first_difference({k: v for k, v in param_summary().items() if k != "meta"},
                          g["paramSummary"])
-    check("params: param_summary() matches JS paramSummary() (24 of 54 graded >= B)",
-          d is None, d or "")
-    check("version: MODEL_VERSION and DISCLAIMER match the reference that wrote the fixture",
-          MODEL_VERSION == g["modelVersion"] == "1.0.1" and DISCLAIMER == g["disclaimer"],
-          f"python {MODEL_VERSION!r}, fixture {g['modelVersion']!r}")
+    check("params: param_summary() matches JS paramSummary() (24 of 57 graded >= B; "
+          "E-assumption 33)", d is None and g["paramSummary"]["count"] == 57
+          and g["paramSummary"]["atLeastB"] == 24
+          and g["paramSummary"]["byGrade"]["E-assumption"] == 33, d or str(g["paramSummary"]))
+    check("version: MODEL_VERSION, DISCLAIMER and VALIDATION_STATUS match the reference that "
+          "wrote the fixture",
+          MODEL_VERSION == g["modelVersion"] == "1.1.0" and DISCLAIMER == g["disclaimer"]
+          and VALIDATION_STATUS == g.get("validationStatus"),
+          f"python {MODEL_VERSION!r}, fixture {g['modelVersion']!r}, "
+          f"validationStatus {g.get('validationStatus')!r}")
     check("version: health package version is 0.1.0", HEALTH_VERSION == "0.1.0", HEALTH_VERSION)
 
 
@@ -403,6 +411,22 @@ def test_reference_engine_files_match_the_fixture_hashes():
     ours = hashlib.sha256((Path(params_module.__file__).parent / "params.json").read_bytes()).hexdigest()
     check("fixture: the Python engine's params.json has the reference params.json hash",
           ours == recorded.get("reference/metabolic-map-v1/engine/params.json"), ours)
+
+
+def test_golden_fixture_fits_the_generator_size_budget():
+    """BUG-20261003-173: the 1.0.1 fixture (403,140 bytes) sat 1.6 % under the generator's
+    400 KB budget, so the 1.1.0 regeneration (three parameter rows: 120 influence effects and
+    24 sample values more, plus resultLabels) was refused at 413,597 bytes. The budget is now
+    448 KB; this test reads it from tools/health_golden.mjs (no Node needed) and reports the
+    headroom, so the next model change sees the margin before the generator refuses."""
+    src = (ROOT / "tools" / "health_golden.mjs").read_text(encoding="utf-8")
+    m = re.search(r"^const MAX_BYTES = (\d+) \* 1024;$", src, re.M)
+    budget = int(m.group(1)) * 1024 if m else 0
+    size = GOLDEN_PATH.stat().st_size
+    check("fixture: golden_v1.json fits the generator's size budget (MAX_BYTES)",
+          0 < size <= budget, f"{size} bytes, budget {budget}")
+    note(f"golden_v1.json {size:,} of {budget:,} bytes ({100 * (budget - size) / max(budget, 1):.1f} % "
+         "headroom)")
 
 
 @needs_binary("node", "/opt/node22/bin/node")
@@ -760,9 +784,10 @@ def test_draw_samples_matches_javascript_reference():
 
 
 def test_monte_carlo_bands_match_javascript_reference():
+    global _MC
     g = golden()["simulateMC"]
     t0 = time.perf_counter()
-    r = simulate_mc(scenario=g["scenario"], n=g["n"], seed=g["seed"], keys=g["keys"])
+    r = _MC = simulate_mc(scenario=g["scenario"], n=g["n"], seed=g["seed"], keys=g["keys"])
     note(f"simulate_mc({g['scenario']}, n={g['n']}) took {time.perf_counter() - t0:.2f} s")
     check("simulateMC: grid length and rejected count as in JS",
           len(r["t"]) == g["length"] and r["rejected"] == g["rejected"],
@@ -802,7 +827,8 @@ def test_scenario_records_match_javascript_reference():
     py_only: list[str] = []
 
     def js_view(validation: Mapping[str, Any] | None) -> Any:
-        """The validation record minus the Python-only annotations (id, role, calibrates)."""
+        """The validation record minus PY_ONLY_EXPECTATION_KEYS (empty since 1.1.0, so the
+        record is compared whole: id, role and calibrates included)."""
         if validation is None:
             return None
         out = dict(validation)
@@ -830,8 +856,8 @@ def test_scenario_records_match_javascript_reference():
         exp_main = {k: v for k, v in exp.items() if k != "sweep"}
         d = first_difference(record(sc), exp_main, sid)
         check(f"scenario {sid}: id, title, description, tEnd, dt, events, overrides, "
-              "validation contract and input schedule are verbatim JS (Python-only role "
-              "annotations aside)", d is None, d or "")
+              "validation contract (every expectation key, id/role/calibrates included) and "
+              "input schedule are verbatim JS", d is None, d or "")
         if "sweep" in exp:
             sw = sc.sweep
             es = exp["sweep"]
@@ -845,15 +871,26 @@ def test_scenario_records_match_javascript_reference():
                         break
                 check(f"scenario {sid}: sweep.make(g) builds the JS scenario for all "
                       f"{len(sw.values)} doses", d is None, d or "")
-    check("scenarios: the only Python-only annotations are one explicit id per expectation "
-          "(HREQ-E-13) and the chronic calibration and structural roles (docs/health/03 §5.1)",
-          sorted(py_only) == sorted(
-              [f"{e['metric']}.id" for sc in SCENARIOS.values()
-               for e in (sc.validation or {}).get("expects") or []]
-              + ["ΔMAP at day 30 per +100 mmol/day Na.role",
-                 "ΔMAP at day 30 per +100 mmol/day Na.calibrates",
-                 "MAP time course.role", "MAP time course.calibrates",
-                 "Na excretion ≈ intake by day 30.role"]), str(py_only))
+    check("scenarios: no expectation key is Python-only (PY_ONLY_EXPECTATION_KEYS is empty "
+          "since 1.1.0, W-13), so the comparison above covered every key",
+          PY_ONLY_EXPECTATION_KEYS == () and py_only == [],
+          f"{PY_ONLY_EXPECTATION_KEYS!r}; {py_only}")
+    js_rows = [e for sid in g["scenarioOrder"]
+               for e in (g["scenarios"][sid]["validation"] or {}).get("expects") or []]
+    js_ids = [e.get("id") for e in js_rows]
+    check("scenarios: every JavaScript expectation record carries its id "
+          "(\"<scenario_id>/<NN>\", 1-based) -- 24 ids, unique, in registration order",
+          len(js_ids) == 24 and len(set(js_ids)) == 24 and all(
+              e.get("id") == f"{sid}/{i:02d}" for sid in g["scenarioOrder"]
+              for i, e in enumerate((g["scenarios"][sid]["validation"] or {}).get("expects")
+                                    or [], 1)), str(js_ids))
+    roles = {e["id"]: (e.get("role"), e.get("calibrates")) for e in js_rows if "role" in e}
+    check("scenarios: the JavaScript records carry the calibration and structural roles "
+          "(chronic_high_salt_30d/01 and /02 calibration with their parameters, /03 structural)",
+          roles == {"chronic_high_salt_30d/01": ("calibration",
+                                                 ["map_vol_exp", "pn_gain", "aldo_vol_exp"]),
+                    "chronic_high_salt_30d/02": ("calibration", ["map_auto_tau_h"]),
+                    "chronic_high_salt_30d/03": ("structural", None)}, str(roles))
     made = [make_water_load(1), make_water_load(0.5, 5, 2, 6), make_water_load(1.5, 30),
             make_salt_load(2.5), make_salt_load(6, 0.25, 10, 3, 24), make_salt_load(0)]
     for sc, exp in zip(made, g["made"], strict=True):
@@ -879,9 +916,9 @@ def test_influence_screen_matches_javascript_reference():
     d = first_difference(r["params"], g["params"])
     check("computeInfluence: the parameter lists (>1 % effect, strongest first) equal JS",
           d is None, d or "")
-    js_meta = {k: v for k, v in r["meta"].items() if k not in ("disclaimer", "validation_status")}
-    d = first_difference(js_meta, g["meta"])
-    check("computeInfluence: meta (infeasible, nParams, modelVersion) equals JS", d is None,
+    d = first_difference(r["meta"], g["meta"])
+    check("computeInfluence: meta (infeasible, nParams, modelVersion, disclaimer, "
+          "validation_status) equals JS, every key", d is None and g["meta"]["nParams"] == 57,
           str(d))
     global _INFLUENCE
     _INFLUENCE = r
@@ -988,6 +1025,206 @@ def test_non_finite_semantics_match_javascript_reference():
         check(f"non-finite: rhs, ledger, fluxes and derived at {desc} equal JS, NaN for NaN",
               w.ok and n_nan > 0, w.summary() + f"; {n_nan} NaN values in the fixture")
         note(f"{label}: {w.summary()}; {n_nan} NaN values compared by position")
+
+
+#: BUG-20261003-116 (c): the quantiles that were NaN in 1.0.1 and are now the infinity both
+#: neighbouring order statistics share (R type 7 interpolates only between DIFFERENT ones).
+#: (q index, series column) -> value, read against QB_QS = [0.05, 0.5, 0.95, 0, 1].
+BUG116_QUANTILES = {(2, 2): math.inf, (3, 0): -math.inf, (4, 0): math.inf, (4, 2): math.inf}
+
+
+def test_reference_edge_semantics_of_model_1_1_0():
+    """BUG-20261003-116, changed identically in index.js/mc.js/scenarios.js and the port:
+    (a) the influence screen counts a NaN difference anywhere in a series, not only in its
+    trailing run; (b) a scenario's inputs() reads frozen copies of its events and overrides;
+    (c) a quantile between two equal infinities is that infinity, not NaN."""
+    # (c) pinned literally (both implementations regressing together would still fail here)
+    got = quantile_bands(QB_SERIES, QB_QS)
+    fixture = golden()["nonFinite"]["quantileBands"]["bands"]
+    check("BUG-116 (c): the four quantiles that were NaN in 1.0.1 are now the shared infinity, "
+          "in the port and in the JavaScript fixture",
+          all(got[j][k] == v and fixture[j][k] == v for (j, k), v in BUG116_QUANTILES.items()),
+          str({jk: (got[jk[0]][jk[1]], fixture[jk[0]][jk[1]]) for jk in BUG116_QUANTILES}))
+    check("BUG-116 (c): quantile_sorted interpolates only between different order statistics: "
+          "[inf, inf] -> inf at every q, [-inf, -inf, 1] at q = 0.25 -> -inf, [-inf, inf] at "
+          "q = 0.5 -> NaN, finite values unchanged",
+          quantile_sorted([math.inf, math.inf], 0.3) == math.inf
+          and quantile_sorted([-math.inf, -math.inf, 1.0], 0.25) == -math.inf
+          and math.isnan(quantile_sorted([-math.inf, math.inf], 0.5))
+          and quantile_sorted([1.0, 2.0, 4.0], 0.75) == 3.0
+          and quantile_sorted([2.0, 2.0], 0.5) == 2.0)
+    js_mc = (REFERENCE_ENGINE / "mc.js").read_text(encoding="utf-8")
+    check("BUG-116 (c): mc.js quantileSorted returns sorted[lo] when sorted[lo] === sorted[hi]",
+          "if (sorted[lo] === sorted[hi]) return sorted[lo];" in js_mc)
+
+    # (a) plant a NaN at output index 1 of one series (not trailing: indices 2 and 3 follow)
+    # in every perturbed run of one parameter; the screen must count it (effect = inf).
+    real = api_module.simulate
+    planted = "na_normal_low"            # inert in simulate(): every other difference is 0
+    default = default_params()[planted]
+
+    def planting(**kw: Any) -> dict[str, Any]:
+        r = real(**kw)
+        if (kw.get("params") or {}).get(planted, default) != default:
+            der = dict(r["derived"])
+            der["Na_plasma"] = list(der["Na_plasma"])
+            der["Na_plasma"][1] = math.nan
+            r = {**r, "derived": der}
+        return r
+
+    api_module.simulate = planting
+    try:
+        r = compute_influence(scenario="drink_water_1L", t_end=0.3, dt=0.1)
+    finally:
+        api_module.simulate = real
+    e = r["effects"]
+    check("BUG-116 (a): a NaN difference at output index 1 of 4 (followed by finite ones) "
+          "counts as influencing that key (effect = inf, listed among its feeders)",
+          e["Na_plasma"][planted] == math.inf and planted in r["params"]["Na_plasma"],
+          f"effect {e['Na_plasma'][planted]!r}")
+    check("BUG-116 (a): ... and only that key (the planted parameter is inert elsewhere)",
+          all(e[k][planted] == 0 for k in e if k != "Na_plasma"),
+          str({k: e[k][planted] for k in e if e[k][planted] != 0}))
+    js_idx = (REFERENCE_ENGINE / "index.js").read_text(encoding="utf-8")
+    check("BUG-116 (a): index.js computeInfluence no longer keeps a running maximum that a "
+          "later finite difference overwrites; it records any NaN",
+          "if (!(d <= m)) m = d;" not in js_idx and "if (d !== d) nan = true;" in js_idx)
+
+    # (b) the port: editing the arrays passed in cannot change a built scenario's schedule
+    events = [{"start": 1, "durMin": 10, "water_L": 1}]
+    overrides = [{"start": 2, "end": 3, "naIn_mmolh": 0}]
+    sc = make_scenario(id="frozen_probe", title="t", description="d", t_end=4, events=events,
+                       overrides=overrides)
+    p = default_params()
+    before = [sc.inputs(t, p) for t in (1.05, 2.5)]
+    events[0]["water_L"] = 9
+    events.append({"start": 2, "durMin": 60, "water_L": 7})
+    overrides[0]["naIn_mmolh"] = 99
+    check("BUG-116 (b): the port's inputs() reads frozen copies (caller's arrays edited after "
+          "building change nothing)", [sc.inputs(t, p) for t in (1.05, 2.5)] == before,
+          str(before))
+
+
+@needs_binary("node", "/opt/node22/bin/node")
+def test_reference_scenario_inputs_read_frozen_copies():
+    """BUG-20261003-116 (b) on the JavaScript side: makeScenario's inputs() closed over the
+    caller's `events` and `overrides` arrays (mutable), not the frozen copies it stored, so
+    editing those arrays after building changed a built scenario's schedule."""
+    import subprocess
+    node = binary_available("node", ("/opt/node22/bin/node",))
+    script = (
+        "const S = await import(process.argv[1]);"
+        "const p = { waterIn_base_Ld: 2.1, naIn_base_mmold: 150, kIn_base_mmold: 80 };"
+        "const events = [{ start: 1, durMin: 10, water_L: 1 }];"
+        "const overrides = [{ start: 2, end: 3, naIn_mmolh: 0 }];"
+        "const sc = S.makeScenario({ id: 'frozen_probe', title: 't', description: 'd', tEnd: 4,"
+        " events, overrides });"
+        "const at = () => [1.05, 2.5].map((t) => sc.inputs(t, p));"
+        "const before = JSON.stringify(at());"
+        "events[0].water_L = 9; events.push({ start: 2, durMin: 60, water_L: 7 });"
+        "overrides[0].naIn_mmolh = 99;"
+        "console.log(JSON.stringify({ before, after: JSON.stringify(at()),"
+        " frozen: Object.isFrozen(sc.events) && Object.isFrozen(sc.events[0]) }));")
+    r = subprocess.run([node, "--input-type=module", "-e", script,
+                        (REFERENCE_ENGINE / "scenarios.js").as_uri()],
+                       capture_output=True, text=True, timeout=60, check=False)
+    out = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+    check("BUG-116 (b): scenarios.js inputs() reads the frozen copies -- editing the caller's "
+          "events/overrides after makeScenario changes no input",
+          bool(out) and out["before"] == out["after"] and out["frozen"],
+          (r.stdout + r.stderr)[-400:])
+
+
+def test_model_blocks_are_labelled_m0_to_m10_alike_in_both_implementations():
+    """BUG-20261003-099 (W-16): model.js had no M9 block (labels M0-M8 and M10) and
+    index.js said "all 52" parameters and "~53 simulations" when the table had 54 rows.
+    Since 1.1.0 the ledger and derived() carry M9, so M0..M10 each label a block exactly
+    once, in the same order in model.js and model.py (HREQ-M-04), and no comment in either
+    API file states a parameter or run count."""
+    label = re.compile(r"^\s*(?://|#)\s*(M\d+)\.\s|^\s*(?:/\*\*|\"\"\")\s*(M\d+)\.\s", re.M)
+    blocks = {}
+    for name, path in (("model.js", REFERENCE_ENGINE / "model.js"),
+                       ("model.py", ROOT / "src" / "health" / "engine" / "model.py")):
+        text = path.read_text(encoding="utf-8")
+        blocks[name] = [a or b for a, b in label.findall(text)]
+    want = [f"M{i}" for i in range(11)]
+    for name, found in blocks.items():
+        check(f"blocks: {name} labels each of M0..M10 exactly once (no gap, no repeat)",
+              sorted(set(found), key=lambda b: int(b[1:])) == want
+              and len(found) == len(set(found)), str(found))
+    check("blocks: model.js and model.py carry the same labels in the same order",
+          blocks["model.js"] == blocks["model.py"], str(blocks))
+    stale = [f"{f}: {pat}" for f, pat in (
+        ("index.js", "all 52"), ("index.js", "~53 simulations"), ("api.py", "~55 simulations"))
+        if pat in ((REFERENCE_ENGINE / f) if f.endswith(".js")
+                   else ROOT / "src" / "health" / "engine" / f).read_text(encoding="utf-8")]
+    check("blocks: no stale parameter or run count in the influence-screen comments", not stale,
+          str(stale))
+
+
+STRAIN_INDEX_CONSTANTS = {"strain_w_glomerular_pressure": 0.5,
+                          "strain_w_glomerular_filtration": 0.5,
+                          "strain_scale_filtration": 0.1}
+_NUMERIC_LITERAL = re.compile(r"(?<![\w.])(?!0\b|1\b)\d+(?:\.\d+)?")
+
+
+def test_strain_index_constants_are_parameter_rows_that_m10_reads():
+    """BUG-20261003-095 (W-14): the glomerular term of the kidney strain index hard-coded
+    0.5, 0.5 and 0.1 in M10 of both implementations. Since 1.1.0 they are params.json rows
+    (grade E-assumption, mc false, fixedReason index-constant, range = value) and M10 reads
+    them; with the defaults every strain value is unchanged (the fixture's trajectories
+    section is byte-identical to 1.0.1's, and the port equals the 1.0.1 literal below)."""
+    ref_table = json.loads(REFERENCE_PARAMS.read_text(encoding="utf-8"))
+    for label, tab in (("port", param_table()), ("reference", ref_table)):
+        rows = {k: tab.get(k) for k in STRAIN_INDEX_CONSTANTS}
+        bad = {k: r for k, r in rows.items()
+               if not (isinstance(r, dict) and r["value"] == STRAIN_INDEX_CONSTANTS[k]
+                       and r["range"] == [r["value"], r["value"]] and r.get("mc") is False
+                       and r.get("fixedReason") == "index-constant"
+                       and r["grade"] == "E-assumption" and r.get("evidence")
+                       and r.get("unit") and sampling_mode(r) == "fixed")}
+        check(f"strain constants: the three rows exist in the {label} table with value 0.5 / "
+              "0.5 / 0.1, range = value, mc false, fixedReason index-constant, grade "
+              "E-assumption (held fixed in sampling)", not bad, str(bad))
+    p = default_params()
+    y = initial_state(p)
+    y[IDX["V_ecf"]] *= 1.05             # GFR above GFR_0 (vr > 1) ...
+    y[IDX["Na_ecf"]] *= 1.05            # ... at the same plasma [Na]
+    y[IDX["MAP"]] += 5.0                # ... and MAP above MAP_0: both glomerular terms > 0
+    d0 = derived(y, p)
+    C = constants(p)
+    f = fluxes(y, p, None, C)
+    literal = (0.5 * max(0.0, (y[IDX["MAP"]] - p["MAP_0"]) / p["strain_scale_pressure"])
+               + 0.5 * max(0.0, (f["GFR"] / C["GFR0_Lh"] - 1) / 0.1))
+    check("strain constants: at the defaults strain_glomerular equals the 1.0.1 literal "
+          "0.5·pressure + 0.5·(GFR rise / 0.1) exactly (bit for bit)",
+          d0["strain_glomerular"] == literal and literal > 0,
+          f"{d0['strain_glomerular']!r} vs {literal!r}")
+    others = ("strain_transport", "strain_excretion", "strain_concentrating")
+    for name in STRAIN_INDEX_CONSTANTS:
+        d1 = derived(y, p | {name: p[name] * 2})
+        check(f"strain constants: M10 reads {name} -- doubling it moves strain_glomerular and "
+              "strain_index and no other strain component",
+              d1["strain_glomerular"] != d0["strain_glomerular"]
+              and d1["strain_index"] != d0["strain_index"]
+              and all(d1[k] == d0[k] for k in others),
+              f"{d0['strain_glomerular']!r} -> {d1['strain_glomerular']!r}")
+    eff = golden()["computeInfluence"]["effects"]["strain_glomerular"]
+    lists = golden()["computeInfluence"]["params"]["strain_glomerular"]
+    check("strain constants: the JavaScript M10 reads them too -- in the fixture's influence "
+          "screen (computed by index.js) each moves strain_glomerular by more than the 1 % "
+          "threshold and is listed among its feeders",
+          all(eff.get(k, 0) > 0.01 and k in lists for k in STRAIN_INDEX_CONSTANTS),
+          str({k: eff.get(k) for k in STRAIN_INDEX_CONSTANTS}))
+    js_model = (REFERENCE_ENGINE / "model.js").read_text(encoding="utf-8")
+    start = js_model.find("function strain(")
+    m10 = js_model[start:js_model.find("\n}\n", start)]
+    py_src = inspect.getsource(importlib.import_module("health.engine.model").strain)
+    py_body = py_src[py_src.find('"""', py_src.find('"""') + 3) + 3:]
+    check("strain constants: no numeric literal other than 0 and 1 is left in strain() of "
+          "either implementation (HREQ-M-07)",
+          start > 0 and not _NUMERIC_LITERAL.findall(m10) and not _NUMERIC_LITERAL.findall(py_body),
+          f"model.js {_NUMERIC_LITERAL.findall(m10)}; model.py {_NUMERIC_LITERAL.findall(py_body)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1530,7 +1767,7 @@ def test_every_extractor_value_is_pinned_and_independently_recomputed():
 
     (a) PINNED holds every extractor's default-parameter value (the run sim() makes: the
         scenario's dt, the 30-day scenario recorded every 3rd point), compared at REL_TOL.
-        The literals were printed with repr() from this engine (model 1.0.1) and were
+        The literals were printed with repr() from this engine (model 1.0.1; unchanged at 1.1.0) and were
         cross-checked by (b) before they were written down; a model change that moves
         one must re-print it and explain the difference (golden-fixture rule).
     (b) Each metric is recomputed here from the result's own series, without the engine's
@@ -1906,6 +2143,7 @@ def test_every_row_publishes_its_band_fields_and_versions():
 _SWEEP: dict[str, Any] | None = None
 _HARNESS_SUMMARY: dict[str, Any] | None = None
 _INFLUENCE: dict[str, Any] | None = None
+_MC: dict[str, Any] | None = None
 
 
 def test_salt_dose_sweep_is_monotonic():
@@ -2096,6 +2334,69 @@ def test_config_agrees_with_engine_and_reference():
           f"scenarios.py {label!r}, base.yaml {cfg['display'].get('trajectory_label')!r}")
 
 
+#: Every index.js function that returns a result object, as recorded in the fixture's
+#: resultLabels section (tools/health_golden.mjs, since model 1.1.0).
+JS_RESULT_FUNCTIONS = ("simulate", "drawSamples", "simulateMC", "saltLoadMetrics",
+                       "simulateSweep", "computeInfluence", "paramSummary")
+
+
+def test_reference_results_carry_validation_status_like_the_port():
+    """BUG-20261003-104, reference side (W-20): index.js exports VALIDATION_STATUS and puts
+    validation_status beside the disclaimer in every result object it returns, in the same
+    places as the port: meta of every result (simulate, drawSamples, simulateMC,
+    saltLoadMetrics, simulateSweep, computeInfluence, paramSummary) and top-level beside the
+    top-level disclaimer of simulateMC and simulateSweep. The fixture's resultLabels section
+    holds what the JavaScript returned; the port must return the same labels, every key."""
+    js = (REFERENCE_ENGINE / "index.js").read_text(encoding="utf-8")
+    m = re.search(r"export const VALIDATION_STATUS = '([^']+)'", js)
+    check("validation status: index.js exports VALIDATION_STATUS byte-equal to the port's",
+          m is not None and m.group(1).encode("utf-8") == VALIDATION_STATUS.encode("utf-8"),
+          repr(m.group(1) if m else None))
+    labels = golden().get("resultLabels", {})
+    check("fixture: resultLabels covers every index.js result object",
+          tuple(labels) == JS_RESULT_FUNCTIONS, str(list(labels)))
+    bare = [name for name, lab in labels.items()
+            if not isinstance(lab.get("meta"), Mapping)
+            or lab["meta"].get("disclaimer") != DISCLAIMER
+            or lab["meta"].get("validation_status") != VALIDATION_STATUS
+            or lab["meta"].get("modelVersion") != MODEL_VERSION]
+    check("fixture: every JavaScript result object carries meta.disclaimer, "
+          "meta.validation_status and meta.modelVersion", not bare and bool(labels),
+          f"missing on: {bare}")
+    top = [name for name in ("simulateMC", "simulateSweep")
+           if labels.get(name, {}).get("disclaimer") != DISCLAIMER
+           or labels.get(name, {}).get("validation_status") != VALIDATION_STATUS]
+    check("fixture: simulateMC and simulateSweep carry validation_status beside their "
+          "top-level disclaimer", not top, str(top))
+
+    def lab(r: Mapping[str, Any]) -> dict[str, Any]:
+        return {k: r[k] for k in ("disclaimer", "validation_status", "meta") if k in r}
+
+    gm, gw = golden()["simulateMC"], golden()["simulateSweep"]
+    mc = _MC if _MC is not None else simulate_mc(scenario=gm["scenario"], n=gm["n"],
+                                                 seed=gm["seed"], keys=gm["keys"])
+    sweep = _SWEEP if _SWEEP is not None else simulate_sweep(n=gw["n"], seed=gw["seed"],
+                                                             values=gw["values"])
+    gi = golden()["computeInfluence"]["opts"]
+    infl = _INFLUENCE if _INFLUENCE is not None else compute_influence(
+        scenario=gi["scenario"], t_end=gi["tEnd"], dt=gi["dt"])
+    port = {
+        "simulate": lab(sim("drink_water_1L")),
+        "drawSamples": lab(draw_samples(n=8, seed=1)),
+        "simulateMC": lab(mc),
+        "saltLoadMetrics": lab(salt_load_metrics(sim("salt_load_10g", 1 / 30))),
+        "simulateSweep": lab(sweep),
+        "computeInfluence": lab(infl),
+        "paramSummary": lab(param_summary()),
+    }
+    for name in JS_RESULT_FUNCTIONS:
+        js_lab = {k: v for k, v in labels.get(name, {}).items()
+                  if k in ("disclaimer", "validation_status", "meta")}
+        d = first_difference(port[name], js_lab, name)
+        check(f"labels: the port's {name} carries the same disclaimer / validation_status / "
+              "meta as the JavaScript, every key", d is None and bool(js_lab), d or "")
+
+
 def test_every_public_result_carries_disclaimer_and_validation_status():
     """HREQ-S-01 as amended: every result object carries meta.disclaimer, byte-equal to the
     JavaScript DISCLAIMER, and meta.validation_status = "Not clinically validated."."""
@@ -2133,8 +2434,11 @@ def test_every_public_result_carries_disclaimer_and_validation_status():
           "summarize and all 24 expectation rows) carries meta.disclaimer, "
           "meta.validation_status and meta.modelVersion (HREQ-M-01)", not missing,
           f"missing on: {missing}")
-    check("the JavaScript-shaped top-level disclaimer of simulate_mc / simulate_sweep is kept",
-          results[1][1]["disclaimer"] == DISCLAIMER and sweep["disclaimer"] == DISCLAIMER)
+    check("the JavaScript-shaped top-level disclaimer of simulate_mc / simulate_sweep is kept, "
+          "with validation_status beside it (as index.js since 1.1.0)",
+          results[1][1]["disclaimer"] == DISCLAIMER and sweep["disclaimer"] == DISCLAIMER
+          and results[1][1].get("validation_status") == VALIDATION_STATUS
+          and sweep.get("validation_status") == VALIDATION_STATUS)
 
 
 # ---------------------------------------------------------------------------

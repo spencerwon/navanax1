@@ -43,12 +43,18 @@ export function sampleParams(table, rng) {
   return p;
 }
 
-/** Linear-interpolation quantile (R type 7) of an ascending-sorted array. */
+/**
+ * Linear-interpolation quantile (R type 7) of an ascending-sorted array. As R does, it
+ * interpolates only between DIFFERENT order statistics, so a quantile between two equal
+ * infinities is that infinity, not Inf - Inf = NaN (BUG-20261003-116; before 1.1.0 it
+ * returned NaN there). Between -Infinity and +Infinity, or next to a NaN, it is NaN.
+ */
 export function quantileSorted(sorted, q) {
   const n = sorted.length;
   if (n === 0) return NaN;
   const h = (n - 1) * q;
   const lo = Math.floor(h), hi = Math.ceil(h);
+  if (sorted[lo] === sorted[hi]) return sorted[lo];
   return sorted[lo] + (h - lo) * (sorted[hi] - sorted[lo]);
 }
 

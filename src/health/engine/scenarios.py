@@ -11,19 +11,19 @@ overrides it (no_water_24h removes drinking water).
 
 The `validation` records below are the literature-validation contract. They are copied
 verbatim from scenarios.js -- ids, titles, descriptions, events, overrides, tEnd/dt and
-every expectation's metric/target/range/kind/evidence/note -- and the self-test compares
-them field by field with the JavaScript reference. Do not paraphrase them here; change
-them in the reference first and regenerate the golden fixture.
+every expectation's id/metric/target/range/kind/evidence/note/role/calibrates -- and the
+self-test compares them field by field, every key, with the JavaScript reference. Do not
+paraphrase them here; change them in the reference first and regenerate the golden fixture.
 
 Event and override dicts keep the JavaScript keys (start, durMin, water_L, salt_g, end,
 waterIn_Lh, naIn_mmolh) and are read-only views.
 
-Python-only annotations (docs/health/03 §5.1-5.2; the JavaScript reference is unchanged
-this phase): an expectation carries a stable `id` ("<scenario_id>/<NN>", 1-based;
-HREQ-E-13) and may carry `role` -- "validation" (the default when absent), "calibration"
-(with `calibrates`, the parameters tuned to it) or "structural". Only validation rows can
-enter the validation totals. These three keys (id, role, calibrates) are the ONLY ones the
-self-test allows to differ from the JavaScript records (PY_ONLY_EXPECTATION_KEYS).
+Expectation annotations (docs/health/03 §5.1-5.2): an expectation carries a stable `id`
+("<scenario_id>/<NN>", 1-based; HREQ-E-13) and may carry `role` -- "validation" (the
+default when absent), "calibration" (with `calibrates`, the parameters tuned to it) or
+"structural". Only validation rows can enter the validation totals. Until model 1.1.0
+these three keys existed here only; scenarios.js now carries the identical records (W-13,
+BUG-20261003-097), so PY_ONLY_EXPECTATION_KEYS is empty and no key may differ.
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ __all__ = [
     "make_water_load",
 ]
 
-#: Keys an expectation record may carry here and not in scenarios.js.
-PY_ONLY_EXPECTATION_KEYS: tuple[str, ...] = ("id", "role", "calibrates")
+#: Keys an expectation record may carry here and not in scenarios.js: none since 1.1.0.
+PY_ONLY_EXPECTATION_KEYS: tuple[str, ...] = ()
 
 #: mmol Na per gram NaCl (molar mass 58.44 g/mol). Physical constant.
 MMOL_NA_PER_G_NACL = 1000 / 58.44
