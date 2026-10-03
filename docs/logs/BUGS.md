@@ -1395,109 +1395,6 @@ or recalibrate through WF-H-01 (tracker D-9).
 **BUG-20261003-116 (S4/P3).** Three latent quirks in the reference engine found while
 porting; none reachable with shipped data.
 
-**The undo model, rehearsed (BUG-20261003-154 … BUG-20261003-165).** The adversarial
-review ran the removal recipes on scratch copies for the first time, and none of them
-worked as written. Removing `engine-v1` exactly as its recipe said turned the gates red,
-because the ledger requires every cited file to exist and seven entries cite the engine
-(BUG-20261003-154); the knowledge-base self-test typed the Phase 0 module set
-(BUG-20261003-155); the `cli` recipe's first edit left `import os` unused, so ruff failed
-(BUG-20261003-156); the `errors` recipe never set the flag or ran the gates
-(BUG-20261003-157); `depends_on` said `kb-v1` and `cli` import `health.errors`, which
-only the engine does, and 07 disagreed with the yaml (BUG-20261003-158); `reference-v1`
-and `errors` kept listing a test file the engine recipe deleted, and nothing checked a
-`tests` path (BUG-20261003-159); the flag was a label — a disabled engine was imported
-and `status` printed `model 1.0.1` beside `modules DISABLED: engine-v1`
-(BUG-20261003-160); the engine recipe left stale references in five files
-(BUG-20261003-161); "`process` can go at any time; nothing imports it" was false — the
-engine and knowledge-base tests read its configuration and documents (BUG-20261003-162,
-S1); no gate ran `health_golden.mjs --check` (BUG-20261003-163); the engine recipe was
-imprecise against a shared CI step (BUG-20261003-164); and the health README said
-`gates.py` runs `status` (BUG-20261003-165). All fixed in this PR: `removed_with_module`
-and `buglog.py --mark-removed`; a gate, `python -m health.registry --check`, that holds
-every entry to the disk, the imports, the live files naming its paths and the generated
-07; `status` obeys the flag; one CI step per module and mode; a golden gate that says
-SKIPPED rather than green when Node is absent; `errors` has its own test file; every
-module depends on `process`, which goes last. Each recipe was then run literally on a
-scratch copy with `tools/gates.py` green after it (`cli` then `engine-v1`; `errors`;
-`kb-v1`; `reference-v1`; `process`). `engine-v1` and `cli` are recorded in 07 as accepted
-exceptions to HREQ-X-02, with the reason.
-
-**BUG-20261003-166 (S3/P2).** `buglog.py --check` rule 4 (every id mentioned is in the
-ledger) walked the whole directory tree, so in the main checkout it failed on ids that
-exist only in the builders' git-ignored worktrees under `.claude/worktrees/`. It reads
-`git ls-files` now, and walks the tree only where git cannot answer. Fixed in this PR.
-
-**BUG-20261003-167 (S3/P2).** Rule 3 skipped any `regression_test` without `::`, so a
-fixed entry whose test was the sentence "none — doc-only; re-verified by the qa-auditor
-sweep" passed. A fixed entry's test is now `file::function` or exactly
-`docs-only (no mechanical guard)`, and the literal holds only when every location is
-documentation; `removed_with_module` does not bypass it. The four 2026-09-09 entries whose
-prose names a CI step are a closed exception list in the gate. Fixed in this PR.
-The adversarial review of the health subsystem read the documents against the code. The
-twelve entries below are the document side of it. Each figure in the corrected text was
-re-measured on the port, and every line that depends on code landing in the same round is
-marked for re-verification after the merge (tracker W-22).
-
-**BUG-20261003-142 (S1/P1).** `03 §12`, the table that sets the validation record against
-the tuning, quoted about 8,900 compared golden values with a worst difference of 4e-14. The
-suite compares 12,822 values, and the worst difference is 1.24e-12 relative. The table also
-called the harness counts "identical on the reference", which has no harness. Fixed: model
-1.0.1 and default parameters stated, the counts as the suite prints them (24 rows; counted
-9 pass, 1 fail; 12 not_checked; calibration 1; structural 1), and a separate row for the
-counts once the MAP time-course row becomes a calibration row.
-
-**BUG-20261003-143 (S1/P1).** `01 §6.3` presented a two-sided calibration link as built: id
-`chronic_high_salt_30d:0`, `calibratedAgainst` on the parameters, and a knowledge-base check
-that the two agree. `params.json` has no `calibratedAgainst`, the check is deferred, and the
-harness id is `<scenario>/<NN>`. Fixed: the record as shipped, the id rule, and the
-parameter side and the JavaScript mirror named as planned (W-18, W-13).
-
-**BUG-20261003-144 (S4/P3).** `03 §4.2` listed four golden trajectories and asked for
-additions the fixture already held: all seven scenarios, the stiff corner, checkpoints,
-rejection margins and findings. Fixed: every section as built, this round's additions
-marked, and the regeneration rule stated (a `MODEL_VERSION` bump, or new sections with every
-old one byte-identical).
-
-**BUG-20261003-145 (S4/P3).** `03 §5.1` described harness rows with 8 fields and called
-`id`, `role`, `registered` and `counted` "required additions". The rows carry all 17 fields.
-Fixed.
-
-**BUG-20261003-146 (S4/P3).** `03 §2` gave Node timings as the cost of every layer. The Python
-port that runs the gates is 8 to 13 times slower per run, and about 10 minutes for the
-literature layer at n = 256, not about a minute. Fixed: a Node column and a Python column,
-both measured, with the method.
-
-**BUG-20261003-147 (S4/P3).** `03 §4.3` said a 1e-6 change to any parameter fails the golden
-comparison; the test exempts four. Fixed: the two classification thresholds stay exempt, with
-the reason, and the potassium and sweat goldens of this round cover the other two.
-
-**BUG-20261003-148 (S4/P3).** `03 §11` and the HREQ-V-25 row put the planted knowledge-base
-fixtures in `tests/health_selftest.py`, and §9 called them files. They are in-memory plants
-in `tests/health_kb_selftest.py`. Fixed.
-
-**BUG-20261003-149 (S4/P3).** `config/health/base.yaml` said no threshold lives in code. It
-is a checked mirror of code constants. Its comments also placed `MODEL_VERSION` in the wrong
-file and named two of the four invariants, and 13 of its keys have no reader. Fixed in
-comments only: the header says what the agreement test enforces, and each unread key is
-marked reserved. No key or value changed.
-
-**BUG-20261003-150 (S4/P3).** ADR-0002 and HREQ-P-01 said the port uses "the same
-identifiers", reads its tolerances from the configuration, and raises
-`ReferenceDivergenceError` on a divergence. Function names are snake_case, the tolerances are
-test constants mirrored in the configuration, and nothing raises the error. Fixed by an
-appended errata section (the accepted text stands) and a reworded HREQ-P-01.
-
-**BUG-20261003-151 (S4/P3).** `06 §4` drew CI as running on every push. It runs on a push or
-pull request to `main` only, and its order is kb-check, ledger, lint, pytest, secrets. A push
-to a branch with no pull request open against `main` runs no CI and is gated only by
-`tools/gates.py`. Fixed in the figure and its `.mmd` source.
-
-**BUG-20261003-152 (S4/P3).** Tracker W-1 still read "in progress" after b810ed6 delivered
-the port. Closed with the measured equivalence figures.
-
-**BUG-20261003-153 (S4/P3).** Three documents said six registered scenarios. Seven carry
-expectations: 1 + 6 + 2 + 5 + 2 + 4 + 4 = 24 rows. Fixed. The same pass corrected 08's "40
-contract rules" to the measured 54 checker codes (47 blocking).
 **BUG-20261003-117 (S2/P1).** The self-test pinned only `status == "pass"` for the counted
 rows, so seven extractor mutants that read the wrong window, unit or baseline survived
 (peak time from t = 0, salt window from t = 0, water fraction without baseline urine, ΔMAP
@@ -1566,6 +1463,7 @@ expectation record) on every row and the summary.
 **BUG-20261003-131 (S1/P1).** The 33-object disclaimer test never checked
 `meta.modelVersion`; dropping it from `result_meta` left the suite green. Fixed: the
 predicate requires it.
+
 **BUG-20261003-132 (S1/P1).** No golden or invariant test ever moved potassium or made
 the body sweat: every registered scenario holds K intake constant and sweat at zero, so
 eight port mutants of `model.py` (both K sign flips, the `k_excr_gain` sign, the `K_ur`
@@ -1614,6 +1512,123 @@ rejected by Monte Carlo) were in no test. Both now are. Fixed in this PR.
 `sweat_na_mmolL` as inert only because no run let them act. After 132 the exempt set is the
 two `na_normal` thresholds, which the drawSamples golden catches. Fixed in this PR.
 
+The adversarial review of the health subsystem read the documents against the code. The
+twelve entries below are the document side of it. Each figure in the corrected text was
+re-measured on the port, and every line that depends on code landing in the same round is
+marked for re-verification after the merge (tracker W-22).
+
+**BUG-20261003-142 (S1/P1).** `03 §12`, the table that sets the validation record against
+the tuning, quoted about 8,900 compared golden values with a worst difference of 4e-14. The
+suite compares 12,822 values, and the worst difference is 1.24e-12 relative. The table also
+called the harness counts "identical on the reference", which has no harness. Fixed: model
+1.0.1 and default parameters stated, the counts as the suite prints them (24 rows; counted
+9 pass, 1 fail; 12 not_checked; calibration 1; structural 1), and a separate row for the
+counts once the MAP time-course row becomes a calibration row.
+
+**BUG-20261003-143 (S1/P1).** `01 §6.3` presented a two-sided calibration link as built: id
+`chronic_high_salt_30d:0`, `calibratedAgainst` on the parameters, and a knowledge-base check
+that the two agree. `params.json` has no `calibratedAgainst`, the check is deferred, and the
+harness id is `<scenario>/<NN>`. Fixed: the record as shipped, the id rule, and the
+parameter side and the JavaScript mirror named as planned (W-18, W-13).
+
+**BUG-20261003-144 (S4/P3).** `03 §4.2` listed four golden trajectories and asked for
+additions the fixture already held: all seven scenarios, the stiff corner, checkpoints,
+rejection margins and findings. Fixed: every section as built, this round's additions
+marked, and the regeneration rule stated (a `MODEL_VERSION` bump, or new sections with every
+old one byte-identical).
+
+**BUG-20261003-145 (S4/P3).** `03 §5.1` described harness rows with 8 fields and called
+`id`, `role`, `registered` and `counted` "required additions". The rows carry all 17 fields.
+Fixed.
+
+**BUG-20261003-146 (S4/P3).** `03 §2` gave Node timings as the cost of every layer. The Python
+port that runs the gates is 8 to 13 times slower per run, and about 10 minutes for the
+literature layer at n = 256, not about a minute. Fixed: a Node column and a Python column,
+both measured, with the method.
+
+**BUG-20261003-147 (S4/P3).** `03 §4.3` said a 1e-6 change to any parameter fails the golden
+comparison; the test exempts four. Fixed: the two classification thresholds stay exempt, with
+the reason, and the potassium and sweat goldens of this round cover the other two.
+
+**BUG-20261003-148 (S4/P3).** `03 §11` and the HREQ-V-25 row put the planted knowledge-base
+fixtures in `tests/health_selftest.py`, and §9 called them files. They are in-memory plants
+in `tests/health_kb_selftest.py`. Fixed.
+
+**BUG-20261003-149 (S4/P3).** `config/health/base.yaml` said no threshold lives in code. It
+is a checked mirror of code constants. Its comments also placed `MODEL_VERSION` in the wrong
+file and named two of the four invariants, and 13 of its keys have no reader. Fixed in
+comments only: the header says what the agreement test enforces, and each unread key is
+marked reserved. No key or value changed.
+
+**BUG-20261003-150 (S4/P3).** ADR-0002 and HREQ-P-01 said the port uses "the same
+identifiers", reads its tolerances from the configuration, and raises
+`ReferenceDivergenceError` on a divergence. Function names are snake_case, the tolerances are
+test constants mirrored in the configuration, and nothing raises the error. Fixed by an
+appended errata section (the accepted text stands) and a reworded HREQ-P-01.
+
+**BUG-20261003-151 (S4/P3).** `06 §4` drew CI as running on every push. It runs on a push or
+pull request to `main` only, and its order is kb-check, ledger, lint, pytest, secrets. A push
+to a branch with no pull request open against `main` runs no CI and is gated only by
+`tools/gates.py`. Fixed in the figure and its `.mmd` source.
+
+**BUG-20261003-152 (S4/P3).** Tracker W-1 still read "in progress" after b810ed6 delivered
+the port. Closed with the measured equivalence figures.
+
+**BUG-20261003-153 (S4/P3).** Three documents said six registered scenarios. Seven carry
+expectations: 1 + 6 + 2 + 5 + 2 + 4 + 4 = 24 rows. Fixed. The same pass corrected 08's "40
+contract rules" to the measured 54 checker codes (47 blocking).
+
+**The undo model, rehearsed (BUG-20261003-154 … BUG-20261003-165).** The adversarial
+review ran the removal recipes on scratch copies for the first time, and none of them
+worked as written. Removing `engine-v1` exactly as its recipe said turned the gates red,
+because the ledger requires every cited file to exist and seven entries cite the engine
+(BUG-20261003-154); the knowledge-base self-test typed the Phase 0 module set
+(BUG-20261003-155); the `cli` recipe's first edit left `import os` unused, so ruff failed
+(BUG-20261003-156); the `errors` recipe never set the flag or ran the gates
+(BUG-20261003-157); `depends_on` said `kb-v1` and `cli` import `health.errors`, which
+only the engine does, and 07 disagreed with the yaml (BUG-20261003-158); `reference-v1`
+and `errors` kept listing a test file the engine recipe deleted, and nothing checked a
+`tests` path (BUG-20261003-159); the flag was a label — a disabled engine was imported
+and `status` printed `model 1.0.1` beside `modules DISABLED: engine-v1`
+(BUG-20261003-160); the engine recipe left stale references in five files
+(BUG-20261003-161); "`process` can go at any time; nothing imports it" was false — the
+engine and knowledge-base tests read its configuration and documents (BUG-20261003-162,
+S1); no gate ran `health_golden.mjs --check` (BUG-20261003-163); the engine recipe was
+imprecise against a shared CI step (BUG-20261003-164); and the health README said
+`gates.py` runs `status` (BUG-20261003-165). All fixed in this PR: `removed_with_module`
+and `buglog.py --mark-removed`; a gate, `python -m health.registry --check`, that holds
+every entry to the disk, the imports, the live files naming its paths and the generated
+07; `status` obeys the flag; one CI step per module and mode; a golden gate that says
+SKIPPED rather than green when Node is absent; `errors` has its own test file; every
+module depends on `process`, which goes last. Each recipe was then run literally on a
+scratch copy with `tools/gates.py` green after it (`cli` then `engine-v1`; `errors`;
+`kb-v1`; `reference-v1`; `process`). `engine-v1` and `cli` are recorded in 07 as accepted
+exceptions to HREQ-X-02, with the reason.
+
+**BUG-20261003-166 (S3/P2).** `buglog.py --check` rule 4 (every id mentioned is in the
+ledger) walked the whole directory tree, so in the main checkout it failed on ids that
+exist only in the builders' git-ignored worktrees under `.claude/worktrees/`. It reads
+`git ls-files` now, and walks the tree only where git cannot answer. Fixed in this PR.
+
+**BUG-20261003-167 (S3/P2).** Rule 3 skipped any `regression_test` without `::`, so a
+fixed entry whose test was the sentence "none — doc-only; re-verified by the qa-auditor
+sweep" passed. A fixed entry's test is now `file::function` or exactly
+`docs-only (no mechanical guard)`, and the literal holds only when every location is
+documentation; `removed_with_module` does not bypass it. The four 2026-09-09 entries whose
+prose names a CI step are a closed exception list in the gate. Fixed in this PR.
+
+**BUG-20261003-168 and BUG-20261003-169 (S2/P2).** Both "never swallowed" CI steps were regular
+expressions that read a handler's body as running to the next column-0 line, so a `raise`
+later in the same function hid a swallowing handler; on a planted swallow they flagged
+nothing. Replaced by `tools/swallow_check.py`, a syntax-tree check that also sees subclasses,
+tuples and qualified names; the health step derives every `SurfaceIntegrityError` subclass by
+import, and the errors self-test proves the tool fires and that CI calls it.
+
+**BUG-20261003-170 (S3/P2).** `health.registry --check` walked the working tree, so an
+ignored build artefact (`src/navanax.egg-info/SOURCES.txt`) counted as a live reference to
+module paths and the gate failed in the main checkout. The scan reads `git ls-files` now and
+walks only outside a checkout, the rule the ledger gate learned the same day (BUG-166).
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
@@ -1630,8 +1645,10 @@ two `na_normal` thresholds, which the drawSamples golden catches. Fixed in this 
 | BUG-20261003-114 | S4 | P3 | k_excr_gain sampling note wrong | Curator, M1 |
 | BUG-20261003-115 | S1 | P1 | 1 L water sodium recovery 7.05 h vs registered 6 h | Operator decision D-9 |
 | BUG-20261003-116 | S4 | P3 | Latent reference-engine quirks | Next reference change (M1) |
+| BUG-20261003-127 | S1 | P1 | The counted row drink_water_1L/05 (minimum urine osmolality) shares its only evidence (Baylis 1986) with U_os… | Open -- the curator's decision (row not changed; ranges are never widened): cite an independent source for the row and drop Baylis 1986 fro… |
+| BUG-20261003-128 | S2 | P1 | The registered "< 6 h" bound of the sodium recovery row has no traceable Crowe 1987 source value, and the row… | Open -- curator (extends BUG-20261003-115): find and quote the source value for 6 h, or record the bound as an assumption with that grade;… |
 
-104 of 116 logged bugs are fixed (the health entries of 2026-10-03 are open at logging; those marked "in this PR" close in the pull request that logged them, with their regression tests).
+155 of 169 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
 
 ### The lesson
 

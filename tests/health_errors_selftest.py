@@ -100,13 +100,29 @@ def _raises(body: list[ast.stmt]) -> bool:
     return False
 
 
+def _swallow_tool():
+    """tools/swallow_check.py, the check both CI steps run (loaded by path: tools/ is not a
+    package)."""
+    import importlib.util
+    path = ROOT / "tools" / "swallow_check.py"
+    spec = importlib.util.spec_from_file_location("swallow_check", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def swallowed(source: str) -> list[int]:
     """Line numbers of every `except` clause catching SurfaceIntegrityError or a subclass
-    (alone, in a tuple, or as `errors.X`) whose own body never raises."""
+    (alone, in a tuple, or as `errors.X`) whose own body never raises -- the same reading
+    the suite keeps in `_names_a_surface_error`/`_raises`, cross-checked against the tool."""
     names = _surface_names()
-    return sorted(n.lineno for n in ast.walk(ast.parse(source))
+    here = sorted(n.lineno for n in ast.walk(ast.parse(source))
                   if isinstance(n, ast.ExceptHandler) and _names_a_surface_error(n.type, names)
                   and not _raises(n.body))
+    tool = _swallow_tool().swallowed(source, names)
+    if tool != here:
+        raise AssertionError(f"tools/swallow_check.py disagrees with the suite: {tool} vs {here}")
+    return here
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +275,27 @@ def test_surface_integrity_error_is_never_swallowed(tmp: Path) -> None:
           "(10) is not", swallowed(planted) == [4, 17], str(swallowed(planted)))
     regex_hits = [planted[:m.start()].count("\n") + 1 for m in CI_SWALLOW_RE.finditer(planted)
                   if "raise" not in m.group(1)]
-    print(f"      (the CI grep's pattern flags lines {regex_hits} of the same plant)")
+    check("never swallowed: the CI steps' old regular expression misses the planted swallows "
+          "(it is kept here only as the record of BUG-20261003-168/169)", regex_hits == [],
+          str(regex_hits))
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    check("never swallowed: both CI steps run tools/swallow_check.py (the syntax-tree check), "
+          "and no step uses the regular expression", ci.count("tools/swallow_check.py") >= 2
+          and "re.finditer(r\"except" not in ci, str(ci.count("tools/swallow_check.py")))
+    tool = _swallow_tool()
+    check("never swallowed: the tool fires on the same plant for DataIntegrityError-style "
+          "names given with --names", tool.swallowed(planted.replace("SurfaceIntegrityError",
+          "DataIntegrityError"), {"DataIntegrityError"}) == [4], "")
+    planted_dir = tmp / "swallow-plant" / "pkg"
+    planted_dir.mkdir(parents=True)
+    (planted_dir / "view.py").write_text(planted, encoding="utf-8")
+    code = tool.main(["--names", "SurfaceIntegrityError,MissingDisclaimerError",
+                      str(planted_dir.parent)])
+    check("never swallowed: the tool's command line exits 1 on the planted file", code == 1,
+          str(code))
+    check("never swallowed: the tool's --family health.errors:SurfaceIntegrityError covers every "
+          "surface class", tool.family("health.errors:SurfaceIntegrityError") == _surface_names(),
+          str(tool.family("health.errors:SurfaceIntegrityError") ^ _surface_names()))
 
 
 # ---------------------------------------------------------------------------

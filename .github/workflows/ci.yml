@@ -119,33 +119,13 @@ jobs:
              --include='*.py' src/ ; then
             echo "::error::transaction-signing capability present (REQ-N-14)"; exit 1
           fi
+      # A syntax-tree check (tools/swallow_check.py): the regular expression used until
+      # 2026-10-03 flagged nothing on a planted swallow (BUG-20261003-169).
       - name: DataIntegrityError is never swallowed
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
-          bad = []
-          for p in pathlib.Path("src").rglob("*.py"):
-              src = p.read_text()
-              for m in re.finditer(r"except\s+DataIntegrityError[^\n]*:\n((?:\s+.*\n)+?)(?=\S|\Z)", src):
-                  if "raise" not in m.group(1):
-                      bad.append(f"{p}:{src[:m.start()].count(chr(10))+1}")
-          if bad:
-              print("::error::DataIntegrityError caught without re-raise (S1):", *bad, sep="\n  "); sys.exit(1)
-          print("ok")
-          PY
+        run: python3 tools/swallow_check.py --names DataIntegrityError src
       # docs/health/05 §6.1: a surface that cannot render the disclaimer renders
       # "unavailable"; it never swallows the error and shows the number anyway.
+      # The same syntax-tree check over every SurfaceIntegrityError subclass, qualified or
+      # in a tuple (BUG-20261003-168); tests/health_errors_selftest.py proves it fires.
       - name: SurfaceIntegrityError is never swallowed (health)
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
-          bad = []
-          for p in pathlib.Path("src/health").rglob("*.py"):
-              src = p.read_text()
-              for m in re.finditer(r"except\s+SurfaceIntegrityError[^\n]*:\n((?:\s+.*\n)+?)(?=\S|\Z)", src):
-                  if "raise" not in m.group(1):
-                      bad.append(f"{p}:{src[:m.start()].count(chr(10))+1}")
-          if bad:
-              print("::error::SurfaceIntegrityError caught without re-raise (S1):", *bad, sep="\n  "); sys.exit(1)
-          print("ok")
-          PY
+        run: PYTHONPATH=src python3 tools/swallow_check.py --family health.errors:SurfaceIntegrityError src/health

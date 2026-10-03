@@ -56,6 +56,7 @@ import datetime
 import math
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -1066,11 +1067,31 @@ def _ownership_problems(modules: list[dict[str, Any]], root: Path) -> list[str]:
     return problems
 
 
+def _tracked_paths(root: Path) -> list[Path] | None:
+    """Git-tracked files under `root` (`git ls-files -z`), or None when git is unavailable
+    or `root` is not a checkout -- the caller then walks the tree, so a copy with no .git
+    is still checked. Ignored and untracked paths (a build's *.egg-info, a builder's
+    worktree under .claude/worktrees/, a scratch file) are not the repository and never
+    count as live files (BUG-20261003-166 taught the ledger gate the same rule)."""
+    try:
+        p = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                           capture_output=True, check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    return [root / n for n in p.stdout.decode("utf-8", "surrogateescape").split("\0") if n]
+
+
 def _live_files(root: Path) -> list[tuple[str, str]]:
+    tracked = _tracked_paths(root)
     out: dict[str, str] = {}
     for entry in LIVE_SCOPE:
         base = root / entry
-        files = [base] if base.is_file() else sorted(base.rglob("*")) if base.is_dir() else []
+        if tracked is not None:
+            files = [f for f in tracked if f == base or base in f.parents]
+        else:
+            files = [base] if base.is_file() else sorted(base.rglob("*")) if base.is_dir() else []
         for f in files:
             rel = f.relative_to(root)
             if not f.is_file() or _SKIP_DIRS.intersection(rel.parts):

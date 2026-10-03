@@ -1618,6 +1618,44 @@ def test_buglog_removed_with_module_exempts_deleted_files(tmp: Path) -> None:
           and again == new, str(marked_again))
 
 
+def test_registry_live_scan_reads_tracked_files_only(tmp: Path) -> None:
+    """The registry's live-reference scan (every file that names a module's path must be
+    named by that module's recipe) walked LIVE_SCOPE on disk, so an ignored build artefact
+    (src/navanax.egg-info/SOURCES.txt) made `health.registry --check` fail in the main
+    checkout (BUG-20261003-170). It reads `git ls-files` now; outside a checkout it walks,
+    so a copy with no .git is still checked."""
+    from health.registry import _live_files
+    git = shutil.which("git")
+    check("registry live scan: git is available here (the scan reads tracked files through it)",
+          git is not None)
+    if git is None:
+        return
+    repo = tmp / "live-repo"
+    (repo / "src" / "navanax.egg-info").mkdir(parents=True)
+    (repo / "tools").mkdir()
+    (repo / ".gitignore").write_text("*.egg-info/\n", encoding="utf-8")
+    (repo / "README.md").write_text("tracked: names src/health/cli.py\n", encoding="utf-8")
+    (repo / "src" / "navanax.egg-info" / "SOURCES.txt").write_text(
+        "ignored: names src/health/cli.py\n", encoding="utf-8")
+    (repo / "tools" / "scratch.py").write_text("untracked: names src/health/cli.py\n",
+                                               encoding="utf-8")
+    for args in (["init", "-q"], ["add", ".gitignore", "README.md"]):
+        subprocess.run([git, "-C", str(repo), *args], check=True, capture_output=True)
+    names = [rel for rel, _ in _live_files(repo)]
+    check("registry live scan: in a checkout only the tracked file is read (ignored and "
+          "untracked ones are not)", names == ["README.md"], str(names))
+    plain = tmp / "live-plain"
+    shutil.copytree(repo, plain, ignore=shutil.ignore_patterns(".git"))
+    walked = sorted(rel for rel, _ in _live_files(plain))
+    check("registry live scan: outside a checkout every file is walked (a copy with no .git "
+          "is still checked)", walked == ["README.md", "src/navanax.egg-info/SOURCES.txt",
+                                           "tools/scratch.py"], str(walked))
+    real = [rel for rel, _ in _live_files(ROOT)]
+    stray = [r for r in real if ".egg-info" in r or ".claude/worktrees" in r]
+    check("registry live scan: the repository scan holds no ignored path", real and not stray,
+          str(stray[:5]))
+
+
 def test_buglog_rule_4_reads_tracked_files_only(tmp: Path) -> None:
     """Rule (4) -- every BUG id mentioned in the repository is in the ledger -- walked the
     whole directory tree, so `buglog.py --check` in the main checkout failed on ids in the

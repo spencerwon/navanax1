@@ -135,7 +135,8 @@ HealthError                              (base — never raised directly)
 │
 ├── SurfaceIntegrityError                → S0a. Handler WITHHOLDS the value ("unavailable").
 │   ├── MissingDisclaimerError
-│   └── UnlabelledIndexError
+│   ├── UnlabelledIndexError
+│   └── UnlabelledThresholdError
 │
 ├── EvidenceIntegrityError               → S0b. Handler HALTS RELEASE.
 │   ├── UnresolvedEvidenceError          (a cited record does not exist or does not resolve)
@@ -157,15 +158,14 @@ HealthError                              (base — never raised directly)
 │   ├── StepControlError
 │   └── NonFiniteTrajectoryError         (a trajectory holds a NaN or infinite value; HREQ-V-07)
 │
-├── OperationalError                     → S3.
-│   └── PersistenceError
-│
-└── ConfigurationError                   → S3, or S1 if it silently changed a result.
+└── OperationalError                     → S3.
+    ├── PersistenceError
+    └── ConfigurationError               → S3, or S1 if it silently changed a result.
 ```
 
 ### 6.1 Rules the hierarchy enforces
 
-- **`SurfaceIntegrityError` is never caught and swallowed.** A surface that cannot render the disclaimer renders "unavailable". CI greps for an `except SurfaceIntegrityError` that does not re-raise.
+- **`SurfaceIntegrityError` is never caught and swallowed.** A surface that cannot render the disclaimer renders "unavailable". CI runs `tools/swallow_check.py`, a syntax-tree check that fails on an `except SurfaceIntegrityError` (or any subclass, alone, in a tuple or qualified) whose handler never raises; `tests/health_errors_selftest.py` proves it fires on a planted swallow (the regular expression used before 2026-10-03 flagged nothing: BUG-20261003-168).
 - **`ReferenceDivergenceError` halts release, not computation.** The engine keeps working; nothing is published until the divergence is explained. Phase 0: the class is defined in `src/health/errors.py` and raised nowhere yet; a divergence fails the golden tests in `tests/health_selftest.py` (ADR-0002 errata).
 - **`InfeasibleParametersError` is an error, not a warning.** The sampler counts the rejection; the deterministic path refuses.
 - **`ExpectationSkippedError` exists so the harness cannot shrink.** The number of rows equals the number of registered expectations, or the harness is wrong.
