@@ -80,13 +80,13 @@ Which module owns each of these, and the recipe that removes it, is
 Run it:
 
 ```bash
-PYTHONPATH=src python3 -m health.cli status        # version, KB counts, parameter grade share, module flags, the disclaimer
+PYTHONPATH=src python3 -m health.cli status        # versions, KB counts, grade share, KB contract, expectations, module flags, the disclaimer
 PYTHONPATH=src python3 -m health.cli kb-check      # every knowledge-base contract rule; exit 1 on an error
 PYTHONPATH=src python3 -m health.registry --check  # every module's fields, paths, tests, dependencies and removal recipe
 python3 tests/health_selftest.py --no-skips        # engine: golden equivalence, steady state, mass balance, expectations
 python3 tests/health_kb_selftest.py --no-skips     # knowledge base: every rule, each with a planted violation
 python3 tests/health_errors_selftest.py --no-skips # error hierarchy: severities, halt flags, never swallowed
-python3 tools/gates.py                             # every line above except `status` (a surface, not a gate), plus golden --check when Node is present, plus the repository's own gates
+python3 tools/gates.py                             # every line above except `status` (a surface, not a gate), plus golden --check (a counted SKIPPED without Node), plus the repository's own gates
 ```
 
 ## Relationship to the market-data documents

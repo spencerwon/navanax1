@@ -95,8 +95,8 @@ display:
   show_assumption_count: true     # reserved: no reader yet (surface layer, M1)
   show_grade_share: true          # reserved: no reader yet (surface layer, M1)
   # The mandated labels (HREQ-S-03, S-04, P-12, P-13); documents quote these. Only
-  # trajectory_label has a reader: the self-test holds it equal to the chronic scenario's
-  # label (the string V1 shows; wording is tracker D-8). [VERIFY-AFTER-MERGE]
+  # trajectory_label has a reader: tests/health_selftest.py (test_config_agrees_with_engine_and_reference)
+  # holds it equal to the chronic scenario's label (the string V1 shows; wording is tracker D-8).
   index_label: "an index, not a clinical measure"   # reserved: no reader yet (surface layer, M1)
   threshold_label: "classification threshold, not a physiological parameter"   # reserved: no reader yet (surface layer, M1)
   trajectory_label: "modeled risk trajectory — not a prediction"

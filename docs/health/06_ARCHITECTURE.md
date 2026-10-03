@@ -114,7 +114,7 @@ checklist (safety review, by hand).
 flowchart LR
   subgraph CI["CI: push to main, pull request to main"]
     direction LR
-    c1["selftest.py<br/>(stdlib, market)"] --> c2["health_selftest.py<br/>(stdlib)"] --> c3["health_kb_selftest.py<br/>(stdlib)"] --> c4["pip install"] --> c5["all three, --no-skips"] --> c6["health.cli kb-check"] --> c7["zstd probe · codec contract<br/>(market)"] --> c8["buglog.py --check"] --> c9["ruff"] --> c10["pytest"] --> c11["secrets_check.py"] --> c12["signing grep · error-swallow checks"]
+    c1["selftest.py<br/>(stdlib, market)"] --> c2["health_selftest.py<br/>(stdlib)"] --> c3["health_kb_selftest.py<br/>(stdlib)"] --> c4["health_errors_selftest.py<br/>(stdlib)"] --> c5["pip install"] --> c6["all four, --no-skips"] --> c7["health.registry --check"] --> c8["health.cli kb-check"] --> c9["Node 22 · health_golden.mjs --check"] --> c10["zstd probe · codec contract<br/>(market)"] --> c11["buglog.py --check"] --> c12["ruff"] --> c13["pytest"] --> c14["secrets_check.py"] --> c15["signing grep · swallow_check.py ×2"]
   end
   subgraph REF["Model change, or new fixture sections"]
     r1["node tools/health_golden.mjs"] --> r2["golden_v1.json regenerated<br/>(old sections byte-identical when only sections are added)"] --> r3["diff explained line by line"]
@@ -132,10 +132,12 @@ pull request open against `main` runs no CI; `tools/gates.py`, run by the agent 
 claiming green, is then the only gate. The
 stdlib-only steps run **before** `pip install` on purpose (`docs/03 §4.6`): a suite that
 cannot run until the environment is built cannot tell you the environment is broken.
-This round adds `tests/health_errors_selftest.py` and a golden `--check` step in
-`tools/gates.py` that runs where a Node binary exists and prints a loud SKIPPED otherwise;
-the figure shows the workflow before any CI step for either, and is redrawn if the merge
-adds one. [VERIFY-AFTER-MERGE]
+The three health self-tests run in both modes; the module registry gate
+(`python -m health.registry --check`) runs before `kb-check`; the golden fixture step sets
+up Node 22 and runs `node tools/health_golden.mjs --check`; and both error-swallow steps
+run `tools/swallow_check.py`, a syntax-tree check. `tools/gates.py` runs the same health
+gates, and where no Node binary exists it prints the golden check as a loud SKIPPED that
+its verdict line counts.
 
 ---
 
