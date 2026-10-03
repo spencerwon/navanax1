@@ -1395,6 +1395,74 @@ or recalibrate through WF-H-01 (tracker D-9).
 **BUG-20261003-116 (S4/P3).** Three latent quirks in the reference engine found while
 porting; none reachable with shipped data.
 
+**BUG-20261003-117 (S2/P1).** The self-test pinned only `status == "pass"` for the counted
+rows, so seven extractor mutants that read the wrong window, unit or baseline survived
+(peak time from t = 0, salt window from t = 0, water fraction without baseline urine, ΔMAP
+not per 100 mmol, osmolality rise at its peak, urine peak from mL/min, nadir at 1.5 h).
+Fixed: every extractor's value is pinned at 1e-9 and recomputed independently from the
+result's own series (trapezoid integrals, never the ledger); all seven are now killed.
+
+**BUG-20261003-118 (S2/P1).** A Monte Carlo set for another scenario, run length, dt or any
+n was attached as a row's band. Fixed: the set must match the scored result's scenario,
+t_end and dt and hold n runs, and n ≥ 256 unless `allow_small_n=True` (HREQ-U-08).
+
+**BUG-20261003-119 (S1/P1).** Rows without Monte Carlo carried no band fields and nothing
+said the statuses were unbanded. Fixed: the six band fields are always present
+(`band_reason` "no Monte Carlo supplied"); `summarize()` counts `unbanded_counted` and the
+status line prints "bands 0 of 10 counted" with the reason (HREQ-V-15).
+
+**BUG-20261003-120 (S2/P1).** An unregistered or mis-cased kind, a countable row without a
+range, or an extractor unavailable for any reason became a quiet not_checked row; a kind
+typo on the recovery row turned the summary into 9 pass / 0 fail. Fixed: registry defects
+are a `ConfigurationError`; only a run too short may give not_checked, and
+`summarize()` lists every countable not_checked row with its reason.
+
+**BUG-20261003-121 (S2/P1).** Truncated runs were scored with substitute values. Fixed: a
+run shorter than the scenario is not scored (every row not_checked, "run too short"), and
+whole-run extractors check coverage; on a full run a never-recovered +inf stays a
+counted fail.
+
+**BUG-20261003-122 (S2/P1).** Results from non-default parameters or another dt were
+scored without trace. Fixed: refused unless `params_override=True`; every row's meta
+stamps the params digest, the override flag, dt and t_end.
+
+**BUG-20261003-123 (S2/P1).** The duplicate-id guard saw only explicit ids, and none
+existed. Fixed: duplicates are checked over the final ids, and all 24 shipped
+expectations carry explicit `<scenario_id>/<NN>` ids (a Python-only key).
+
+**BUG-20261003-124 (S3/P2).** A reversed or NaN range was scored as a counted model fail.
+Fixed: `ConfigurationError` unless lo ≤ hi and neither bound is NaN (±inf allowed).
+
+**BUG-20261003-125 (S3/P2).** No plant covered the bounds or ±inf; the strict-comparison
+and inf-passes mutants survived and a string "0.5" scored a pass. Fixed: boundary, ±inf
+and non-number plants; both mutants killed.
+
+**BUG-20261003-126 (S3/P2).** The known-divergence and unverified rows gave generic
+reasons. Fixed: the row's note (else its target) is on the reason.
+
+**BUG-20261003-127 (S1/P1), open.** The counted row "minimum urine osmolality"
+(drink_water_1L/05) shares its only evidence, Baylis 1986, with `U_osm_min`, which floors
+the metric at the row's lower bound: only the upper bound is a test (harness value
+62.76 mOsm/kg). The row is unchanged; the curator decides between an independent source
+(dropping Baylis from `U_osm_min`) and marking the lower bound structural.
+
+**BUG-20261003-128 (S2/P1), open.** The recovery row's "< 6 h" bound has no traceable
+Crowe 1987 value (the only quote is the 2 h excreted share) and the row has no note. The
+fail itself is honest under every reading (7.05, 6.88, 6.47 h). Extends BUG-20261003-115;
+the range is not widened; the curator traces or regrades the bound.
+
+**BUG-20261003-129 (S1/P1).** The D-2 "MAP time course" design target had no role, so the
+harness reported 3 calibrated parameters where 03 §12 lists 4. Fixed: role calibration of
+`map_auto_tau_h`; the status line now says "calibrated params 4".
+
+**BUG-20261003-130 (S1/P1).** HREQ-U-08, M-12 and V-15 were listed as enforced by
+`validate.py` and were not. Fixed: the n gate (118), `independent_vs_calibrated` on the
+summary and the status line, and a `registry_version` (sha256 of every registered
+expectation record) on every row and the summary.
+
+**BUG-20261003-131 (S1/P1).** The 33-object disclaimer test never checked
+`meta.modelVersion`; dropping it from `result_meta` left the suite green. Fixed: the
+predicate requires it.
 **BUG-20261003-132 (S1/P1).** No golden or invariant test ever moved potassium or made
 the body sweat: every registered scenario holds K intake constant and sweat at zero, so
 eight port mutants of `model.py` (both K sign flips, the `k_excr_gain` sign, the `K_ur`

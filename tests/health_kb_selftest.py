@@ -1176,15 +1176,29 @@ def test_status_expectations_line() -> None:
     m = re.fullmatch(r"expectations (\d+): counted pass (\d+) · counted fail (\d+) · "
                      r"not_checked (\d+) · calibration (\d+) · structural (\d+) · "
                      r"known-divergence (\d+) · unverified (\d+) · calibrated params (\d+)"
-                     r"(?: \((.*)\))?", line)
-    got = tuple(int(x) for x in m.groups()[:9]) if m else None
+                     r"(?: \(([^()]*)\))? · independent (\d+) vs calibrated (\d+) \(HREQ-M-12\)"
+                     r" · countable not_checked (\d+)(?: \(([^()]*)\))?"
+                     r" · bands (\d+) of (\d+) counted(?: \(([^()]*)\))? · registry ([0-9a-f]{12})",
+                     line)
+    got = (tuple(int(m.group(k)) for k in (*range(1, 10), 11, 12, 13, 15, 16)) if m else None)
+    counted = s["counted_pass"] + s["counted_fail"]
     want = (s["rows"], s["counted_pass"], s["counted_fail"], s["not_checked"],
             s["calibration"]["n"], s["structural"]["n"], kinds["known-divergence"],
-            kinds["unverified"], len(s["calibrated_parameters"]))
+            kinds["unverified"], len(s["calibrated_parameters"]),
+            s["independent_vs_calibrated"]["independent_counted"],
+            s["independent_vs_calibrated"]["calibrated_parameters"],
+            len(s["not_checked_countable"]), counted - s["unbanded_counted"], counted)
     check("cli status: the expectations line equals summarize() over every scenario "
           f"({want})", got == want and r.returncode == 0, f"{line!r} vs {want}")
     check("cli status: the expectations line names the calibrated parameters",
           bool(m) and (m.group(10) or "") == ", ".join(s["calibrated_parameters"]), line)
+    check("cli status: V1 prints 4 calibrated parameters against 10 independent counted rows, "
+          "and 'bands 0 of 10 counted' with why (no Monte Carlo in status; n >= 256 needed) "
+          "-- never hidden (HREQ-M-12, HREQ-U-08, HREQ-V-15)",
+          bool(m) and m.group(9) == "4" and m.group(11) == "10" and m.group(12) == "4"
+          and (m.group(15), m.group(16)) == ("0", "10")
+          and m.group(17) == "no Monte Carlo in this run; n ≥ 256 required for a published band"
+          and m.group(18) == str(s["registry_version"])[:12], line)
     check("cli status: 24 registered expectations (V1)", s["rows"] == 24, str(s["rows"]))
     lines = r.stdout.splitlines()
     check("cli status: the expectations line follows the KB contract line and precedes the "

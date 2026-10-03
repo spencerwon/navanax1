@@ -9,23 +9,54 @@ in registration order, asserts that count, and never omits one (HREQ-P-05, HREQ-
 
     id, metric, kind, role, calibrates, registered, countable, counted, target, range,
     actual, status, reason, evidence, model_version, disclaimer,
-    meta {disclaimer, validation_status, modelVersion}
-    + band, in_range_share, n, rejected, seed     (when Monte Carlo runs are supplied)
+    band, in_range_share, n, seed, rejected, band_reason     (ALWAYS present, HREQ-V-15)
+    meta {disclaimer, validation_status, modelVersion, scenario, registry_version,
+          params_digest, params_override, dt, t_end}
 
 status
-    "pass"         lo <= actual <= hi;
-    "fail"         outside the range, or not a finite number (a model that cannot answer
-                   has failed, not abstained);
-    "not_checked"  a non-countable kind (qualitative, design-target, known-divergence,
-                   unverified, numerical), a countable expectation with no extractor yet
-                   ("NO METRIC IMPLEMENTATION", listed by summarize()), or a run too short to
-                   compute the metric. Always with a reason; never counted as a pass.
+    "pass"         lo <= actual <= hi (both bounds inclusive);
+    "fail"         outside the range, or not a finite number (+inf, -inf, NaN: a model that
+                   cannot answer has failed, not abstained);
+    "not_checked"  ONLY for (a) a non-countable kind (qualitative, design-target,
+                   known-divergence, unverified, numerical), (b) a countable expectation
+                   with no extractor yet ("NO METRIC IMPLEMENTATION", listed by summarize()),
+                   or (c) a run too short to compute the metric (MetricUnavailable with cause
+                   "run_too_short"). Always with a reason; never counted as a pass.
 role (Python-side annotation in scenarios.py; default "validation")
-    "calibration"  the parameters in `calibrates` were tuned to this target: evaluated and
-                   reported, NEVER counted as validation (calibration is never validation);
+    "calibration"  the parameters in `calibrates` (required, non-empty) were tuned to this
+                   target: evaluated and reported, NEVER counted as validation;
     "structural"   a structural property of the model: evaluated, reported, never counted.
 counted = kind in COUNTABLE_KINDS and role == "validation" and status in {pass, fail}
 (HREQ-V-14). summarize() reports counted passes/fails apart from calibration and structural.
+
+What the harness REFUSES (ConfigurationError, never a quiet not_checked row):
+  * a registry defect: a kind that is not registered (typo, missing, wrong case); a
+    countable kind without a numeric range; a range that is not two numbers, has a NaN
+    bound, or has lo > hi (±inf bounds are allowed, by intent); duplicate FINAL ids
+    (explicit or positional); an unknown role; a calibration row naming no parameter;
+  * an extractor that returns a non-number (a string, None, a bool) or raises
+    MetricUnavailable for any cause other than "run_too_short";
+  * a result for another scenario (ValueError), or a result computed with non-default
+    parameters or a dt other than the scenario's, unless `params_override=True` (the
+    override is then stamped on every row's meta);
+  * a Monte Carlo set (`mc`) whose runs are for another scenario, end at another time,
+    use another dt, or whose size is not n; and any n < 256 (HREQ-U-08) unless
+    `allow_small_n=True` (the golden equivalence check uses n = 8). A band at n < 256 is
+    shown with its n and a band_reason, and summarize() counts it as unbanded.
+A result that ends before the scenario's t_end is NOT scored: every row is not_checked with
+the reason "run too short: t_end X h < scenario Y h" (chosen over raising so the one-row-per-
+expectation contract holds; summarize() lists each such countable row with its reason).
+A full-length run on which the recovery extractor returns +inf is a counted FAIL (the model
+never recovered within the run), not a missing value.
+
+Band fields: with no `mc`, band = None, n = 0, in_range_share = seed = rejected = None and
+band_reason = "no Monte Carlo supplied". summarize() reports `unbanded_counted` (counted rows
+with no band or n < 256) and the CLI prints it (HREQ-V-15, never hidden).
+
+Versions on every row (HREQ-V-15, HREQ-M-01): meta.registry_version is the sha256 of the
+canonical JSON of every registered expectation record (all scenarios, in order; a planted
+Scenario object replaces the registered one of its id), so ANY registry edit changes it;
+meta.params_digest is the sha256 of the canonical JSON of the parameters the result used.
 
 `numerical` rows (baseline drift) are a solver property: the value is computed and shown;
 the numerical gate in tests/health_selftest.py enforces it.
@@ -35,13 +66,15 @@ load size, override window) are read from the scenario record, never re-typed he
 Extractor definitions (default-parameter run unless the caller passes another result):
   * "baseline" values are the values at t = 0 (the analytic steady state);
   * "after drinking starts" / "by N h" are measured from the START of the first event;
+  * whole-run extractors (peak, nadir, minimum, recovery) check that the run reaches the
+    scenario's t_end (MetricUnavailable "run_too_short" otherwise);
   * "time to recover |ΔNa| < 0.5 mmol/L after drinking starts" (drink_water_1L). Neither
     scenarios.js nor anything vendored with V1 defines it (V1's tests/engine.test.mjs was not
     vendored), so it is defined here, explicitly:
         ΔNa(t) = Na_plasma(t) − Na_plasma(0); k_nadir = first index of min Na_plasma;
         recovery = t[k] − t_start for the FIRST output index k > k_nadir with |ΔNa| < 0.5,
         t_start = start of the first event (1 h); 0 if |ΔNa| never reaches 0.5 mmol/L;
-        +inf if |ΔNa| is still >= 0.5 at the end of the run.
+        +inf if |ΔNa| is still >= 0.5 at the end of the (full-length) run.
     The alternative reading -- the time after which |ΔNa| STAYS below 0.5 -- is computed by
     recovery_time_variants() and gives the same value whenever the recovery is monotone, as
     it is in V1 at default parameters (7.05 h; |ΔNa| = 0.575 mmol/L at +6 h, so every
@@ -54,6 +87,8 @@ Extractor definitions (default-parameter run unless the caller passes another re
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -69,11 +104,13 @@ from .api import (
 )
 from .mc import quantile_sorted
 from .model import STATE_KEYS, constants
+from .params import default_params
 from .scenarios import MMOL_NA_PER_G_NACL, SCENARIOS, Scenario
 
-__all__ = ["COUNTABLE_KINDS", "METRICS", "NOT_CHECKED_KINDS", "ROLES", "MetricUnavailable",
-           "evaluate_expectations", "max_relative_state_drift", "monte_carlo_runs",
-           "recovery_time_variants", "summarize"]
+__all__ = ["COUNTABLE_KINDS", "METRICS", "MIN_PUBLISHED_N", "NOT_CHECKED_KINDS", "ROLES",
+           "RUN_TOO_SHORT", "MetricUnavailable", "evaluate_expectations",
+           "max_relative_state_drift", "monte_carlo_runs", "params_digest",
+           "recovery_time_variants", "registry_version", "summarize"]
 
 #: The only kinds that count toward pass/fail totals (HREQ-E-14).
 COUNTABLE_KINDS: tuple[str, ...] = ("quantitative", "semi-quantitative")
@@ -93,14 +130,55 @@ NOT_CHECKED_KINDS: Mapping[str, str] = {
                  "numerical gate (tests/health_selftest.py); value shown for the record",
 }
 
+#: Kinds whose not_checked reason also states the row's own note (or target), so the
+#: divergence / what is unverified is on the row (H9).
+_STATE_NOTE_KINDS: tuple[str, ...] = ("known-divergence", "unverified")
+
+#: Smallest Monte Carlo n whose band may be published or used for a status (HREQ-U-08).
+MIN_PUBLISHED_N = 256
+
+#: The only MetricUnavailable cause that may yield a not_checked row.
+RUN_TOO_SHORT = "run_too_short"
+
 NO_EXTRACTOR = "NO METRIC IMPLEMENTATION"
+NO_MC_REASON = "no Monte Carlo supplied"
 
 # Times are compared to the output grid with this slack (h) when deciding a run is long enough.
 _T_SLACK = 1e-9
 
 
 class MetricUnavailable(Exception):
-    """The metric cannot be computed from this result (e.g. the run ends too early)."""
+    """The metric cannot be computed from this result. `cause` says why; only
+    RUN_TOO_SHORT may become a not_checked row, any other cause is a harness defect."""
+
+    def __init__(self, message: str, *, cause: str) -> None:
+        super().__init__(message)
+        self.cause = cause
+
+
+# ---------------------------------------------------------------------------
+# Versions and digests (HREQ-V-15).
+# ---------------------------------------------------------------------------
+def _canonical_sha256(obj: Any) -> str:
+    text = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                      default=repr)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def params_digest(params: Mapping[str, Any]) -> str:
+    """sha256 of the canonical JSON of a parameter set (stamped on every row's meta)."""
+    return _canonical_sha256(dict(params))
+
+
+def registry_version(planted: Scenario | None = None) -> str:
+    """sha256 of the canonical JSON of every registered expectation record, scenario by
+    scenario in SCENARIOS order. `planted` (a Scenario object, e.g. a self-test registry)
+    replaces the registered scenario of the same id, or is appended when its id is new."""
+    scen: dict[str, Scenario] = dict(SCENARIOS)
+    if planted is not None:
+        scen[planted.id] = planted
+    return _canonical_sha256([[sid, list((sc.validation or {}).get("expects") or [])]
+                              for sid, sc in scen.items()])
 
 
 # ---------------------------------------------------------------------------
@@ -111,19 +189,29 @@ def _index_at(r: Mapping[str, Any], t_target: float) -> int:
     t = r["t"]
     if t_target > t[-1] + _T_SLACK or t_target < t[0] - _T_SLACK:
         raise MetricUnavailable(f"run covers t = {t[0]:g}..{t[-1]:g} h; metric needs "
-                                f"t = {t_target:g} h")
+                                f"t = {t_target:g} h", cause=RUN_TOO_SHORT)
     return nearest_index(t, t_target)
+
+
+def _require_full_run(sc: Scenario, r: Mapping[str, Any]) -> None:
+    """Whole-run extractors (peak, nadir, minimum, recovery) need the scenario's full run:
+    on a truncated run they would return a substitute value."""
+    if r["t"][-1] < sc.t_end - _T_SLACK:
+        raise MetricUnavailable(f"run too short: t_end {r['t'][-1]:g} h < scenario "
+                                f"{sc.t_end:g} h", cause=RUN_TOO_SHORT)
 
 
 def _first_event(sc: Scenario) -> Mapping[str, Any]:
     if not sc.events:
-        raise MetricUnavailable(f"scenario {sc.id} has no event to measure from")
+        raise MetricUnavailable(f"scenario {sc.id} has no event to measure from",
+                                cause="scenario_has_no_event")
     return sc.events[0]
 
 
 def _first_override(sc: Scenario) -> Mapping[str, Any]:
     if not sc.overrides:
-        raise MetricUnavailable(f"scenario {sc.id} has no override window")
+        raise MetricUnavailable(f"scenario {sc.id} has no override window",
+                                cause="scenario_has_no_override")
     return sc.overrides[0]
 
 
@@ -132,7 +220,8 @@ def _require_no_sweat(sc: Scenario, r: Mapping[str, Any]) -> None:
     p = r["params"]
     probes = [0.0, *sc.breakpoints, r["t"][-1]]
     if any(sc.inputs(t, p).get("sweat_Lh", 0) for t in probes):
-        raise MetricUnavailable("scenario sweats; urine volume cannot be read from water_out")
+        raise MetricUnavailable("scenario sweats; urine volume cannot be read from water_out",
+                                cause="scenario_sweats")
 
 
 def _urine_volume(sc: Scenario, r: Mapping[str, Any], ta: float, tb: float) -> float:
@@ -173,22 +262,27 @@ def max_relative_state_drift(r: Mapping[str, Any]) -> tuple[float, str, int]:
 # Metric implementations, keyed by (scenario id, metric string exactly as registered).
 # ---------------------------------------------------------------------------
 def _baseline_drift(sc: Scenario, r: Mapping[str, Any]) -> float:
+    _require_full_run(sc, r)
     return max_relative_state_drift(r)[0]
 
 
 def _na_nadir(sc: Scenario, r: Mapping[str, Any]) -> float:
+    _require_full_run(sc, r)
     na = r["derived"]["Na_plasma"]
     return min(na) - na[0]
 
 
 def _na_peak(sc: Scenario, r: Mapping[str, Any]) -> float:
+    _require_full_run(sc, r)
     na = r["derived"]["Na_plasma"]
     return max(na) - na[0]
 
 
 def _na_recovery_time(sc: Scenario, r: Mapping[str, Any]) -> float:
     """First output time after the Na nadir at which |ΔNa| < 0.5 mmol/L, measured from the
-    drinking start (0 if |ΔNa| never reaches 0.5; +inf if it is still >= 0.5 at the end)."""
+    drinking start (0 if |ΔNa| never reaches 0.5; +inf if it is still >= 0.5 at the end of
+    the full-length run -- a counted fail, never a missing value)."""
+    _require_full_run(sc, r)
     start = _first_event(sc)["start"]
     t, na = r["t"], r["derived"]["Na_plasma"]
     k_nadir = min(range(len(na)), key=na.__getitem__)          # first minimum
@@ -228,6 +322,7 @@ def recovery_time_variants(r: Mapping[str, Any], start: float,
 
 
 def _urine_peak_time(sc: Scenario, r: Mapping[str, Any]) -> float:
+    _require_full_run(sc, r)
     start = _first_event(sc)["start"]
     uf = r["derived"]["urine_flow"]
     k = max(range(len(uf)), key=uf.__getitem__)       # first maximum
@@ -235,10 +330,12 @@ def _urine_peak_time(sc: Scenario, r: Mapping[str, Any]) -> float:
 
 
 def _urine_peak(sc: Scenario, r: Mapping[str, Any]) -> float:
+    _require_full_run(sc, r)
     return max(r["derived"]["urine_flow"])
 
 
 def _urine_osm_min(sc: Scenario, r: Mapping[str, Any]) -> float:
+    _require_full_run(sc, r)
     return min(r["derived"]["U_osm"])
 
 
@@ -312,12 +409,27 @@ METRICS: dict[tuple[str, str], MetricFn] = {
     ("no_water_24h", "osmolality rise"): _no_water_osm_rise,
 }
 
-def _numeric_range(e: Mapping[str, Any]) -> tuple[float, float] | None:
-    rng = e.get("range")
-    if (isinstance(rng, Sequence) and not isinstance(rng, str) and len(rng) == 2
-            and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in rng)):
-        return float(rng[0]), float(rng[1])
-    return None
+
+def _is_number(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _numeric_range(sc: Scenario, e: Mapping[str, Any]) -> tuple[float, float] | None:
+    """The registered [lo, hi], or None when the record has no range. A range that is
+    present must be two numbers, neither NaN, with lo <= hi (±inf allowed, by intent)."""
+    if "range" not in e or e.get("range") is None:
+        return None
+    rng = e["range"]
+    if not (isinstance(rng, Sequence) and not isinstance(rng, str) and len(rng) == 2
+            and all(_is_number(x) for x in rng)):
+        raise ConfigurationError(f"expectation {e.get('metric')!r}: range must be two numbers",
+                                 expected="[lo, hi]", received=rng, scenario=sc.id)
+    lo, hi = float(rng[0]), float(rng[1])
+    if lo != lo or hi != hi or not (lo <= hi):
+        raise ConfigurationError(f"expectation {e.get('metric')!r}: range {list(rng)!r} is "
+                                 "NaN or reversed (lo > hi)",
+                                 expected="lo <= hi, neither NaN", received=rng, scenario=sc.id)
+    return lo, hi
 
 
 def _quantile(sorted_: Sequence[float], q: float) -> float:
@@ -365,15 +477,84 @@ def _resolve(scenario: str | Scenario) -> Scenario:
     return sc
 
 
+def _metric_value(sc: Scenario, fn: MetricFn, r: Mapping[str, Any], metric: Any) -> float:
+    """The extractor's value as a float. A non-number (str, None, bool) is a harness defect,
+    never coerced: float("0.5") would score a string as a pass."""
+    v = fn(sc, r)
+    if not _is_number(v):
+        raise ConfigurationError(f"extractor for {metric!r} returned {type(v).__name__} "
+                                 f"{v!r}, not a number", expected="int or float",
+                                 received=repr(v), scenario=sc.id)
+    return float(v)
+
+
+def _defect(sc: Scenario, metric: Any, exc: MetricUnavailable) -> ConfigurationError:
+    return ConfigurationError(f"metric {metric!r} unavailable for a reason other than run "
+                              f"length ({exc.cause}): {exc}", expected=RUN_TOO_SHORT,
+                              received=exc.cause, scenario=sc.id)
+
+
+def _check_registry(sc: Scenario, expects: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Validate every record BEFORE any is scored; return the final ids (explicit `id`, else
+    `<scenario>/<NN>`). Raises ConfigurationError on any registry defect."""
+    ids: list[str] = []
+    for i, e in enumerate(expects):
+        metric, kind = e.get("metric"), e.get("kind")
+        if kind not in COUNTABLE_KINDS and kind not in NOT_CHECKED_KINDS:
+            raise ConfigurationError(
+                f"expectation {metric!r} has unregistered kind {kind!r}",
+                expected=COUNTABLE_KINDS + tuple(NOT_CHECKED_KINDS), received=kind,
+                scenario=sc.id)
+        role = e.get("role", "validation")
+        if role not in ROLES:
+            raise ConfigurationError(f"expectation {metric!r} has unknown role {role!r}",
+                                     expected=ROLES, received=role, scenario=sc.id)
+        if role == "calibration" and not e.get("calibrates"):
+            raise ConfigurationError(f"calibration expectation {metric!r} names no parameter "
+                                     "in `calibrates`", expected="non-empty calibrates",
+                                     received=e.get("calibrates"), scenario=sc.id)
+        bounds = _numeric_range(sc, e)
+        if kind in COUNTABLE_KINDS and bounds is None:
+            raise ConfigurationError(f"countable expectation {metric!r} ({kind}) has no "
+                                     "numeric range", expected="[lo, hi]",
+                                     received=e.get("range"), scenario=sc.id)
+        ids.append(e.get("id") or f"{sc.id}/{i + 1:02d}")
+    dupes = sorted({x for x in ids if ids.count(x) > 1})
+    if dupes:
+        raise ConfigurationError(f"expectation registry of {sc.id} has duplicate ids {dupes}",
+                                 expected="unique ids", received=dupes, scenario=sc.id)
+    return ids
+
+
+def _check_mc(sc: Scenario, result: Mapping[str, Any], mc: Mapping[str, Any],
+              allow_small_n: bool) -> None:
+    """HREQ-U-08: a band belongs to THIS scenario's runs, on the same grid, at n >= 256."""
+    runs = mc.get("results") or []
+    n = mc.get("n")
+    if not isinstance(n, int) or len(runs) != n:
+        raise ConfigurationError(f"Monte Carlo set has {len(runs)} runs for n = {n!r}",
+                                 expected=n, received=len(runs), scenario=sc.id)
+    t_end, dt = result["t"][-1], (result.get("meta") or {}).get("dt")
+    for k, rr in enumerate(runs):
+        got = (rr.get("scenario"), rr["t"][-1], (rr.get("meta") or {}).get("dt"))
+        if got != (sc.id, t_end, dt):
+            raise ConfigurationError(
+                f"Monte Carlo run {k} is (scenario, t_end, dt) = {got}, not {(sc.id, t_end, dt)}"
+                ": a band from another scenario or grid is never attached",
+                expected=(sc.id, t_end, dt), received=got, scenario=sc.id)
+    if n < MIN_PUBLISHED_N and not allow_small_n:
+        raise ConfigurationError(f"Monte Carlo n = {n} < {MIN_PUBLISHED_N} (HREQ-U-08); pass "
+                                 "allow_small_n=True only for equivalence tests",
+                                 expected=f">= {MIN_PUBLISHED_N}", received=n, scenario=sc.id)
+
+
 def _evaluate_one(sc: Scenario, i: int, e: Mapping[str, Any], r: Mapping[str, Any],
-                  mc: Mapping[str, Any] | None) -> dict[str, Any]:
+                  mc: Mapping[str, Any] | None, *, row_id: str, meta: Mapping[str, Any],
+                  short: str | None) -> dict[str, Any]:
     metric, kind = e.get("metric"), e.get("kind")
     role = e.get("role", "validation")
-    if role not in ROLES:
-        raise ConfigurationError(f"expectation {metric!r} has unknown role {role!r}",
-                                 expected=ROLES, received=role, scenario=sc.id)
     row: dict[str, Any] = {
-        "id": e.get("id") or f"{sc.id}/{i + 1:02d}",
+        "id": row_id,
         "metric": metric, "kind": kind, "role": role,
         "calibrates": list(e.get("calibrates") or []),
         # docs/health/01 §7.1: V1's expectations were written alongside the model.
@@ -383,28 +564,36 @@ def _evaluate_one(sc: Scenario, i: int, e: Mapping[str, Any], r: Mapping[str, An
         "actual": None, "status": "not_checked", "reason": "",
         "evidence": list(e.get("evidence") or []),
         "model_version": MODEL_VERSION, "disclaimer": DISCLAIMER,
-        "meta": result_meta(scenario=sc.id),
+        "band": None, "in_range_share": None, "n": 0, "seed": None, "rejected": None,
+        "band_reason": NO_MC_REASON,
+        "meta": dict(meta),
     }
     fn = METRICS.get((sc.id, metric))
-    bounds = _numeric_range(e)
+    bounds = _numeric_range(sc, e)
     if kind in NOT_CHECKED_KINDS:
         row["reason"] = NOT_CHECKED_KINDS[kind]
-        if kind == "numerical" and fn is not None:
+        if kind in _STATE_NOTE_KINDS:
+            row["reason"] += f": {e.get('note') or e.get('target')}"
+        if short is not None:
+            row["reason"] += f"; {short}"
+        elif kind == "numerical" and fn is not None:
             try:
-                row["actual"] = float(fn(sc, r))
+                row["actual"] = _metric_value(sc, fn, r, metric)
             except MetricUnavailable as exc:
+                if exc.cause != RUN_TOO_SHORT:
+                    raise _defect(sc, metric, exc) from exc
                 row["reason"] += f"; value unavailable: {exc}"
-    elif kind not in COUNTABLE_KINDS:
-        row["reason"] = f"unknown expectation kind {kind!r}: not scored (registry defect)"
-    elif bounds is None:
-        row["reason"] = f"countable kind {kind!r} without a numeric range (registry defect)"
+    elif short is not None:
+        row["reason"] = short
     elif fn is None:
         row["reason"] = (f"{NO_EXTRACTOR} for this ranged expectation "
                          "(harness gap: add it to validate.METRICS)")
     else:
         try:
-            actual = float(fn(sc, r))
+            actual = _metric_value(sc, fn, r, metric)
         except MetricUnavailable as exc:
+            if exc.cause != RUN_TOO_SHORT:
+                raise _defect(sc, metric, exc) from exc
             row["reason"] = f"unavailable: {exc}"
         else:
             lo, hi = bounds
@@ -414,45 +603,80 @@ def _evaluate_one(sc: Scenario, i: int, e: Mapping[str, Any], r: Mapping[str, An
             row["reason"] = (f"{actual:.6g} in [{lo:g}, {hi:g}]" if ok
                              else f"{actual:.6g} outside [{lo:g}, {hi:g}]")
     if role == "calibration":
-        row["reason"] += (f"; calibration target (calibrates {', '.join(row['calibrates']) or '?'}):"
+        row["reason"] += (f"; calibration target (calibrates {', '.join(row['calibrates'])}):"
                           " reported separately, never counted as validation")
     elif role == "structural":
         row["reason"] += "; structural property: reported separately, never counted as validation"
     row["counted"] = (row["countable"] and role == "validation"
                       and row["status"] in ("pass", "fail"))
     if mc is not None:
-        row.update({"band": None, "in_range_share": None, "n": mc["n"], "seed": mc["seed"],
-                    "rejected": mc["rejected"]})
-        if fn is not None and (kind in COUNTABLE_KINDS or kind == "numerical"):
-            try:
-                values = [float(fn(sc, rr)) for rr in mc["results"]]
-            except MetricUnavailable:
-                values = None
+        row.update({"n": mc["n"], "seed": mc["seed"], "rejected": mc["rejected"]})
+        if short is not None:
+            row["band_reason"] = short
+        elif kind not in COUNTABLE_KINDS and kind != "numerical":
+            row["band_reason"] = f"{kind} expectation: no metric to band"
+        elif fn is None:
+            row["band_reason"] = f"{NO_EXTRACTOR}: nothing to band"
+        else:
+            values: list[float] | None = []
+            for rr in mc["results"]:
+                try:
+                    values.append(_metric_value(sc, fn, rr, metric))
+                except MetricUnavailable as exc:
+                    if exc.cause != RUN_TOO_SHORT:
+                        raise _defect(sc, metric, exc) from exc
+                    row["band_reason"] = f"unavailable on a Monte Carlo run: {exc}"
+                    values = None
+                    break
             if values is not None:
                 row.update(_band(values, bounds))
+                row["band_reason"] = (None if mc["n"] >= MIN_PUBLISHED_N else
+                                      f"n = {mc['n']} < {MIN_PUBLISHED_N}: shown with its n, "
+                                      "not a published band (HREQ-U-08)")
     return row
 
 
 def evaluate_expectations(scenario: str | Scenario, result: Mapping[str, Any], *,
-                          mc: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+                          mc: Mapping[str, Any] | None = None, allow_small_n: bool = False,
+                          params_override: bool = False) -> list[dict[str, Any]]:
     """Score `result` (a simulate() result for `scenario`) against every registered
     expectation of that scenario. One row per expectation, in order; never omits one.
 
     `scenario` is an id or a Scenario object (the self-test plants registries this way).
-    `mc` (from monte_carlo_runs) adds each metric's per-sample band and in-range share.
-    Raises ConfigurationError on duplicate expectation ids or an unknown role, and
-    ExpectationSkippedError if a row were ever dropped.
+    `mc` (from monte_carlo_runs, same scenario, t_end and dt as `result`, n >= 256 unless
+    `allow_small_n`) adds each metric's per-sample band and in-range share.
+    `params_override=True` admits a result with non-default parameters or a dt other than
+    the scenario's; the row meta records it either way.
+    Raises ValueError for a result of another scenario; ConfigurationError for any registry
+    defect, a non-default result without params_override, or an unfit `mc` (see the module
+    docstring); ExpectationSkippedError if a row were ever dropped.
     """
     sc = _resolve(scenario)
     if result.get("scenario") != sc.id:
         raise ValueError(f"result is for scenario {result.get('scenario')!r}, not {sc.id!r}")
     expects = (sc.validation or {}).get("expects") or []
-    explicit = [e["id"] for e in expects if e.get("id")]
-    dupes = sorted({x for x in explicit if explicit.count(x) > 1})
-    if dupes:
-        raise ConfigurationError(f"expectation registry of {sc.id} has duplicate ids {dupes}",
-                                 expected="unique ids", received=dupes, scenario=sc.id)
-    rows = [_evaluate_one(sc, i, e, result, mc) for i, e in enumerate(expects)]
+    ids = _check_registry(sc, expects)
+    params = result.get("params")
+    dt = (result.get("meta") or {}).get("dt")
+    t_end = result["t"][-1]
+    default_p = params == default_params()
+    non_default = not default_p or dt != sc.dt
+    if non_default and not params_override:
+        raise ConfigurationError(
+            f"result for {sc.id} was computed with "
+            + ("non-default parameters" if not default_p else f"dt = {dt!r}")
+            + f" (scenario dt {sc.dt!r}); pass params_override=True to score it",
+            expected="default_params() and the scenario dt", received=dt, scenario=sc.id)
+    if mc is not None:
+        _check_mc(sc, result, mc, allow_small_n)
+    short = (f"run too short: t_end {t_end:g} h < scenario {sc.t_end:g} h"
+             if t_end < sc.t_end - _T_SLACK else None)
+    meta = result_meta(scenario=sc.id, registry_version=registry_version(
+                           sc if SCENARIOS.get(sc.id) is not sc else None),
+                       params_digest=params_digest(params or {}),
+                       params_override=bool(non_default), dt=dt, t_end=t_end)
+    rows = [_evaluate_one(sc, i, e, result, mc, row_id=ids[i], meta=meta, short=short)
+            for i, e in enumerate(expects)]
     if len(rows) != len(expects):  # structural guarantee, kept as a loud check (HREQ-V-12)
         raise ExpectationSkippedError("evaluate_expectations dropped a row",
                                       expected=len(expects), received=len(rows),
@@ -470,6 +694,13 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         structural                   {"n", "statuses": {pass, fail, not_checked}} -- never counted
         calibrated_parameters        sorted union of every calibration row's `calibrates`
         missing_extractors           ids of countable rows that have no extractor yet
+        not_checked_countable        [{id, reason}] of EVERY countable-kind row (any role)
+                                     left not_checked -- missing extractor or run too short
+        unbanded_counted             counted rows with no band or a band at n < 256
+                                     (HREQ-U-08, HREQ-V-15)
+        independent_vs_calibrated    {"independent_counted": counted validation rows,
+                                      "calibrated_parameters": how many} (HREQ-M-12)
+        registry_version             the rows' registry version (one; mixed rows refused)
         rows, meta                   row count; disclaimer, validation status, model version
     """
     def role_column() -> dict[str, Any]:
@@ -479,12 +710,24 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "rows": len(rows), "counted_pass": 0, "counted_fail": 0, "not_checked": 0,
         "counted_by_registration": {}, "calibration": role_column(),
         "structural": role_column(), "calibrated_parameters": [], "missing_extractors": [],
+        "not_checked_countable": [], "unbanded_counted": 0,
+        "independent_vs_calibrated": {}, "registry_version": None,
         "meta": result_meta(),
     }
+    versions = {(row.get("meta") or {}).get("registry_version") for row in rows}
+    if len(versions) > 1:
+        raise ConfigurationError("summarize() over rows from different expectation registries",
+                                 expected="one registry_version", received=sorted(map(str, versions)))
+    out["registry_version"] = next(iter(versions)) if versions else None
     calibrated: set[str] = set()
     for row in rows:
         if row["reason"].startswith(NO_EXTRACTOR):
             out["missing_extractors"].append(row["id"])
+        if row["countable"] and row["status"] == "not_checked":
+            out["not_checked_countable"].append({"id": row["id"], "reason": row["reason"]})
+        if row["counted"] and (row.get("band") is None
+                               or (row.get("n") or 0) < MIN_PUBLISHED_N):
+            out["unbanded_counted"] += 1
         if row["role"] in ("calibration", "structural"):
             col = out[row["role"]]
             col["n"] += 1
@@ -500,4 +743,7 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         elif row["status"] == "not_checked":
             out["not_checked"] += 1
     out["calibrated_parameters"] = sorted(calibrated)
+    out["independent_vs_calibrated"] = {
+        "independent_counted": out["counted_pass"] + out["counted_fail"],
+        "calibrated_parameters": len(out["calibrated_parameters"])}
     return out

@@ -1280,9 +1280,10 @@ def test_scenario_expectations_harness_evaluates_every_quantitative_expectation(
     short = simulate(scenario="salt_load_10g", t_end=12)
     rows = evaluate_expectations("salt_load_10g", short)
     r48 = next(x for x in rows if x["metric"] == "fraction excreted by 48 h")
-    check("harness: a run too short for a metric is reported unavailable, never a substitute value",
+    check("harness: a run too short for a metric is reported not_checked with the run length, "
+          "never a substitute value",
           r48["status"] == "not_checked" and r48["actual"] is None
-          and r48["reason"].startswith("unavailable"), str(r48))
+          and r48["reason"] == "run too short: t_end 12 h < scenario 72 h", str(r48))
 
 
 def test_failing_expectation_is_pinned_to_the_reference_with_its_band():
@@ -1325,7 +1326,13 @@ def test_failing_expectation_is_pinned_to_the_reference_with_its_band():
         g8 = js["mc"]["8"]
         t0 = time.perf_counter()
         mc = monte_carlo_runs(sid, n=g8["n"], seed=g8["seed"])
-        row_mc = next(x for x in evaluate_expectations(sid, r, mc=mc) if x["metric"] == metric)
+        # n = 8 is the golden equivalence check, not a published band (HREQ-U-08).
+        row_mc = next(x for x in evaluate_expectations(sid, r, mc=mc, allow_small_n=True)
+                      if x["metric"] == metric)
+        check(f"finding {sid}: a band at n = {g8['n']} is shown with its n and a band_reason, "
+              "never as a published band (HREQ-U-08)",
+              row_mc["n"] == g8["n"] and row_mc["band"] is not None
+              and f"n = {g8['n']} < 256" in (row_mc["band_reason"] or ""), str(row_mc))
         w = Worst()
         for q in ("q05", "q50", "q95"):
             w.add(f"band.{q}", row_mc["band"][q], g8["band"][q])
@@ -1346,11 +1353,19 @@ def test_calibration_and_structural_rows_are_never_counted_as_validation():
     # The shipped chronic rows: one calibration, one structural, neither counted.
     rows = evaluate_expectations("chronic_high_salt_30d", sim("chronic_high_salt_30d"))
     cal = next(x for x in rows if x["role"] == "calibration")
+    design = next(x for x in rows if x["metric"] == "MAP time course")
     struct = next(x for x in rows if x["role"] == "structural")
     check("roles: chronic ΔMAP row is a calibration target of map_vol_exp, pn_gain, aldo_vol_exp",
           cal["metric"] == "ΔMAP at day 30 per +100 mmol/day Na"
           and cal["calibrates"] == ["map_vol_exp", "pn_gain", "aldo_vol_exp"]
           and "map_vol_exp" in cal["reason"], str(cal))
+    check("roles: the D-2 'MAP time course' design target is the calibration target of "
+          "map_auto_tau_h (docs/health/03 §12), not counted, its note naming D-2",
+          design["role"] == "calibration" and design["calibrates"] == ["map_auto_tau_h"]
+          and design["kind"] == "design-target" and design["status"] == "not_checked"
+          and not design["counted"] and "map_auto_tau_h" in design["reason"]
+          and "Decision D-2" in next(e for e in SCENARIOS["chronic_high_salt_30d"].validation[
+              "expects"] if e["metric"] == "MAP time course")["note"], str(design))
     check("roles: chronic Na-balance row is structural",
           struct["metric"] == "Na excretion ≈ intake by day 30", str(struct))
     check("roles: calibration and structural rows are evaluated (pass/fail) but never counted",
@@ -1359,13 +1374,15 @@ def test_calibration_and_structural_rows_are_never_counted_as_validation():
     summ = summarize(rows)
     check("roles: summarize() puts them in their own columns, not in the validation totals",
           summ["counted_pass"] + summ["counted_fail"] == 0
-          and summ["calibration"]["n"] == 1 and summ["structural"]["n"] == 1
+          and summ["calibration"]["n"] == 2 and summ["structural"]["n"] == 1
           and summ["calibration"]["statuses"]["pass"] + summ["calibration"]["statuses"]["fail"] == 1
+          and summ["calibration"]["statuses"]["not_checked"] == 1
           and summ["structural"]["statuses"]["pass"] + summ["structural"]["statuses"]["fail"] == 1,
           str(summ))
-    check("roles: summarize() names the calibrated parameters (for the CLI status line)",
-          summ["calibrated_parameters"] == ["aldo_vol_exp", "map_vol_exp", "pn_gain"],
-          str(summ["calibrated_parameters"]))
+    check("roles: summarize() names the 4 calibrated parameters of 03 §12 (for the CLI status "
+          "line)", len(summ["calibrated_parameters"]) == 4
+          and summ["calibrated_parameters"] == ["aldo_vol_exp", "map_auto_tau_h", "map_vol_exp",
+                                                 "pn_gain"], str(summ["calibrated_parameters"]))
     every = [x for sid in SCENARIOS for x in evaluate_expectations(sid, sim(sid))]
     total = summarize(every)
     check("roles: V1 has 12 countable rows; 1 calibration + 1 structural leave 10 counted, all "
@@ -1373,6 +1390,12 @@ def test_calibration_and_structural_rows_are_never_counted_as_validation():
           sum(x["countable"] for x in every) == 12
           and total["counted_pass"] + total["counted_fail"] == 10
           and set(total["counted_by_registration"]) == {"co-developed"}, str(total))
+    check("roles: V1 calibrates 4 parameters (aldo_vol_exp, map_auto_tau_h, map_vol_exp, "
+          "pn_gain) against 10 independent counted rows (HREQ-M-12)",
+          len(total["calibrated_parameters"]) == 4
+          and total["independent_vs_calibrated"] == {"independent_counted": 10,
+                                                     "calibrated_parameters": 4},
+          str(total["independent_vs_calibrated"]))
     note(f"V1 totals: counted pass {total['counted_pass']}, counted fail {total['counted_fail']}, "
          f"not_checked {total['not_checked']}, calibration {total['calibration']}, structural "
          f"{total['structural']}, missing extractors {total['missing_extractors']}")
@@ -1383,7 +1406,9 @@ def test_calibration_and_structural_rows_are_never_counted_as_validation():
     base = SCENARIOS["drink_water_1L"]
     r = sim("drink_water_1L")
     base_expects = list(base.validation["expects"])
-    peak = next(e for e in base_expects if e["metric"] == "peak urine flow")
+    # Planted copies drop the shipped explicit id, so they take a positional id.
+    peak = {k: v for k, v in next(e for e in base_expects
+                                  if e["metric"] == "peak urine flow").items() if k != "id"}
 
     def planted(*extra: dict[str, Any]) -> Any:
         return dataclasses.replace(base, validation={**base.validation,
@@ -1432,6 +1457,385 @@ def test_calibration_and_structural_rows_are_never_counted_as_validation():
     except ConfigurationError:
         refused = True
     check("planted: a registry with a duplicated expectation id is refused", refused)
+
+
+def test_every_extractor_value_is_pinned_and_independently_recomputed():
+    """docs/health/03 §5 (BUG-20261003-117): a status alone cannot see an extractor that
+    reads the wrong window, unit or baseline -- the value moves and stays inside its range.
+
+    (a) PINNED holds every extractor's default-parameter value (the run sim() makes: the
+        scenario's dt, the 30-day scenario recorded every 3rd point), compared at REL_TOL.
+        The literals were printed with repr() from this engine (model 1.0.1) and were
+        cross-checked by (b) before they were written down; a model change that moves
+        one must re-print it and explain the difference (golden-fixture rule).
+    (b) Each metric is recomputed here from the result's own series, without the engine's
+        ledger or the extractor's helpers: urine and Na excretion are trapezoid integrals of
+        `urine_flow` (L/h) and `Na_excr` (mmol/h) over the stated window from the event
+        start, minus window x the series' own value at t = 0 where the metric says
+        "above baseline"; point readings come from the series and a grid search of our own.
+    """
+    PINNED = {
+        "baseline/01": 9.719173059288608e-16,
+        "drink_water_1L/01": -3.076296774764103,
+        "drink_water_1L/02": 7.050000000000001,
+        "drink_water_1L/03": 1.4666666666666668,
+        "drink_water_1L/04": 0.5721408405333197,
+        "drink_water_1L/05": 62.75778406888058,
+        "drink_water_1L/06": 0.6897013984124625,
+        "salt_load_10g/01": 2.1381547762933337,
+        "salt_load_10g/03": 0.29551422866221755,
+        "salt_load_10g/04": 0.9234361809558178,
+        "chronic_high_salt_30d/01": 2.205914093919021,
+        "chronic_high_salt_30d/03": 1.0002079475438233,
+        "no_water_24h/01": 11.0079117304781,
+    }
+    # Tolerances of (b). Point readings use the same arithmetic as the extractor: REL_TOL.
+    # Integrals: the trapezoid on the output grid vs the solver's RK4 ledger is an O(dt^2)
+    # quadrature difference, measured at <= 2.6e-6 relative (water fraction, 1/60 h grid);
+    # 1e-4 relative leaves margin and is still ~100x tighter than the smallest extractor
+    # mutation the review planted (a shifted window or a missing baseline moves >= 1 %).
+    # ΔMAP uses Na_excr(0) x 24 as the baseline intake (steady state), not the parameter.
+    INTEGRAL_REL = 1e-4
+    STEADY_REL = 1e-6
+    rows = {x["id"]: x for sid in SCENARIOS for x in evaluate_expectations(sid, sim(sid))}
+    scored = {i: x["actual"] for i, x in rows.items() if x["actual"] is not None}
+    check("pins: every row with a computed value is pinned and every pin has a row "
+          f"({len(PINNED)} extractors)",
+          set(scored) == set(PINNED)
+          and {(i.split("/")[0], rows[i]["metric"]) for i in PINNED} == set(METRICS),
+          f"unpinned {sorted(set(scored) - set(PINNED))}, "
+          f"pinned without a value {sorted(set(PINNED) - set(scored))}")
+    w = Worst()
+    for i, v in PINNED.items():
+        w.add(i, scored.get(i, math.nan), v)
+    check("pins: every extractor's default-parameter value equals its pinned literal "
+          f"(REL_TOL {REL_TOL:g})", w.ok, w.summary())
+
+    def k_at(t: Sequence[float], x: float) -> int:
+        return min(range(len(t)), key=lambda k: (abs(t[k] - x), k))
+
+    def trapz(t: Sequence[float], y: Sequence[float], a: float, b: float) -> float:
+        ia, ib = k_at(t, a), k_at(t, b)
+        return sum((t[k + 1] - t[k]) * (y[k] + y[k + 1]) / 2 for k in range(ia, ib))
+
+    indep: dict[str, tuple[float, float]] = {}     # id -> (independent value, rel tolerance)
+    r = sim("baseline")
+    drift = 0.0
+    for key in STATE_KEYS:
+        s = r["states"][key]
+        drift = max([drift] + [abs(v - s[0]) / (abs(s[0]) or 1.0) for v in s])
+    indep["baseline/01"] = (drift, REL_TOL)
+
+    r = sim("drink_water_1L")
+    t, d = r["t"], r["derived"]
+    ev = SCENARIOS["drink_water_1L"].events[0]
+    na, uf = d["Na_plasma"], d["urine_flow"]
+    k_nadir = na.index(min(na))
+    indep["drink_water_1L/01"] = (min(na) - na[0], REL_TOL)
+    indep["drink_water_1L/02"] = (next((t[k] - ev["start"] for k in range(k_nadir + 1, len(t))
+                                        if abs(na[k] - na[0]) < 0.5), math.inf), REL_TOL)
+    indep["drink_water_1L/03"] = (t[uf.index(max(uf))] - ev["start"], REL_TOL)
+    indep["drink_water_1L/04"] = (max(uf), REL_TOL)
+    indep["drink_water_1L/05"] = (min(d["U_osm"]), REL_TOL)
+    indep["drink_water_1L/06"] = ((trapz(t, uf, ev["start"], ev["start"] + 3) - 3 * uf[0])
+                                  / ev["water_L"], INTEGRAL_REL)
+
+    r = sim("salt_load_10g")
+    t, d = r["t"], r["derived"]
+    ev = SCENARIOS["salt_load_10g"].events[0]
+    na, ne = d["Na_plasma"], d["Na_excr"]
+    load = ev["salt_g"] * 1000 / 58.44              # mmol Na in the NaCl load
+    indep["salt_load_10g/01"] = (max(na) - na[0], REL_TOL)
+    for rid, h in (("salt_load_10g/03", 8), ("salt_load_10g/04", 48)):
+        indep[rid] = ((trapz(t, ne, ev["start"], ev["start"] + h) - h * ne[0]) / load,
+                      INTEGRAL_REL)
+
+    r = sim("chronic_high_salt_30d")
+    t, ne, mp = r["t"], r["derived"]["Na_excr"], r["states"]["MAP"]
+    ov = SCENARIOS["chronic_high_salt_30d"].overrides[0]
+    t30 = ov["start"] + 30 * 24
+    indep["chronic_high_salt_30d/01"] = (
+        (mp[k_at(t, t30)] - mp[k_at(t, ov["start"])]) * 100
+        / (ov["naIn_mmolh"] * 24 - ne[0] * 24), STEADY_REL)
+    indep["chronic_high_salt_30d/03"] = (trapz(t, ne, t30 - 24, t30) / (ov["naIn_mmolh"] * 24),
+                                         INTEGRAL_REL)
+
+    r = sim("no_water_24h")
+    t, osm = r["t"], r["derived"]["osm_plasma"]
+    ov = SCENARIOS["no_water_24h"].overrides[0]
+    indep["no_water_24h/01"] = (osm[k_at(t, ov["end"])] - osm[0], REL_TOL)
+
+    check("independent: every pinned extractor has an independent recomputation",
+          set(indep) == set(PINNED), str(sorted(set(PINNED) ^ set(indep))))
+
+    # Whole-run extractors read the WHOLE run: on V1 data every extremum falls early, so an
+    # extractor that looked only at the first part of the run would pass the pins. Plant
+    # each extremum at the last output point of a full-length copy of the result.
+    whole = []
+    for sid, metric, series, sign in (
+            ("drink_water_1L", "Na_plasma nadir − baseline", "Na_plasma", -1),
+            ("drink_water_1L", "peak urine flow", "urine_flow", 1),
+            ("drink_water_1L", "minimum urine osmolality", "U_osm", -1),
+            ("salt_load_10g", "Na_plasma peak − baseline", "Na_plasma", 1)):
+        r = sim(sid)
+        y = list(r["derived"][series])
+        y[-1] = (max(y) if sign > 0 else min(y)) + sign * 1.0
+        planted = {**r, "derived": {**r["derived"], series: y}}
+        row = next(x for x in evaluate_expectations(sid, planted) if x["metric"] == metric)
+        want = y[-1] - (y[0] if "baseline" in metric else 0.0)
+        whole.append((sid, metric, row["actual"], want))
+    check("whole-run extractors: an extremum planted at the LAST output point is the value "
+          "(nadir, peak flow, minimum U_osm, Na peak)",
+          all(err_ratio(a, w) <= 1 for _, _, a, w in whole), str(whole))
+    for rid, (v, tol) in indep.items():
+        got = scored.get(rid, math.nan)
+        ratio = err_ratio(got, v, rel=tol)
+        check(f"independent: {rid} '{rows[rid]['metric']}' = {got!r} equals the recomputation "
+              f"{v!r} to {tol:g} relative", ratio <= 1, f"{ratio:.3g} x tolerance")
+
+
+def test_harness_refuses_registry_defects_and_scores_boundaries():
+    """docs/health/03 §5.2 (BUG-20261003-120, -123, -124, -125): a registry defect is a
+    ConfigurationError, never a quiet not_checked row; bounds are inclusive; ±inf is a
+    counted fail; a non-number from an extractor is never coerced."""
+    from health.engine.validate import RUN_TOO_SHORT, MetricUnavailable
+
+    base = SCENARIOS["drink_water_1L"]
+    r = sim("drink_water_1L")
+    shipped = list(base.validation["expects"])
+    E = [{k: v for k, v in e.items() if k != "id"} for e in shipped]   # positional ids
+    peak, recovery = E[3], E[1]
+
+    def planted(rows: Sequence[Mapping[str, Any]]) -> Any:
+        return dataclasses.replace(base, validation={**base.validation, "expects": list(rows)})
+
+    def outcome(rows: Sequence[Mapping[str, Any]]) -> str:
+        try:
+            got = evaluate_expectations(planted(rows), r)
+        except ConfigurationError as exc:
+            return f"ConfigurationError: {exc.message}"
+        return f"accepted: last row {got[-1]['status']} ({got[-1]['reason']})"
+
+    def refused(label: str, rows: Sequence[Mapping[str, Any]]) -> None:
+        got = outcome(rows)
+        check(f"planted: {label} is refused (ConfigurationError), never a quiet row",
+              got.startswith("ConfigurationError"), got)
+
+    check("ids: every shipped expectation has an explicit id <scenario_id>/<NN> (1-based, in "
+          "registration order), unique over the registry",
+          all(e.get("id") == f"{sid}/{i + 1:02d}" for sid, sc in SCENARIOS.items()
+              for i, e in enumerate((sc.validation or {}).get("expects") or [])),
+          str([e.get("id") for sc in SCENARIOS.values()
+               for e in (sc.validation or {}).get("expects") or []]))
+    # H3: kinds and ranges.
+    refused("kind 'quantitive' on a copy of the recovery row", shipped + [{**recovery,
+                                                                         "kind": "quantitive"}])
+    refused("kind typo ON the recovery row (the 9 pass / 0 fail summary)",
+            [shipped[0], {**shipped[1], "kind": "quantitive"}] + shipped[2:])
+    refused("a row with no kind", E + [{k: v for k, v in peak.items() if k != "kind"}])
+    refused("kind 'Quantitative' (case)", E + [{**peak, "kind": "Quantitative"}])
+    refused("a quantitative row with no range", E + [{k: v for k, v in peak.items()
+                                                      if k != "range"}])
+    refused("a semi-quantitative row with no range",
+            E + [{k: v for k, v in peak.items() if k != "range"} | {"kind": "semi-quantitative"}])
+    refused("a calibration row naming no parameter", E + [{**peak, "role": "calibration"}])
+    # H7: malformed ranges.
+    refused("a reversed range [0.9, 0.35]", E + [{**peak, "range": [0.9, 0.35]}])
+    refused("a NaN range [nan, nan]", E + [{**peak, "range": [math.nan, math.nan]}])
+    refused("a half-NaN range [nan, 0.9]", E + [{**peak, "range": [math.nan, 0.9]}])
+    refused("a range of strings", E + [{**peak, "range": ["0.35", "0.9"]}])
+    refused("a range of three numbers", E + [{**peak, "range": [0.35, 0.9, 1]}])
+    got = outcome(E + [{**peak, "range": [-math.inf, math.inf]}])
+    check("planted: an intentionally unbounded range [-inf, inf] is accepted and scored",
+          got.startswith("accepted: last row pass"), got)
+    # H6: duplicate FINAL ids, explicit or positional.
+    refused("an explicit id colliding with a positional default (drink_water_1L/01)",
+            E + [{**peak, "id": "drink_water_1L/01"}])
+    refused("an explicit id colliding with a shipped explicit id",
+            shipped + [{**peak, "id": "drink_water_1L/04"}])
+
+    # H8 and H3: planted extractors on range [0.35, 0.9].
+    key = ("drink_water_1L", "planted boundary metric")
+    row = {"metric": key[1], "target": "x", "range": [0.35, 0.9], "kind": "quantitative"}
+    try:
+        for value, want in ((0.35, "pass"), (0.9, "pass"), (math.nextafter(0.9, 1.0), "fail"),
+                            (math.nextafter(0.35, 0.0), "fail"), (math.inf, "fail"),
+                            (-math.inf, "fail"), (1, "fail")):
+            METRICS[key] = lambda sc, rr, v=value: v
+            last = evaluate_expectations(planted(E + [row]), r)[-1]
+            check(f"planted: an extractor returning {value!r} on [0.35, 0.9] is a counted "
+                  f"{want.upper()} (bounds inclusive; ±inf fails)",
+                  last["status"] == want and last["counted"] is True, str(last))
+        for value in ("0.5", None, True):
+            METRICS[key] = lambda sc, rr, v=value: v
+            refused(f"an extractor returning {value!r} (never coerced with float())", E + [row])
+        METRICS[key] = lambda sc, rr: (_ for _ in ()).throw(
+            MetricUnavailable("planted: no event", cause="scenario_has_no_event"))
+        refused("an extractor unavailable for a reason other than run length", E + [row])
+        METRICS[key] = lambda sc, rr: (_ for _ in ()).throw(
+            MetricUnavailable("planted: run ends at 1 h", cause=RUN_TOO_SHORT))
+        rows = evaluate_expectations(planted(E + [row]), r)
+        summ = summarize(rows)
+        check("planted: an extractor unavailable because the run is too short gives a "
+              "not_checked row with the reason, listed by summarize() next to missing_extractors",
+              rows[-1]["status"] == "not_checked" and not rows[-1]["counted"]
+              and rows[-1]["reason"] == "unavailable: planted: run ends at 1 h"
+              and summ["not_checked_countable"] == [{"id": rows[-1]["id"],
+                                                     "reason": rows[-1]["reason"]}],
+              str(summ["not_checked_countable"]))
+    finally:
+        del METRICS[key]
+
+
+def test_harness_refuses_unfit_results_and_monte_carlo_sets():
+    """BUG-20261003-118 (Monte Carlo set), -121 (truncated run), -122 (non-default result):
+    the harness scores only what it was asked to score, and stamps what it scored."""
+    from health.engine.validate import RUN_TOO_SHORT, MetricUnavailable, params_digest
+
+    r = sim("drink_water_1L")
+
+    def raises(label: str, fn: Callable[[], Any]) -> None:
+        try:
+            fn()
+            got = "accepted"
+        except ConfigurationError as exc:
+            got = f"ConfigurationError: {exc.message}"
+        check(f"{label} is refused (ConfigurationError)", got.startswith("ConfigurationError"),
+              got)
+
+    # H4: a truncated run is never scored with substitute values.
+    short = simulate(scenario="drink_water_1L", t_end=1.8)
+    rows = evaluate_expectations("drink_water_1L", short)
+    summ = summarize(rows)
+    check("truncated run (t_end 1.8 h of 12 h): every row is not_checked with the run length, "
+          "nothing is counted, and summarize() lists all 6 countable rows with that reason",
+          all(x["status"] == "not_checked" and x["actual"] is None and not x["counted"]
+              and "run too short: t_end 1.8 h < scenario 12 h" in x["reason"] for x in rows)
+          and summ["counted_pass"] + summ["counted_fail"] == 0
+          and len(summ["not_checked_countable"]) == 6,
+          str([(x["id"], x["status"], x["reason"]) for x in rows]))
+    causes = []
+    for (sid, metric), fn in METRICS.items():
+        if sid != "drink_water_1L":
+            continue
+        try:
+            fn(SCENARIOS[sid], short)
+            causes.append((metric, "value"))
+        except MetricUnavailable as exc:
+            causes.append((metric, exc.cause))
+    check("truncated run: every drink_water_1L extractor called directly -- peak, nadir, "
+          "minimum and recovery included -- refuses with cause run_too_short",
+          len(causes) == 6 and all(c == RUN_TOO_SHORT for _, c in causes), str(causes))
+    na = list(r["derived"]["Na_plasma"])
+    k_nadir = na.index(min(na))
+    stuck = {**r, "derived": {**r["derived"],
+                              "Na_plasma": na[:k_nadir] + [na[k_nadir]] * (len(na) - k_nadir)}}
+    rec = evaluate_expectations("drink_water_1L", stuck)[1]
+    check("full-length run that never recovers: the recovery row is +inf and a counted FAIL",
+          rec["actual"] == math.inf and rec["status"] == "fail" and rec["counted"], str(rec))
+
+    # H5: non-default parameters or dt are refused unless params_override; meta stamps both.
+    meta = evaluate_expectations("drink_water_1L", r)[0]["meta"]
+    check("row meta stamps the params digest, dt and t_end of the scored result",
+          meta["params_digest"] == params_digest(default_params()) and meta["dt"] == 1 / 60
+          and meta["t_end"] == 12 and meta["params_override"] is False, str(meta))
+    p = draw_samples(n=1, seed=3)["samples"][0]
+    other = simulate(scenario="drink_water_1L", params=p)
+    raises("a result with non-default parameters, without params_override,",
+           lambda: evaluate_expectations("drink_water_1L", other))
+    coarse = simulate(scenario="drink_water_1L", dt=0.5)
+    raises("a result at dt 0.5 h (scenario dt 1/60 h), without params_override,",
+           lambda: evaluate_expectations("drink_water_1L", coarse))
+    m_other = evaluate_expectations("drink_water_1L", other, params_override=True)[0]["meta"]
+    m_coarse = evaluate_expectations("drink_water_1L", coarse, params_override=True)[0]["meta"]
+    check("params_override=True scores it and the row meta says so (digest, dt)",
+          m_other["params_override"] is True and m_other["params_digest"] == params_digest(p)
+          and m_other["params_digest"] != meta["params_digest"]
+          and m_coarse["params_override"] is True and m_coarse["dt"] == 0.5,
+          f"{m_other} {m_coarse}")
+
+    # H1: a Monte Carlo set must be this scenario's, on this grid, of size n >= 256.
+    mc2 = monte_carlo_runs("drink_water_1L", n=2, seed=1)
+    raises("a Monte Carlo set for another scenario",
+           lambda: evaluate_expectations("drink_water_1L", r, allow_small_n=True,
+                                         mc=monte_carlo_runs("drink_water_3L_fast", n=2, seed=1)))
+    raises("a Monte Carlo set with another t_end",
+           lambda: evaluate_expectations("drink_water_1L", r, allow_small_n=True,
+                                         mc=monte_carlo_runs("drink_water_1L", n=2, seed=1,
+                                                             t_end=6)))
+    raises("a Monte Carlo set at another dt",
+           lambda: evaluate_expectations("drink_water_1L", r, allow_small_n=True,
+                                         mc=monte_carlo_runs("drink_water_1L", n=2, seed=1,
+                                                             dt=0.1)))
+    raises("a Monte Carlo set whose run count is not its n",
+           lambda: evaluate_expectations("drink_water_1L", r, allow_small_n=True,
+                                         mc={**mc2, "results": mc2["results"][:1]}))
+    raises("a Monte Carlo set of n = 2 without allow_small_n (HREQ-U-08)",
+           lambda: evaluate_expectations("drink_water_1L", r, mc=mc2))
+    small = evaluate_expectations("drink_water_1L", r, mc=mc2, allow_small_n=True)
+    row = small[0]
+    check("allow_small_n=True: the n = 2 band is shown with its n and a band_reason",
+          row["band"] is not None and row["n"] == 2 and row["seed"] == 1
+          and "n = 2 < 256" in row["band_reason"], str(row))
+    check("summarize(): a counted row whose band is at n < 256 still counts as unbanded "
+          "(all 6 counted drink_water_1L rows)",
+          summarize(small)["unbanded_counted"] == 6, str(summarize(small)["unbanded_counted"]))
+
+
+def test_every_row_publishes_its_band_fields_and_versions():
+    """HREQ-V-15 / HREQ-U-08 / HREQ-M-12 (BUG-20261003-119, -126, -130): every row carries
+    its band fields (None and a band_reason when there is no band), the registry version and
+    the model version; summarize() counts unbanded counted rows and never hides them."""
+    from health.engine.validate import registry_version
+
+    every = [x for sid in SCENARIOS for x in evaluate_expectations(sid, sim(sid))]
+    fields = {"band": None, "in_range_share": None, "n": 0, "seed": None, "rejected": None,
+              "band_reason": "no Monte Carlo supplied"}
+    check("no Monte Carlo: every row carries band, in_range_share, n, seed, rejected and "
+          "band_reason (None / 0 / 'no Monte Carlo supplied')",
+          all({k: x.get(k, "MISSING") for k in fields} == fields for x in every),
+          str([x["id"] for x in every if any(x.get(k, "MISSING") != v
+                                             for k, v in fields.items())]))
+    total = summarize(every)
+    check("summarize(): all 10 counted rows are unbanded without Monte Carlo",
+          total["unbanded_counted"] == 10 == total["counted_pass"] + total["counted_fail"],
+          str(total["unbanded_counted"]))
+    version = registry_version()
+    check("every row's meta and the summary carry the registry version (sha256 of the "
+          "registered expectation records) and the model version",
+          len(version) == 64 and total["registry_version"] == version
+          and all(x["meta"].get("registry_version") == version
+                  and x["meta"].get("modelVersion") == MODEL_VERSION for x in every), version)
+    base = SCENARIOS["drink_water_1L"]
+    edited = dataclasses.replace(base, validation={
+        **base.validation, "expects": [{**base.validation["expects"][0], "target": "edited"}]
+        + list(base.validation["expects"][1:])})
+    r = sim("drink_water_1L")
+    ed_rows = evaluate_expectations(edited, r)
+    check("a registry edit (one target text) changes the registry version",
+          ed_rows[0]["meta"]["registry_version"] != version
+          and ed_rows[0]["meta"]["registry_version"] == registry_version(edited))
+    try:
+        summarize(every + ed_rows)
+        mixed = "accepted"
+    except ConfigurationError as exc:
+        mixed = f"ConfigurationError: {exc.message}"
+    check("summarize() refuses rows from two registry versions",
+          mixed.startswith("ConfigurationError"), mixed)
+    mc256 = {"results": [r] * 256, "n": 256, "seed": 0, "rejected": 0}
+    banded = evaluate_expectations("drink_water_1L", r, mc=mc256)
+    s256 = summarize(banded)
+    check("a Monte Carlo set of n = 256 gives every counted row a published band "
+          "(band_reason None) and summarize() then counts 0 unbanded",
+          all(x["band"] is not None and x["band_reason"] is None for x in banded if x["counted"])
+          and s256["unbanded_counted"] == 0 and s256["counted_pass"] + s256["counted_fail"] == 6,
+          str(s256["unbanded_counted"]))
+    by_id = {x["id"]: x for x in every}
+    div, unv = by_id["chronic_high_salt_30d/04"], by_id["salt_load_sweep/02"]
+    check("known-divergence and unverified rows state WHAT diverges / is unverified (their "
+          "note, else their target) in the reason",
+          "Heer 2000 found plasma volume +315 mL" in div["reason"]
+          and "Audit F-02/F-03" in unv["reason"], f"{div['reason']} | {unv['reason']}")
 
 
 _SWEEP: dict[str, Any] | None = None
@@ -1620,6 +2024,11 @@ def test_config_agrees_with_engine_and_reference():
     check("config: countable and reported expectation kinds agree with the harness",
           tuple(ex["countable_kinds"]) == COUNTABLE_KINDS
           and set(ex["reported_kinds"]) == set(NOT_CHECKED_KINDS), str(ex))
+    label = SCENARIOS["chronic_high_salt_30d"].label
+    check("config: the chronic scenario's trajectory label literal in scenarios.py equals "
+          "display.trajectory_label (one copy of each mandated label, HREQ-S-03)",
+          label is not None and label == cfg["display"]["trajectory_label"],
+          f"scenarios.py {label!r}, base.yaml {cfg['display'].get('trajectory_label')!r}")
 
 
 def test_every_public_result_carries_disclaimer_and_validation_status():
@@ -1652,11 +2061,13 @@ def test_every_public_result_carries_disclaimer_and_validation_status():
     missing = [name for name, r in results
                if not isinstance(r.get("meta"), Mapping)
                or r["meta"].get("disclaimer") != DISCLAIMER
-               or r["meta"].get("validation_status") != VALIDATION_STATUS]
+               or r["meta"].get("validation_status") != VALIDATION_STATUS
+               or r["meta"].get("modelVersion") != MODEL_VERSION]
     check(f"every public result ({len(results)} objects: simulate, simulate_mc, simulate_sweep, "
           "compute_influence, draw_samples, salt_load_metrics, param_summary, monte_carlo_runs, "
-          "summarize and all 24 expectation rows) carries meta.disclaimer and "
-          "meta.validation_status", not missing, f"missing on: {missing}")
+          "summarize and all 24 expectation rows) carries meta.disclaimer, "
+          "meta.validation_status and meta.modelVersion (HREQ-M-01)", not missing,
+          f"missing on: {missing}")
     check("the JavaScript-shaped top-level disclaimer of simulate_mc / simulate_sweep is kept",
           results[1][1]["disclaimer"] == DISCLAIMER and sweep["disclaimer"] == DISCLAIMER)
 

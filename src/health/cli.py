@@ -108,7 +108,10 @@ def _footer() -> None:
 def expectations_line(fast: bool = False) -> str:
     """HREQ-D-06: the expectation harness over every registered scenario at default
     parameters (config expectations.evaluate_on), summarised by validate.summarize().
-    "unavailable" when the engine cannot be imported or the run fails -- never zeros."""
+    "unavailable" when the engine cannot be imported or the run fails -- never zeros.
+    Also printed, never hidden: independent counted rows vs calibrated parameters
+    (HREQ-M-12), countable rows left not_checked (with ids), how many counted rows have a
+    published band (n >= 256, HREQ-U-08 / V-15) and the registry version (12 hex digits)."""
     if fast:
         return "expectations: skipped (--fast)"
     try:
@@ -129,11 +132,24 @@ def expectations_line(fast: bool = False) -> str:
         return f"expectations: {UNAVAILABLE}"
     kinds = Counter(r.get("kind") for r in rows)
     cal = list(s["calibrated_parameters"])
+    counted = s["counted_pass"] + s["counted_fail"]
+    banded = counted - s["unbanded_counted"]
+    no_mc = all(not r.get("n") for r in rows)
+    why = ("no Monte Carlo in this run; " if no_mc else "") + "n ≥ 256 required for a published band"
+    ivc = s["independent_vs_calibrated"]
+    unscored = s["not_checked_countable"]
     return (f"expectations {s['rows']}: counted pass {s['counted_pass']} · "
             f"counted fail {s['counted_fail']} · not_checked {s['not_checked']} · "
             f"calibration {s['calibration']['n']} · structural {s['structural']['n']} · "
             f"known-divergence {kinds['known-divergence']} · unverified {kinds['unverified']} · "
-            f"calibrated params {len(cal)}" + (f" ({', '.join(cal)})" if cal else ""))
+            f"calibrated params {len(cal)}" + (f" ({', '.join(cal)})" if cal else "")
+            + f" · independent {ivc['independent_counted']} vs calibrated "
+            f"{ivc['calibrated_parameters']} (HREQ-M-12)"
+            + f" · countable not_checked {len(unscored)}"
+            + (f" ({', '.join(x['id'] for x in unscored)})" if unscored else "")
+            + f" · bands {banded} of {counted} counted"
+            + (f" ({why})" if s["unbanded_counted"] else "")
+            + f" · registry {str(s['registry_version'])[:12]}")
 
 
 def _status_body(kb: dict[str, Any], args: argparse.Namespace) -> int:
