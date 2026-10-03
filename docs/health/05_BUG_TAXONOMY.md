@@ -154,7 +154,8 @@ HealthError                              (base — never raised directly)
 │
 ├── NumericalError                       → S3, or S1 if a value was produced anyway.
 │   ├── InfeasibleParametersError        (no steady state inside the ranges)
-│   └── StepControlError
+│   ├── StepControlError
+│   └── NonFiniteTrajectoryError         (a trajectory holds a NaN or infinite value; HREQ-V-07)
 │
 ├── OperationalError                     → S3.
 │   └── PersistenceError
