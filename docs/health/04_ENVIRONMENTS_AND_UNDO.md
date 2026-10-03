@@ -156,8 +156,8 @@ before publication (WF-H-06), and why a wrong number on a surface is S0a.
 
 | Command | What it does | Spends anything? |
 |---|---|---|
-| `python3 tests/health_selftest.py` | Engine self-test with the stdlib only | No |
-| `python3 tests/health_selftest.py --no-skips` | Strict: a skipped test is a failure | No |
+| `python3 tests/health_selftest.py` | Engine self-test. The runner and the engine need only the standard library; two tests declare what they need (`@needs("yaml")` for the config mirror, `@needs_binary("node")` for the golden check) and are counted skips, by name, when it is absent | No |
+| `python3 tests/health_selftest.py --no-skips` | Strict: a skipped test is a failure, so PyYAML (`pip install -e ".[dev]"`) and a Node binary ≥ 20 must be present; this is the mode `tools/gates.py` and the CI step after install use | No |
 | `python3 tests/health_kb_selftest.py --no-skips` | Knowledge-base rules, each with a planted violation | No |
 | `python3 tests/health_errors_selftest.py --no-skips` | The error hierarchy: severities, halt flags, `SurfaceIntegrityError` never swallowed | No |
 | `PYTHONPATH=src python3 -m health.cli status` | Versions, counts, grade share, expectation statuses (about 3 s; `--fast` skips them; skipped while `engine-v1` is disabled), every module's flag, the disclaimer and the validation status last; exits 1 on any contract error | No |
