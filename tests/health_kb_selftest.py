@@ -1242,19 +1242,12 @@ def test_cli_constants_match_engine_and_config() -> None:
 def test_status_lists_every_registered_module(tmp: Path) -> None:
     """HREQ-X-01: a flag nothing reads is a CFG defect; `status` is the minimum consumer.
     Every module in config/health/modules.yaml appears on the modules line with its
-    state, before the disclaimer; a disabled module is named, never merely absent."""
-    from health.registry import DEFAULT_PATH, format_modules, load_modules
+    state, before the disclaimer; a disabled module is named, never merely absent. No id
+    is typed here: the registry is read, so removing a module cannot break this test."""
+    from health.registry import ENV_PATH, load_modules
 
     mods = load_modules()
     ids = [m["id"] for m in mods]
-    check("registry: the shipped registry names the Phase 0 modules",
-          {"reference-v1", "engine-v1", "kb-v1", "cli", "errors", "process"} <= set(ids), str(ids))
-    check("registry: every shipped module carries a flag, an owner and a removal recipe",
-          all(isinstance(m.get("enabled"), bool) and m.get("owner") and m.get("removal")
-              for m in mods),
-          str([(m["id"], m.get("enabled"), m.get("owner"), bool(m.get("removal"))) for m in mods]))
-    check("registry: the stdlib reader gives the same modules as the default reader",
-          load_modules(reader="stdlib") == mods)
     r = _run_cli("status", "--fast")
     lines = r.stdout.splitlines()
     mod_line = next((i for i, line in enumerate(lines) if line.startswith("modules (")), -1)
@@ -1262,19 +1255,628 @@ def test_status_lists_every_registered_module(tmp: Path) -> None:
     check("cli status: a modules line exists and precedes the disclaimer",
           0 <= mod_line < disc, r.stdout)
     check("cli status: every registered module is on the modules line with its state",
-          mod_line >= 0 and all(f"{i} on" in lines[mod_line] for i in ids),
+          mod_line >= 0 and bool(ids) and all(f"{i} on" in lines[mod_line] for i in ids),
           lines[mod_line] if mod_line >= 0 else "")
     check("cli status: the modules line is read from the registry file, not typed",
           mod_line >= 0 and lines[mod_line].startswith(f"modules ({len(mods)}):"),
           lines[mod_line] if mod_line >= 0 else "")
-    text = DEFAULT_PATH.read_text(encoding="utf-8").replace(
-        "  - id: cli\n    enabled: true", "  - id: cli\n    enabled: false", 1)
+    first = ids[0] if ids else "?"
+    alt = tmp / "modules-one-off.yaml"
+    alt.write_text(re.sub(rf"(  - id: {re.escape(first)}\n    enabled: )true", r"\1false",
+                          _registry_text(), count=1), encoding="utf-8")
+    r = _run_cli("status", "--fast", env_extra={ENV_PATH: str(alt)})
+    check(f"cli status: a disabled module ({first}) is named on its own DISABLED line and "
+          "not shown as on", f"modules DISABLED: {first}" in r.stdout.splitlines()
+          and f"{first} on" not in r.stdout, r.stdout[-400:])
+
+
+def test_status_honours_the_module_flags(tmp: Path) -> None:
+    """HREQ-X-01 / 07 "Flags and what reads them": the flag governs the surface. With
+    engine-v1 off, status prints `model unavailable (engine-v1 disabled in <registry>)` and
+    `expectations: skipped (engine-v1 disabled)`, never imports the engine, and still ends
+    with the footer; kb-check reads no flag. A registry that cannot be read fails closed."""
+    from health.registry import ENV_PATH
+
+    shipped = _registry_text()
+    off_text, n = re.subn(r"(  - id: engine-v1\n    enabled: )true", r"\1false", shipped)
+    off = tmp / "modules-engine-off.yaml"
+    off.write_text(off_text, encoding="utf-8")
+    gone_text, n_gone = re.subn(r"  - id: engine-v1\n(?:(?!  - id: ).*\n)*", "", shipped)
+    gone = tmp / "modules-engine-gone.yaml"
+    gone.write_text(gone_text, encoding="utf-8")
+    check("flags: the engine-v1 entry was found in the registry (the plants below are real)",
+          n == 1 and n_gone == 1)
+
+    r = _run_cli("status", "--fast")
+    model = next((ln for ln in r.stdout.splitlines() if ln.startswith("model ")), "")
+    check("flags: engine-v1 on -> the model line is the engine's version",
+          re.fullmatch(r"model \d+\.\d+\.\d+", model) is not None, model)
+    for args in (("status",), ("status", "--fast")):
+        r = _run_cli(*args, env_extra={ENV_PATH: str(off)})
+        lines = r.stdout.splitlines()
+        check(f"flags: engine-v1 off -> `{' '.join(args)}` prints the model as unavailable "
+              "and says why, the expectations as skipped and why, the module as DISABLED, "
+              "exits 0 and ends with the footer",
+              f"model unavailable (engine-v1 disabled in {off})" in lines
+              and "expectations: skipped (engine-v1 disabled)" in lines
+              and "modules DISABLED: engine-v1" in lines
+              and not any(ln.startswith("expectations ") for ln in lines)
+              and r.returncode == 0 and _footer_ok(r.stdout),
+              f"exit {r.returncode}\n{r.stdout}\n{r.stderr[-300:]}")
+    probe = ("import sys\nfrom health.cli import main\nrc = main(['status'])\n"
+             "print('ENGINE-IMPORTED', 'health.engine' in sys.modules)\n")
+    r = _run_py("-c", probe, env_extra={ENV_PATH: str(off)})
+    check("flags: engine-v1 off -> status does not import health.engine at all",
+          "ENGINE-IMPORTED False" in r.stdout, r.stdout[-300:] + r.stderr[-300:])
+    r = _run_py("-c", probe)
+    check("flags: engine-v1 on -> status does import it (the probe can tell the difference)",
+          "ENGINE-IMPORTED True" in r.stdout, r.stdout[-300:] + r.stderr[-300:])
+    on, flagged = _run_cli("kb-check"), _run_cli("kb-check", env_extra={ENV_PATH: str(off)})
+    check("flags: kb-check reads no flag -- same output and exit with engine-v1 off",
+          on.returncode == flagged.returncode == 0 and on.stdout == flagged.stdout)
+
+    r = _run_cli("status", "--fast", env_extra={ENV_PATH: str(gone)})
+    check("flags: engine-v1 not in the registry -> model unavailable (not registered), "
+          "expectations skipped",
+          f"model unavailable (engine-v1 not registered in {gone})" in r.stdout.splitlines()
+          and "expectations: skipped (engine-v1 not registered)" in r.stdout.splitlines(),
+          r.stdout)
+    missing = tmp / "no-registry-here.yaml"
+    r = _run_cli("status", env_extra={ENV_PATH: str(missing)})
+    lines = r.stdout.splitlines()
+    check("flags: a registry that cannot be read fails closed -- model unavailable, "
+          "expectations skipped, the registry named missing, the footer last",
+          any(ln.startswith("model unavailable (module registry unreadable: "
+                            "FileNotFoundError") for ln in lines)
+          and "expectations: skipped (module registry unreadable)" in lines
+          and any(ln.startswith("modules: registry not found") for ln in lines)
+          and _footer_ok(r.stdout), r.stdout)
+    r = _run_cli("status", "--fast", "--root", str(tmp / "no-such-kb"),
+                 env_extra={ENV_PATH: str(off)})
+    check("flags: an unloadable KB with engine-v1 off -> 'KB unavailable', expectations "
+          "skipped (engine-v1 disabled), exit 1, the footer last",
+          r.returncode == 1 and "KB unavailable" in r.stdout
+          and "expectations: skipped (engine-v1 disabled)" in r.stdout.splitlines()
+          and _footer_ok(r.stdout), r.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Tests: the module registry, the ledger's removal field, and the gates (process)
+# ---------------------------------------------------------------------------
+def _registry_text() -> str:
+    from health.registry import DEFAULT_PATH
+
+    return DEFAULT_PATH.read_text(encoding="utf-8")
+
+
+def _run_py(*args: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """`python <args>` from the repository root with src/ on the path."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT / "src")] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.update(env_extra or {})
+    return subprocess.run([sys.executable, *args], cwd=str(ROOT), env=env,
+                          capture_output=True, text=True, encoding="utf-8", timeout=300,
+                          check=False)
+
+
+def _by_id(mods: list[dict[str, Any]], mid: str) -> dict[str, Any]:
+    return next(m for m in mods if m.get("id") == mid)
+
+
+def test_registry_entries_are_well_formed(tmp: Path) -> None:
+    """HREQ-X-01 / X-02, by structure and never by a typed list of ids (a typed list is what
+    turned the gates red the moment a module was removed): every entry has the fields;
+    ids are unique; every depends_on names a registered module and the edges have no
+    cycle; every paths and tests entry exists (a `file::function` test is defined); every
+    file under src/health/ and every health test, fixture and tool belongs to one module;
+    every health.* import in src/ follows an edge; every recipe sets the flag off, removes
+    its entry and runs the gates; docs/health/07's generated block is the rendering.
+    Each rule is shown to fire on a planted violation, and the shipped registry passes."""
+    from health.registry import (
+        PAGE,
+        REQUIRED_FIELDS,
+        _edge_problems,
+        _existence_problems,
+        _field_problems,
+        _ownership_problems,
+        format_modules,
+        is_enabled,
+        load_modules,
+        module_state,
+        page_problems,
+        render_page_block,
+        validate_modules,
+        write_page,
+    )
+
+    mods = load_modules()
+    check("registry: the stdlib reader gives the same modules as the default reader",
+          load_modules(reader="stdlib") == mods)
+    check(f"registry: every entry carries {', '.join(REQUIRED_FIELDS)} (HREQ-X-01)",
+          bool(mods) and all(all(f in m for f in REQUIRED_FIELDS) for m in mods),
+          str([(m.get("id"), [f for f in REQUIRED_FIELDS if f not in m]) for m in mods]))
+    problems = validate_modules(mods)
+    check("registry: the shipped registry passes every --check rule", not problems,
+          "\n        ".join(problems))
+    r = _run_py("-m", "health.registry", "--check")
+    check("registry: `python -m health.registry --check` exits 0 and says PASS",
+          r.returncode == 0 and "PASS" in r.stdout, r.stdout[-800:] + r.stderr[-300:])
+
+    def plant(label: str, mutate: Callable[[list[dict[str, Any]]], Any],
+              rule: Callable[[list[dict[str, Any]]], list[str]], want: str) -> None:
+        planted = copy.deepcopy(mods)
+        mutate(planted)
+        got = rule(planted)
+        check(f"registry plant ({label}): reported", any(want in p for p in got),
+              f"wanted {want!r} in {got}")
+
+    def rid(mid: str) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
+        return lambda ms: _by_id(ms, mid)
+
+    some, other = mods[0]["id"], mods[-1]["id"]
+    files = lambda ms: _existence_problems(ms, ROOT)    # noqa: E731
+    owned = lambda ms: _ownership_problems(ms, ROOT)    # noqa: E731
+    plant("a field missing", lambda ms: rid(some)(ms).pop("tests"), _field_problems,
+          "missing tests")
+    plant("a flag that is not a boolean", lambda ms: rid(some)(ms).update(enabled="yes"),
+          _field_problems, "it must be true or false")
+    plant("tests not a list", lambda ms: rid(some)(ms).update(tests="tests/x.py"),
+          _field_problems, "tests must be a list")
+    plant("a duplicate id", lambda ms: ms.append(copy.deepcopy(rid(some)(ms))),
+          _field_problems, f"module {some!r}: registered 2 times")
+    for phrase in ("enabled: false", "this entry", "tools/gates.py"):
+        plant(f"a recipe that never says {phrase!r}",
+              lambda ms, ph=phrase: rid(some)(ms).update(
+                  removal=rid(some)(ms)["removal"].replace(ph, "...")),
+              _field_problems, f"never says {phrase!r}")
+    plant("a dependency that is not registered",
+          lambda ms: rid(some)(ms)["depends_on"].append("no-such-module"), _edge_problems,
+          "depends on 'no-such-module', which is not registered")
+    plant("a dependency on a removed module (its entry gone, the edge left behind)",
+          lambda ms: ms.remove(rid(other)(ms)), _edge_problems, "which is not registered")
+    plant("a cycle", lambda ms: rid(other)(ms)["depends_on"].append(some), _edge_problems,
+          "depends_on cycle")
+    plant("a path that does not exist",
+          lambda ms: rid(some)(ms)["paths"].append("src/health/no_such_dir/"), files,
+          "path src/health/no_such_dir/ does not exist")
+    plant("a tests file that does not exist (a module removed with it)",
+          lambda ms: rid(some)(ms)["tests"].append("tests/no_such_selftest.py"), files,
+          "tests/no_such_selftest.py does not exist")
+    never = "_".join(("test", "that", "was", "never", "written"))   # not spelled out: the
+    plant("a tests function that is not defined",                    # check reads this file
+          lambda ms: rid(some)(ms)["tests"].append(f"tests/health_kb_selftest.py::{never}"),
+          files, f"`def {never}(` is not in tests/health_kb_selftest.py")
+    owner_of = lambda rel: next(m["id"] for m in mods    # noqa: E731
+                                if any(rel.startswith(p.rstrip("/")) for p in m["paths"]))
+    reg_owner = owner_of("src/health/registry.py")
+    plant("a file no module owns",
+          lambda ms: rid(reg_owner)(ms)["paths"].remove("src/health/registry.py"), owned,
+          "src/health/registry.py: in no module's paths")
+    plant("a file two modules own",
+          lambda ms: rid(some if some != reg_owner else other)(ms)["paths"].append(
+              "src/health/registry.py"), owned, "a file belongs to one module")
+    importer = next((m for m in mods if "errors" in m["depends_on"]
+                     and any(p.startswith("src/") for p in m["paths"])), None)
+    if importer is not None:
+        plant("an import with no depends_on edge (U4)",
+              lambda ms: rid(importer["id"])(ms)["depends_on"].remove("errors"), owned,
+              "imports health.errors")
+
+    page_copy = tmp / "07.md"
+    page_copy.write_text(PAGE.read_text(encoding="utf-8"), encoding="utf-8")
+    check("07: the generated block is the registry's rendering", not page_problems(mods),
+          str(page_problems(mods)))
+    changed = copy.deepcopy(mods)
+    changed[0]["owner"] = "someone-else"
+    check("07 plant (the registry changed, the page did not): reported",
+          bool(page_problems(changed, page_copy)), "")
+    check("07: --write-07 brings the page back to the registry, and only the block changes",
+          write_page(changed, page_copy) and not page_problems(changed, page_copy)
+          and page_copy.read_text(encoding="utf-8").replace(render_page_block(changed), "")
+          == PAGE.read_text(encoding="utf-8").replace(render_page_block(mods), ""))
+
+    check("flags: module_state reads enabled, disabled and unregistered",
+          module_state(some, [{"id": some, "enabled": True}]) == "enabled"
+          and module_state(some, [{"id": some, "enabled": False}]) == "disabled"
+          and module_state(some, [{"id": some, "enabled": "true"}]) == "disabled"
+          and module_state(some, []) == "unregistered")
+    check("flags: two entries under one id read as disabled unless both are on (fails closed)",
+          not is_enabled(some, [{"id": some, "enabled": True}, {"id": some, "enabled": False}])
+          and is_enabled(some, [{"id": some, "enabled": True}]))
     alt = tmp / "modules.yaml"
-    alt.write_text(text, encoding="utf-8")
+    alt.write_text(re.sub(rf"(  - id: {re.escape(some)}\n    enabled: )true", r"\1false",
+                          _registry_text(), count=1), encoding="utf-8")
     for reader in ("auto", "stdlib"):
         out = format_modules(load_modules(alt, reader=reader))
         check(f"registry ({reader} reader): a disabled module is named on its own DISABLED line",
-              "modules DISABLED: cli" in out and "cli on" not in out, out)
+              f"modules DISABLED: {some}" in out and f"{some} on" not in out, out)
+
+
+def test_removal_recipes_name_every_live_reference() -> None:
+    """U7 / D8 / D18: a recipe that forgets a file leaves a stale reference or a red gate.
+    For every module, each live file (code, tests, tools, config, CI, packaging, READMEs, 04,
+    07) that names one of its paths and is not removed before it must be named in its
+    recipe. Planted: no module depending on process (the false "process can go at any
+    time": the engine's self-test reads process's files), and an engine-v1 recipe that
+    forgets config/health/base.yaml or the root README."""
+    from health.registry import dependants, load_modules, recipe_gaps
+
+    mods = load_modules()
+    gaps = recipe_gaps(mods)
+    check("recipes: every recipe names every live file that names its paths", not gaps,
+          "\n        ".join(gaps))
+    ids = {m["id"] for m in mods}
+    check("recipes: process is depended on by every other module (it goes last)",
+          "process" not in ids or dependants(mods, "process") == ids - {"process"},
+          str(sorted(dependants(mods, "process"))))
+    if "engine-v1" not in ids:
+        return
+    no_edge = copy.deepcopy(mods)
+    for m in no_edge:                      # the registry as it was: nothing depends on process
+        if "process" in m["depends_on"]:
+            m["depends_on"].remove("process")
+    engine_test = next(p for p in _by_id(mods, "engine-v1")["paths"]
+                       if p.startswith("tests/") and p.endswith(".py"))
+    got = [g for g in recipe_gaps(no_edge) if g.startswith("module 'process'")]
+    check("recipes plant (no module depends on process -- \"process can go at any time\"): "
+          "process's recipe is shown to miss the engine's self-test, which reads "
+          "process's configuration and documents",
+          any(f"{engine_test} names" in g for g in got), str(got))
+    for name in ("config/health/base.yaml", "README.md"):
+        forgot = copy.deepcopy(mods)
+        e = _by_id(forgot, "engine-v1")
+        e["removal"] = re.sub(rf"(?<![\w./-]){re.escape(name)}(?![\w/-])", "(a file)",
+                              e["removal"])
+        got = recipe_gaps(forgot)
+        check(f"recipes plant (engine-v1's recipe forgets {name}): reported by name",
+              any(g.startswith(f"module 'engine-v1': {name} names") for g in got), str(got))
+
+
+def _buglog() -> Any:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("buglog_probe", ROOT / "tools" / "buglog.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_buglog_removed_with_module_exempts_deleted_files(tmp: Path) -> None:
+    """U0: a removal recipe deletes files on purpose and the ledger is append-only, so the
+    entries citing them carry `removed_with_module` -- and only those entries skip the
+    existence checks. Planted on a scratch tree: the same missing location and test pass
+    with the field and fail without it; the field cannot name a module that is still
+    registered; a fixed entry still needs its test named and its resolved_at; and
+    --mark-removed adds exactly one line per matching entry and nothing else."""
+    bl = _buglog()
+    (tmp / "ledger").mkdir(exist_ok=True)
+    md = tmp / "ledger" / "BUGS.md"
+
+    def bug(bid: str, **extra: Any) -> dict[str, Any]:
+        b = {"id": bid, "status": "fixed", "resolved_at": "2026-10-03T12:00:00-05:00",
+             "locations": [{"file": "src/health/gone_with_the_module.py", "line": 1}],
+             "regression_test": "tests/gone_selftest.py::test_gone"}
+        b.update(extra)
+        return b
+
+    ids = [f"BUG-20991231-{n:03d}" for n in range(1, 7)]
+    bugs = [bug(ids[0], removed_with_module="gone-v1"),
+            bug(ids[1]),
+            bug(ids[2], removed_with_module="still-here"),
+            bug(ids[3], removed_with_module=["gone-v1", "gone-v2"]),
+            bug(ids[4], removed_with_module="gone-v1", regression_test=None),
+            bug(ids[5], removed_with_module="Not An Id")]
+    md.write_text("\n".join(ids) + "\n", encoding="utf-8")
+    old = bl.ROOT, bl.MARKDOWN
+    try:
+        bl.ROOT, bl.MARKDOWN = tmp / "ledger", md
+        problems = bl.check({"repo": "x/y", "bugs": bugs}, registered={"still-here"})
+    finally:
+        bl.ROOT, bl.MARKDOWN = old
+
+    def about(bid: str) -> list[str]:
+        return [p for p in problems if p.startswith(bid)]
+
+    check("ledger: with removed_with_module, a missing location and a missing test pass",
+          about(ids[0]) == [] and about(ids[3]) == [], str(about(ids[0]) + about(ids[3])))
+    check("ledger: the same entry without the field fails on both",
+          any("location src/health/gone_with_the_module.py does not exist" in p
+              for p in about(ids[1]))
+          and any("regression test file tests/gone_selftest.py does not exist" in p
+                  for p in about(ids[1])), str(about(ids[1])))
+    check("ledger: the field naming a module that is still registered is itself a failure",
+          any("names a module that is still in" in p for p in about(ids[2])), str(about(ids[2])))
+    check("ledger: a fixed entry with the field must still name its regression test",
+          any("NO regression test" in p for p in about(ids[4])), str(about(ids[4])))
+    check("ledger: the field must be a module id",
+          any("is not a module id" in p for p in about(ids[5])), str(about(ids[5])))
+
+    text = (f"bugs:\n- id: {ids[0]}\n  summary: one\n  status: open\n  locations:\n"
+            f"  - {{file: src/health/example/model.py, line: 3}}\n\n"
+            f"- id: {ids[1]}\n  summary: two\n  status: fixed\n"
+            f"  regression_test: tests/health_kb_selftest.py::test_a\n\n"
+            f"- id: {ids[2]}\n  summary: three\n  status: fixed\n"
+            f"  regression_test: tests/health_kb_selftest.py::test_b\n")
+    parsed = [{"id": ids[0], "locations": [{"file": "src/health/example/model.py", "line": 3}]},
+              {"id": ids[1], "regression_test": "tests/health_kb_selftest.py::test_a"},
+              {"id": ids[2], "regression_test": "tests/health_kb_selftest.py::test_b"}]
+    new, marked = bl.mark_removed(text, parsed, "example-v1", ["src/health/example/"],
+                                  ["tests/health_kb_selftest.py::test_a"])
+    check("--mark-removed: marks the entries citing the module's paths or its tests, only",
+          marked == [ids[0], ids[1]], str(marked))
+    check("--mark-removed: one line after each marked entry's status line, nothing else changed",
+          new.replace("  removed_with_module: example-v1\n", "") == text
+          and new.count("removed_with_module") == 2
+          and f"- id: {ids[0]}\n  summary: one\n  status: open\n  removed_with_module: example-v1\n"
+          in new, new)
+    parsed[0]["removed_with_module"] = parsed[1]["removed_with_module"] = "example-v1"
+    again, marked_again = bl.mark_removed(new, parsed, "example-v1", ["src/health/example/"],
+                                          ["tests/health_kb_selftest.py::test_a"])
+    check("--mark-removed: running it twice marks nothing more", marked_again == []
+          and again == new, str(marked_again))
+
+
+def test_buglog_rule_4_reads_tracked_files_only(tmp: Path) -> None:
+    """Rule (4) -- every BUG id mentioned in the repository is in the ledger -- walked the
+    whole directory tree, so `buglog.py --check` in the main checkout failed on ids in the
+    builders' git-ignored worktrees under .claude/worktrees/. It reads `git ls-files` now.
+    Planted in a scratch git repository: an id in a tracked file is reported, the same kind
+    of id in an ignored or an untracked file is not; outside a checkout the walk is the
+    fallback (so a copy with no .git is still checked)."""
+    git = shutil.which("git")
+    check("ledger rule 4: git is available here (the gate reads tracked files through it)",
+          git is not None)
+    if git is None:
+        return
+    bl = _buglog()
+    repo = tmp / "rule4-repo"
+    (repo / "ignored").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    tracked, ignored, untracked = (f"BUG-20991231-{n}" for n in ("701", "702", "703"))
+    (repo / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    (repo / "docs" / "notes.md").write_text(f"cites {tracked}\n", encoding="utf-8")
+    (repo / "ignored" / "BUGS.md").write_text(f"a worktree's copy cites {ignored}\n",
+                                              encoding="utf-8")
+    (repo / "scratch.md").write_text(f"untracked, cites {untracked}\n", encoding="utf-8")
+    (repo / "BUGS.md").write_text("", encoding="utf-8")
+    for args in (["init", "-q"], ["add", ".gitignore", "docs/notes.md"]):
+        subprocess.run([git, "-C", str(repo), *args], check=True, capture_output=True)
+    plain = tmp / "rule4-plain"
+    plain.mkdir()
+    (plain / "x.md").write_text(f"cites {ignored}\n", encoding="utf-8")
+    (plain / "BUGS.md").write_text("", encoding="utf-8")
+    old = bl.ROOT, bl.MARKDOWN
+    try:
+        bl.ROOT, bl.MARKDOWN = repo, repo / "BUGS.md"
+        problems = bl.check({"repo": "x/y", "bugs": []}, registered=set())
+        listed = sorted(f.relative_to(repo).as_posix() for f in bl.repo_files())
+        bl.ROOT, bl.MARKDOWN = plain, plain / "BUGS.md"
+        walked = bl.check({"repo": "x/y", "bugs": []}, registered=set())
+    finally:
+        bl.ROOT, bl.MARKDOWN = old
+    check("ledger rule 4: the files read are the tracked ones", listed == [".gitignore",
+                                                                         "docs/notes.md"],
+          str(listed))
+    check("ledger rule 4: an id in a tracked file that the ledger lacks is reported",
+          any(p.startswith(tracked) and "docs/notes.md" in p for p in problems), str(problems))
+    check("ledger rule 4: the same in an ignored path (a worktree) or an untracked file is not",
+          not any(ignored in p or untracked in p for p in problems), str(problems))
+    check("ledger rule 4: outside a git checkout the directory walk still reads every file",
+          any(p.startswith(ignored) for p in walked), str(walked))
+
+
+def test_buglog_rule_3_refuses_placeholder_tests(tmp: Path) -> None:
+    """Rule (3) skipped every regression_test without `::`, so a fixed entry whose test read
+    "none -- doc-only; re-verified by the qa-auditor sweep" passed. A fixed entry's test is
+    `file::function` or exactly the literal DOCS_ONLY, and the literal holds only when every
+    location is documentation (docs/, .md/.mmd/.svg, a comment line of a .yaml). Planted on
+    a scratch tree, both sides of each rule; removed_with_module does not bypass it."""
+    bl = _buglog()
+    root = tmp / "rule3"
+    for d in ("docs/health", "config", "src", "tests"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "health" / "page.md").write_text("text\n", encoding="utf-8")
+    (root / "config" / "base.yaml").write_text("# a comment\nkey: 1\n", encoding="utf-8")
+    (root / "src" / "code.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "tests" / "t_selftest.py").write_text("def test_real():\n    pass\n",
+                                                  encoding="utf-8")
+    placeholder = "none — doc-only; re-verified by the qa-auditor sweep"
+    doc, cfg_comment, cfg_value, code = (
+        {"file": "docs/health/page.md", "line": 1}, {"file": "config/base.yaml", "line": 1},
+        {"file": "config/base.yaml", "line": 2}, {"file": "src/code.py", "line": 1})
+    legacy = sorted(bl.PRE_STRICT_PROSE_TESTS)[0]
+    cases = {   # id suffix: (entry fields, should it pass?)
+        "801": ({"regression_test": placeholder, "locations": [code]}, False),
+        "802": ({"regression_test": placeholder, "locations": [doc]}, False),
+        "803": ({"regression_test": bl.DOCS_ONLY, "locations": [doc, cfg_comment]}, True),
+        "804": ({"regression_test": bl.DOCS_ONLY, "locations": [doc, code]}, False),
+        "805": ({"regression_test": bl.DOCS_ONLY, "locations": [cfg_value]}, False),
+        "806": ({"regression_test": bl.DOCS_ONLY, "locations": []}, False),
+        "807": ({"regression_test": [placeholder], "locations": [code],
+                 "removed_with_module": "gone-v1"}, False),
+        "808": ({"regression_test": "tests/gone_selftest.py::test_x", "locations": [code],
+                 "removed_with_module": "gone-v1"}, True),
+        "809": ({"regression_test": "tests/t_selftest.py::test_real", "locations": [code]},
+                True),
+        "810": ({"regression_test": "tests/t_selftest.py", "locations": [code]}, False),
+        "811": ({"regression_test": placeholder, "locations": [code], "status": "open"}, True),
+    }
+    bugs: list[dict[str, Any]] = []
+    for n, (fields, _) in cases.items():
+        b: dict[str, Any] = {"id": f"BUG-20991231-{n}", "status": "fixed",
+                             "resolved_at": "2026-10-03T12:00:00-05:00"}
+        b.update(fields)
+        bugs.append(b)
+    bugs.append({"id": legacy, "status": "fixed", "resolved_at": "2026-09-09T12:00:00-05:00",
+                 "regression_test": "CI itself", "locations": [code]})
+    (root / "BUGS.md").write_text("\n".join(b["id"] for b in bugs) + "\n", encoding="utf-8")
+    old = bl.ROOT, bl.MARKDOWN
+    try:
+        bl.ROOT, bl.MARKDOWN = root, root / "BUGS.md"
+        problems = bl.check({"repo": "x/y", "bugs": bugs}, registered=set())
+    finally:
+        bl.ROOT, bl.MARKDOWN = old
+    for n, (fields, ok) in cases.items():
+        mine = [p for p in problems if p.startswith(f"BUG-20991231-{n}")]
+        label = (f"{'passes' if ok else 'fails, naming the entry'}: {fields.get('status', 'fixed')}"
+                 f", test {str(fields['regression_test'])[:40]!r}, locations "
+                 f"{[loc['file'] + ':' + str(loc['line']) for loc in fields['locations']]}"
+                 + (", removed_with_module" if "removed_with_module" in fields else ""))
+        check(f"ledger rule 3 ({n}) {label}", (not mine) if ok else bool(mine), str(mine))
+    check(f"ledger rule 3: a pre-strict entry ({legacy}, prose naming a CI step) is the "
+          "listed exception, not a pattern", not [p for p in problems if p.startswith(legacy)]
+          and len(bl.PRE_STRICT_PROSE_TESTS) == 4, str(sorted(bl.PRE_STRICT_PROSE_TESTS)))
+    check("ledger rule 3: the literal is exactly 'docs-only (no mechanical guard)'",
+          bl.DOCS_ONLY == "docs-only (no mechanical guard)", bl.DOCS_ONLY)
+
+
+def test_gates_health_steps_remove_cleanly() -> None:
+    """U2: a removal recipe deletes a module's statements from tools/gates.py. Nothing it
+    leaves behind may be an unused import (ruff F401 turns the gate red, as `import os` did
+    when the kb-check step went). Each health statement of main(), and all of them with the
+    health helpers, are removed from the syntax tree and the imports checked for use."""
+    import ast
+
+    src = (ROOT / "tools" / "gates.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def steps(body: list[ast.stmt]) -> list[ast.stmt]:
+        out: list[ast.stmt] = []
+        for st in body:
+            if isinstance(st, ast.If):
+                out += steps(st.body) + steps(st.orelse)
+            elif "health" in (ast.get_source_segment(src, st) or "").lower():
+                out.append(st)
+        return out
+
+    def unused_imports(t: ast.Module) -> list[str]:
+        bound: list[str] = []
+        for n in t.body:
+            if isinstance(n, ast.Import):
+                bound += [(a.asname or a.name).split(".")[0] for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and n.module != "__future__":
+                bound += [a.asname or a.name for a in n.names]
+        used = {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+        return sorted(set(bound) - used)
+
+    def _is_health_helper(st: ast.stmt) -> bool:
+        names = [st.name] if isinstance(st, ast.FunctionDef) else [
+            t.id for t in getattr(st, "targets", [getattr(st, "target", None)])
+            if isinstance(t, ast.Name)]
+        return any(w in n.lower() for n in names for w in ("health", "golden", "node"))
+
+    class Drop(ast.NodeTransformer):
+        """Remove the statements starting on `lines` (and, with helpers, the health
+        functions and constants) wherever they sit; an emptied body becomes `pass`."""
+
+        def __init__(self, lines: set[int], helpers: bool) -> None:
+            self.lines, self.helpers = lines, helpers
+
+        def generic_visit(self, node: ast.AST) -> ast.AST:
+            super().generic_visit(node)
+            body = getattr(node, "body", None)
+            if isinstance(body, list) and body and all(isinstance(s, ast.stmt) for s in body):
+                kept = [s for s in body if getattr(s, "lineno", None) not in self.lines
+                        and not (self.helpers and _is_health_helper(s))]
+                node.body = kept or [ast.Pass()]
+            return node
+
+    found = steps(main.body)    # how many depends on which modules are still registered
+    check(f"gates: main() has health steps to remove ({len(found)})", bool(found),
+          str([ast.get_source_segment(src, s) for s in found]))
+    before = unused_imports(tree)
+    check("gates: no unused import as shipped", not before, str(before))
+    for st in found:
+        label = (ast.get_source_segment(src, st) or "").splitlines()[0][:70]
+        left = unused_imports(Drop({st.lineno}, helpers=False).visit(ast.parse(src)))
+        check(f"gates: removing `{label}` leaves no unused import", not left, str(left))
+    left = unused_imports(Drop({s.lineno for s in found}, helpers=True).visit(ast.parse(src)))
+    check("gates: removing every health step and helper (the whole subsystem) leaves no "
+          "unused import", not left, str(left))
+
+
+def test_gates_never_reads_green_on_a_skip() -> None:
+    """D16: the golden fixture is checked by a gate when Node exists, and when it does not
+    the gate says SKIPPED loudly and the verdict line cannot read ALL GATES GREEN. The
+    generator exists exactly when gates.py runs its --check (removing engine-v1 removes
+    both, so this holds before and after)."""
+    import contextlib
+    import importlib.util
+    import io
+
+    spec = importlib.util.spec_from_file_location("gates_probe", ROOT / "tools" / "gates.py")
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    check("gates: nothing skipped -> ALL GATES GREEN", g.verdict() == "ALL GATES GREEN")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        g.run("probe", ["no-such-binary-anywhere-health-probe"], optional=True)
+    check("gates: an optional gate whose tool is missing is SKIPPED and named in the verdict",
+          "SKIPPED" in buf.getvalue() and "ALL GATES GREEN" not in g.verdict()
+          and "1 SKIPPED" in g.verdict() and "probe" in g.verdict(), g.verdict())
+    g.SKIPPED.clear()
+    generator = ROOT / "tools" / "health_golden.mjs"
+    main_src = (ROOT / "tools" / "gates.py").read_text(encoding="utf-8").split("def main(")[1]
+    wired = hasattr(g, "health_golden_check") and "health_golden_check()" in main_src
+    check("gates: the golden generator exists exactly when main() runs its --check",
+          generator.exists() == wired, f"generator {generator.exists()}, wired {wired}")
+    if not wired:
+        return
+    g.node_binary = lambda: None
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        g.health_golden_check()
+    check("gates: no Node -> 'SKIPPED (no Node binary): golden --check not run', counted",
+          "SKIPPED (no Node binary): golden --check not run" in buf.getvalue()
+          and len(g.SKIPPED) == 1 and g.verdict().startswith("GATES GREEN, 1 SKIPPED"),
+          buf.getvalue() + g.verdict())
+    g.SKIPPED.clear()
+    calls: list[tuple[str, list[str]]] = []
+    g.node_binary = lambda: "/somewhere/node"
+    g.run = lambda label, cmd, **kw: calls.append((label, cmd)) or ""
+    g.health_golden_check()
+    check("gates: with Node, the generator runs with --check from the repository root",
+          calls == [("health golden fixture", ["/somewhere/node",
+                                               generator.relative_to(ROOT).as_posix(),
+                                               "--check"])] and not g.SKIPPED, str(calls))
+
+
+def test_docs_say_what_gates_runs() -> None:
+    """D23: "gates.py runs all of the above" was false -- it never runs `health.cli status`.
+    In each README run block that names tools/gates.py, every command above the gates line
+    is either run by tools/gates.py or named on the gates line as not run."""
+    gates = (ROOT / "tools" / "gates.py").read_text(encoding="utf-8")
+    seen = 0
+    for doc in (ROOT / "README.md", ROOT / "docs" / "health" / "README.md"):
+        if not doc.exists():
+            continue
+        for block in re.findall(r"```bash\n(.*?)```", doc.read_text(encoding="utf-8"), re.S):
+            lines = block.splitlines()
+            at = next((i for i, ln in enumerate(lines) if "tools/gates.py" in ln), None)
+            if at is None or "health" not in block:
+                continue
+            seen += 1
+            claim = lines[at].split("#", 1)[1] if "#" in lines[at] else ""
+            for ln in lines[:at]:
+                cmd = ln.split("#", 1)[0].strip()
+                if not cmd:
+                    continue
+                m = re.search(r"-m (health\.\w+) (\S+)", cmd)
+                if m:
+                    key, name = f'"{m.group(1)}", "{m.group(2)}"', m.group(2)
+                else:
+                    script = next((w for w in cmd.split() if w.endswith((".py", ".mjs"))), cmd)
+                    key, name = f'"{script}"', script
+                ran = key in gates
+                check(f"{doc.relative_to(ROOT)}: `{cmd}` is run by tools/gates.py or the gates "
+                      "line says it is not", ran or f"`{name}`" in claim,
+                      f"gates line: {lines[at]!r}")
+            check(f"{doc.relative_to(ROOT)}: the gates line does not claim 'all of the above'",
+                  "all of the above" not in claim.lower(), lines[at])
+    check("docs: at least one README run block names tools/gates.py", seen >= 1, str(seen))
 
 
 # Registry cases with their PyYAML answer written out, so the stdlib reader is tested on

@@ -27,7 +27,7 @@ not by a crash. So the standing rule is different in kind but the same in spirit
 | Environment | What it is | Writes to |
 |---|---|---|
 | **LOCAL** | A branch on a developer's or agent's machine | Working tree only |
-| **TEST** | CI on every push and pull request: both health self-tests before any install, strict after install, `kb-check`, lint | Nothing |
+| **TEST** | CI on push and pull request to `main`: every health self-test before any install, strict after install, the module registry, `kb-check`, the golden fixture under Node 22, lint | Nothing |
 | **REFERENCE** | The vendored JavaScript engine run under Node to regenerate the golden fixture | `tests/fixtures/health/golden_v1.json`, only on a `MODEL_VERSION` bump |
 | **PUBLISHED** | The reference app as a static page (today the Operator's Claude artifact; tomorrow wherever the Operator chooses) | Nothing; it is read-only |
 
@@ -102,32 +102,43 @@ is never edited; a reversal is a new ADR whose title begins "Supersedes ADR-nnnn
 
 ### 6.5 A module
 
-Every module is registered in `config/health/modules.yaml`:
+Every module is registered in `config/health/modules.yaml` (the shape; the real entries
+and their recipes are in `07_MODULE_REGISTRY.md`, generated from the file):
 
 ```yaml
-- id: engine-v1
-  enabled: true
+- id: example-v1
+  enabled: false                 # off until its enable/<id> pull request
   owner: health-physiology-modeler
-  phase: 0
-  paths: [src/health/engine/]
-  depends_on: [reference-v1]
-  tests: [tests/health_selftest.py]
-  adr: ADR-0002
-  removal: >
-    set enabled: false; delete src/health/engine/ and tests/health_selftest.py and
-    tests/fixtures/health/golden_v1.json and tools/health_golden.mjs; remove this entry;
-    remove the health_selftest step from tools/gates.py and .github/workflows/ci.yml;
-    run tools/gates.py.
+  phase: 1
+  paths: [src/health/example/, tests/health_example_selftest.py]
+  depends_on: [process]          # every module it imports or reads
+  tests: [tests/health_example_selftest.py]
+  adr: ADR-00nn
+  removal: |
+    1. Set `enabled: false` on this entry.
+    2. Run `python3 tools/buglog.py --mark-removed example-v1`.
+    3. Delete the paths; delete its gate and CI steps by name.
+    4. Remove this entry; regenerate 07; run `python3 tools/gates.py`.
 ```
 
-**Removal recipe (HREQ-X-02).** In order: set `enabled: false` → delete the listed
-paths → remove the registry entry → remove the module's gate and CI steps if it has
-any → run `tools/gates.py`. If anything else must be touched, the module was not
-finished, and that is a Tech Lead finding, not a judgment call.
+**The flag is the surface switch.** `enabled` governs every surface — `health.cli
+status` today, the app at M1: a surface asks `health.registry.is_enabled` and shows a
+disabled module's output as unavailable, with the reason. The tests and the package
+still run, so a disabled module stays verified by every gate. The merge is the code
+switch; the flag is the surface switch.
+
+**Removal recipe (HREQ-X-02).** In order: set `enabled: false` → mark the ledger
+entries that cite the module (`buglog.py --mark-removed`) → delete the listed paths →
+remove the module's gate and CI steps → remove the registry entry → regenerate 07 → run
+`tools/gates.py`. If anything else must be touched, the module was not finished, and
+that is a Tech Lead finding, not a judgment call — unless 07 records it as an accepted
+exception with its reason (today `engine-v1` and `cli`). `python -m health.registry
+--check` makes the recipe checkable: it fails when a recipe forgets a live file that
+names the module's paths, or when a dependant still lists a removed module.
 
 **Add recipe.** Branch `module/<id>` → ADR → registry entry with `enabled: false` →
-code, tests, docs → `tools/gates.py` green → **try the removal recipe on a scratch
-branch and confirm gates stay green** → PR → approve → `enable/<id>` PR.
+code, tests, docs → `tools/gates.py` green → **run the removal recipe on a scratch copy
+and confirm gates stay green** → PR → approve → `enable/<id>` PR.
 
 ### 6.6 A merge
 
@@ -148,9 +159,11 @@ before publication (WF-H-06), and why a wrong number on a surface is S0a.
 | `python3 tests/health_selftest.py` | Engine self-test with the stdlib only | No |
 | `python3 tests/health_selftest.py --no-skips` | Strict: a skipped test is a failure | No |
 | `python3 tests/health_kb_selftest.py --no-skips` | Knowledge-base rules, each with a planted violation | No |
-| `PYTHONPATH=src python3 -m health.cli status` | Versions, counts, grade share, expectation statuses (about 3 s; `--fast` skips them), every module's flag, the disclaimer and the validation status last; exits 1 on any contract error | No |
+| `python3 tests/health_errors_selftest.py --no-skips` | The error hierarchy: severities, halt flags, `SurfaceIntegrityError` never swallowed | No |
+| `PYTHONPATH=src python3 -m health.cli status` | Versions, counts, grade share, expectation statuses (about 3 s; `--fast` skips them; skipped while `engine-v1` is disabled), every module's flag, the disclaimer and the validation status last; exits 1 on any contract error | No |
 | `PYTHONPATH=src python3 -m health.cli kb-check` | Every contract rule; exit 1 on an error | No |
-| `python3 tools/gates.py` | All of the repository's gates including the above | No |
+| `PYTHONPATH=src python3 -m health.registry --check` | Every module's fields, paths, tests, dependency edges and removal recipe against the repository; 07 matches the registry | No |
+| `python3 tools/gates.py` | The repository's gates: every command above except `status` (a surface, not a gate), and the golden-fixture check when Node is present (SKIPPED, and said so on the last line, when it is not) | No |
 | `node tools/health_golden.mjs` | Regenerate the golden fixture from the JS reference (model changes only) | No |
 | open `reference/metabolic-map-v1/index.html` | The V1 app, as published | No |
 

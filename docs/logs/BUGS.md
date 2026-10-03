@@ -1395,6 +1395,44 @@ or recalibrate through WF-H-01 (tracker D-9).
 **BUG-20261003-116 (S4/P3).** Three latent quirks in the reference engine found while
 porting; none reachable with shipped data.
 
+**The undo model, rehearsed (BUG-20261003-154 … BUG-20261003-165).** The adversarial
+review ran the removal recipes on scratch copies for the first time, and none of them
+worked as written. Removing `engine-v1` exactly as its recipe said turned the gates red,
+because the ledger requires every cited file to exist and seven entries cite the engine
+(BUG-20261003-154); the knowledge-base self-test typed the Phase 0 module set
+(BUG-20261003-155); the `cli` recipe's first edit left `import os` unused, so ruff failed
+(BUG-20261003-156); the `errors` recipe never set the flag or ran the gates
+(BUG-20261003-157); `depends_on` said `kb-v1` and `cli` import `health.errors`, which
+only the engine does, and 07 disagreed with the yaml (BUG-20261003-158); `reference-v1`
+and `errors` kept listing a test file the engine recipe deleted, and nothing checked a
+`tests` path (BUG-20261003-159); the flag was a label — a disabled engine was imported
+and `status` printed `model 1.0.1` beside `modules DISABLED: engine-v1`
+(BUG-20261003-160); the engine recipe left stale references in five files
+(BUG-20261003-161); "`process` can go at any time; nothing imports it" was false — the
+engine and knowledge-base tests read its configuration and documents (BUG-20261003-162,
+S1); no gate ran `health_golden.mjs --check` (BUG-20261003-163); the engine recipe was
+imprecise against a shared CI step (BUG-20261003-164); and the health README said
+`gates.py` runs `status` (BUG-20261003-165). All fixed in this PR: `removed_with_module`
+and `buglog.py --mark-removed`; a gate, `python -m health.registry --check`, that holds
+every entry to the disk, the imports, the live files naming its paths and the generated
+07; `status` obeys the flag; one CI step per module and mode; a golden gate that says
+SKIPPED rather than green when Node is absent; `errors` has its own test file; every
+module depends on `process`, which goes last. Each recipe was then run literally on a
+scratch copy with `tools/gates.py` green after it (`cli` then `engine-v1`; `errors`;
+`kb-v1`; `reference-v1`; `process`). `engine-v1` and `cli` are recorded in 07 as accepted
+exceptions to HREQ-X-02, with the reason.
+
+**BUG-20261003-166 (S3/P2).** `buglog.py --check` rule 4 (every id mentioned is in the
+ledger) walked the whole directory tree, so in the main checkout it failed on ids that
+exist only in the builders' git-ignored worktrees under `.claude/worktrees/`. It reads
+`git ls-files` now, and walks the tree only where git cannot answer. Fixed in this PR.
+
+**BUG-20261003-167 (S3/P2).** Rule 3 skipped any `regression_test` without `::`, so a
+fixed entry whose test was the sentence "none — doc-only; re-verified by the qa-auditor
+sweep" passed. A fixed entry's test is now `file::function` or exactly
+`docs-only (no mechanical guard)`, and the literal holds only when every location is
+documentation; `removed_with_module` does not bypass it. The four 2026-09-09 entries whose
+prose names a CI step are a closed exception list in the gate. Fixed in this PR.
 The adversarial review of the health subsystem read the documents against the code. The
 twelve entries below are the document side of it. Each figure in the corrected text was
 re-measured on the port, and every line that depends on code landing in the same round is

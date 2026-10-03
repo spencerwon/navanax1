@@ -56,10 +56,10 @@ docs/         the contract: requirements, methodology, agents, validation,
 docs/health/  the health subsystem's contract, architecture diagrams, ADRs, process log
 .claude/      agent definitions (15 shared + 4 health), with model tiering for cost control
 src/navanax/  errors · codec · landing · governor · opstore · stream · cli
-src/health/   errors · engine (solver, model, scenarios, mc, validate) · kb · cli
+src/health/   the health subsystem's modules, one row each in docs/health/07
 reference/metabolic-map-v1/   the Operator's Metabolic Map V1, vendored verbatim
 tests/        selftest.py runs with zero third-party deps; tests that need one skip loudly
-              health_selftest.py and health_kb_selftest.py follow the same rule
+              the health_*_selftest.py suites follow the same rule
 data/         landing zone + stores (gitignored -- irreplaceable, back up separately)
 ```
 
@@ -74,11 +74,17 @@ a written recipe. **Educational and research only; never
 medical advice.** Start at [`docs/health/README.md`](docs/health/README.md).
 
 ```bash
-PYTHONPATH=src python3 -m health.cli status      # versions, counts, grade share, the disclaimer
+PYTHONPATH=src python3 -m health.cli status      # versions, counts, grade share, module flags, the disclaimer
 PYTHONPATH=src python3 -m health.cli kb-check    # every knowledge-base contract rule
+PYTHONPATH=src python3 -m health.registry --check   # every module: fields, paths, tests, dependencies, removal recipe
 python3 tests/health_selftest.py --no-skips      # engine: golden equivalence, conservation, expectations
 python3 tests/health_kb_selftest.py --no-skips   # knowledge base: every rule, each with a planted violation
+python3 tests/health_errors_selftest.py --no-skips   # error hierarchy: severities, halt flags, never swallowed
+python3 tools/gates.py                           # every line above except `status` (a surface, not a gate), plus golden --check when Node is present
 ```
+
+Every health module has a flag and a written removal recipe, held to the repository by a
+gate: [`docs/health/07_MODULE_REGISTRY.md`](docs/health/07_MODULE_REGISTRY.md).
 
 ## Storage, in one line each
 

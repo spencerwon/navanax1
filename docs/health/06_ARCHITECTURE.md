@@ -187,9 +187,11 @@ flowchart TB
 ```
 
 Arrows point from a dependency to what needs it. Removal goes against the arrows: `cli`
-first, then `engine-v1` or `kb-v1`, then `reference-v1`; `process` can be removed at any
-time because nothing imports it. Every entry in `config/health/modules.yaml` carries the
-recipe (`04 §6.5`), and the registry is the only place the dependency edges are recorded.
+first, then `engine-v1` or `kb-v1`, then `errors` (after `engine-v1`) and `reference-v1`;
+`process` last, because every other module reads its configuration (`base.yaml`), its
+documents (`03 §6`) or its registry, or lives in its package. Every entry in
+`config/health/modules.yaml` carries the recipe (`04 §6.5`), and the registry is the only
+place the dependency edges are recorded.
 
 ---
 

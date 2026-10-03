@@ -11,6 +11,13 @@ the error findings), 0 otherwise -- and whatever happens it ends with the
 disclaimer and then the validation status, each on its own line (HREQ-P-07,
 HREQ-S-01). --root points at a directory holding the five KB files (default: the
 packaged data). status --fast skips the expectation harness run (~3-8 s).
+
+status honours the module flags (HREQ-X-01, docs/health/07 "Flags and what reads them"):
+with engine-v1 disabled in config/health/modules.yaml it prints
+`model unavailable (engine-v1 disabled in config/health/modules.yaml)` and
+`expectations: skipped (engine-v1 disabled)` and never imports the engine; a registry
+that cannot be read fails closed the same way. kb-check and kb-summary read no flag: the
+knowledge base contract holds whatever the surfaces show.
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ VALIDATION_STATUS = "Not clinically validated."
 holds these copies, the engine's and the config's to one text). Constants, not a config
 read: the surface must print them even when nothing else can be loaded."""
 STATUS_MAX_ERRORS = 20
+ENGINE_MODULE = "engine-v1"
+"""The registry id whose flag governs the model and expectations lines of status."""
 
 
 def _version() -> str:
@@ -94,9 +103,35 @@ def _model_version() -> str:
     return str(MODEL_VERSION)
 
 
+def _module_gate(module_id: str) -> tuple[str, str] | None:
+    """None when `module_id` is enabled in the registry; otherwise (short, long) -- the
+    reason a surface prints in place of the module's output. HREQ-X-01: the flag governs
+    the surface. Fails closed: a registry that cannot be read shows the module as
+    unavailable, never as on."""
+    try:
+        from health.registry import display_path, module_state, registry_path
+        state = module_state(module_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry fails closed, never open
+        return ("module registry unreadable",
+                f"module registry unreadable: {type(exc).__name__}: {exc}")
+    if state == "enabled":
+        return None
+    word = "disabled" if state == "disabled" else "not registered"
+    return f"{module_id} {word}", f"{module_id} {word} in {display_path(registry_path())}"
+
+
 def _status_header() -> None:
     print(f"health {_version()}")
-    print(f"model {_model_version()}")
+    gate = _module_gate(ENGINE_MODULE)
+    print(f"model {_model_version()}" if gate is None else f"model {UNAVAILABLE} ({gate[1]})")
+
+
+def _expectations(fast: bool) -> str:
+    """expectations_line() behind the engine-v1 flag: a disabled engine is not run."""
+    gate = _module_gate(ENGINE_MODULE)
+    if gate is not None:
+        return f"expectations: skipped ({gate[0]})"
+    return expectations_line(fast)
 
 
 def _footer() -> None:
@@ -178,7 +213,7 @@ def _status_body(kb: dict[str, Any], args: argparse.Namespace) -> int:
         print(f"  error  {f.code}  {f.where}: {f.message}")
     if len(errors) > STATUS_MAX_ERRORS:
         print(f"  ... and {len(errors) - STATUS_MAX_ERRORS} more error(s)")
-    print(expectations_line(args.fast))
+    print(_expectations(args.fast))
     print(_modules_line())
     return 1 if errors else 0
 
@@ -259,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":       # a surface that fails still carries the disclaimer
             _status_header()
             print("KB unavailable")
-            print(expectations_line(args.fast))
+            print(_expectations(args.fast))
             print(_modules_line())
             _footer()
         return 1

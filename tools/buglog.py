@@ -3,6 +3,7 @@
 
     python3 tools/buglog.py            # regenerate docs/logs/BUGS.xlsx
     python3 tools/buglog.py --check    # CI gate, writes nothing
+    python3 tools/buglog.py --mark-removed <module-id>   # a health removal recipe step
 
 `docs/logs/bugs.yaml` is the source of truth. Nobody types into the
 spreadsheet: a hand-maintained log drifts from the code within a week, and this
@@ -18,7 +19,29 @@ their head:
   4. every BUG-id mentioned anywhere in the repo exists in the ledger
 
 (3) is the one that matters. "Fixed" without a regression test is a claim, and
-`tech-lead` blocks on exactly that.
+`tech-lead` blocks on exactly that. For a fixed entry every `regression_test` item is
+either `file::function` (the file exists and defines the function) or exactly the literal
+`docs-only (no mechanical guard)` -- and then every one of the entry's locations must be
+documentation: under docs/, a .md/.mmd/.svg file, or a comment line of a .yaml/.yml file.
+Anything else (prose, a bare file, "none -- re-verified by hand") fails, naming the entry:
+the gate cannot tell a placeholder from a test. Four entries of 2026-09-09 whose prose
+names a CI step predate the rule and are listed, by id, in PRE_STRICT_PROSE_TESTS.
+
+(4) reads git-tracked files only (`git ls-files -z` from the repository root), and walks
+the directory tree only when git is unavailable or the root is not a checkout: an ignored
+or untracked path -- a builder's worktree under .claude/worktrees/, a local scratch file --
+is not part of the repository, and an id in it must never fail (or pass) the gate.
+
+`removed_with_module: <module id>` (or a list of ids) is the one exception to (2) and to
+the existence half of (3). A health module's removal recipe (docs/health/07) deletes its
+files on purpose, and the ledger is append-only, so the entries that cite those files are
+kept and marked instead: `--mark-removed <id>` adds the field to every entry whose
+locations or regression tests fall under that module's `paths` or `tests` in
+config/health/modules.yaml (run it before the entry is removed), and `--check` then skips
+the existence checks for that entry -- and only for it. Everything else still holds: the
+entry must be in BUGS.md, a fixed one must still name its test and its resolved_at, and the
+module it names must no longer be registered (a field that hides a live module's broken
+reference is itself a failure). The field is a column of the spreadsheet.
 """
 from __future__ import annotations
 
@@ -90,6 +113,7 @@ COLUMNS = [
     ("Code index", "_code_index", 34),
     ("Open in GitHub", "_code_link", 40),
     ("Regression test", "regression_test", 44),
+    ("Removed with module", "removed_with_module", 16),
     ("Detected by", "detected_by", 34),
     ("Channel", "detection_channel", 12),
     ("Occurred", "occurred_at", 22),
@@ -127,6 +151,9 @@ def derive(bug: dict, repo: str) -> dict:
     rt = b.get("regression_test")
     if isinstance(rt, list):
         b["regression_test"] = "\n".join(rt)
+    rm = b.get("removed_with_module")
+    if isinstance(rm, list):
+        b["removed_with_module"] = ", ".join(map(str, rm))
     for k, v in list(b.items()):
         if isinstance(v, str):
             b[k] = " ".join(v.split()) if "\n" in v else v
@@ -266,6 +293,10 @@ def build(data: dict) -> None:
         "  · a `locations` file does not exist in the repo",
         "  · a bug is marked fixed but names no regression test",
         "  · a named regression test function does not exist in the test file",
+        "  · a fixed bug's test is neither file::function nor the literal",
+        "    'docs-only (no mechanical guard)' with only documentation locations",
+        "  (the two existence checks are skipped for an entry carrying",
+        "   removed_with_module: its files went with a removed health module)",
         "",
         "That last one is the point. 'Fixed' without a test that fails against",
         "the old code is a claim, not a fix -- and five of the bugs in this log",
@@ -281,7 +312,128 @@ def build(data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-def check(data: dict) -> list[str]:
+REGISTRY = ROOT / "config" / "health" / "modules.yaml"
+_MODULE_ID = re.compile(r"^[a-z][a-z0-9-]*$")
+
+#: The one regression_test value that is not a test: a fix to documentation only, with
+#: every location in documentation (see `doc_only_location`).
+DOCS_ONLY = "docs-only (no mechanical guard)"
+#: Fixed entries logged before rule (3) was strict, whose regression_test is prose naming
+#: a CI step. Closed: an entry joins only by editing this gate, in review. Rewriting one to
+#: `file::function` removes it from here.
+PRE_STRICT_PROSE_TESTS = frozenset({
+    "BUG-20260909-004",   # "CI itself (ruff check src tests tools)"
+    "BUG-20260909-019",   # "CI itself" (the pytest step)
+    "BUG-20260909-034",   # "CI itself -- the deprecation annotation disappears"
+    "BUG-20260909-038",   # "tests/selftest.py itself -- the summary line ..."
+})
+_DOC_SUFFIXES = frozenset({".md", ".mmd", ".svg"})
+
+
+def doc_only_location(loc: dict) -> bool:
+    """A location that is documentation: under docs/, a .md/.mmd/.svg file, or a comment
+    line (`#`) of a .yaml/.yml file -- the line read from the file, so a missing file or a
+    line of configuration is not documentation."""
+    file = str(loc.get("file", ""))
+    suffix = pathlib.PurePosixPath(file).suffix.lower()
+    if file.startswith("docs/") or suffix in _DOC_SUFFIXES:
+        return True
+    if suffix not in (".yaml", ".yml"):
+        return False
+    try:
+        lines = (ROOT / file).read_text(encoding="utf-8").splitlines()
+        line = int(loc.get("line", 0))
+    except (OSError, UnicodeDecodeError, TypeError, ValueError):
+        return False
+    return 1 <= line <= len(lines) and lines[line - 1].lstrip().startswith("#")
+
+
+def registered_modules() -> set[str]:
+    """The ids in the health module registry; empty when there is none (the health
+    subsystem's `process` module removed)."""
+    return {str(m.get("id")) for m in _registry_entries()}
+
+
+def _registry_entries() -> list[dict]:
+    if not REGISTRY.exists():
+        return []
+    import yaml
+    data = yaml.safe_load(REGISTRY.read_text(encoding="utf-8")) or {}
+    return [m for m in data.get("modules") or [] if isinstance(m, dict)]
+
+
+def _removed_with(bug: dict) -> list:
+    v = bug.get("removed_with_module")
+    if v is None:
+        return []
+    return list(v) if isinstance(v, list) else [v]
+
+
+def _refs(bug: dict) -> list[str]:
+    """Every file and `file::function` an entry cites (locations, then regression tests)."""
+    rt = bug.get("regression_test")
+    tests = [rt] if isinstance(rt, str) else list(rt or [])
+    return ([str(loc.get("file", "")) for loc in bug.get("locations") or []]
+            + [str(t) for t in tests])
+
+
+def _in_scope(ref: str, paths: list[str], tests: list[str]) -> bool:
+    """`ref` (a file or `file::function`) is one of a module's tests or under its paths."""
+    if ref in tests:
+        return True
+    file = ref.split("::", 1)[0]
+    return any(file == p.rstrip("/") or file.startswith(p.rstrip("/") + "/") for p in paths)
+
+
+def mark_removed(text: str, bugs: list[dict], module_id: str, paths: list[str],
+                 tests: list[str]) -> tuple[str, list[str]]:
+    """`text` (bugs.yaml) with `removed_with_module: <module_id>` added to every entry that
+    cites a file under `paths` or a test in `tests` and carries no such field yet, and the
+    ids it marked. The line goes right after the entry's `status:` line; nothing else in
+    the file changes (the ledger is append-only)."""
+    marked = [b["id"] for b in bugs if not _removed_with(b)
+              and any(_in_scope(r, paths, tests) for r in _refs(b))]
+    out: list[str] = []
+    done: list[str] = []
+    pending = False
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"^- id: (BUG-\d{8}-\d{3})\s*$", line)
+        if m:
+            pending = m.group(1) in marked and m.group(1) not in done
+            current = m.group(1)
+        out.append(line)
+        if pending and re.match(r"^  status:", line):
+            out.append(f"  removed_with_module: {module_id}\n")
+            done.append(current)
+            pending = False
+    if sorted(done) != sorted(marked):
+        raise SystemExit(f"--mark-removed: no `status:` line found for "
+                         f"{sorted(set(marked) - set(done))}")
+    return "".join(out), marked
+
+
+def repo_files() -> list[pathlib.Path]:
+    """The files rule (4) reads: git-tracked files under ROOT (`git ls-files -z`). Only
+    when git is missing or ROOT is not a checkout, every file under ROOT (the old walk).
+    Ignored and untracked paths -- builders' worktrees under .claude/worktrees/, scratch
+    files -- are not the repository and never count."""
+    import subprocess
+    try:
+        p = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"],
+                           capture_output=True, check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        p = None
+    if p is not None and p.returncode == 0:
+        names = p.stdout.decode("utf-8", "surrogateescape").split("\0")
+        return [ROOT / n for n in names if n]
+    return list(ROOT.rglob("*"))
+
+
+def check(data: dict, registered: set[str] | None = None) -> list[str]:
+    """Every rule in the module docstring. `registered` is the set of module ids in the
+    health registry (read from config/health/modules.yaml when None)."""
+    if registered is None:
+        registered = registered_modules()
     problems: list[str] = []
     md = MARKDOWN.read_text() if MARKDOWN.exists() else ""
     # (0) A DUPLICATE ID is the one defect that makes every other entry unciteable:
@@ -308,19 +460,42 @@ def check(data: dict) -> list[str]:
 
     for bug in data["bugs"]:
         bid = bug["id"]
+        removed = _removed_with(bug)
+        for mid in removed:
+            if not (isinstance(mid, str) and _MODULE_ID.match(mid)):
+                problems.append(f"{bid}: removed_with_module {mid!r} is not a module id")
+            elif mid in registered:
+                problems.append(
+                    f"{bid}: removed_with_module {mid} names a module that is still in "
+                    f"config/health/modules.yaml -- the field is for files a removal deleted, "
+                    f"never a way to hide a live module's broken reference")
+        if "removed_with_module" in bug and not removed:
+            problems.append(f"{bid}: removed_with_module is empty")
         for loc in bug.get("locations") or []:
-            if not (ROOT / loc["file"]).exists():
+            if not removed and not (ROOT / loc["file"]).exists():
                 problems.append(f"{bid}: location {loc['file']} does not exist")
         rt = bug.get("regression_test")
         tests = [rt] if isinstance(rt, str) else list(rt or [])
         if bug.get("status") == "fixed" and not tests:
             problems.append(f"{bid}: marked fixed with NO regression test named")
             continue
-        if bug.get("status") == "fixed" and not bug.get("resolved_at"):
+        fixed = bug.get("status") == "fixed"
+        if fixed and not bug.get("resolved_at"):
             problems.append(f"{bid}: marked fixed with no resolved_at")
+        docs_only = False
         for one in tests:
-            if "::" not in one:
+            if one == DOCS_ONLY:
+                docs_only = True
                 continue
+            if not isinstance(one, str) or "::" not in one:
+                if fixed and bid not in PRE_STRICT_PROSE_TESTS:
+                    problems.append(
+                        f"{bid}: regression test {one!r} is neither `file::function` nor the "
+                        f"literal {DOCS_ONLY!r} -- the gate cannot tell a placeholder from a "
+                        f"test")
+                continue
+            if removed:
+                continue      # its files went with the module (the shape rule above holds)
             path, fn = one.split("::", 1)
             p = ROOT / path
             if not p.exists():
@@ -329,14 +504,23 @@ def check(data: dict) -> list[str]:
                 problems.append(
                     f"{bid}: regression test {one} is named but `def {fn}(` is not in "
                     f"{path} -- a fix whose test does not exist is not a fix")
+        if fixed and docs_only:
+            code = [str(loc.get("file")) for loc in bug.get("locations") or []
+                    if not doc_only_location(loc)]
+            if code or not bug.get("locations"):
+                problems.append(
+                    f"{bid}: regression test is {DOCS_ONLY!r} but "
+                    + (f"{', '.join(code)} {'is' if len(code) == 1 else 'are'} not "
+                       f"documentation" if code else "it names no location")
+                    + " -- a fix to code or configuration needs a test")
     # (4) V15: pyproject.toml cited BUG-20260909-011, which did not exist.
     # A reference to a bug id nobody can look up is worse than no reference.
     referenced: dict[str, set[str]] = {}
     skip = {".git", "__pycache__", ".venv", "node_modules"}
-    for f in ROOT.rglob("*"):
+    for f in repo_files():
         if not f.is_file() or f.suffix.lower() in {".xlsx", ".zst", ".gz", ".db", ".pyc"}:
             continue
-        if any(part in skip for part in f.parts):
+        if any(part in skip for part in f.relative_to(ROOT).parts):
             continue
         try:
             text = f.read_text(encoding="utf-8")
@@ -356,8 +540,25 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
                     help="validate the ledger against the repo; write nothing")
+    ap.add_argument("--mark-removed", metavar="MODULE_ID",
+                    help="add removed_with_module: MODULE_ID to every entry citing that "
+                         "health module's paths or tests (a removal recipe step; run it "
+                         "while the module is still in config/health/modules.yaml)")
     a = ap.parse_args()
     data = load()
+    if a.mark_removed:
+        entry = next((m for m in _registry_entries() if m.get("id") == a.mark_removed), None)
+        if entry is None:
+            print(f"--mark-removed: {a.mark_removed!r} is not in config/health/modules.yaml "
+                  "(mark the ledger before removing the entry)", file=sys.stderr)
+            return 1
+        text, marked = mark_removed(LEDGER.read_text(encoding="utf-8"), data["bugs"],
+                                    a.mark_removed, list(entry.get("paths") or []),
+                                    list(entry.get("tests") or []))
+        LEDGER.write_text(text, encoding="utf-8")
+        print(f"removed_with_module: {a.mark_removed} added to {len(marked)} entr"
+              f"{'y' if len(marked) == 1 else 'ies'}: {', '.join(marked) or '(none)'}")
+        return 0
 
     problems = check(data)
     if problems:

@@ -4397,6 +4397,101 @@ bugs:
   resolution: "Planned (M1, with the next reference change): count any NaN difference; read the frozen copies; return Inf between infinities; mirror in the port where it differs (the port already reads frozen copies and uses R's rule for the harness band)."
   monitor_gap: The golden fixture covers shipped data only; edge-case fixtures are a 03 §9 item.
 
+- id: BUG-20261003-154
+  area: health
+  summary: Removing engine-v1 exactly as its recipe said turned the gates red, because the bug ledger requires every cited file of every bug to exist whatever its status
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:10:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review rehearsal wf-review/undo/rehearse_B.sh (cli recipe, then engine-v1 recipe, on a scratch copy): tools/gates.py stopped at 'gate failed: selftest' -- the real-ledger buglog check inside tests/selftest.py; tools/buglog.py --check alone lists 13 problems: nine locations and four regression tests under the deleted engine paths (BUG-20261003-095, 096, 097, 098, 101, 102, 115)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/buglog.py, line: 463}
+  - {file: tools/buglog.py, line: 388}
+  - {file: config/health/modules.yaml, line: 80}
+  requirement: HREQ-X-02
+  data_impact: None on any number. No module could be removed with the gates green, so the undo model (HREQ-X-02, docs/health/04 §6.5) was untested and untrue for every module whose files a ledger entry cites.
+  root_cause: The ledger is append-only and its check holds every cited file to existence; the removal recipes deleted cited files and had no ledger step, and nothing distinguished "deleted on purpose by a removal" from "a reference that rotted".
+  resolution: "tools/buglog.py accepts `removed_with_module: <id>` (or a list): for such an entry the location and regression-test existence checks are skipped and nothing else is (BUGS.md presence, a named test and resolved_at for a fixed entry); the module it names must no longer be registered. `--mark-removed <id>` adds the field after each matching entry's status line, reading the module's paths and tests from the registry, and every recipe runs it before its entry is removed. The field is a spreadsheet column."
+  monitor_gap: The removal recipes had never been run; HREQ-X-02's own proof (run the recipe, gates green) was a sentence, not a step anyone executed.
+  regression_test: tests/health_kb_selftest.py::test_buglog_removed_with_module_exempts_deleted_files
+
+- id: BUG-20261003-155
+  area: health
+  summary: The registry test hard-coded the Phase 0 module set, so removing any module failed the knowledge-base self-test
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:11:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review rehearsal wf-review/undo/rehearse_C.sh: with engine-v1 removed and the ledger patched, tools/gates.py stopped at 'gate failed: health kb selftest' -- FAIL registry: the shipped registry names the Phase 0 modules -- ['reference-v1', 'kb-v1', 'cli', 'errors', 'process']"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tests/health_kb_selftest.py, line: 1354}
+  - {file: src/health/registry.py, line: 905}
+  requirement: HREQ-X-02
+  data_impact: None on any number. A module could not be removed without editing kb-v1's test file, so every recipe was incomplete.
+  root_cause: The test asserted which modules exist instead of what every module must carry.
+  resolution: "The registry is held by structure, never by a typed id set: health.registry.validate_modules (run by the gate `python -m health.registry --check` and by the kb self-test) requires the HREQ-X-01 fields with their types, unique ids, registered and acyclic depends_on, existing paths and tests, one owner per file, import edges and recipe words; each rule fires on a planted violation. The status test reads the registry rather than naming ids."
+  monitor_gap: No rehearsal of a removal existed; the test was only ever run against the registry it was written for.
+  regression_test: tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-156
+  area: health
+  summary: "The cli recipe's first step left `import os` unused in tools/gates.py, so ruff (F401) turned the gates red"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:12:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of the cli recipe, reproduced on a scratch copy of e0b5412 (wf-review/undo-D/before.sh): the recipe's gates.py edit (wf-review/undo/edit.py gates-cli), then `ruff check tools/gates.py` -- F401 `os` imported but unused"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/gates.py, line: 71}
+  requirement: HREQ-X-02
+  data_impact: None on any number. The cli recipe could not be completed as written.
+  root_cause: The kb-check step built its own environment with `{**os.environ, ...}`, the only use of `os` in the file, so deleting the step deleted the import's last use.
+  resolution: "`run()` takes `env_extra` and merges it with os.environ itself, so no step builds an environment and removing any step leaves every import in use. A test removes each health statement of main(), and all of them with the health helpers, from the syntax tree and checks for unused imports."
+  monitor_gap: Recipes were reviewed as prose; their edits were never applied and linted.
+  regression_test: tests/health_kb_selftest.py::test_gates_health_steps_remove_cleanly
+
+- id: BUG-20261003-157
+  area: health
+  summary: "The errors recipe never set `enabled: false` or ran tools/gates.py"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:13:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of config/health/modules.yaml:100; the new gate `python -m health.registry --check` run on the reviewed registry (wf-review/undo-D/before.out) reports, among 40 problems, that the errors, reference-v1 and process recipes never say 'enabled: false' and errors and reference-v1 never say 'tools/gates.py'"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 228}
+  - {file: src/health/registry.py, line: 905}
+  requirement: HREQ-X-02
+  data_impact: None on any number. Following the recipe would have removed the module without the flag step or the proof.
+  root_cause: Recipes were free text with no shape check.
+  resolution: "Every recipe is a numbered list ending in the gates run; --check requires the words `enabled: false`, `this entry` and `tools/gates.py` in every recipe (a planted recipe missing each is reported); the errors, reference-v1 and process recipes gained the missing steps; docs/health/07 is generated from the file."
+  monitor_gap: No check read the recipes.
+  regression_test: tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-158
+  area: health
+  summary: The errors recipe and kb-v1's depends_on claimed kb-v1 and cli import health.errors; only the engine does, and 07 disagreed with the registry
 - id: BUG-20261003-142
   area: health
   summary: "03 §12 process metrics quote a stale golden comparison (about 8,900 values, worst 4e-14; measured 12,822 and 1.24e-12) and call the harness counts identical on a reference that has no harness"
@@ -5296,6 +5391,122 @@ bugs:
   priority: P3
   error_class: CFG
   status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:14:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review (grep of `health.errors` / `..errors` imports: src/health/engine/api.py, model.py, validate.py and tests/health_selftest.py only); 07's depends-on column omitted errors for engine-v1"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 136}
+  - {file: src/health/registry.py, line: 1044}
+  - {file: docs/health/07_MODULE_REGISTRY.md, line: 16}
+  requirement: HREQ-X-01
+  data_impact: None on any number. The removal order was wrong (errors would have waited for kb-v1 and cli for no reason) and the page contradicted the file it renders.
+  root_cause: Dependency edges were written from memory, and 07 was a hand-kept copy.
+  resolution: "kb-v1 depends_on [reference-v1, process]; errors' recipe waits for engine-v1 only. --check reads every health.* import in src/ (with parent packages) and fails when the importing module does not list the imported file's owner; it also requires every file under src/health/ and every health test, fixture and tool to belong to exactly one module. 07's table and recipes are generated from the yaml (--write-07) and --check fails when the page's block differs."
+  monitor_gap: No check compared depends_on with the imports, or 07 with the yaml.
+  regression_test: tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-159
+  area: health
+  summary: After engine-v1's removal, reference-v1 and errors still listed tests/health_selftest.py as their test, and nothing checked that a tests or paths entry exists
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:15:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of config/health/modules.yaml:99 after the engine-v1 rehearsal (wf-review/undo/rehearse_A.sh); the registry still named the deleted file and the gates did not notice"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/registry.py, line: 973}
+  - {file: config/health/modules.yaml, line: 37}
+  - {file: tests/health_errors_selftest.py, line: 140}
+  requirement: HREQ-X-01
+  data_impact: None on any number. Two modules claimed a verification that no longer ran.
+  root_cause: The errors module had no test of its own, and reference-v1 named a file instead of the functions that verify it; the registry was never read against the disk.
+  resolution: "--check fails when a paths or tests entry does not exist, or a `file::function` test is not defined. errors has its own stdlib test, tests/health_errors_selftest.py (hierarchy, severities, halt flags for every class including later ones, context, and an AST check that SurfaceIntegrityError or a subclass is never caught without a raise, proven on a plant; 0.15 s), run by tools/gates.py and by CI's stdlib and strict steps. reference-v1 names the consumer functions that verify its bytes (two engine tests, one kb test); it gets no test file of its own because a hash manifest would duplicate the fixture's engineSha256 and need a file outside its read-only paths, while naming the consumers keeps the recipe honest -- each consumer's recipe deletes its entries, and the existence check turns a forgotten one red."
+  monitor_gap: The tests field was documentation nobody read.
+  regression_test:
+    - tests/health_errors_selftest.py::test_every_error_class_declares_its_halt_behaviour
+    - tests/health_errors_selftest.py::test_surface_integrity_error_is_never_swallowed
+    - tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-160
+  area: health
+  summary: "The enabled flag was a display label: a disabled engine-v1 was still imported and status printed `model 1.0.1` next to `modules DISABLED: engine-v1`"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:16:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review rehearsal wf-review/undo/rehearse_D.sh (flag only); reproduced on a scratch copy of e0b5412 (wf-review/undo-D/before.out): `status --fast` with engine-v1 enabled: false prints `model 1.0.1` and `modules DISABLED: engine-v1`"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/cli.py, line: 106}
+  - {file: src/health/registry.py, line: 868}
+  requirement: HREQ-X-01
+  data_impact: None on any number shipped. The two-PR enable rule (07, 04 §4) had nothing to enforce it; an "off" module's output would have reached a surface.
+  root_cause: The registry reader formatted the flags but no surface consulted them.
+  resolution: "health.registry.is_enabled / module_state (fail closed on duplicates). status prints `model unavailable (engine-v1 disabled in config/health/modules.yaml)` and `expectations: skipped (engine-v1 disabled)` and never imports the engine; an unregistered engine and an unreadable registry fail closed the same way; kb-check and kb-summary read no flag. HEALTH_MODULES_PATH (tests only, documented) lets a test show the surface with a copy of the registry. 07 and 04 §6.5 say the flag governs every surface (status today, the app at M1), the tests and the package still run, the merge is the code switch and the flag the surface switch."
+  monitor_gap: The status test checked that the flag was printed, not that it was obeyed.
+  regression_test: tests/health_kb_selftest.py::test_status_honours_the_module_flags
+
+- id: BUG-20261003-161
+  area: health
+  summary: The engine-v1 recipe left stale references in base.yaml, pyproject.toml, both READMEs, 04 and 07, and nothing checked a recipe against the files that name its module
+  severity: S4
+  priority: P3
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:17:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review (plausible): grep after the engine-v1 rehearsal found config/health/base.yaml equivalence.golden_fixture/generator, pyproject.toml 'engine/params.json', README.md:79, docs/health/README.md:65-66 and 07's rows; the new --check on the reviewed registry reports 28 such recipe gaps (wf-review/undo-D/registry_check_before.out)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/registry.py, line: 1104}
+  - {file: config/health/modules.yaml, line: 80}
+  requirement: HREQ-X-02
+  data_impact: None on any number. After a removal the READMEs would have told a reader to run files that no longer exist.
+  root_cause: Recipes listed the module's own paths and the gate steps, not the other files that name them.
+  resolution: "Every recipe names each file it edits, step by step. --check scans the live files (src, tests, tools, config, .github, pyproject.toml, the READMEs, 04, 07) and fails when one names a module's paths, will still exist when the module is removed (not its own, not a dependant's), and is not named in the recipe; whole-path matching, so README.md is not named by docs/health/README.md. Planted: a recipe forgetting base.yaml or the root README is reported by name."
+  monitor_gap: No grep for a module's paths ran when a recipe was written.
+  regression_test: tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference
+
+- id: BUG-20261003-162
+  area: health
+  summary: "The registry and 06 said process can go at any time because nothing imports it; the engine and knowledge-base self-tests read its files"
+  severity: S1
+  priority: P1
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:18:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review docs-drift probe (wf-review/docs-drift/noprocess.out): with config/health/ removed, tests/health_selftest.py fails test_config_agrees_with_engine_and_reference (FileNotFoundError config/health/base.yaml); kb-v1's test parses docs/health/03 §6, and cli reads the registry"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 78}
+  - {file: docs/health/06_ARCHITECTURE.md, line: 180}
+  requirement: HREQ-X-01
+  data_impact: None on any number. Following the registry would have removed the configuration, the documents and the registry itself while the modules that read them stayed, with red gates and no recipe to recover.
+  root_cause: '"Nothing imports it" was taken to mean "nothing depends on it"; data reads (base.yaml, the 03 §6 table, the registry) and the package root are dependencies too.'
+  resolution: "base.yaml stays in process, not engine-v1: it carries subsystem-wide rules (the disclaimer and validation-status text every surface renders, display labels, the grade headline), not only the engine's tolerances. Every module now lists process in depends_on; process owns the package root and the registry reader and goes last; the claim is gone from the yaml and from 06. The recipe-gap check proves the edge matters: with no module depending on process, process's recipe is reported as missing the engine's self-test."
+  monitor_gap: Dependencies were checked against imports by eye only.
+  regression_test: tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference
+
+- id: BUG-20261003-163
+  area: health
+  summary: No gate ran tools/health_golden.mjs --check, so a stale golden fixture passed every gate
   resolved_at: "2026-10-03T05:10:00-05:00"
   logged_at: "2026-10-03T04:56:00-05:00"
   occurred_at: "2026-10-03T02:55:54-05:00"
@@ -5395,6 +5606,49 @@ bugs:
   priority: P3
   error_class: INF
   status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:19:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "adversarial review against docs/health/03 Appendix B V-08; `grep -c health_golden tools/gates.py` on e0b5412 = 0 and CI had no Node step"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/gates.py, line: 90}
+  - {file: .github/workflows/ci.yml, line: 69}
+  requirement: HREQ-X-05
+  data_impact: None today (the fixture was current, `--check` exit 0 in 6.7 s). A reference change without regeneration would have left the port held to an old fixture.
+  root_cause: The generator's --check existed but was wired into nothing.
+  resolution: "tools/gates.py runs `node tools/health_golden.mjs --check` with /opt/node22/bin/node, else `node` on PATH; without either it prints `SKIPPED (no Node binary): golden --check not run`, and any skip (this or ruff) turns the last line into `GATES GREEN, N SKIPPED: ...` -- never ALL GATES GREEN. CI sets up Node 22 with actions/setup-node@v5 (Node 24 runtime) and runs the check."
+  monitor_gap: The gates verdict could not express a gate that did not run.
+  regression_test: tests/health_kb_selftest.py::test_gates_never_reads_green_on_a_skip
+
+- id: BUG-20261003-164
+  area: health
+  summary: The engine-v1 recipe was imprecise (the strict CI step runs both suites and must be edited, not removed) and HREQ-X-02 said a module needing more steps was not finished
+  severity: S4
+  priority: P3
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:20:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of config/health/modules.yaml:47 and the rehearsal edit wf-review/undo/edit.py ci-engine, which had to edit a shared step"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 80}
+  - {file: docs/health/07_MODULE_REGISTRY.md, line: 231}
+  - {file: .github/workflows/ci.yml, line: 33}
+  requirement: HREQ-X-02
+  data_impact: None on any number. Two people following the recipe would have made different edits.
+  root_cause: CI and the gates grouped several modules' suites in one step, so no recipe could delete "its" step.
+  resolution: "CI has one step per module and mode (engine, knowledge-base, errors; stdlib and strict), the gates one HEALTH_SUITES row per module, so every recipe deletes whole steps by name. The engine-v1 recipe names every edit (gates rows and functions, four CI steps, reference-v1's tests entries, the ledger mark, base.yaml keys and comments, the pyproject glob, README, 04 and 07 rows) and 07 records engine-v1 and cli as accepted, documented exceptions to HREQ-X-02 with the reason (the gate and CI steps are the module's own tests, which X-02 did not anticipate; cli's tests live in kb-v1's file). 00 is unchanged. Rehearsed on scratch copies: gates green after each recipe."
+  monitor_gap: The recipe was never executed literally.
+  regression_test: tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference
+
+- id: BUG-20261003-165
+  area: health
+  summary: "docs/health/README.md said tools/gates.py runs all of the above; it never ran health.cli status"
   resolved_at: "2026-10-03T05:10:00-05:00"
   logged_at: "2026-10-03T04:59:00-05:00"
   occurred_at: "2026-10-03T03:29:03-05:00"
@@ -5419,6 +5673,67 @@ bugs:
   priority: P3
   error_class: INF
   status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:21:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of docs/health/README.md:78 against tools/gates.py (no `status` step)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/README.md, line: 89}
+  - {file: README.md, line: 83}
+  requirement: HREQ-X-02
+  data_impact: None on any number. A reader would have taken a green gates run as proof that status works.
+  root_cause: The line was written for an earlier list of commands and never re-read against gates.py.
+  resolution: "Both READMEs' gates lines say `every line above except status (a surface, not a gate), plus golden --check when Node is present`; 04 §7 says the same. A test parses each README run block naming tools/gates.py and requires every command above it to be run by gates.py or named on the gates line as not run, and forbids 'all of the above'."
+  monitor_gap: No test read the documentation's claims about the gates.
+  regression_test: tests/health_kb_selftest.py::test_docs_say_what_gates_runs
+
+- id: BUG-20261003-166
+  area: health
+  summary: "buglog.py --check rule 4 walked the whole directory tree, so in the main checkout it failed on BUG ids in the builders' git-ignored worktrees under .claude/worktrees/"
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:40:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  detected_by: "the orchestrator running `python3 tools/buglog.py --check` in the main checkout while four builder worktrees existed: 'BUG-20261003-165: referenced in .claude/worktrees/agent-.../docs/logs/BUGS.md ... but not in bugs.yaml'; reproduced with the reviewed buglog.py on a planted repository (wf-review/undo-D/rule4_before.py)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/buglog.py, line: 415}
+  - {file: tools/buglog.py, line: 520}
+  requirement: HREQ-X-02
+  data_impact: None on any number. The ledger gate was red in the main checkout for ids that exist only on unmerged branches, and an id cited only in an ignored file could equally have passed the gate.
+  root_cause: Rule 4 used ROOT.rglob("*"), which sees every file on disk -- git-ignored worktrees, untracked scratch -- not the repository's files.
+  resolution: "Rule 4 reads `git ls-files -z` from the repository root (tracked files only) and walks the tree only when git is unavailable or the root is not a checkout. Planted in a scratch git repository: an id in a tracked file is reported, an id in an ignored path or an untracked file is not, and outside a checkout the walk still reads every file."
+  monitor_gap: The gate had only ever run in checkouts with no nested worktrees.
+  regression_test: tests/health_kb_selftest.py::test_buglog_rule_4_reads_tracked_files_only
+
+- id: BUG-20261003-167
+  area: health
+  summary: "buglog.py --check rule 3 skipped any regression_test without `::`, so a fixed entry whose test was a placeholder sentence passed the gate"
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:50:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  detected_by: "the docs builder of this round: a fixed entry whose regression_test read 'none — doc-only; re-verified by the qa-auditor sweep' passed `tools/buglog.py --check`; reproduced with the reviewed buglog.py on a planted ledger with a code location (wf-review/undo-D/rule3_before.py: no problems)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/buglog.py, line: 491}
+  - {file: tools/buglog.py, line: 333}
+  requirement: HREQ-X-02
+  data_impact: None on any number. A bug could be closed with no test at all while the gate that exists to refuse exactly that stayed green.
+  root_cause: "The check read `::` as the marker of a checkable test and silently skipped everything else, so prose, a bare file name and a placeholder were indistinguishable from \"no test to check\"."
+  resolution: "For a fixed entry every regression_test item is `file::function` (file exists, function defined) or exactly the literal `docs-only (no mechanical guard)`, and the literal holds only when every location is documentation (under docs/, a .md/.mmd/.svg file, or a comment line of a .yaml/.yml file, the line read from the file); anything else fails, naming the entry. removed_with_module skips only the existence half, never this shape rule. The four fixed entries of 2026-09-09 whose prose names a CI step (004, 019, 034, 038) are a closed, named exception list in the gate (PRE_STRICT_PROSE_TESTS), not a pattern."
+  monitor_gap: The gate's own tests planted a missing test function but never a test that is not a function at all.
+  regression_test: tests/health_kb_selftest.py::test_buglog_rule_3_refuses_placeholder_tests
   resolved_at: "2026-10-03T05:10:00-05:00"
   logged_at: "2026-10-03T05:00:00-05:00"
   occurred_at: "2026-10-03T02:55:54-05:00"
