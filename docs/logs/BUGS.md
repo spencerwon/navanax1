@@ -1323,13 +1323,54 @@ orders whose expiry has passed scanned all 5.9 million lives to find the
 fourteen thousand standing ones, five times a minute. A partial index over the
 standing lives makes it a seek.
 
+## Health subsystem — 2026-10-03
+
+The health subsystem (`docs/health/`) shares this ledger; its entries carry
+`area: health` and the classes of `docs/health/05_BUG_TAXONOMY.md` §3. Its first five
+entries were found by the methodology builder measuring the vendored V1 reference under
+Node, not by a reader.
+
+**BUG-20261003-095 (S2/P2).** The kidney strain index's glomerular term averages a
+pressure load and a hyperfiltration load with `0.5`/`0.5` and scales the GFR rise by
+`0.1`, all three inline in `model.js` M10 (and mirrored in `model.py`), while every
+sibling weight and scale is a graded `params.json` row. Three constants the evidence
+drawer cannot list. Open: three E-assumption rows at M1, with the version bump.
+
+**BUG-20261003-096 (S1/P1).** The influence screen behind every evidence chip runs one
+reference scenario (10 g salt, 24 h, +10 %). Run on every scenario at its own horizon in
+both directions, MAP over 30 days has 15 feeders, not 12 — and one of the six missing is
+`pn_gain`, calibrated to the very band that chart is compared with. The lists look
+complete and are not. Open: HREQ-U-12 (union over scenarios and directions) at M1.
+
+**BUG-20261003-097 (S1/P1).** The Python harness had no `role`. A calibration target —
+the He 2013 blood-pressure band that `map_vol_exp`, `pn_gain` and `aldo_vol_exp` were
+tuned to hit — would have been counted as a literature pass, and so would the day-30
+sodium-balance row, which holds for any parameter set that reaches balance. Fixed in
+this PR on the Python side (role, calibrates, counted); the reference mirrors at M1.
+
+**BUG-20261003-098 (S3/P1).** The golden fixture covered four short scenarios and not
+`chronic_high_salt_30d` (744 h, 41,664 steps), the stiff parameter corner, or step
+checkpoints — so a Python/JavaScript divergence that grows with run length or stiffness
+had nowhere to show. Fixed in this PR: the fixture is regenerated with all of them and
+the source hashes in its header.
+
+**BUG-20261003-099 (S4/P3).** `index.js` still says "all 52" parameters and "~53
+simulations"; the table has had 54 rows since D-2. No M9 block exists between M8 and
+M10. Cosmetic; logged because a stale count in a comment is the shape this project
+keeps catching.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
+| BUG-20261003-095 | S2 | P2 | Strain index glomerular constants live in code, not the table | Needs three graded rows and a model-version bump (M1) |
+| BUG-20261003-096 | S1 | P1 | Influence screen under-counts feeders; evidence chips omit a calibrated parameter | HREQ-U-12 per-scenario, both-direction screen (M1) |
+| BUG-20261003-097 | S1 | P1 | Harness could count a calibration target as validation | Being fixed in this PR (role field, regression test) |
+| BUG-20261003-098 | S3 | P1 | Golden fixture omitted the chronic scenario, stiff corner, checkpoints | Being fixed in this PR (fixture regenerated) |
+| BUG-20261003-099 | S4 | P3 | Stale parameter count in a reference comment; no M9 block | With the next reference change (M1) |
 
-93 of 94 logged bugs are fixed.
+93 of 99 logged bugs are fixed (the five health entries of 2026-10-03 are open; two close in the pull request that logged them).
 
 ### The lesson
 

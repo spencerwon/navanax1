@@ -58,6 +58,14 @@ ERROR_CLASS = {
     "INF": "Infrastructure",
     "PRS": "Presentation",
     "BTI": "Backtest integrity",
+    # Health subsystem classes (docs/health/05_BUG_TAXONOMY.md §3, ADR-0005)
+    "MDL": "Model (health)",
+    "PRM": "Parameter (health)",
+    "EVD": "Evidence (health)",
+    "NUM": "Numerics (health)",
+    "KBI": "Knowledge base integrity (health)",
+    "VAL": "Validation harness (health)",
+    "ETH": "Ethics / framing (health)",
 }
 
 COLUMNS = [

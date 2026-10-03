@@ -3710,3 +3710,177 @@ bugs:
   monitor_gap: None new -- this is the phase timing doing its job on its first day.
   regression_test:
     - tests/selftest.py::test_expired_standing_lives_are_found_by_index_not_by_scan
+
+# ---------------------------------------------------------------------------
+# Health subsystem (docs/health/05_BUG_TAXONOMY.md; area: health). Classes MDL PRM EVD
+# NUM KBI VAL PRS ETH CFG INF SEC. data_impact reads as reader_impact: which surface,
+# which numbers, with or without their labels.
+# ---------------------------------------------------------------------------
+- id: BUG-20261003-095
+  area: health
+  summary: Kidney strain index glomerular term hard-codes 0.5, 0.5 and 0.1 in engine code; three constants with no parameter row, grade or source
+  severity: S2
+  priority: P2
+  error_class: PRM
+  status: open
+  logged_at: "2026-10-03T03:10:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "methodology builder reading reference/metabolic-map-v1/engine/model.js M10 while writing docs/health/01 §4.7 and §9"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/model.js, line: 335}
+  - {file: src/health/engine/model.py, line: 481}
+  requirement: HREQ-M-07
+  data_impact: >-
+    Reader-facing: the salt dose-sweep panel's strain curve and the kidney colour depend
+    on three constants the evidence drawer cannot list, so the drawer's "parameters that
+    feed this" is incomplete for strain_index. No number is wrong; its provenance is.
+  root_cause: >-
+    The glomerular load averages a pressure term and a hyperfiltration term with weights
+    0.5/0.5 and scales the GFR rise by 0.1 inline, while the sibling weights and scales
+    live in params.json as E-assumptions. The index was written as code first and the
+    table filled in after; three constants never made the trip.
+  resolution: >-
+    Planned (M1, WF-H-01): three params.json rows (strain_w_glomerular_pressure,
+    strain_w_glomerular_filtration, strain_scale_filtration), grade E-assumption, mc:
+    false; both implementations read them; MODEL_VERSION bump; golden regenerated.
+    Until then the index band must say its definition constants are fixed (HREQ-M-10).
+  monitor_gap: >-
+    No lint over engine source for numeric literals (HREQ-M-07 names one); the KB
+    engineParam mirror can only check rows that exist.
+
+- id: BUG-20261003-096
+  area: health
+  summary: Default influence screen under-counts the parameters that feed a quantity; evidence chips omit the calibrated pn_gain for MAP over 30 days
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T03:12:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "methodology builder running computeInfluence() on every scenario at its own horizon in both directions under Node v22.22.0 (docs/health/01 §8.2)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 201}
+  - {file: src/health/engine/api.py, line: 282}
+  requirement: HREQ-U-12
+  data_impact: >-
+    Reader-facing, silent: the evidence chip on the chronic-salt MAP chart lists 12
+    feeders where 15 move MAP over 30 days; one of the six missing is pn_gain, a
+    parameter calibrated to the very band that chart is compared with. thirst_vol_gain
+    has exactly zero effect in the salt screen (the hypovolemic term is max(0, 1 - vr)
+    and salt expands the ECF) so it never appears for Thirst, though it feeds Thirst in
+    no_water_24h. The lists look complete and are not.
+  root_cause: >-
+    One reference run (salt_load_10g, 24 h, +10 %) for every quantity. A parameter whose
+    effect is small at 24 h but grows over 30 days, or whose term is clamped to zero in
+    that scenario's direction, is below the 1 % threshold or exactly zero. The screen's
+    "can only over-count" claim holds for how failures are handled, not for the screen
+    as a whole.
+  resolution: >-
+    Planned (M1): run the screen for every registered scenario at its own horizon, in
+    both directions, and report the union (HREQ-U-12); the difference in feeder lists is
+    part of every model-change review (HREQ-V-19). Cost measured at about 17 s for the
+    30-day scenario's 108 runs.
+  monitor_gap: >-
+    No test compared feeder lists across scenarios or directions; the influence result
+    was cached once per page load and never audited.
+
+- id: BUG-20261003-097
+  area: health
+  summary: Expectation harness has no role field, so a calibration target (chronic salt vs He 2013) would be counted as a validation pass
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T03:14:00-05:00"
+  occurred_at: "2026-10-03T02:50:00-05:00"
+  detected_by: "methodology builder reading src/health/engine/validate.py summarize() against docs/health/01 §6 (calibration is never validation)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 328}
+  - {file: src/health/engine/scenarios.py, line: 1}
+  requirement: HREQ-E-11
+  data_impact: >-
+    Reader-facing if shipped: the status line and any summary would report the He 2013
+    MAP band as a literature pass, when map_vol_exp, pn_gain and aldo_vol_exp were
+    chosen to hit it. The "Na excretion within 2 % of intake by day 30" row would also
+    count, though it holds for any parameter set that reaches balance (structural).
+  root_cause: >-
+    V1 records calibration only in free-text notes on the parameter rows and in the
+    expectation's note; nothing machine-readable connects an expectation to the
+    parameters tuned against it, and the port's summarize() counts by status alone.
+  resolution: >-
+    In this PR: Python-side `role` (validation | calibration | structural) and
+    `calibrates` on the two rows; summarize() reports counted passes and fails separately
+    and never counts calibration or structural rows; the JS reference gains the same
+    fields at M1 with the version bump (tracker W-13).
+  monitor_gap: >-
+    No test planted a passing calibration row and asserted the validation count did not
+    move; docs/health/03 §5.2 now requires it.
+
+- id: BUG-20261003-098
+  area: health
+  summary: Golden fixture omitted chronic_high_salt_30d (the longest run, 41,664 steps), the stiff corner and the step checkpoints
+  severity: S3
+  priority: P1
+  error_class: NUM
+  status: open
+  logged_at: "2026-10-03T03:16:00-05:00"
+  occurred_at: "2026-10-03T02:55:00-05:00"
+  detected_by: "methodology builder comparing tools/health_golden.mjs with docs/health/03 §4.2"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/health_golden.mjs, line: 1}
+  - {file: tests/fixtures/health/golden_v1.json, line: 1}
+  requirement: HREQ-V-08
+  data_impact: >-
+    None reached a reader. Equivalence was proven on the four short scenarios only; the
+    scenario a reader is most likely to act on (chronic salt, 744 h, dt 0.25, 41,664
+    steps) and the stiffest parameter corner were not in the fixture, so a divergence
+    that grows with run length or stiffness would not have been seen.
+  root_cause: >-
+    The fixture generator was written to the builder brief's list of four scenarios
+    before docs/health/03 §4.2 specified the full content.
+  resolution: >-
+    In this PR: chronic_high_salt_30d thinned to <= 1,000 recorded points with the
+    exact step count asserted; the §3.5 stiff corner on chronic_high_salt_30d and
+    drink_water_3L_fast; checkpoints (constants, initial state, rhs at t = 0, one RK4
+    step); SHA-256 of every reference engine file in the header, compared on disk.
+  monitor_gap: >-
+    No test asserted that the fixture covers every registered scenario; the port's
+    trajectory test now lists what the fixture covers and fails on a missing one.
+
+- id: BUG-20261003-099
+  area: health
+  summary: Reference engine comments say 52 parameters and ~53 influence runs; the table has had 54 rows since D-2, and there is no M9 block label
+  severity: S4
+  priority: P3
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:18:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "methodology builder counting params.json rows against the index.js comment (docs/health/01 §8.1)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 187}
+  - {file: reference/metabolic-map-v1/engine/model.js, line: 1}
+  requirement: HREQ-E-04
+  data_impact: >-
+    None. A count in a code comment, not on a surface; the status line computes the real
+    count (54) from the table. Logged because an unrefreshed count in a comment is the
+    shape of drift this project keeps catching.
+  root_cause: >-
+    D-2 added map_auto_frac and map_auto_tau_h to the table; the comment that quoted the
+    count was not revisited. M9 was never assigned a block.
+  resolution: >-
+    Planned (M1, with the next reference change): fix the comment, add the M9 label or
+    renumber M10 to M9, mirror in model.py.
+  monitor_gap: >-
+    Counts in comments are not computed from data; HREQ-E-04 covers surfaces, not
+    comments. Accepted as cosmetic.

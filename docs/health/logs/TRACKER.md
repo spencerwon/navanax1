@@ -31,6 +31,11 @@ the bottom with the date and the ADR or commit that closed them.
 | W-10 | Narratives for the six registered scenarios (HREQ-P-15) | M1 | ui-designer + docs-explainer | open |
 | W-11 | Grade-E red pill and chart banner audit against HREQ-S-06 on the reference app | M1 | design-lead + health-safety-reviewer | open |
 | W-12 | Stress-test measurements recorded from the Operator's machine (HREQ-N-07) | M1 | Spencer runs; orchestrator records | open |
+| W-13 | Mirror the harness `role` / `calibrates` fields into `reference/metabolic-map-v1/engine/scenarios.js` with the next MODEL_VERSION bump (BUG-20261003-097, Python-side only this phase) | M1 | health-physiology-modeler | open |
+| W-14 | BUG-20261003-095: three strain-index constants into params.json rows (grade E, mc false) in both implementations; version bump; golden regenerated | M1 | health-literature-curator + modeler | open |
+| W-15 | BUG-20261003-096: influence screen per scenario, both directions, union (HREQ-U-12); feeder-list diff in every model-change review (HREQ-V-19) | M1 | health-physiology-modeler | open |
+| W-16 | BUG-20261003-099: stale "52 parameters" comment and missing M9 label in the reference | M1 | health-physiology-modeler | open |
+| W-17 | Enforcement status of HREQ-M/E/U/V appendices: mark each row Phase 0 (enforced) or M1 (planned) so no requirement reads as enforced before its gate exists | M0 | orchestrator | open |
 
 ## Blocked on
 
