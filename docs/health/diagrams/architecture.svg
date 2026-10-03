@@ -82,7 +82,7 @@
   <text x="316" y="606" class="title">KNOWLEDGE  src/health/kb/</text>
   <text x="316" y="630" class="file">data/entities.json (107) · data/relations.json (203) · data/evidence.json (57)</text>
   <text x="316" y="650" class="file">data/VERIFICATION_LOG.json (154) · data/schema.json</text>
-  <text x="316" y="670" class="file">check.py — every schema rule + cross-file rules · report.py — counts and the grade share</text>
+  <text x="316" y="670" class="file">check.py — 47 blocking codes; 11 of 16 documented rules enforced, 5 deferred (W-18) · report.py — counts and the grade share</text>
   <text x="316" y="694" class="note">append-only: corrections supersede; disagreeing sources kept in `conflicts`</text>
 
   <!-- gates between layers -->

@@ -22,7 +22,7 @@ range (`docs/health/02 §4` WF-H-02).
 
 ## The rules that shape everything you build
 
-1. **One model, two implementations.** A change to `src/health/engine/` is mirrored in `reference/metabolic-map-v1/engine/` in the same change, `MODEL_VERSION` is bumped in both and in `config/health/base.yaml`, and `tools/health_golden.mjs` regenerates `tests/fixtures/health/golden_v1.json`. A port that "mostly matches" is an S0b (`ReferenceDivergenceError`). Never loosen the tolerance in `config/health/base.yaml equivalence`.
+1. **One model, two implementations.** A change to `src/health/engine/` is mirrored in `reference/metabolic-map-v1/engine/` in the same change, `MODEL_VERSION` is bumped in both and in `config/health/base.yaml`, and `tools/health_golden.mjs` regenerates `tests/fixtures/health/golden_v1.json`. A port that "mostly matches" is an S0b (the golden tests fail; `ReferenceDivergenceError` is not raised yet). Never loosen the tolerance in `tests/health_selftest.py` or its mirror in `config/health/base.yaml equivalence`.
 2. **Keep the M-blocks.** M0–M10 in `model.js` and `model.py` stay aligned so an auditor can read them side by side. A new flux gets a block number and a comment that names the parameter rows it uses.
 3. **Steady state first.** Every change keeps `baseline` a steady state (drift < 1e-6) and keeps water and sodium balance closed to 1e-9. If a change breaks either, the change is wrong, not the test.
 4. **Fail loud on infeasibility.** `initial_state` raises `InfeasibleParametersError`; the sampler counts rejections. Never silently clamp a parameter into feasibility.

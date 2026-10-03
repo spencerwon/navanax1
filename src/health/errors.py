@@ -164,7 +164,9 @@ class MisquotedSourceError(EvidenceIntegrityError):
 
 class ReferenceDivergenceError(EvidenceIntegrityError):
     """The Python engine and the JavaScript reference disagree on a golden value beyond
-    config/health/base.yaml equivalence tolerances (HREQ-P-02).
+    the equivalence tolerances (tests/health_selftest.py REL_TOL/ABS_TOL, mirrored in
+    config/health/base.yaml equivalence; HREQ-P-02). Not raised anywhere yet: a
+    divergence fails the golden tests (ADR-0002 errata).
 
     Every result since the last passing golden run is suspect until the divergence is
     explained. Not a normal test failure: it retroactively taints completed work.

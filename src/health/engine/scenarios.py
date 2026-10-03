@@ -19,9 +19,10 @@ Event and override dicts keep the JavaScript keys (start, durMin, water_L, salt_
 waterIn_Lh, naIn_mmolh) and are read-only views.
 
 Python-only annotations (docs/health/03 §5.1-5.2; the JavaScript reference is unchanged
-this phase): an expectation may carry `role` -- "validation" (the default when absent),
-"calibration" (with `calibrates`, the parameters tuned to it) or "structural". Only
-validation rows can enter the validation totals. These two keys are the ONLY ones the
+this phase): an expectation carries a stable `id` ("<scenario_id>/<NN>", 1-based;
+HREQ-E-13) and may carry `role` -- "validation" (the default when absent), "calibration"
+(with `calibrates`, the parameters tuned to it) or "structural". Only validation rows can
+enter the validation totals. These three keys (id, role, calibrates) are the ONLY ones the
 self-test allows to differ from the JavaScript records (PY_ONLY_EXPECTATION_KEYS).
 """
 

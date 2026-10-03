@@ -2145,7 +2145,9 @@ def run_suite(tests: list[tuple[str, Callable[[], None]]], *, strict: bool = Fal
               f"{h['counted_fail']} fail; {h['not_checked']} not_checked; calibration "
               f"{h['calibration']['n']} {h['calibration']['statuses']} (calibrates "
               f"{', '.join(h['calibrated_parameters'])}); structural {h['structural']['n']} "
-              f"{h['structural']['statuses']}")
+              f"{h['structural']['statuses']}; independent {h['independent_vs_calibrated']} "
+              f"· unbanded counted {h['unbanded_counted']} · countable not_checked "
+              f"{h['not_checked_countable']}")
     for line in summary_lines(len(tests), len(PASS), len(FAIL), SKIPPED, robust_note):
         print(line)
     print(f"wall time {time.perf_counter() - t_start:.1f} s")

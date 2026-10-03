@@ -219,7 +219,7 @@ class of security and privacy obligations from v1 and is deliberate.
 - **HREQ-N-03** Python 3.10 compatibility (the Operator's Linux workspace, `pyproject.toml`).
 - **HREQ-N-04** The engine self-test SHALL complete in under two minutes in pure Python; Monte Carlo tests use small `n` and say so.
 - **HREQ-N-05** No network listener beyond localhost; no credentials of any kind in v1; CI's secret scan and transaction-capability checks apply to `src/health` unchanged.
-- **HREQ-N-06** Every threshold, tolerance, seed default and flag lives in `config/health/*.yaml` or `params.json`, never in code (as `docs/00` REQ-N-09).
+- **HREQ-N-06** Every threshold, tolerance, seed default and flag SHALL be mirrored in `config/health/*.yaml` or `params.json`, and `test_config_agrees_with_engine_and_reference` SHALL fail when a mirror and the code differ; a key with no reader is marked reserved (as `docs/00` REQ-N-09, read as a mirror rule).
 - **HREQ-N-07** Compute SHALL scale to the Operator's machine: Monte Carlo and sweeps run on a worker pool sized to the available cores, with a stress test that reports samples per second and frame rate at 64, 256 and 1,024 samples (V1 `app/worker.js` and the stress panel), and the numbers are recorded in `docs/health/measurements/` when the Operator runs it. "Use any resource this laptop can process and store" is a budget, not a licence: nothing runs on the Operator's machine that he has not launched.
 
 ## 7. Extensibility and Undo Requirements

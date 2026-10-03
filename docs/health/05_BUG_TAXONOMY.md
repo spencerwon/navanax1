@@ -140,7 +140,7 @@ HealthError                              (base — never raised directly)
 ├── EvidenceIntegrityError               → S0b. Handler HALTS RELEASE.
 │   ├── UnresolvedEvidenceError          (a cited record does not exist or does not resolve)
 │   ├── MisquotedSourceError
-│   └── ReferenceDivergenceError         (Python and JavaScript disagree beyond tolerance)
+│   └── ReferenceDivergenceError         (Python and JavaScript disagree beyond tolerance; defined in src/health/errors.py, raised nowhere yet — a divergence fails the golden tests, ADR-0002 errata)
 │
 ├── SilentWrongnessError                 → S1. Alert, non-suppressible.
 │   ├── MissingUncertaintyError          (a point without its band)
@@ -166,7 +166,7 @@ HealthError                              (base — never raised directly)
 ### 6.1 Rules the hierarchy enforces
 
 - **`SurfaceIntegrityError` is never caught and swallowed.** A surface that cannot render the disclaimer renders "unavailable". CI greps for an `except SurfaceIntegrityError` that does not re-raise.
-- **`ReferenceDivergenceError` halts release, not computation.** The engine keeps working; nothing is published until the divergence is explained.
+- **`ReferenceDivergenceError` halts release, not computation.** The engine keeps working; nothing is published until the divergence is explained. Phase 0: the class is defined in `src/health/errors.py` and raised nowhere yet; a divergence fails the golden tests in `tests/health_selftest.py` (ADR-0002 errata).
 - **`InfeasibleParametersError` is an error, not a warning.** The sampler counts the rejection; the deterministic path refuses.
 - **`ExpectationSkippedError` exists so the harness cannot shrink.** The number of rows equals the number of registered expectations, or the harness is wrong.
 - **Every raise carries context**: which parameter, which scenario, which evidence id, which model version.
