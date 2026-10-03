@@ -2,25 +2,36 @@
 
     python -m health.cli kb-check   [--root DIR] [--params FILE]
     python -m health.cli kb-summary [--root DIR] [--params FILE] [--json]
-    python -m health.cli status     [--root DIR] [--params FILE]
+    python -m health.cli status     [--root DIR] [--params FILE] [--fast]
 
 kb-check exits 1 when any `error` finding is reported (or the KB cannot be
-loaded at all) and 0 otherwise; warnings and info never fail it. --root points
-at a directory holding the five KB files (default: the packaged data).
+loaded at all) and 0 otherwise; warnings and info never fail it. status exits on
+the same rule -- 1 when the KB cannot be loaded or breaks its contract (it lists
+the error findings), 0 otherwise -- and whatever happens it ends with the
+disclaimer and then the validation status, each on its own line (HREQ-P-07,
+HREQ-S-01). --root points at a directory holding the five KB files (default: the
+packaged data). status --fast skips the expectation harness run (~3-8 s).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from collections import Counter
 from typing import Any
 
 from health.kb import KBLoadError, load_kb
 from health.kb.check import SEVERITIES, Finding, check_kb, counts_by_severity
-from health.kb.report import format_share, format_summary, summary
+from health.kb.report import UNAVAILABLE, assumption_count, format_share, format_summary, summary
 
 DISCLAIMER = "Educational model — not medical advice."
+VALIDATION_STATUS = "Not clinically validated."
+"""config/health/base.yaml model.disclaimer and model.validation_status (the self-test
+holds these copies, the engine's and the config's to one text). Constants, not a config
+read: the surface must print them even when nothing else can be loaded."""
+STATUS_MAX_ERRORS = 20
 
 
 def _version() -> str:
@@ -47,7 +58,8 @@ def _print_findings(findings: list[Finding]) -> None:
 def _sources(kb: dict[str, Any]) -> str:
     paths = kb.get("paths", {})
     kb_dir = paths.get("entities", "?").rsplit("/", 1)[0].rsplit("\\", 1)[0]
-    return f"KB files: {kb_dir}\nparams:   {paths.get('params') or '(none found)'}"
+    return (f"KB files: {kb_dir}\nparams:   {paths.get('params') or '(none found)'}\n"
+            f"params.data.js: {paths.get('params_js') or '(none found)'}")
 
 
 def cmd_kb_check(kb: dict[str, Any], _args: argparse.Namespace) -> int:
@@ -78,7 +90,7 @@ def _model_version() -> str:
     try:
         from health.engine import MODEL_VERSION
     except Exception:  # noqa: BLE001 - any engine import failure means "unavailable"
-        return "unavailable"
+        return UNAVAILABLE
     return str(MODEL_VERSION)
 
 
@@ -87,26 +99,88 @@ def _status_header() -> None:
     print(f"model {_model_version()}")
 
 
-def cmd_status(kb: dict[str, Any], _args: argparse.Namespace) -> int:
-    """HREQ-P-07 order: package version, model version, KB version and curator, counts,
-    parameter grade distribution and the >= B share, then the disclaimer on its own line."""
+def _footer() -> None:
+    """The last two lines of every status run, whatever happened before them."""
+    print(DISCLAIMER)
+    print(VALIDATION_STATUS)
+
+
+def expectations_line(fast: bool = False) -> str:
+    """HREQ-D-06: the expectation harness over every registered scenario at default
+    parameters (config expectations.evaluate_on), summarised by validate.summarize().
+    "unavailable" when the engine cannot be imported or the run fails -- never zeros."""
+    if fast:
+        return "expectations: skipped (--fast)"
+    try:
+        from health.engine import SCENARIOS, simulate
+        from health.engine.validate import evaluate_expectations, summarize
+    except Exception as exc:  # noqa: BLE001 - any engine import failure means "unavailable"
+        print(f"status: expectations unavailable: the engine cannot be imported "
+              f"({type(exc).__name__}: {exc})", file=sys.stderr)
+        return f"expectations: {UNAVAILABLE}"
+    try:
+        rows: list[dict[str, Any]] = []
+        for sid in SCENARIOS:
+            rows.extend(evaluate_expectations(sid, simulate(scenario=sid)))
+        s = summarize(rows)
+    except Exception as exc:  # noqa: BLE001 - a failed run is shown as unavailable, not as 0
+        print(f"status: expectations unavailable: the harness run failed "
+              f"({type(exc).__name__}: {exc})", file=sys.stderr)
+        return f"expectations: {UNAVAILABLE}"
+    kinds = Counter(r.get("kind") for r in rows)
+    cal = list(s["calibrated_parameters"])
+    return (f"expectations {s['rows']}: counted pass {s['counted_pass']} · "
+            f"counted fail {s['counted_fail']} · not_checked {s['not_checked']} · "
+            f"calibration {s['calibration']['n']} · structural {s['structural']['n']} · "
+            f"known-divergence {kinds['known-divergence']} · unverified {kinds['unverified']} · "
+            f"calibrated params {len(cal)}" + (f" ({', '.join(cal)})" if cal else ""))
+
+
+def _status_body(kb: dict[str, Any], args: argparse.Namespace) -> int:
     s = summary(kb)
     c = s["counts"]
-    counts = counts_by_severity(check_kb(kb))
-    _status_header()
+    findings = check_kb(kb)
+    counts = counts_by_severity(findings)
     print(f"KB {s['kbVersion']}  generated {s['generated']}  curator {s['curator']}")
     print(f"entities {c['entities']}  relations {c['relations']}  evidence {c['evidence']}  "
           f"verification records {c['verificationRecords']}  quantities {c['quantities']}")
     grades = s["paramsByGrade"]
-    print(f"engine params by grade ({c['params']}): "
-          + ", ".join(f"{g} {n}" for g, n in grades.items()))
+    if grades:
+        print(f"engine params by grade ({c['params']}): "
+              + ", ".join(f"{g} {n}" for g, n in grades.items()))
+    else:
+        print(f"engine params by grade: {UNAVAILABLE}")
     print(f"engine params graded >= B: {format_share(s['paramsGradedAtLeastB'])}  "
-          f"E-assumption: {grades.get('E-assumption', 0)}")
+          f"E-assumption: {assumption_count(s)}")
+    if s.get("paramsUnavailable"):
+        print(f"status: engine parameter grade share and E-assumption count unavailable: "
+              f"{s['paramsUnavailable']}", file=sys.stderr)
     print(f"KB contract: {counts['error']} error(s), {counts['warn']} warning(s) "
           "(python -m health.cli kb-check for detail)")
+    errors = [f for f in findings if f.severity == "error"]
+    for f in errors[:STATUS_MAX_ERRORS]:
+        print(f"  error  {f.code}  {f.where}: {f.message}")
+    if len(errors) > STATUS_MAX_ERRORS:
+        print(f"  ... and {len(errors) - STATUS_MAX_ERRORS} more error(s)")
+    print(expectations_line(args.fast))
     print(_modules_line())
-    print(DISCLAIMER)
-    return 0
+    return 1 if errors else 0
+
+
+def cmd_status(kb: dict[str, Any], args: argparse.Namespace) -> int:
+    """HREQ-P-07 order: package version, model version, KB version and curator, counts,
+    parameter grade distribution and the >= B share, the KB contract (and its errors),
+    the expectation counts (HREQ-D-06), the modules, then the disclaimer and the
+    validation status, each on its own line, LAST -- even if a line above fails."""
+    _status_header()
+    try:
+        code = _status_body(kb, args)
+    except Exception as exc:  # noqa: BLE001 - the footer must still be printed
+        print(f"status: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"status: {UNAVAILABLE} (internal error, see stderr)")
+        code = 1
+    _footer()
+    return code
 
 
 def _modules_line() -> str:
@@ -131,7 +205,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True, metavar="COMMAND")
     helps = {"kb-check": "check the KB against its contract; exit 1 on any error finding",
              "kb-summary": "counts by type, scale, relation, source and grade",
-             "status": "package and KB version, counts, grade share, disclaimer"}
+             "status": "versions, KB counts, grade share, contract, expectations, modules, "
+                       "disclaimer"}
     for name, text in helps.items():
         p = sub.add_parser(name, help=text, description=text)
         p.add_argument("--root", default=None,
@@ -141,6 +216,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "params.json, else the packaged engine/params.json)")
         if name == "kb-summary":
             p.add_argument("--json", action="store_true", help="print the summary as JSON")
+        if name == "status":
+            p.add_argument("--fast", action="store_true",
+                           help="skip the expectation harness run (prints 'skipped (--fast)')")
     return ap
 
 
@@ -148,7 +226,7 @@ def _ensure_printable() -> None:
     """Never crash on the disclaimer's dash under a non-UTF-8 stdout."""
     for stream in (sys.stdout, sys.stderr):
         try:
-            DISCLAIMER.encode(stream.encoding or "ascii")
+            (DISCLAIMER + " · ").encode(stream.encoding or "ascii")
         except (UnicodeEncodeError, LookupError):
             reconfigure = getattr(stream, "reconfigure", None)
             if reconfigure is not None:
@@ -165,10 +243,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":       # a surface that fails still carries the disclaimer
             _status_header()
             print("KB unavailable")
-            print(DISCLAIMER)
+            print(expectations_line(args.fast))
+            print(_modules_line())
+            _footer()
         return 1
     return COMMANDS[args.command](kb, args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:              # stdout closed early (`| head`): exit quietly
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        raise SystemExit(1) from None

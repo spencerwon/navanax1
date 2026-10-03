@@ -148,7 +148,7 @@ before publication (WF-H-06), and why a wrong number on a surface is S0a.
 | `python3 tests/health_selftest.py` | Engine self-test with the stdlib only | No |
 | `python3 tests/health_selftest.py --no-skips` | Strict: a skipped test is a failure | No |
 | `python3 tests/health_kb_selftest.py --no-skips` | Knowledge-base rules, each with a planted violation | No |
-| `PYTHONPATH=src python3 -m health.cli status` | Versions, counts, grade share, disclaimer | No |
+| `PYTHONPATH=src python3 -m health.cli status` | Versions, counts, grade share, expectation statuses (about 3 s; `--fast` skips them), every module's flag, the disclaimer and the validation status last; exits 1 on any contract error | No |
 | `PYTHONPATH=src python3 -m health.cli kb-check` | Every contract rule; exit 1 on an error | No |
 | `python3 tools/gates.py` | All of the repository's gates including the above | No |
 | `node tools/health_golden.mjs` | Regenerate the golden fixture from the JS reference (model changes only) | No |

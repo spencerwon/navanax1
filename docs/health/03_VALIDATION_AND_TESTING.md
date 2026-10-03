@@ -230,34 +230,33 @@ Planted registry fixtures prove each rule fires: a calibration-role expectation 
 
 `src/health/kb/check.py` enforces every rule in `kb/schema.json` and the cross-file rules that JSON Schema cannot express (V1 enforced the latter in `tests/kb.test.mjs`, per the schema's own description).
 
-| Rule | Statement | Origin |
-|---|---|---|
-| `schema` | Every record validates against `kb/schema.json`: id patterns; the six-grade enum; required fields on quantity, Entity, Relation and Evidence; entity type enum and scale 0–7; relation type enum; evidence kind, with `doi` or `pmid` required to match; https URLs; ISO dates; verification fields; per-database external-id patterns; no additional properties | `kb/schema.json` |
-| `ref-resolves` | Every entity, relation endpoint, parent and evidence id cited anywhere (including `params.json`) resolves | Schema description |
-| `parent-scale` | A parent's scale ≤ its child's scale (organism 0 … molecule 7) | Schema description |
-| `engine-mirror` | A quantity with `engineParam` matches that `params.json` row in value, range, unit and grade | `quantity.engineParam` |
-| `params-mirror` | `params.data.js` equals `params.json` | `params.data.js` header |
-| `xid-verified` | Every external id has a `VERIFICATION_LOG.json` record for that entity, database and id with `resolved: true` | `01` HREQ-E-07 |
-| `word-limits` | Summary ≤ 60 words; quote ≤ 25 words | Schema description |
-| `conflict-unsourced` | A conflict with empty evidence says so in its note | `conflict` definition |
-| `grade-ceiling` | No grade above the best `defaultGrade` of its evidence (V1: 0 violations) | `01` HREQ-E-03 |
-| `range-contains-value` | lo ≤ value ≤ hi | `01` §4 |
-| `unique-ids` | No id appears twice in a file | — |
-| `range-kind`, `dispersion` | Structured range kind on every sampled parameter; dispersion type and n where a dispersion is used | `01` HREQ-E-08, E-09 |
-| `calibration-link` | `calibrates` and `calibratedAgainst` agree on both sides | `01` HREQ-E-10 |
-| `fixed-reason` | Every `mc: false` row carries one of the three permitted reasons | `01` HREQ-U-01 |
-| `append-only` | Against the last released snapshot, no record is removed or changed except through a superseding record | `01` HREQ-E-06 |
+| Rule | Statement | Origin | Status (Phase 0, `src/health/kb/check.py`) |
+|---|---|---|---|
+| `schema` | Every record validates against `kb/schema.json`: id patterns; the six-grade enum; required fields on quantity, Entity, Relation and Evidence; entity type enum and scale 0–7; relation type enum; evidence kind, with `doi` or `pmid` required to match; https URLs; ISO dates; verification fields; per-database external-id patterns; no additional properties | `kb/schema.json` | enforced: a generic draft-07 validator over the live `schema.json` (`schema-violation`, `pattern-mismatch`, `unknown-key`, `missing-field`, `wrong-type`, `bad-enum`, `out-of-bounds`, …); a schema edit the data violates is an error |
+| `ref-resolves` | Every entity, relation endpoint, parent and evidence id cited anywhere (including `params.json`) resolves | Schema description | enforced: `dangling-evidence`, `dangling-endpoint`, `dangling-parent`, `param-evidence-unresolved` |
+| `parent-scale` | A parent's scale ≤ its child's scale (organism 0 … molecule 7) | Schema description | enforced: `parent-scale` |
+| `engine-mirror` | A quantity with `engineParam` matches that `params.json` row in value, range, unit and grade | `quantity.engineParam` | enforced: `engine-param-unknown`, `engine-param-mismatch`, `engine-params-unavailable` |
+| `params-mirror` | `params.data.js` equals `params.json` | `params.data.js` header | enforced: `params-mirror` |
+| `xid-verified` | Every external id has a `VERIFICATION_LOG.json` record for that entity, database and id with `resolved: true` | `01` HREQ-E-07 | enforced: `external-id-unverified` (the latest log record governs), `entity-removed` |
+| `word-limits` | Summary ≤ 60 words; quote ≤ 25 words | Schema description | enforced: `summary-too-long`, `quote-too-long` (JavaScript whitespace) |
+| `conflict-unsourced` | A conflict with empty evidence says so in its note | `conflict` definition | enforced: `conflict-unsourced-note` (a clause of the note must begin "Unsourced" or "No verified source") |
+| `grade-ceiling` | No grade above the best `defaultGrade` of its evidence (V1: 0 violations) | `01` HREQ-E-03 | enforced: `grade-ceiling`, `default-grade-mapping`, `evidence-grading-missing` |
+| `range-contains-value` | lo ≤ value ≤ hi | `01` §4 | enforced: `value-outside-range`, `range-order` |
+| `unique-ids` | No id appears twice in a file | — | enforced: `duplicate-id` |
+| `range-kind`, `dispersion` | Structured range kind on every sampled parameter; dispersion type and n where a dispersion is used | `01` HREQ-E-08, E-09 | deferred (tracker W-18): needs structured fields on `params.json` rows; named in `DEFERRED_RULES` |
+| `calibration-link` | `calibrates` and `calibratedAgainst` agree on both sides | `01` HREQ-E-10 | deferred (W-18): the harness carries `role`/`calibrates` on the Python side (BUG-20261003-097); `params.json` has no `calibratedAgainst` yet |
+| `fixed-reason` | Every `mc: false` row carries one of the three permitted reasons | `01` HREQ-U-01 | deferred (W-18): the reason is free text in `notes` |
+| `append-only` | Against the last released snapshot, no record is removed or changed except through a superseding record | `01` HREQ-E-06 | deferred (W-18, HREQ-V-18): needs a released snapshot and a `supersedes` field; `entity-removed` already makes a deleted entity an error |
 
 V1 scale, for sizing the gate: 107 entities, 203 relations, 57 evidence records, 20 quantities (10 mirroring engine parameters, 7 carrying conflicts) and 154 verification records, all resolved.
 
-**Every rule has a planted-violation test.** For each rule there is a minimal copy of the knowledge base with exactly one violation. The checker must report that rule and no other. A meta-test compares the checker's rule list with the planted fixtures and fails if either has an entry the other lacks. A rule with no planted violation has never been shown to fire, and counts as absent.
+**Every rule has a planted-violation test.** For each rule there is a minimal copy of the knowledge base with exactly one violation. The checker must report that rule and no other. A meta-test compares the checker's rule list with the planted fixtures and fails if either has an entry the other lacks. A rule with no planted violation has never been shown to fire, and counts as absent. A second meta-test (`tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred`) parses this table at run time and fails if a documented rule has neither an implementing error-severity code nor a `DEFERRED_RULES` entry that says what it is waiting for. As of Phase 0 the checker has 47 error-severity codes, 6 warnings and 1 info line; `health.cli status` exits 1 on any error finding, the same rule as `kb-check`.
 
 - **HREQ-V-16** `src/health/kb/check.py` SHALL enforce every rule in the §6 table and SHALL block a merge on any violation.
 - **HREQ-V-17** Every knowledge-base rule SHALL have a planted-violation fixture that triggers that rule and no other, and a meta-test SHALL fail if any rule lacks one.
 - **HREQ-V-18** The append-only check SHALL compare against the last released snapshot of the knowledge base and evidence ledger.
 
 ---
-
 ## 7. Sensitivity and Robustness
 
 ### 7.1 Influence screen
@@ -403,10 +402,10 @@ Computed from data, never typed, recorded on every release:
 |---|---|---|
 | Share of parameters graded ≥ B | 24 / 54 = 44.4 % | Evidence strength of the parameter table |
 | E-assumption count, and its trend | 30 | Should fall release on release; a rise must be explained |
-| Expectations: counted pass / counted fail / not_checked | 24 rows, at most 10 counted (12 countable kinds, less 1 calibration and 1 structural); harness not yet run on the port | The validation record, read with the next row |
+| Expectations: counted pass / counted fail / not_checked | 24 rows; counted 9 pass, 1 fail; 12 not_checked; calibration 1 (pass), structural 1 (pass) — measured on the port 2026-10-03, identical on the reference; the fail is `drink_water_1L` sodium recovery 7.05 h vs [0, 6] h (BUG-20261003-115) | The validation record, read with the next row |
 | Calibrated parameters vs independent countable expectations | 4 calibrated (3 to the He 2013 band; `map_auto_tau_h` to the D-2 design target); 0 pre-registered independent expectations | Whether validation outnumbers tuning |
 | Rejection share | 0.4–1.2 % at n = 256 | Whether the ranges describe possible people |
-| JS/Python divergence incidents | None yet (no port) | Each is a stop-the-line event |
+| JS/Python divergence incidents | 0 (port landed 2026-10-03; ~8,900 golden values compared, worst difference about 4e-14 relative) | Each is a stop-the-line event |
 | Bugs by class and severity | Per `05_BUG_TAXONOMY.md` | Where errors come from |
 
 **The one that matters most:** the number of **pre-registered, independent, countable expectations that pass**, set against the number of calibrated parameters. For V1 it is zero against four. Everything in this document exists to make that first number grow honestly. A model that hits only the targets it was tuned to hit has shown that its tuning works, and nothing about physiology.
@@ -434,8 +433,8 @@ For import into `00_REQUIREMENTS.md`.
 | HREQ-V-13 | Status pass/fail/not_checked; non-finite is fail; not_checked has a reason | 5.2 | `src/health/engine/validate.py` |
 | HREQ-V-14 | Counted only if quantitative or semi-quantitative, role validation, status pass or fail | 5.2 | `src/health/engine/validate.py` |
 | HREQ-V-15 | Status published with band, in-range share, n, seed and versions | 5.2 | `src/health/engine/validate.py` |
-| HREQ-V-16 | KB checker enforces every §6 rule and blocks merge | 6 | `src/health/kb/check.py` |
-| HREQ-V-17 | Every KB rule has a planted violation; meta-test enforces it | 6 | `tests/health_selftest.py` |
+| HREQ-V-16 | KB checker enforces every §6 rule and blocks merge | 6 | `src/health/kb/check.py` (11 of 16 rules enforced in Phase 0; 5 deferred by name, tracker W-18) |
+| HREQ-V-17 | Every KB rule has a planted violation; meta-test enforces it | 6 | `tests/health_kb_selftest.py` |
 | HREQ-V-18 | Append-only check against the last released snapshot | 6 | `src/health/kb/check.py` |
 | HREQ-V-19 | Influence screen rerun on every model change; difference reviewed | 7.4 | Review record |
 | HREQ-V-20 | ±20 % (range-clipped) perturbation never flips a countable sign | 7.4 | Robustness run |

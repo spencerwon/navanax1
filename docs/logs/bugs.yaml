@@ -4070,7 +4070,8 @@ bugs:
   severity: S3
   priority: P1
   error_class: PRS
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:40:00-05:00"
   occurred_at: "2026-10-03T02:30:00-05:00"
   detected_by: "health-rigor-lead mutation: entities[0].type = [\"organism\"] under --root; status tracebacks with empty stdout"
@@ -4088,11 +4089,14 @@ bugs:
     summary() uses field values as dict keys and sort keys; a list is unhashable and an
     object is unorderable, and the garbage test only substituted whole documents.
   resolution: >-
-    Being fixed in this PR: summary() buckets non-string values under "(invalid)"; status
+    Fixed in this PR: summary() buckets non-string values under "(invalid)"; status
     prints findings and the disclaimer last with exit 1; regression test on an
     array-typed field.
   monitor_gap: >-
     The never-raises test substituted whole documents, never single fields.
+  regression_test:
+    - tests/health_kb_selftest.py::test_checker_never_raises_on_garbage
+    - tests/health_kb_selftest.py::test_status_prints_the_disclaimer
 
 - id: BUG-20261003-106
   area: health
@@ -4100,7 +4104,8 @@ bugs:
   severity: S3
   priority: P1
   error_class: KBI
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:42:00-05:00"
   occurred_at: "2026-10-03T02:30:00-05:00"
   detected_by: "health-rigor-lead mutation: a quantity with value Infinity passes kb-check; Node JSON.parse throws on the same file"
@@ -4113,8 +4118,10 @@ bugs:
     None on shipped data. A KB file the Python gate passes could break the published app
     at load, the opposite of what the gate is for.
   root_cause: Python's json accepts the non-standard tokens by default.
-  resolution: "Being fixed in this PR: json.loads(parse_constant=...) raises; regression test."
+  resolution: "Fixed in this PR: json.loads(parse_constant=...) raises; regression test."
   monitor_gap: No test fed non-standard JSON to the loader.
+  regression_test:
+    - tests/health_kb_selftest.py::test_strict_json_and_params_data_js
 
 - id: BUG-20261003-107
   area: health
@@ -4122,7 +4129,8 @@ bugs:
   severity: S2
   priority: P1
   error_class: KBI
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:44:00-05:00"
   occurred_at: "2026-10-03T02:30:00-05:00"
   detected_by: "health-rigor-lead mutation: DOI 10.1016/s0889<NBSP>8529 accepted in Python, rejected by ECMA-262 in Node"
@@ -4135,8 +4143,10 @@ bugs:
     None on shipped data. An evidence id that does not resolve could pass the gate with
     an invisible character in it, which is provenance loss by the back door.
   root_cause: "re.ASCII changes \\S to match non-ASCII whitespace; the schema's patterns are ECMA-262."
-  resolution: "Being fixed in this PR: ECMA-262 class semantics for \\s \\S \\d \\w; regression test."
+  resolution: "Fixed in this PR: ECMA-262 class semantics for \\s \\S \\d \\w; regression test."
   monitor_gap: No test used non-ASCII whitespace.
+  regression_test:
+    - tests/health_kb_selftest.py::test_patterns_have_ecma_262_semantics
 
 - id: BUG-20261003-108
   area: health
@@ -4144,7 +4154,8 @@ bugs:
   severity: S2
   priority: P1
   error_class: KBI
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:46:00-05:00"
   occurred_at: "2026-10-03T02:30:00-05:00"
   detected_by: "health-rigor-lead mutation: appended a later resolved:false record for organism:body / UBERON; no finding"
@@ -4157,8 +4168,10 @@ bugs:
     None on shipped data (all 154 records resolve). The append-only log cannot retire an
     identifier, which defeats the point of supersession.
   root_cause: The check tested membership of any resolved record rather than the latest.
-  resolution: "Being fixed in this PR: the latest record per (entity, db, id) governs; regression test."
+  resolution: "Fixed in this PR: the latest record per (entity, db, id) governs; regression test."
   monitor_gap: No plant appended a superseding record.
+  regression_test:
+    - tests/health_kb_selftest.py::test_verification_log_latest_record_governs
 
 - id: BUG-20261003-109
   area: health
@@ -4166,7 +4179,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: PRS
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:48:00-05:00"
   occurred_at: "2026-10-03T02:30:00-05:00"
   detected_by: "health-rigor-lead: --params pointing at a file containing null; status exits 0 showing E-assumption: 0 (real count 30)"
@@ -4179,8 +4193,11 @@ bugs:
     Reader-facing on the status surface: a zero where the honest answer is "unavailable",
     the exact substitution HREQ-N-01 forbids.
   root_cause: The grade distribution defaults to zero counts when no rows load.
-  resolution: "Being fixed in this PR: both figures print unavailable with the reason on stderr; regression test."
+  resolution: "Fixed in this PR: both figures print unavailable with the reason on stderr; regression test."
   monitor_gap: The CLI test only exercised a missing KB root, not a bad params file.
+  regression_test:
+    - tests/health_kb_selftest.py::test_summary_counts_match_the_data
+    - tests/health_kb_selftest.py::test_status_prints_the_disclaimer
 
 - id: BUG-20261003-110
   area: health
@@ -4188,7 +4205,8 @@ bugs:
   severity: S3
   priority: P1
   error_class: CFG
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:50:00-05:00"
   occurred_at: "2026-10-03T02:45:00-05:00"
   detected_by: "health-rigor-lead registry_probe.py: comments on flags, yes/on/TRUE, 4-space indent, id not first, flow mappings, quoted lists, ~, tabs"
@@ -4204,8 +4222,11 @@ bugs:
   root_cause: >-
     A line-regex scanner for the shipped file's exact shape, compared with PyYAML only on
     that file.
-  resolution: "Being fixed in this PR: a correct YAML-subset parser; tests compare it with PyYAML on five variants."
+  resolution: "Fixed in this PR: a correct YAML-subset parser; tests compare it with PyYAML on five variants."
   monitor_gap: The agreement test used one file.
+  regression_test:
+    - tests/health_kb_selftest.py::test_registry_reader_agrees_with_pyyaml
+    - tests/health_kb_selftest.py::test_registry_reader_reads_the_yaml_subset
 
 - id: BUG-20261003-111
   area: health
@@ -4213,7 +4234,8 @@ bugs:
   severity: S3
   priority: P1
   error_class: KBI
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:52:00-05:00"
   occurred_at: "2026-10-03T02:45:00-05:00"
   detected_by: "health-rigor-lead mutation: maxLength 5 on Entity.name -> schema-drift warn, PASS"
@@ -4224,8 +4246,10 @@ bugs:
   requirement: HREQ-D-03
   data_impact: None on shipped data; a changed contract would not be enforced on it.
   root_cause: The checker mirrors the schema by hand and only warns when the mirror and the file differ.
-  resolution: "Being fixed in this PR: evaluate the live schema generically; a violation of it is an error."
+  resolution: "Fixed in this PR: evaluate the live schema generically; a violation of it is an error."
   monitor_gap: The drift check watched the file hash, not the data.
+  regression_test:
+    - tests/health_kb_selftest.py::test_schema_edits_are_enforced_not_just_detected
 
 - id: BUG-20261003-112
   area: health
@@ -4233,7 +4257,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: VAL
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:54:00-05:00"
   occurred_at: "2026-10-03T03:00:00-05:00"
   detected_by: "health-rigor-lead reconciliation of the 03 §6 table against check.py RULES (requested by the orchestrator)"
@@ -4261,6 +4286,9 @@ bugs:
     has neither a code nor a deferral. 03 §6 gains a status column (tracker W-17).
   monitor_gap: >-
     No test read the document; the gate now does.
+  regression_test:
+    - tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred
+    - tests/health_kb_selftest.py::test_every_contract_rule_fires_on_a_planted_violation
 
 - id: BUG-20261003-113
   area: health
@@ -4268,7 +4296,8 @@ bugs:
   severity: S4
   priority: P2
   error_class: VAL
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
   logged_at: "2026-10-03T03:56:00-05:00"
   occurred_at: "2026-10-03T02:45:00-05:00"
   detected_by: "health-rigor-lead mutants.py and edge.py"
@@ -4280,8 +4309,12 @@ bugs:
   requirement: HREQ-V-17
   data_impact: None. Test strength and performance only.
   root_cause: First-pass tests pinned behaviour on the shipped file, not on boundaries.
-  resolution: "Being fixed in this PR: items validated; linear cycle walk (1,000-deep chain under 1 s); mutants killed; warning set pinned; one rule per plant."
+  resolution: "Fixed in this PR: items validated; linear cycle walk (1,000-deep chain under 1 s); mutants killed; warning set pinned; one rule per plant."
   monitor_gap: No mutation testing in the gates; the rigor-lead runs it per review.
+  regression_test:
+    - tests/health_kb_selftest.py::test_boundaries_kill_the_surviving_mutants
+    - tests/health_kb_selftest.py::test_parent_cycle_walk_is_linear
+    - tests/health_kb_selftest.py::test_every_contract_rule_fires_on_a_planted_violation
 
 - id: BUG-20261003-114
   area: health

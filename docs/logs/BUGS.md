@@ -1378,9 +1378,9 @@ forever, so the append-only log cannot retire one (108); `status` prints
 `E-assumption: 0` when params are unusable instead of "unavailable" (109); the
 registry scanner disagrees with PyYAML in 17 of 20 crafted cases (110); a schema
 tightening the data violates is only a warning (111); `03 §6` names sixteen rules and
-seven are unimplemented, four warn-only (112); checker hygiene (113). All being fixed in
-this PR with regression tests, except what needs data fields that do not exist yet,
-which `DEFERRED_RULES` names and a meta-test enforces.
+seven are unimplemented, four warn-only (112); checker hygiene (113). All fixed in this PR
+with regression tests (47 blocking rules now), except what needs data fields that do not
+exist yet, which `DEFERRED_RULES` names and a meta-test enforces.
 
 **BUG-20261003-114 (S4/P3).** `k_excr_gain` says "Log-uniform sampling"; its range is
 exactly 5-fold and the rule is `hi/lo > 5`, so it is uniform. Inert in every scenario.
@@ -1408,20 +1408,11 @@ porting; none reachable with shipped data.
 | BUG-20261003-102 | S1 | P1 | Imperative scenario titles, no reference person | Display-title map at M1 (W-19) |
 | BUG-20261003-103 | S1 | P1 | Chronic result hides its divergence and calibration status | M1 viewer review (HREQ-S-07) |
 | BUG-20261003-104 | S1 | P1 | Only the first disclaimer sentence is rendered in V1 | Python side fixed in this PR; reference at the next version bump (W-20) |
-| BUG-20261003-105 | S3 | P1 | report.py tracebacks on a list-typed field; status loses its disclaimer | Being fixed in this PR |
-| BUG-20261003-106 | S3 | P1 | Loader accepts NaN/Infinity the browser rejects | Being fixed in this PR |
-| BUG-20261003-107 | S2 | P1 | re.ASCII lets a DOI with a Unicode space through | Being fixed in this PR |
-| BUG-20261003-108 | S2 | P1 | Any resolved:true record verifies an id forever | Being fixed in this PR |
-| BUG-20261003-109 | S1 | P1 | status prints E-assumption: 0 instead of unavailable | Being fixed in this PR |
-| BUG-20261003-110 | S3 | P1 | Registry scanner disagrees with PyYAML | Being fixed in this PR |
-| BUG-20261003-111 | S3 | P1 | Schema tightening only warns | Being fixed in this PR |
-| BUG-20261003-112 | S1 | P1 | 03 §6 rules unimplemented or warn-only | Being fixed in this PR; deferred rules named |
-| BUG-20261003-113 | S4 | P2 | Checker hygiene: unvalidated arrays, cubic walk, surviving mutants | Being fixed in this PR |
 | BUG-20261003-114 | S4 | P3 | k_excr_gain sampling note wrong | Curator, M1 |
 | BUG-20261003-115 | S1 | P1 | 1 L water sodium recovery 7.05 h vs registered 6 h | Operator decision D-9 |
 | BUG-20261003-116 | S4 | P3 | Latent reference-engine quirks | Next reference change (M1) |
 
-95 of 116 logged bugs are fixed (the health entries of 2026-10-03 are open at logging; those marked "in this PR" close in the pull request that logged them, with their regression tests).
+104 of 116 logged bugs are fixed (the health entries of 2026-10-03 are open at logging; those marked "in this PR" close in the pull request that logged them, with their regression tests).
 
 ### The lesson
 
