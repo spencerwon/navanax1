@@ -35,3 +35,6 @@ tools/sample_frames.jsonl
 # market-analyst output: local only, never published
 docs/market/
 data/market/
+
+# agent worktrees (builders working in isolation): checkouts, never content
+.claude/worktrees/
