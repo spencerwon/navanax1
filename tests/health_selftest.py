@@ -28,6 +28,7 @@ import importlib
 import inspect
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -177,9 +178,31 @@ def module_available(name: str) -> bool:
     return _IMPORTABLE[name]
 
 
+def needs_binary(name: str, *paths: str):
+    """Declare an executable a test cannot run without (`name` on PATH, or one of `paths`).
+    Recorded as SKIPPED by name when absent, like a missing module; `--no-skips` makes the
+    absence a failure, so the gate and CI never pass by skipping it."""
+    def deco(fn):
+        fn.needs_binaries = getattr(fn, "needs_binaries", ()) + ((name, paths),)
+        return fn
+    return deco
+
+
+def binary_available(name: str, paths: tuple[str, ...]) -> str | None:
+    import shutil
+    for cand in paths:
+        if os.path.exists(cand) and os.access(cand, os.X_OK):
+            return cand
+    return shutil.which(name)
+
+
 def missing_modules(fn) -> tuple[str, ...]:
-    """The modules `fn` declared that are not importable here. Empty tuple = run it."""
-    return tuple(m for m in getattr(fn, "needs_modules", ()) if not module_available(m))
+    """The modules (and binaries) `fn` declared that are not available here. Empty tuple =
+    run it."""
+    missing = [m for m in getattr(fn, "needs_modules", ()) if not module_available(m)]
+    missing += [f"{name} (binary)" for name, paths in getattr(fn, "needs_binaries", ())
+                if binary_available(name, paths) is None]
+    return tuple(missing)
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -380,6 +403,45 @@ def test_reference_engine_files_match_the_fixture_hashes():
     ours = hashlib.sha256((Path(params_module.__file__).parent / "params.json").read_bytes()).hexdigest()
     check("fixture: the Python engine's params.json has the reference params.json hash",
           ours == recorded.get("reference/metabolic-map-v1/engine/params.json"), ours)
+
+
+@needs_binary("node", "/opt/node22/bin/node")
+def test_golden_check_ignores_the_recorded_node_version_but_not_a_value():
+    """BUG-20261003-171: CI on Node 22.23 read a fixture generated under 22.22 as stale,
+    because `tools/health_golden.mjs --check` compared whole files and the header records
+    `process.version`. The recorded Node version is provenance, not a value: Node 20.20,
+    22.22 and 22.23 regenerate the fixture byte-identically apart from that line. Planted
+    on a copy (HEALTH_GOLDEN_OUT): a different recorded version is up to date; one changed
+    value is stale, and the first differing line is named."""
+    import re
+    import subprocess
+    import tempfile
+    node = binary_available("node", ("/opt/node22/bin/node",))
+    text = (ROOT / "tests" / "fixtures" / "health" / "golden_v1.json").read_text(encoding="utf-8")
+    check("golden --check: the fixture header records the Node version that wrote it",
+          re.search(r'(?m)^ "node": "v\d+\.\d+\.\d+",$', text) is not None)
+
+    def run_check(planted: str) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "golden.json"
+            out.write_text(planted, encoding="utf-8")
+            r = subprocess.run([node, str(ROOT / "tools" / "health_golden.mjs"), "--check"],
+                               env={**os.environ, "HEALTH_GOLDEN_OUT": str(out)},
+                               capture_output=True, text=True, timeout=300, check=False)
+            return r.returncode, r.stdout + r.stderr
+
+    code, out = run_check(re.sub(r'(?m)^ "node": "v[^"]*",$', ' "node": "v99.0.0",', text, count=1))
+    check("golden --check: a copy that differs only in the recorded Node version is up to "
+          "date, and the check says which versions were compared",
+          code == 0 and "generated under node v99.0.0" in out and "identical" in out, out[-400:])
+    old, new = "0.6270739405881613", "0.6270739405881614"
+    check("golden --check: the planted value exists exactly once (mulberry32 seed 1)",
+          text.count(old) == 1)
+    code, out = run_check(text.replace(old, new, 1))
+    check("golden --check: one changed value is stale (exit 1) and the first differing line "
+          "is named with both versions of it",
+          code == 1 and "stale" in out and "first difference at line" in out and new in out
+          and old in out, out[-600:])
 
 
 def test_model_version_agrees_everywhere():

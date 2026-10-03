@@ -1629,6 +1629,13 @@ ignored build artefact (`src/navanax.egg-info/SOURCES.txt`) counted as a live re
 module paths and the gate failed in the main checkout. The scan reads `git ls-files` now and
 walks only outside a checkout, the rule the ledger gate learned the same day (BUG-166).
 
+**BUG-20261003-171 (S3/P1).** CI's first run on the pull request went red at the golden
+check: the fixture header records the Node version that wrote it and `--check` compared
+whole files, so the runner's Node 22.23.3 read a value-identical fixture as stale. Node
+20.20, 22.22 and 22.23 regenerate every value byte-identically; the check now treats the
+recorded version as provenance, names the first differing line when something real
+changed, and a test plants both cases on a copy.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
@@ -1648,7 +1655,7 @@ walks only outside a checkout, the rule the ledger gate learned the same day (BU
 | BUG-20261003-127 | S1 | P1 | The counted row drink_water_1L/05 (minimum urine osmolality) shares its only evidence (Baylis 1986) with U_os… | Open -- the curator's decision (row not changed; ranges are never widened): cite an independent source for the row and drop Baylis 1986 fro… |
 | BUG-20261003-128 | S2 | P1 | The registered "< 6 h" bound of the sodium recovery row has no traceable Crowe 1987 source value, and the row… | Open -- curator (extends BUG-20261003-115): find and quote the source value for 6 h, or record the bound as an assumption with that grade;… |
 
-155 of 169 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
+156 of 170 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
 
 ### The lesson
 

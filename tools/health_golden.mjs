@@ -36,7 +36,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_DIR = resolve(ROOT, 'reference/metabolic-map-v1/engine');
 const ENGINE = resolve(ENGINE_DIR, 'index.js');
-const OUT = resolve(ROOT, 'tests/fixtures/health/golden_v1.json');
+// HEALTH_GOLDEN_OUT overrides the fixture path (the self-test uses it to check a planted copy).
+const OUT = process.env.HEALTH_GOLDEN_OUT ? resolve(process.env.HEALTH_GOLDEN_OUT)
+  : resolve(ROOT, 'tests/fixtures/health/golden_v1.json');
 const MAX_BYTES = 400 * 1024;
 
 const E = await import(pathToFileURL(ENGINE).href);
@@ -512,12 +514,27 @@ if (bytes > MAX_BYTES) {
 }
 
 if (process.argv.includes('--check')) {
+  // The header's `node` field is provenance (which Node wrote the file), not a value: a
+  // fixture is up to date when every other byte is the same, whatever Node runs the
+  // check. Node 20.20, 22.22 and 22.23 regenerate it byte-identically (BUG-20261003-171,
+  // which was CI reading a valid fixture as stale because only this line differed).
   const cur = existsSync(OUT) ? readFileSync(OUT, 'utf8') : '';
-  if (cur !== text) {
+  const NODE_LINE = /^ "node": "v[^"]*",$/m;
+  const recorded = (cur.match(NODE_LINE) || [''])[0].replace(/^ "node": "|",$/g, '');
+  const curNormalised = cur.replace(NODE_LINE, ` "node": ${JSON.stringify(process.version)},`);
+  if (curNormalised !== text) {
+    const a = curNormalised.split('\n'), b = text.split('\n');
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
     console.error(`health_golden: ${OUT} is stale; regenerate with: ${golden.regenerate}`);
+    console.error(`  first difference at line ${i + 1}:`);
+    console.error(`    file: ${(a[i] ?? '<end of file>').slice(0, 160)}`);
+    console.error(`    now:  ${(b[i] ?? '<end of file>').slice(0, 160)}`);
     process.exit(1);
   }
-  console.log(`health_golden: ${OUT} is up to date (${bytes} bytes)`);
+  const under = recorded && recorded !== process.version
+    ? ` (generated under node ${recorded}, checked under ${process.version}: identical)` : '';
+  console.log(`health_golden: ${OUT} is up to date (${bytes} bytes)${under}`);
 } else {
   mkdirSync(dirname(OUT), { recursive: true });
   writeFileSync(OUT, text);
