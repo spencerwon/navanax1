@@ -1402,8 +1402,6 @@ porting; none reachable with shipped data.
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 | BUG-20261003-095 | S2 | P2 | Strain index glomerular constants live in code, not the table | Needs three graded rows and a model-version bump (M1) |
 | BUG-20261003-096 | S1 | P1 | Influence screen under-counts feeders; evidence chips omit a calibrated parameter | HREQ-U-12 per-scenario, both-direction screen (M1) |
-| BUG-20261003-097 | S1 | P1 | Harness could count a calibration target as validation | Being fixed in this PR (role field, regression test) |
-| BUG-20261003-098 | S3 | P1 | Golden fixture omitted the chronic scenario, stiff corner, checkpoints | Being fixed in this PR (fixture regenerated) |
 | BUG-20261003-099 | S4 | P3 | Stale parameter count in a reference comment; no M9 block | With the next reference change (M1) |
 | BUG-20261003-100 | S0a | P0 | Published V1 surface frames the strain index as a dose answer without its label | Operator decision A-2: patch the artifact or accept until M1 |
 | BUG-20261003-101 | S1 | P1 | 135 mmol/L drawn as a red danger line | M1 viewer review, both implementations |
@@ -1423,7 +1421,7 @@ porting; none reachable with shipped data.
 | BUG-20261003-115 | S1 | P1 | 1 L water sodium recovery 7.05 h vs registered 6 h | Operator decision D-9 |
 | BUG-20261003-116 | S4 | P3 | Latent reference-engine quirks | Next reference change (M1) |
 
-93 of 116 logged bugs are fixed (the twenty-two health entries of 2026-10-03 are open at logging; those marked "in this PR" close in the pull request that logged them, with their regression tests).
+95 of 116 logged bugs are fixed (the health entries of 2026-10-03 are open at logging; those marked "in this PR" close in the pull request that logged them, with their regression tests).
 
 ### The lesson
 

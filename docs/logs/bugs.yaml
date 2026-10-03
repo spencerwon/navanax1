@@ -3794,7 +3794,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: VAL
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:20:00-05:00"
   logged_at: "2026-10-03T03:14:00-05:00"
   occurred_at: "2026-10-03T02:50:00-05:00"
   detected_by: "methodology builder reading src/health/engine/validate.py summarize() against docs/health/01 §6 (calibration is never validation)"
@@ -3814,13 +3815,15 @@ bugs:
     expectation's note; nothing machine-readable connects an expectation to the
     parameters tuned against it, and the port's summarize() counts by status alone.
   resolution: >-
-    In this PR: Python-side `role` (validation | calibration | structural) and
+    Fixed in this PR (commit with the engine port): Python-side `role` (validation | calibration | structural) and
     `calibrates` on the two rows; summarize() reports counted passes and fails separately
     and never counts calibration or structural rows; the JS reference gains the same
     fields at M1 with the version bump (tracker W-13).
   monitor_gap: >-
     No test planted a passing calibration row and asserted the validation count did not
     move; docs/health/03 §5.2 now requires it.
+  regression_test:
+    - tests/health_selftest.py::test_calibration_and_structural_rows_are_never_counted_as_validation
 
 - id: BUG-20261003-098
   area: health
@@ -3828,7 +3831,8 @@ bugs:
   severity: S3
   priority: P1
   error_class: NUM
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T04:20:00-05:00"
   logged_at: "2026-10-03T03:16:00-05:00"
   occurred_at: "2026-10-03T02:55:00-05:00"
   detected_by: "methodology builder comparing tools/health_golden.mjs with docs/health/03 §4.2"
@@ -3847,13 +3851,17 @@ bugs:
     The fixture generator was written to the builder brief's list of four scenarios
     before docs/health/03 §4.2 specified the full content.
   resolution: >-
-    In this PR: chronic_high_salt_30d thinned to <= 1,000 recorded points with the
+    Fixed in this PR (commit with the engine port): chronic_high_salt_30d thinned to <= 1,000 recorded points with the
     exact step count asserted; the §3.5 stiff corner on chronic_high_salt_30d and
     drink_water_3L_fast; checkpoints (constants, initial state, rhs at t = 0, one RK4
     step); SHA-256 of every reference engine file in the header, compared on disk.
   monitor_gap: >-
     No test asserted that the fixture covers every registered scenario; the port's
     trajectory test now lists what the fixture covers and fails on a missing one.
+  regression_test:
+    - tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+    - tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes
+    - tests/health_selftest.py::test_divergence_checkpoints_match_javascript_reference
 
 - id: BUG-20261003-099
   area: health
