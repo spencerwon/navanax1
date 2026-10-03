@@ -84,7 +84,7 @@ Run bottom-up. A failure in a lower layer makes every result above it unpublisha
 
 ### 3.1 Steady state
 
-The `baseline` scenario (`scenarios.js`) runs 24 h with nothing happening. Gate: for every state i, max over t of |y_i(t) − y_i(0)| / max(|y_i(0)|, 1e-12) < 1e-6, the `numerical` expectation in `scenarios.js`. Measured 2026-10-03 at default parameters: 9.7e-16 (ADH). The gate is nine orders above round-off on purpose. Its job is to catch a "steady state" that is not one (a wrong closed form in M0, or a flux missing from `rhs()`), not to measure round-off. Because the closed form must hold for every feasible parameter set, not only the default, the gate also runs on every accepted sample of the reporting set (n = 256).
+The `baseline` scenario (`scenarios.js`) runs 24 h with nothing happening. Gate: for every state i, max over t of |y_i(t) − y_i(0)| / scale_i < 1e-6, with scale_i = |y_i(0)|, or 1 for a state whose baseline is exactly 0 (`max_relative_state_drift` in `src/health/engine/validate.py`); this is the `numerical` expectation in `scenarios.js`. Measured 2026-10-03 at default parameters: 9.7e-16 (ADH). The gate is nine orders above round-off on purpose. Its job is to catch a "steady state" that is not one (a wrong closed form in M0, or a flux missing from `rhs()`), not to measure round-off. Because the closed form must hold for every feasible parameter set, not only the default, the gate also runs on every accepted sample of the reporting set (n = 256).
 
 ### 3.2 Mass balance
 
@@ -149,42 +149,45 @@ The JavaScript reference (`reference/metabolic-map-v1/engine/`) runs in the brow
 
 ### 4.2 The golden fixture
 
-`tests/fixtures/health/golden_v1.json` is generated only by `tools/health_golden.mjs`, which imports the JavaScript reference and writes:
+`tests/fixtures/health/golden_v1.json` is generated only by `tools/health_golden.mjs`, which imports the JavaScript reference. The output is deterministic, with no timestamps, so the same reference and Node version give the same bytes. `--check` regenerates in memory and fails if the file on disk differs, which is how a stale fixture is detected. As built on 2026-10-03, the fixture holds:
 
-| Section | Content | Compared |
-|---|---|---|
-| Header | Generator version; `MODEL_VERSION` (V1: `1.0.1`); SHA-256 of every engine file and of `params.json`; Node version; date | Exact. A hash mismatch with the reference means the fixture is stale |
-| Constants | `constants()` at default parameters (steady state, FE0, conductance, τ_min) | 1e-9 |
-| Checkpoints | Initial state; `rhs()` at the initial state with baseline inputs; state after one RK4 step | 1e-9. These exist to localise a divergence (§4.4) |
-| Trajectories | Every registered scenario at default parameters: t, 13 states, 21 derived, 6 ledger entries; `meta.steps` | 1e-9; step counts exact |
-| Stiff corner | `chronic_high_salt_30d` and `drink_water_3L_fast` at the §3.5 corner | 1e-9 |
-| PRNG | First 1,000 outputs of mulberry32 for seeds 1–5 (chosen) | Exact: integer arithmetic |
-| Samples | `drawSamples(n = 64, seed = 1)`: accepted parameter sets and rejected count | Values 1e-9; count exact |
-| Monte Carlo | `simulateMC` on `drink_water_1L`, n = 64, seed 1: absolute and change bands | 1e-9 |
-| Sweep | `simulateSweep`, n = 16, seed 1, all 13 doses | 1e-9 |
-| Influence | `computeInfluence()` at its defaults: effects and feeder lists | Effects 1e-9; infinities exact; lists exact except for parameters within 1e-9 of the 1 % threshold |
-| Summary | `paramSummary()` | Exact |
+| Section | Content |
+|---|---|
+| (a) PRNG | First 5 mulberry32 outputs for seeds 1 and 42 |
+| (b) Trajectories | `baseline`, `drink_water_1L`, `salt_load_10g`, `no_water_24h` at default parameters: states, derived and ledger at indices 0, 1, 10, 100, the last, and every whole hour; step count and `maxStep` |
+| (c) Samples | `drawSamples(n = 8, seed = 1)` |
+| (d) Monte Carlo | `simulateMC` on `drink_water_1L`, n = 8, seed 1, three keys at five time indices |
+| (e) Salt metrics | `saltLoadMetrics` of the 10 g load |
+| (f) Scenario records | Every scenario's validation record and input schedule |
+| (g) Rejection | `drawSamples` with ranges widened so that rejections occur (n = 8, seed 7) |
+| (h) Sweep | `simulateSweep`, n = 4, seed 1, doses 0, 10 and 20 g |
+| (i) Influence | `computeInfluence` on a reduced configuration |
+| (j), (k) | Analytic steady-state constants; `paramSummary()` |
 
-Trajectories are recorded with `outEvery` chosen so that none exceeds 1,000 points (chosen, to keep the file reviewable in a diff). Thinning changes only what is recorded, not how the run is integrated, and the exact step count checks that. For every Monte Carlo draw the generator also records the margin to each rejection boundary: the urine-osmolality fraction h to 0 and 1, and baseline sodium to 135 and 145 mmol/L. It refuses to write a fixture in which any relative margin is below 1e-6 (chosen). An ulp-level difference at a knife-edge could flip one acceptance and shift every later sample, which would turn a rounding difference into an apparent model divergence.
+The generator enforces a 400 KB size budget. **Required additions**, which this document asks for and the fixture does not yet hold:
+- `chronic_high_salt_30d`. It has the most steps (41,664), so it is where ulp-level differences between the two maths libraries accumulate most.
+- `drink_water_3L_fast`, and both of these at the stiff corner of §3.5.
+- Divergence-localisation checkpoints: `rhs()` at the initial state with baseline inputs, and the state after one RK4 step.
+- The rejection-boundary margins of HREQ-V-11. For every Monte Carlo draw the generator records the distance to each rejection boundary: the urine-osmolality fraction h to 0 and 1, and baseline sodium to 135 and 145 mmol/L. It refuses to write a fixture in which any relative margin is below 1e-6 (chosen). An ulp-level difference at a knife-edge could flip one acceptance and shift every later sample, turning a rounding difference into an apparent model divergence. Section (g) deliberately produces rejections, so its margins matter most.
 
 ### 4.3 Tolerance
 
-For each key k and time t: |py_k(t) − js_k(t)| ≤ 1e-9 × max over t of |js_k(t)|. Decision 6 fixes 1e-9; the scale is chosen. Pointwise relative error is undefined at zero crossings and on keys that sit at zero, and V1 has both: free-water clearance crosses zero, every change band starts at zero, and the strain components are zero at baseline. Cost: where a key is small relative to its own peak, the check is looser than a pointwise 1e-9. A key that is identically zero in the reference must be identically zero in the port. Integers (step counts, rejected counts, lengths, PRNG outputs), strings (`MODEL_VERSION`, the disclaimer, scenario labels) and the positions of NaN must match exactly.
+As enforced by `tests/health_selftest.py`: |py − js| ≤ max(1e-9 × max(|py|, |js|), 1e-12) for every floating-point value (HREQ-P-02 in `00_REQUIREMENTS.md`); 1e-12 relative for sampled parameter values, which pass through a single `exp` or `log` each with nothing to amplify the difference. The 1e-12 absolute floor exists for values that sit at or cross zero: the strain components are zero at baseline, and free-water clearance crosses zero after a water load. Round-off on O(1) intermediates leaves noise of about 1e-16 absolute there, and a pure relative test would fail on it. Cost: below about 1e-3 in magnitude the absolute floor dominates, and the check there is looser than 1e-9 relative. Integers (step counts, rejected counts, lengths), strings (`MODEL_VERSION`, the disclaimer, scenario labels) and the positions of non-finite values must match exactly. The suite also proves the comparison has teeth: a 1e-6 relative change to any parameter must fail the trajectory comparison.
 
 1e-9 is achievable. Both sides use IEEE-754 doubles in the same order of operations. What remains is the maths library: `exp`, `log` and `pow` may differ by an ulp between V8 and the platform libm. In a dissipative system such differences do not grow. Estimate: steps × machine epsilon ≈ 41,664 × 2.2e-16 ≈ 9e-12 on the longest scenario. That is consistent with the 2.75e-12 mass-balance round-off measured over the same run, and two orders inside 1e-9.
 
 ### 4.4 On divergence: stop the line
 
-1. **Stop.** No merge that touches `src/health/engine/` or the reference engine until the divergence is resolved. Severity follows `05_BUG_TAXONOMY.md`; the line stops regardless.
-2. **Localise** in fixture order: constants → initial state → `rhs()` at t = 0 → one step → step count → first diverging time and key. The checkpoints exist to make this mechanical.
+1. **Stop.** No merge that touches `src/health/engine/` or the reference engine until the divergence is resolved. `00_REQUIREMENTS.md` HREQ-P-02 classes it S0b (`05_BUG_TAXONOMY.md` §2); the release halts.
+2. **Localise** in fixture order: constants → initial state → `rhs()` at t = 0 → one step → step count → first diverging time and key. The checkpoints (a required addition, §4.2) exist to make this mechanical.
 3. **Decide which side is wrong** by a third computation, such as a hand calculation or an exact-arithmetic evaluation of the single diverging step. Never by majority, and never by which implementation is older.
-4. **Fix the wrong side.** If it is the JavaScript reference, that is a model change: bump `MODEL_VERSION`, regenerate the fixture with `tools/health_golden.mjs`, record the change, then compare the port to the new fixture.
+4. **Fix the wrong side.** If it is the JavaScript reference, that is a model change: bump `MODEL_VERSION` and regenerate the fixture with `tools/health_golden.mjs` in the same change (HREQ-X-05), then compare the port to the new fixture.
 5. **Keep the case.** The diverging input joins the fixture as a permanent regression.
 
 Never: loosen the tolerance; regenerate the fixture to match the port; edit the fixture by hand; mark the comparison skipped.
 
-- **HREQ-V-08** `golden_v1.json` SHALL be produced only by `tools/health_golden.mjs` from the JavaScript reference, SHALL record the hashes of the files it was generated from, and SHALL NOT be edited by hand.
-- **HREQ-V-09** The Python port SHALL match every golden floating-point value to 1e-9 of that key's peak magnitude, and every integer, string and NaN position exactly.
+- **HREQ-V-08** `golden_v1.json` SHALL be produced only by `tools/health_golden.mjs` from the JavaScript reference, SHALL be byte-reproducible (`--check`), SHALL NOT be edited by hand, and SHALL cover every registered scenario and the stiff corner of §3.5.
+- **HREQ-V-09** The Python port SHALL match every golden floating-point value to max(1e-9 relative, 1e-12 absolute), sampled parameter values to 1e-12 relative, and every integer, string and non-finite position exactly.
 - **HREQ-V-10** A divergence SHALL stop merges to engine code until it is resolved by the §4.4 procedure. It SHALL NOT be resolved by changing the tolerance or the fixture to match the port.
 - **HREQ-V-11** The fixture generator SHALL refuse to write Monte Carlo samples whose relative margin to any rejection boundary is below 1e-6.
 
@@ -194,24 +197,22 @@ Never: loosen the tolerance; regenerate the fixture to match the port; edit the 
 
 ### 5.1 The `evaluate_expectations` contract
 
-`evaluate_expectations` (`src/health/engine/validate.py`) takes the expectation registry (in V1, the `validation.expects` entries of every scenario), the model version and the Monte Carlo settings (n ≥ 256, seed fixed in configuration). It returns one row per registered expectation plus a summary.
+`evaluate_expectations(scenario_id, result)` (`src/health/engine/validate.py`) scores one simulation against its scenario's registered `expects` entries and returns one row per entry, in registration order (HREQ-P-05 in `00_REQUIREMENTS.md`). As built on 2026-10-03, a row carries `metric`, `kind`, `target`, `range`, `actual`, `status`, `reason` and `evidence`, and `summarize()` counts rows by status. The rules that calibration is never validation and that no number goes without its band (`01` §5–§6) need more than that. Without a role, the chronic ΔMAP row, which is a calibration target, would be counted as a validation pass. Without a band, a status is a point estimate. **Required additions** to every row:
 
-| Row field | Content |
+| Field | Content |
 |---|---|
-| `id`, `scenario`, `metric` | Stable expectation id (`01` HREQ-E-13); where it applies; what is measured |
-| `kind`, `role` | One of the seven kinds (`01` §7.2); `validation`, `calibration` or `structural` |
-| `range`, `unit`, `evidence`, `registered` | The registered claim, and whether it was pre-registered or co-developed with V1 |
-| `value` | The metric on the default-parameter run |
-| `band`, `in_range_share`, `n`, `rejected`, `seed` | Per-sample q05, q50 and q95 of the metric; the share of accepted samples inside the range |
-| `status` | `pass`, `fail` or `not_checked` |
-| `counted`, `reason` | Whether it enters the validation totals; a reason whenever it is not_checked or not counted |
+| `id` | Stable expectation id (`01` HREQ-E-13) |
+| `role` | `validation`, `calibration` or `structural` (`01` §6) |
+| `registered` | Whether pre-registration is demonstrable or the expectation was co-developed with V1 |
+| `band`, `in_range_share`, `n`, `rejected`, `seed` | Per-sample q05, q50 and q95 of the metric at n ≥ 256, and the share of accepted samples inside the range |
+| `counted` | Whether the row enters the validation totals (§5.2 rule 4) |
 | `model_version`, `disclaimer` | As on every result (`01` HREQ-M-01) |
 
 ### 5.2 Rules
 
 1. **One row per `expects` entry, never silently skipped.** The harness asserts that the number of rows equals the number of registered entries. V1: 24 rows.
 2. **pass** if lo ≤ value ≤ hi. **fail** if outside, or if the value is non-finite, or the parameter set has no steady state. A model that cannot answer has failed, not abstained.
-3. **not_checked** only for a kind that does not count (qualitative, design-target, known-divergence, unverified, numerical), or for a countable expectation whose extractor does not exist yet. Always with a reason. Missing extractors are listed by name above the summary, the way the NFT suite lists skips.
+3. **not_checked** only for a kind that does not count (qualitative, design-target, known-divergence, unverified, numerical), for a countable expectation whose extractor does not exist yet, or for a run too short to compute the metric. Always with a reason. Missing extractors are listed by name above the summary, the way the NFT suite lists skips.
 4. **counted** = kind ∈ {quantitative, semi-quantitative} and role = validation and status ∈ {pass, fail}.
 5. **Calibration targets are evaluated but excluded.** They are run, because missing a calibration target later is a real regression, and reported in their own summary column with the calibrated parameters named in the reason. They never enter the validation pass count. Structural checks are handled the same way.
 6. The summary reports counted passes, counted fails, not_checked, calibration and structural results, and splits counted results into pre-registered and co-developed. V1: 12 countable rows, of which 1 is calibration and 1 structural, so at most 10 are counted and all 10 are co-developed.
@@ -425,11 +426,11 @@ For import into `00_REQUIREMENTS.md`.
 | HREQ-V-05 | Step-halving change ≤ 1e-5 of peak (1e-3 for ADH, Thirst) | 3.6 | `tests/health_selftest.py` |
 | HREQ-V-06 | Stiff corner passes every numerical gate | 3.6 | Stiff fixture |
 | HREQ-V-07 | Non-finite trajectory fails and is never displayed | 3.6 | Engine; result schema |
-| HREQ-V-08 | Golden fixture only from `tools/health_golden.mjs`, with source hashes, never hand-edited | 4.4 | Header hash check |
-| HREQ-V-09 | Port matches golden to 1e-9 of peak; integers, strings and NaN positions exact | 4.4 | `tests/health_selftest.py` |
+| HREQ-V-08 | Golden fixture only from `tools/health_golden.mjs`, byte-reproducible, never hand-edited, covering every scenario and the stiff corner | 4.4 | `tools/health_golden.mjs --check` |
+| HREQ-V-09 | Port matches golden to max(1e-9 rel, 1e-12 abs), samples to 1e-12; integers, strings, non-finite positions exact (refines HREQ-P-02) | 4.4 | `tests/health_selftest.py` |
 | HREQ-V-10 | Divergence stops engine merges; never resolved by changing tolerance or fixture | 4.4 | Merge gate |
 | HREQ-V-11 | Fixture generator refuses samples within 1e-6 of a rejection boundary | 4.4 | `tools/health_golden.mjs` |
-| HREQ-V-12 | One harness row per registered expectation, count asserted | 5.2 | `src/health/engine/validate.py` |
+| HREQ-V-12 | One harness row per registered expectation, count asserted (refines HREQ-P-05) | 5.2 | `src/health/engine/validate.py` |
 | HREQ-V-13 | Status pass/fail/not_checked; non-finite is fail; not_checked has a reason | 5.2 | `src/health/engine/validate.py` |
 | HREQ-V-14 | Counted only if quantitative or semi-quantitative, role validation, status pass or fail | 5.2 | `src/health/engine/validate.py` |
 | HREQ-V-15 | Status published with band, in-range share, n, seed and versions | 5.2 | `src/health/engine/validate.py` |
