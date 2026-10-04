@@ -6309,3 +6309,61 @@ bugs:
     MODEL_VERSION bump (W-14), or add a third case to 03 §4 for a metadata-only change whose
     diff touches only the hash and paramSummary lines.
   monitor_gap: No gate tells a metadata-only params.json change from a value change.
+- id: BUG-20261003-198
+  area: health
+  summary: "Three checks of kb-v1's self-test assume every registered module is enabled, so the add recipe's first step -- a registry entry with `enabled: false` (docs/health/04 §6.5; 07, 'Adding a module') -- turns tests/health_kb_selftest.py red with nothing wrong"
+  severity: S3
+  priority: P1
+  error_class: CFG
+  status: open
+  logged_at: "2026-10-03T19:40:00-05:00"
+  occurred_at: "2026-10-03T05:54:48-05:00"
+  detected_by: "the desktop-app builder, registering the module with `enabled: false`: four checks failed (`every registered module is on the modules line with its state`, `a disabled module (reference-v1) is named on its own DISABLED line`, and `engine-v1 off -> ... the module as DISABLED` for `status` and `status --fast`) while `health.registry --check` passed"
+  detection_channel: agent
+  branch: worktree-agent-a54eb1300898dec29
+  locations:
+  - {file: tests/health_kb_selftest.py, line: 1258}
+  - {file: tests/health_kb_selftest.py, line: 1269}
+  - {file: tests/health_kb_selftest.py, line: 1302}
+  requirement: HREQ-X-03
+  data_impact: None on any value; a gate was red on a correct registry. Every module added by the documented recipe hits it, and the only way to turn the suite green without the fix is to land the module enabled, against the two-PR rule.
+  root_cause: >-
+    The checks were written when all six modules were on: one requires `<id> on` on the
+    modules line for every registered id, and two compare the whole DISABLED line with a
+    single id (`modules DISABLED: <id>`), so a second disabled module breaks them.
+  resolution: >-
+    Open -- an edit to kb-v1's suite, which the desktop-app module does not own, proposed
+    with its pull request: an enabled module must appear as `<id> on`, the DISABLED line
+    must list exactly the disabled ids in registry order (and be absent when there are
+    none), and the two planted checks look for their id in the DISABLED list instead of
+    matching the whole line.
+  monitor_gap: No test ran against a registry holding a disabled module; the suite's own plants switch one module off at a time in an all-on registry.
+
+- id: BUG-20261003-199
+  area: health
+  summary: "health.registry --check matches a module's path in the live files as a bare substring, so a one-segment directory path such as `desktop/` is 'named' by any file containing the word desktop -- prose, or the id desktop-app -- and the gate fails, asking for a recipe step that edits a file which does not reference the module"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: open
+  logged_at: "2026-10-03T19:40:00-05:00"
+  occurred_at: "2026-10-03T05:54:48-05:00"
+  detected_by: "the desktop-app builder, probing the gate before relying on it: one appended sentence, 'The Operator works at a standing desktop.', in docs/README.md made `python -m health.registry --check` report \"module 'desktop-app': docs/README.md names desktop\" and FAIL"
+  detection_channel: agent
+  branch: worktree-agent-a54eb1300898dec29
+  locations:
+  - {file: src/health/registry.py, line: 1137}
+  requirement: HREQ-X-02
+  data_impact: None today (no live file outside the module's recipe says desktop). Latent -- the next document or docstring that mentions a desktop, or the module's id, fails the gate for a reference that is not one, the false alarm that teaches people to ignore a gate (BUG-20261003-171).
+  root_cause: >-
+    `recipe_gaps` normalises each path by stripping its trailing slash and searches for the
+    result anywhere in a file. Every earlier path has two or more segments
+    (src/health/kb, reference/metabolic-map-v1), which a substring search matches precisely
+    enough; `desktop/` is the first one-segment directory, and without its slash it is an
+    English word.
+  resolution: >-
+    Open -- an edit to src/health/registry.py (module process), proposed with the
+    desktop-app pull request: a one-segment directory path is searched for with its
+    trailing slash (`desktop/`), every other path as before; a new test plants prose and a
+    real reference on a scratch tree.
+  monitor_gap: The recipe-gap plants all use multi-segment paths.

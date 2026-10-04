@@ -36,6 +36,8 @@ jobs:
         run: python3 tests/health_kb_selftest.py
       - name: Health errors self-test (stdlib only)
         run: python3 tests/health_errors_selftest.py
+      - name: Health desktop app self-test (stdlib only)
+        run: python3 tests/health_app_selftest.py
 
       - name: Install
         run: pip install -e ".[dev]"
@@ -52,6 +54,8 @@ jobs:
         run: python3 tests/health_kb_selftest.py --no-skips
       - name: Health errors self-test (strict)
         run: python3 tests/health_errors_selftest.py --no-skips
+      - name: Health desktop app self-test (strict)
+        run: python3 tests/health_app_selftest.py --no-skips
 
       # HREQ-X-01/X-02: every module's fields, paths, tests, dependency edges and removal
       # recipe hold against the repository, and docs/health/07 is the registry's rendering.

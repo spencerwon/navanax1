@@ -1,0 +1,52 @@
+#!/bin/bash
+# Metabolic Map -- the executable of desktop/MetabolicMap.app (module desktop-app,
+# docs/health/07). Double-clicking the app runs this script. It finds the checkout the
+# bundle sits in and Python 3.10 or newer, and runs `python3 -m health.app --dialogs` from
+# the checkout's root with PYTHONPATH=src: the program MetabolicMap.command runs, with
+# macOS dialogs in place of a terminal (the refusal while the flag is off, and a Stop
+# button). Educational model -- not medical advice. Not clinically validated.
+#
+# METABOLIC_MAP_PYTHON=/path/to/python3 picks the interpreter (for example a virtual
+# environment with the optional pywebview installed). The program's output goes to
+# ~/Library/Logs/MetabolicMap.log (Console.app lists it under Log Reports).
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+ROOT="$(cd "$HERE/../../../.." && pwd)" || exit 1      # MacOS -> Contents -> .app -> desktop -> root
+LOG="$HOME/Library/Logs/MetabolicMap.log"
+
+alert() {   # one macOS dialog with an OK button; nothing where there is no osascript
+  command -v osascript >/dev/null 2>&1 || { echo "$1" >&2; return 0; }
+  osascript -e 'on run argv' \
+            -e 'display dialog (item 1 of argv) with title "Metabolic Map" buttons {"OK"} default button 1 with icon stop' \
+            -e 'end run' "$1" >/dev/null 2>&1
+}
+
+if [ ! -f "$ROOT/src/health/app.py" ]; then
+  alert "Metabolic Map runs the viewer from the navanax1 folder it came in, so it has to stay at desktop/MetabolicMap.app inside that folder. To keep it in the Dock, drag it from there to the Dock (or make an alias of it in Applications) instead of moving it."
+  exit 1
+fi
+
+# A double-clicked app gets the system PATH only (/usr/bin:/bin:/usr/sbin:/sbin), not the
+# one your shell builds, so also look where python.org and Homebrew install Python.
+PATH="/Library/Frameworks/Python.framework/Versions/Current/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+usable() { "$1" -c 'import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)' >/dev/null 2>&1; }
+PY=""
+if [ -n "${METABOLIC_MAP_PYTHON:-}" ]; then
+  usable "$METABOLIC_MAP_PYTHON" && PY="$METABOLIC_MAP_PYTHON"
+else
+  for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+    p="$(command -v "$c" 2>/dev/null)" || continue
+    # Without the Command Line Tools, /usr/bin/python3 only offers to install them.
+    if [ "$p" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
+    usable "$p" && { PY="$p"; break; }
+  done
+fi
+if [ -z "$PY" ]; then
+  alert "Metabolic Map needs Python 3.10 or newer, and none was found. Install Python from python.org (Downloads, macOS), then open Metabolic Map again."
+  exit 1
+fi
+
+cd "$ROOT" || exit 1
+mkdir -p "${LOG%/*}" 2>/dev/null || LOG=/dev/null
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m health.app --dialogs >>"$LOG" 2>&1

@@ -19,6 +19,7 @@ is not finished.
 | `engine-v1` | true | 0 | health-physiology-modeler | `reference-v1`<br>`errors`<br>`process` | `src/health/engine/`<br>`tests/health_selftest.py`<br>`tests/fixtures/health/golden_v1.json`<br>`tools/health_golden.mjs`<br>`tools/health_influence_diff.py` | `tests/health_selftest.py` | ADR-0002 |
 | `kb-v1` | true | 0 | health-literature-curator | `reference-v1`<br>`process` | `src/health/kb/`<br>`tests/health_kb_selftest.py` | `tests/health_kb_selftest.py` | ADR-0003 |
 | `cli` | true | 0 | platform-engineer | `engine-v1`<br>`kb-v1`<br>`process` | `src/health/cli.py` | `tests/health_kb_selftest.py::test_cli_kb_check_exit_codes`<br>`tests/health_kb_selftest.py::test_status_prints_the_disclaimer`<br>`tests/health_kb_selftest.py::test_status_expectations_line`<br>`tests/health_kb_selftest.py::test_cli_constants_match_engine_and_config`<br>`tests/health_kb_selftest.py::test_status_lists_every_registered_module`<br>`tests/health_kb_selftest.py::test_status_honours_the_module_flags` | ADR-0003 |
+| `desktop-app` | false | 1 | platform-engineer | `reference-v1`<br>`process` | `src/health/app.py`<br>`desktop/`<br>`MetabolicMap.command`<br>`tools/health_icon.py`<br>`tests/health_app_selftest.py` | `tests/health_app_selftest.py` | ADR-0007 |
 | `errors` | true | 0 | health-physiology-modeler | `process` | `src/health/errors.py`<br>`tests/health_errors_selftest.py` | `tests/health_errors_selftest.py` | ADR-0001 |
 | `process` | true | 0 | orchestrator | — | `docs/health/`<br>`.claude/agents/health-physiology-modeler.md`<br>`.claude/agents/health-literature-curator.md`<br>`.claude/agents/health-rigor-lead.md`<br>`.claude/agents/health-safety-reviewer.md`<br>`config/health/`<br>`src/health/__init__.py`<br>`src/health/registry.py` | `tests/health_kb_selftest.py::test_registry_entries_are_well_formed`<br>`tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference`<br>`tests/health_kb_selftest.py::test_registry_reader_reads_the_yaml_subset`<br>`tests/health_kb_selftest.py::test_registry_reader_agrees_with_pyyaml`<br>`tests/health_kb_selftest.py::test_buglog_removed_with_module_exempts_deleted_files` | ADR-0001 |
 
@@ -146,6 +147,34 @@ kb-v1's test file, so step 4 edits a file this module does not own.
    "Where things are". `docs/health/04_ENVIRONMENTS_AND_UNDO.md` §7: delete the two
    `health.cli` rows and replace "every command above except `status` (a surface,
    not a gate)" with "every command above".
+8. Remove this entry.
+9. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
+   `docs/health/07_MODULE_REGISTRY.md`).
+10. Run `python3 tools/gates.py`: ALL GATES GREEN.
+
+#### `desktop-app`
+
+1. Nothing depends on it: it can be removed first, at any time.
+2. Set `enabled: false` on this entry (both launchers then refuse to start, and say
+   why).
+3. Run `python3 tools/buglog.py --mark-removed desktop-app` (adds
+   `removed_with_module: desktop-app` to every ledger entry citing these paths or this
+   test that has no such field yet; on 2026-10-03: none).
+4. Delete `src/health/app.py`, `desktop/` (the bundle, the icon's source and its
+   1024 px render), `MetabolicMap.command`, `tools/health_icon.py` and
+   `tests/health_app_selftest.py`.
+5. `tools/gates.py`: delete the `("health app selftest", "tests/health_app_selftest.py")`
+   row of `HEALTH_SUITES`.
+6. `.github/workflows/ci.yml`: delete the steps "Health desktop app self-test (stdlib
+   only)" and "Health desktop app self-test (strict)".
+7. `README.md`: delete the `tests/health_app_selftest.py` line of the health block and
+   the paragraph "Launch the viewer as a desktop app" with its code block.
+   `docs/health/README.md`: delete the `src/health/app.py`, `desktop/` and
+   `tests/health_app_selftest.py` rows of "Where things are", the
+   `tests/health_app_selftest.py` line of "Run it", and the paragraph "Launch the
+   viewer as a desktop app" with its code block.
+   `docs/health/04_ENVIRONMENTS_AND_UNDO.md` §7: delete the `desktop/MetabolicMap.app`
+   row.
 8. Remove this entry.
 9. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
    `docs/health/07_MODULE_REGISTRY.md`).

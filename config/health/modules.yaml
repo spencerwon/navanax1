@@ -212,6 +212,54 @@ modules:
          `docs/health/07_MODULE_REGISTRY.md`).
       10. Run `python3 tools/gates.py`: ALL GATES GREEN.
 
+  - id: desktop-app
+    enabled: false
+    phase: 1
+    owner: platform-engineer
+    adr: ADR-0007
+    description: >
+      The Metabolic Map viewer as a double-clickable Mac app. `python -m health.app` serves
+      reference/metabolic-map-v1/ unchanged on 127.0.0.1 only and opens it in a native
+      window (the optional pywebview) or the default browser; desktop/MetabolicMap.app (a
+      plain bundle whose executable is a bash script) and MetabolicMap.command run it. The
+      icon, a white stick figure on black, is desktop/icon.svg, rendered and packed into the
+      bundle's .icns by tools/health_icon.py. The flag governs the launchers: while it is
+      off they refuse to start and print why and the enable recipe.
+    paths:
+      - src/health/app.py
+      - desktop/
+      - MetabolicMap.command
+      - tools/health_icon.py
+      - tests/health_app_selftest.py
+    depends_on: [reference-v1, process]
+    tests: [tests/health_app_selftest.py]
+    removal: |
+      1. Nothing depends on it: it can be removed first, at any time.
+      2. Set `enabled: false` on this entry (both launchers then refuse to start, and say
+         why).
+      3. Run `python3 tools/buglog.py --mark-removed desktop-app` (adds
+         `removed_with_module: desktop-app` to every ledger entry citing these paths or this
+         test that has no such field yet; on 2026-10-03: none).
+      4. Delete `src/health/app.py`, `desktop/` (the bundle, the icon's source and its
+         1024 px render), `MetabolicMap.command`, `tools/health_icon.py` and
+         `tests/health_app_selftest.py`.
+      5. `tools/gates.py`: delete the `("health app selftest", "tests/health_app_selftest.py")`
+         row of `HEALTH_SUITES`.
+      6. `.github/workflows/ci.yml`: delete the steps "Health desktop app self-test (stdlib
+         only)" and "Health desktop app self-test (strict)".
+      7. `README.md`: delete the `tests/health_app_selftest.py` line of the health block and
+         the paragraph "Launch the viewer as a desktop app" with its code block.
+         `docs/health/README.md`: delete the `src/health/app.py`, `desktop/` and
+         `tests/health_app_selftest.py` rows of "Where things are", the
+         `tests/health_app_selftest.py` line of "Run it", and the paragraph "Launch the
+         viewer as a desktop app" with its code block.
+         `docs/health/04_ENVIRONMENTS_AND_UNDO.md` §7: delete the `desktop/MetabolicMap.app`
+         row.
+      8. Remove this entry.
+      9. Run `PYTHONPATH=src python3 -m health.registry --write-07` (regenerates
+         `docs/health/07_MODULE_REGISTRY.md`).
+      10. Run `python3 tools/gates.py`: ALL GATES GREEN.
+
   - id: errors
     enabled: true
     phase: 0

@@ -50,6 +50,7 @@ HEALTH_SUITES: tuple[tuple[str, str], ...] = (
     ("health selftest", "tests/health_selftest.py"),                # engine-v1
     ("health kb selftest", "tests/health_kb_selftest.py"),          # kb-v1
     ("health errors selftest", "tests/health_errors_selftest.py"),  # errors
+    ("health app selftest", "tests/health_app_selftest.py"),        # desktop-app
 )
 
 SKIPPED: list[str] = []   # gates that could not run here; the verdict line names them

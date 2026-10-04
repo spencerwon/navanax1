@@ -80,11 +80,26 @@ PYTHONPATH=src python3 -m health.registry --check   # every module: fields, path
 python3 tests/health_selftest.py --no-skips      # engine: golden equivalence, conservation, expectations
 python3 tests/health_kb_selftest.py --no-skips   # knowledge base: every rule, each with a planted violation
 python3 tests/health_errors_selftest.py --no-skips   # error hierarchy: severities, halt flags, never swallowed
+python3 tests/health_app_selftest.py --no-skips      # desktop app: loopback only, the flag, the launchers, the icon
 python3 tools/gates.py                           # every line above except `status` (a surface, not a gate), plus golden --check (a counted SKIPPED without Node), plus the repository's own gates
 ```
 
 Every health module has a flag and a written removal recipe, held to the repository by a
 gate: [`docs/health/07_MODULE_REGISTRY.md`](docs/health/07_MODULE_REGISTRY.md).
+
+**Launch the viewer as a desktop app.** Double-click `desktop/MetabolicMap.app` (a black
+icon with a white stick figure) or `MetabolicMap.command`. Both run
+`python3 -m health.app`, standard library only: it serves `reference/metabolic-map-v1/` to this
+computer alone (127.0.0.1), opens it in your browser (or in its own window when the
+optional `pywebview` is installed) and prints the disclaimer and the validation status
+last. It lands switched off: until the Operator approves the one-line `enable/desktop-app`
+pull request, it refuses and says why ([ADR-0007](docs/health/decisions/ADR-0007-desktop-app-packaging.md)).
+To keep it in the Dock, drag it there from `desktop/`; moved out of the checkout it cannot
+find the viewer.
+
+```bash
+PYTHONPATH=src python3 -m health.app   # the same from a terminal; --no-open serves only, --browser skips the window
+```
 
 ## Storage, in one line each
 

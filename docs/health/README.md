@@ -66,11 +66,14 @@ src/health/kb/                   the knowledge base: data, check, report
 src/health/cli.py                status, kb-check, kb-summary
 src/health/errors.py             the error hierarchy
 src/health/registry.py           the module registry's reader and its gate
+src/health/app.py                python -m health.app: the V1 viewer as a desktop app, served on 127.0.0.1 only
 tests/health_selftest.py         engine: golden equivalence, steady state, mass balance, expectations
 tests/health_kb_selftest.py      knowledge base, cli, registry
 tests/health_errors_selftest.py  error hierarchy
+tests/health_app_selftest.py     desktop app: loopback server, the flag, the launchers, the icon
 tests/fixtures/health/           golden_v1.json — generated from the JavaScript reference by tools/health_golden.mjs
 reference/metabolic-map-v1/      the V1 artifact, vendored verbatim (engine, kb, app)
+desktop/                         MetabolicMap.app (double-click it; MetabolicMap.command at the root does the same) and its icon, built by tools/health_icon.py
 .claude/agents/health-*.md       the four health-specific roles
 ```
 
@@ -86,7 +89,22 @@ PYTHONPATH=src python3 -m health.registry --check  # every module's fields, path
 python3 tests/health_selftest.py --no-skips        # engine: golden equivalence, steady state, mass balance, expectations
 python3 tests/health_kb_selftest.py --no-skips     # knowledge base: every rule, each with a planted violation
 python3 tests/health_errors_selftest.py --no-skips # error hierarchy: severities, halt flags, never swallowed
+python3 tests/health_app_selftest.py --no-skips    # desktop app: loopback only, the flag, the launchers, the icon
 python3 tools/gates.py                             # every line above except `status` (a surface, not a gate), plus golden --check (a counted SKIPPED without Node), plus the repository's own gates
+```
+
+**Launch the viewer as a desktop app.** Double-click `desktop/MetabolicMap.app` (a black
+icon with a white stick figure) or `MetabolicMap.command`. Both run
+`python3 -m health.app`, standard library only: it serves `reference/metabolic-map-v1/` to this
+computer alone (127.0.0.1), opens it in your browser (or in its own window when the
+optional `pywebview` is installed) and prints the disclaimer and the validation status
+last. It lands switched off: until the Operator approves the one-line `enable/desktop-app`
+pull request, it refuses and says why ([ADR-0007](decisions/ADR-0007-desktop-app-packaging.md)).
+To keep it in the Dock, drag it there from `desktop/`; moved out of the checkout it cannot
+find the viewer.
+
+```bash
+PYTHONPATH=src python3 -m health.app   # the same from a terminal; --no-open serves only, --browser skips the window
 ```
 
 ## Relationship to the market-data documents

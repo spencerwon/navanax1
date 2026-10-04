@@ -166,6 +166,7 @@ before publication (WF-H-06), and why a wrong number on a surface is S0a.
 | `python3 tools/gates.py` | The repository's gates: every command above except `status` (a surface, not a gate), and the golden-fixture check when Node is present (SKIPPED, and said so on the last line, when it is not) | No |
 | `node tools/health_golden.mjs` | Regenerate the golden fixture from the JS reference (model changes only) | No |
 | open `reference/metabolic-map-v1/index.html` | The V1 app, as published | No |
+| double-click `desktop/MetabolicMap.app` or `MetabolicMap.command` (`PYTHONPATH=src python3 -m health.app`) | The V1 app as a desktop app: serves `reference/metabolic-map-v1/` to 127.0.0.1 only and opens it in a native window (the optional pywebview) or the browser, the disclaimer and the validation status last; Ctrl-C, closing the window or the Stop dialog stops it. Refuses, saying why, while `desktop-app` is disabled | No |
 
 Nothing in the health subsystem needs a credential, a network connection, or a
 background job.

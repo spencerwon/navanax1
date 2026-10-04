@@ -1691,6 +1691,15 @@ model change. Two findings stay open. The union is not a strict superset of the 
 screen: one cumulative ledger key, never displayed, loses a feeder because a longer horizon
 widens its range (BUG-177). And the viewer still primes the default screen, so the chip on
 the chronic MAP chart still omits `pn_gain` until its worker asks for the union (BUG-178).
+**BUG-20261003-198 (S3/P1) and BUG-20261003-199 (S3/P2), open.** Found while adding the
+`desktop-app` module (ADR-0007). Its registry entry lands with `enabled: false`, as
+`04 §6.5` requires, and four checks in `tests/health_kb_selftest.py` went red with nothing
+wrong: written when every module was on, one requires `<id> on` for every registered id and
+two compare the whole DISABLED line with a single id (BUG-198). And the registry gate
+searches the live files for a module's path as a bare substring, so `desktop/` — the first
+one-segment path — is "named" by any file that says desktop, prose or the module's id; one
+appended sentence in `docs/README.md` turned the gate red (BUG-199). Both fixes edit files
+the desktop-app module does not own and are proposed with its pull request.
 
 ### Still open
 
