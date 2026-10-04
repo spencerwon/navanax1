@@ -1702,6 +1702,29 @@ appended sentence in `docs/README.md` turned the gate red (BUG-199). Both fixed 
 module: the checks read the disabled ids from the registry, and a one-segment directory is
 searched for with its slash; each has a planted test.
 
+**The viewer's safety fixes, M1 (BUG-20261003-101, BUG-20261003-103, BUG-20261003-104,
+BUG-20261003-194, BUG-20261003-195, BUG-20261003-196, BUG-20261003-197; W-19).** The vendored
+app now says what the engine's results say. Both disclaimer sentences, imported from the
+engine and typed nowhere in the app, sit in-band on every surface that shows a number: the
+HUD, the run panel, every chart card, the dose panel, the evidence drawer, the
+knowledge-base card and the footer (BUG-104, viewer side). The 135 and 145 mmol/L lines come
+from their parameter rows and are drawn in one neutral dashed tone with "classification
+threshold, not a physiological parameter" beside each value (BUG-101). Under the chronic
+charts the records speak for themselves: the He 2013 band is a calibration target for
+aldo_vol_exp, map_vol_exp and pn_gain, and the Heer 2000 divergence sits under the volume
+chart, every name read from `scenarios.js` (BUG-103); the same renderer put the salt sweep's
+unverified Suckling comparison on the dose panel it qualifies (BUG-197). Every surface that
+shows the kidney strain index carries "an index, not a clinical measure", the dose panel
+heading and the HUD gauge included, which is BUG-100's fix in the vendored copy; the
+published artifact stays the Operator's (A-2). Proving the page in headless Chromium found
+two more: served from anywhere but its own directory, the page fetched the knowledge base
+relative to itself and silently fell back to the seed entities with every citation "not
+found" (BUG-195), and the Chronic and Custom tabs carried a retyped trajectory label and no
+custom-run label at all (BUG-196). The fallback strain-index evidence list gained the three
+rows of model 1.1.0 (BUG-194). `tools/health_app_smoke.py` runs every scenario and both tabs
+and checks each text against `config/health/base.yaml`: 14 of its 19 checks failed on the
+app before these changes, and all 19 pass after.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |

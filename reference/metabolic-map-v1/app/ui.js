@@ -3,17 +3,24 @@
 // EDUCATIONAL MODEL — NOT MEDICAL ADVICE.
 
 import {
-  SCENARIOS, paramTable, DISCLAIMER, MODEL_VERSION, simulate, simulateSweep, drawSamples,
+  SCENARIOS, paramTable, DISCLAIMER, VALIDATION_STATUS, MODEL_VERSION, simulate, simulateSweep, drawSamples,
   makeScenario, makeWaterLoad, makeSaltLoad, MMOL_NA_PER_G_NACL, REFERENCE_PERSON, paramsFor, primeInfluence, computeInfluence,
   INFLUENCE_DEFAULTS,
 } from '../engine/index.js';
 import { quantileBands } from '../engine/mc.js';
 import { BandChart, DoseChart, fmt, fmtSigned } from './charts.js';
 import { ENTITIES as SEED_ENTITIES, SYSTEMS, LADDER } from './entities.seed.js';
-import { KB_AVAILABLE } from './config.js';
+import { KB_AVAILABLE, LABELS } from './config.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+// HREQ-S-01 (BUG-20261003-104): both sentences, from the engine, in-band on every surface that
+// shows a number. `[data-disclaimer]` elements in index.html are filled from this in main().
+const DISCLAIMER_TEXT = `${DISCLAIMER} ${VALIDATION_STATUS}`;
+const disclaimerLine = () => el('p', 'disclaim', DISCLAIMER_TEXT);
+// Files next to app/ resolve against this module, not the page, so the app loads them from
+// either index.html, served from any directory (BUG-20261003-195).
+const siblingUrl = (path) => new URL(`../${path}`, import.meta.url).href;
 
 const TABLE = paramTable();
 const PARAMS0 = Object.fromEntries(Object.entries(TABLE).map(([k, v]) => [k, v.value]));
@@ -40,16 +47,22 @@ const CORE_NA = ['V_ecf_0', 'glucose_mgdl', 'bun_mgdl', 'adh_threshold', 'adh_sl
   'U_osm_max', 'gut_water_thalf_h', 'gut_na_thalf_h', 'osm_eq_tau_h', 'na_osm_gain', 'urea_excr_mosmd', 'waterIn_base_Ld',
   'naIn_base_mmold', 'insensible_Ld', 'na_normal_low', 'na_normal_high'];
 const STRAIN_P = ['strain_w_transport', 'strain_w_excretion', 'strain_w_glomerular', 'strain_w_concentrating',
+  'strain_w_glomerular_pressure', 'strain_w_glomerular_filtration', 'strain_scale_filtration',
   'strain_scale_transport', 'strain_scale_excretion', 'strain_scale_pressure', 'GFR_0', 'MAP_0', 'gfr_map_exp', 'gfr_vol_exp', 'U_osm_max'];
+
+// Classification thresholds are mc: false parameter rows, drawn as neutral reference lines with
+// display.threshold_label beside the value (HREQ-S-03, BUG-20261003-101).
+const thresholdLine = (name) => ({ value: TABLE[name].value, label: `${TABLE[name].value} — ${LABELS.threshold_label}` });
 
 const CHARTS = [
   { id: 'na', title: 'Plasma sodium', keys: ['Na_plasma'], unit: 'mmol/L', dec: 1, minSpan: 2,
-    refLines: [{ value: 135, label: '135 hyponatremia threshold', tone: 'critical' }, { value: 145, label: '145 upper normal', tone: 'muted' }],
+    refLines: [thresholdLine('na_normal_low'), thresholdLine('na_normal_high')],
     params: CORE_NA },
   { id: 'osm', title: 'Plasma osmolality', keys: ['osm_plasma'], unit: 'mOsm/kg', dec: 0, minSpan: 4,
     params: [...CORE_NA, 'thirst_threshold'] },
   { id: 'vol', title: 'ECF and ICF volume change', keys: ['V_ecf', 'V_icf'], delta: true, unit: 'L', dec: 2, minSpan: 0.1, signed: true,
-    names: ['ECF', 'ICF'], params: ['V_ecf_0', 'V_icf_0', 'K_icf_0', 'osm_eq_tau_h', 'gut_water_thalf_h', 'gut_na_thalf_h', 'water_metabolic_Ld', 'insensible_Ld', 'fecal_water_Ld', 'k_excr_gain'] },
+    names: ['ECF', 'ICF'], params: ['V_ecf_0', 'V_icf_0', 'K_icf_0', 'osm_eq_tau_h', 'gut_water_thalf_h', 'gut_na_thalf_h', 'water_metabolic_Ld', 'insensible_Ld', 'fecal_water_Ld', 'k_excr_gain'],
+    expects: ['chronic_high_salt_30d/04'] },
   { id: 'uflow', title: 'Urine flow', keys: ['urine_flow'], unit: 'L/h', dec: 2, minSpan: 0.1, floor0: true,
     params: ['U_osm_min', 'U_osm_max', 'adh_ec50', 'adh_hill', 'urea_excr_mosmd', 'GFR_0', 'na_osm_gain', 'pn_gain', 'aldo_effect_exp', 'anp_effect_exp', 'k_excr_gain'] },
   { id: 'uosm', title: 'Urine osmolality', keys: ['U_osm'], unit: 'mOsm/kg', dec: 0, minSpan: 50,
@@ -57,9 +70,10 @@ const CHARTS = [
   { id: 'adh', title: 'ADH (vasopressin)', keys: ['ADH'], unit: 'pg/mL', dec: 1, minSpan: 0.5, floor0: true,
     params: ['adh_threshold', 'adh_slope', 'adh_vol_shift', 'adh_thalf_h', 'glucose_mgdl', 'bun_mgdl'] },
   { id: 'map', title: 'Mean arterial pressure', keys: ['MAP'], unit: 'mmHg', dec: 0, tipDec: 1, minSpan: 4,
-    params: ['MAP_0', 'map_vol_exp', 'map_tau_h', 'map_auto_frac', 'map_auto_tau_h', 'pn_gain', 'V_ecf_0', 'aldo_vol_exp', 'aldo_tau_h', 'anp_vol_exp'] },
+    params: ['MAP_0', 'map_vol_exp', 'map_tau_h', 'map_auto_frac', 'map_auto_tau_h', 'pn_gain', 'V_ecf_0', 'aldo_vol_exp', 'aldo_tau_h', 'anp_vol_exp'],
+    expects: ['chronic_high_salt_30d/01', 'chronic_high_salt_30d/02'] },
   { id: 'strain', title: 'Kidney strain index', keys: ['strain_index'], unit: 'index, 0–1', dec: 2, minSpan: 0.05, floor0: true,
-    note: 'A model index built from four workloads. It is not a clinical measure and has no validated thresholds.',
+    note: `Kidney strain index — ${LABELS.index_label}. Built from four model workloads; it has no validated thresholds.`,
     params: STRAIN_P },
 ];
 const DOSE_METRICS = [
@@ -71,6 +85,31 @@ const DOSE_METRICS = [
 ];
 const DOSE_PARAMS = [...STRAIN_P, 'naIn_base_mmold', 'gut_na_thalf_h', 'pn_gain', 'na_osm_gain', 'aldo_vol_exp', 'aldo_tau_h',
   'aldo_effect_exp', 'anp_vol_exp', 'anp_effect_exp', 'anp_thalf_h', 'map_vol_exp', 'map_tau_h'];
+
+// HREQ-S-07: calibration targets, known divergences and unverified expectations are shown on the
+// output they affect (CHARTS[].expects names the registered expectation ids each chart shows; the
+// dose panel shows the sweep's). The words come from the records in engine/scenarios.js: role and
+// calibrates, kind, metric, target and evidence; nothing here restates a record
+// (BUG-20261003-103, BUG-20261003-197).
+const SHOWN_KINDS = { 'known-divergence': 'Known divergence', unverified: 'Unverified' };
+function citeShort(id) {
+  const e = S.evidence.get(id);
+  return e?.authors && e.year ? `${e.authors.split(',')[0].trim().split(' ')[0]} ${e.year}` : id;
+}
+function expectationStatus(x) {
+  if (x.role === 'calibration') {
+    const cites = (x.evidence || []).map(citeShort).join(', ');
+    return ['Calibration, not validation.', `${x.metric}: the ${cites} ${x.range ? 'band' : 'target'} is a calibration ` +
+      `target for ${[...x.calibrates].sort().join(', ')} (role ${x.role}); agreement with it is not evidence.`];
+  }
+  if (SHOWN_KINDS[x.kind]) return [`${SHOWN_KINDS[x.kind]}.`, `${x.metric}: ${x.target}`];
+  return null;
+}
+/** One note per qualifying expectation of scenario `sc` (all of them, or those in `ids`). */
+function statusNotes(sc, ids) {
+  return (sc?.validation?.expects || []).filter((x) => !ids || ids.includes(x.id)).map(expectationStatus).filter(Boolean)
+    .map(([lead, text]) => { const p = el('p', 'chart-foot expect-note'); p.append(el('strong', '', lead), ` ${text}`); return p; });
+}
 
 // ---------------------------------------------------------------------------
 // Scenario specs: structured-clone-safe descriptions rebuilt inside workers.
@@ -207,7 +246,7 @@ async function fetchJSON(url) {
 async function loadEntities() {
   if (!KB_AVAILABLE) return { list: SEED_ENTITIES, source: 'app/entities.seed.js (seed)' }; // no kb/ probe (config.js)
   try {
-    const kb = await fetchJSON('../kb/entities.json');
+    const kb = await fetchJSON(siblingUrl('kb/entities.json'));
     const list = Array.isArray(kb) ? kb : (kb.entities || Object.values(kb));
     const seedById = Object.fromEntries(SEED_ENTITIES.map((e) => [e.id, e]));
     const merged = list.map((e) => ({ ...seedById[e.id], ...e, mesh: seedById[e.id]?.mesh ?? null, system: seedById[e.id]?.system ?? e.system ?? null }));
@@ -218,12 +257,12 @@ async function loadEntities() {
 }
 async function loadEvidence(kbPresent) {
   // Only request kb/ when its entities file loaded (KB_AVAILABLE in config.js gates the first request).
-  const urls = kbPresent ? ['../kb/evidence.json', '../engine/evidence.engine.json'] : ['../engine/evidence.engine.json'];
-  for (const url of urls) {
+  const paths = kbPresent ? ['kb/evidence.json', 'engine/evidence.engine.json'] : ['engine/evidence.engine.json'];
+  for (const path of paths) {
     try {
-      const j = await fetchJSON(url);
+      const j = await fetchJSON(siblingUrl(path));
       const arr = Array.isArray(j) ? j : (j.evidence || Object.values(j));
-      return { map: new Map(arr.map((e) => [e.id, e])), source: url.replace('../', '') };
+      return { map: new Map(arr.map((e) => [e.id, e])), source: path };
     } catch { /* try next */ }
   }
   return { map: new Map(), source: 'none' };
@@ -358,6 +397,10 @@ function buildCharts() {
     const box = el('div', 'chart-box'); card.append(box);
     const tw = el('div', 'tablewrap'); tw.hidden = true; card.append(tw);
     if (c.note) card.append(el('div', 'chart-foot', c.note));
+    if (c.refLines) {
+      card.append(el('div', 'chart-foot', `Dashed lines, ${c.refLines.map((r) => r.value).join(' and ')} ${c.unit}: ${LABELS.threshold_label}`));
+    }
+    const notes = el('div', 'expect-notes'); card.append(notes, disclaimerLine());
     host.append(card);
     const chart = new BandChart(box, { unit: c.unit === 'index, 0–1' ? '' : c.unit, decimals: c.tipDec ?? c.dec, refLines: c.refLines, minSpan: c.minSpan,
       floor0: c.floor0, signed: c.signed, ariaLabel: `${c.title} chart, median with 90% band. Arrow keys move the cursor, Enter jumps the playhead.`,
@@ -366,7 +409,7 @@ function buildCharts() {
       tw.hidden = !tw.hidden; tb.setAttribute('aria-expanded', String(!tw.hidden));
       if (!tw.hidden) renderTable(c, chart, tw);
     });
-    S.charts[c.id] = { cfg: c, chart, tw, chip };
+    S.charts[c.id] = { cfg: c, chart, tw, chip, notes };
   }
 }
 
@@ -388,8 +431,10 @@ function renderTable(c, chart, tw) {
 
 function feedCharts() {
   const R = S.res;
-  for (const { cfg, chart, tw } of Object.values(S.charts)) {
+  const sc = currentScenarioObj();
+  for (const { cfg, chart, tw, notes } of Object.values(S.charts)) {
     chart.opts.xUnit = S.xUnit;
+    notes.replaceChildren(...(cfg.expects ? statusNotes(sc, cfg.expects) : []));
     const series = cfg.keys.map((k, i) => ({
       name: cfg.names?.[i] || QFMT[k][2], colorVar: `--s${i + 1}`,
       q05: cfg.delta ? R.dq05[k] : R.q05[k], q50: cfg.delta ? R.dq50[k] : R.q50[k], q95: cfg.delta ? R.dq95[k] : R.q95[k],
@@ -456,7 +501,7 @@ function updateAtPlayhead() {
     node.children[1].replaceChildren(document.createTextNode(fmt(v, d)));
     if (u) node.children[1].append(el('small', '', u));
     const dd = node.children[2]; dd.replaceChildren();
-    if (k === 'strain_index') { const sw = el('i', 'sw'); sw.style.background = strainCss(v); dd.append(sw, document.createTextNode('model index')); }
+    if (k === 'strain_index') { const sw = el('i', 'sw'); sw.style.background = strainCss(v); dd.append(sw, document.createTextNode(LABELS.index_label)); }
     else dd.textContent = `${fmtSigned(v - v0, k === 'MAP' ? 1 : d)} vs start`;
   });
   // viewer overlay
@@ -562,7 +607,11 @@ function selectScenario(id) {
   const ul = $('scenarioExpects').querySelector('ul'); ul.replaceChildren();
   if (sc.validation) {
     ul.append(el('li', '', sc.validation.summary));
-    for (const e of sc.validation.expects || []) ul.append(el('li', '', `${e.metric}: ${e.target}`));
+    for (const e of sc.validation.expects || []) {
+      const li = el('li', '', `${e.metric}: ${e.target}`);
+      if (e.role === 'calibration') li.append(` — calibration target for ${[...e.calibrates].sort().join(', ')} (role calibration), not validation`);
+      ul.append(li);
+    }
   }
   if (id === 'salt_load_sweep') $('dosePanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   runCurrent();
@@ -784,9 +833,11 @@ function renderKbLive() {
   for (const k of qs) {
     const v = med(k); if (v === undefined) continue;
     const [d, u, lab] = QFMT[k] || [2, '', k];
-    live.append(el('span', '', `${lab} ${k === 'Thirst' ? fmt(v * 100, 0) : fmt(v, d)}${u ? ` ${u}` : ''}`));
+    live.append(el('span', '', `${lab} ${k === 'Thirst' ? fmt(v * 100, 0) : fmt(v, d)}${u ? ` ${u}` : ''}` +
+      (k === 'strain_index' ? ` — ${LABELS.index_label}` : '')));
   }
   if (qs.includes('GFR_norm') && med('GFR_norm') !== undefined) live.append(el('p', 'kb-note', GFR_NOTE));
+  if (live.children.length) { const d = disclaimerLine(); d.classList.add('kb-note'); live.append(d); }
 }
 // Decision D-3: why the two GFR readouts differ (one line, shown under the kidney/nephron live values).
 const GFR_NOTE = `Absolute GFR is what this body filters; "per 1.73 m²" rescales it to a standard body size so people of different sizes can be compared. They are equal here because the model describes one ${REFERENCE_PERSON.name}, whose body surface is 1.73 m².`;
@@ -797,7 +848,7 @@ function renderFooter(evSource) {
   const good = entries.filter((e) => /^(A-|B-)/.test(e.grade)).length;
   const eCount = entries.filter((e) => /^E/.test(e.grade)).length;
   const f = $('foot'); f.replaceChildren();
-  f.append(el('span', 'disclaimer', DISCLAIMER));
+  f.append(el('span', 'disclaimer', DISCLAIMER_TEXT));
   const add = (label, value) => { const s = el('span'); s.append(document.createTextNode(`${label} `), el('strong', 'num', value)); f.append(s); };
   add('Model', `v${MODEL_VERSION}`);
   add('Parameters', fmt(entries.length, 0));
@@ -816,6 +867,9 @@ async function main() {
   sel.value = S.scenarioId;
   sel.addEventListener('change', () => selectScenario(sel.value));
   $('chronicDesc').textContent = SCENARIOS.chronic_high_salt_30d.description;
+  $('chronicLabel').textContent = SCENARIOS.chronic_high_salt_30d.label;   // display.trajectory_label (BUG-20261003-196)
+  for (const n of document.querySelectorAll('[data-label]')) n.textContent = LABELS[n.dataset.label];
+  for (const n of document.querySelectorAll('[data-disclaimer]')) n.textContent = DISCLAIMER_TEXT;
   for (const b of $('modeTabs').children) b.addEventListener('click', () => setMode(b.dataset.mode));
   for (const id of ['cWater', 'cSalt', 'cStart', 'cDur']) $(id).addEventListener('input', updateCustomLabels);
   updateCustomLabels();
@@ -831,6 +885,7 @@ async function main() {
   const ents = await loadEntities();
   const ev = await loadEvidence(!ents.source.includes('seed'));
   S.entities = ents.list; S.entitySource = ents.source; S.evidence = ev.map;
+  $('doseNotes').replaceChildren(...statusNotes(SCENARIOS.salt_load_sweep));
   renderFooter(ev.source);
   buildRail();
 

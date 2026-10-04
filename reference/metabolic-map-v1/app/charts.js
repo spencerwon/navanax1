@@ -50,8 +50,9 @@ function hookTheme() {
 
 /**
  * Time-series band chart.
- * opts: { unit, decimals, xUnit: 'h'|'d', refLines: [{ value, label, tone: 'critical'|'muted' }],
- *         ariaLabel, onScrub(index) }
+ * opts: { unit, decimals, xUnit: 'h'|'d', refLines: [{ value, label }], ariaLabel, onScrub(index) }
+ * refLines are classification thresholds: one neutral dashed tone for all of them, never an
+ * alarm colour, with the label drawn beside the line (HREQ-S-03, BUG-20261003-101).
  * data: { t: Float64Array (h), series: [{ name, colorVar, q05, q50, q95 }] }
  */
 export class BandChart {
@@ -194,15 +195,14 @@ export class BandChart {
     // baseline axis
     g.strokeStyle = axis; g.beginPath(); g.moveTo(pad.l, Math.round(pad.t + ph) + 0.5); g.lineTo(w - pad.r, Math.round(pad.t + ph) + 0.5); g.stroke();
 
-    // reference lines
-    for (const r of this.opts.refLines || []) {
-      if (r.value < nt.lo || r.value > nt.hi) continue;
+    // reference lines (their labels are drawn over the series, below)
+    const refs = (this.opts.refLines || []).filter((r) => r.value >= nt.lo && r.value <= nt.hi);
+    for (const r of refs) {
       const yy = Math.round(y(r.value)) + 0.5;
-      g.strokeStyle = r.tone === 'critical' ? token('--critical') : axis;
-      g.setLineDash([]); g.lineWidth = 1;
+      g.strokeStyle = muted;
+      g.setLineDash([4, 3]); g.lineWidth = 1;
       g.beginPath(); g.moveTo(pad.l, yy); g.lineTo(w - pad.r, yy); g.stroke();
-      g.fillStyle = ink2; g.textAlign = 'right'; g.textBaseline = 'bottom';
-      g.fillText(r.label, w - pad.r - 2, yy - 2);
+      g.setLineDash([]);
     }
 
     // bands then medians
@@ -240,6 +240,13 @@ export class BandChart {
     };
     if (this.play >= 0 && this.play < t.length) mark(this.play, true);
     if (this.hover >= 0 && this.hover !== this.play) mark(this.hover, false);
+
+    // reference-line labels last, on a surface halo, so no band, median or playhead hides them
+    g.textAlign = 'right'; g.textBaseline = 'bottom'; g.lineJoin = 'round'; g.lineWidth = 3; g.strokeStyle = surf; g.fillStyle = ink2;
+    for (const r of refs) {
+      const yy = Math.round(y(r.value)) + 0.5; const maxW = w - pad.l - pad.r - 4;   // condensed, never clipped
+      g.strokeText(r.label, w - pad.r - 2, yy - 2, maxW); g.fillText(r.label, w - pad.r - 2, yy - 2, maxW);
+    }
   }
 
   /** Rows for the table view: one per whole hour (or day for chronic). */

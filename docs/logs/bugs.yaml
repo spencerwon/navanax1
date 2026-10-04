@@ -2587,7 +2587,6 @@ bugs:
     and a real clock and would be the first thing deleted if it ever went flaky.
   pr: 9
 
-
 - id: BUG-20260911-072
   summary: "`probe_two_sockets` decided window membership from each socket's OWN first-sight time, so an event A saw before the common window and B was replayed inside it counted as a unique for B -- fake drops, pointing in the direction that flatters PR-10's case for a second stream"
   severity: S1
@@ -3446,6 +3445,7 @@ bugs:
     trait_series over 24 h (14-24 s) is the next item it named.
   regression_test:
     - tests/selftest.py::test_mix_and_makers_are_index_only_and_an_old_maker_index_is_rebuilt
+
 - id: BUG-20260914-087
   summary: "18 of the last 24 hourly buckets on every chart were blank -- 'the historical data is not there' -- because a bucket was masked as not-listening if ANY ingestion gap overlapped it, and the OpenSea stream reconnects every ~30 min with a 1-3 s 'Service restarting' close; each blip blanked its whole hour while 99.9 % of it had been observed"
   severity: S1
@@ -3521,6 +3521,7 @@ bugs:
     the deploy should be judged on took_ms falling to seconds.
   regression_test:
     - tests/selftest.py::test_analyze_runs_on_growth_not_on_every_fold
+
 - id: BUG-20260914-089
   summary: "top_item_bid over 24 h took 18 s on the main tab and a trait-filtered series 14-24 s on the Traits tab: the observed-book path pulled one row per event into Python to bucket it (1.35 M item bids a day), and a trait-filtered standing leg walked every life of the kind before applying the token filter"
   severity: S2
@@ -3561,6 +3562,7 @@ bugs:
   regression_test:
     - tests/selftest.py::test_observed_series_aggregates_in_sql_and_agrees_with_the_row_path
     - tests/selftest.py::test_metric_engine_contract
+
 - id: BUG-20260914-090
   summary: "The Wallets tab took 16.9-19.2 s over 24 h because the ranked-wallets query took MIN/MAX of valid_at -- the TEXT timestamp -- which forced a row fetch for every one of the day's 2.8 M events"
   severity: S2
@@ -3588,6 +3590,7 @@ bugs:
   monitor_gap: None new; the request log names the endpoint.
   regression_test:
     - tests/selftest.py::test_wallet_card_percentages_carry_their_counts
+
 - id: BUG-20260914-091
   summary: "The Traits tab's token table never loaded: /api/screener took 518 s because it took MIN/MAX per token over EVERY placement event with the standing predicate's EXISTS subqueries per row -- the BUG-083 shape again, one PR later"
   severity: S1
@@ -3646,6 +3649,7 @@ bugs:
   monitor_gap: None new; the UI scan test asserts no chart calls the unclipped form.
   regression_test:
     - tests/selftest.py::test_ui_charts_stay_inside_their_window_and_the_book_is_per_token
+
 - id: BUG-20260914-093
   summary: "After BUG-088 a fold of 844 rows still took 18-22 s (status.normalizer.took_ms), so the page's header lagged the stream by ~20 s and every request on a busy disk slowed with it: the fold decoded the WHOLE open landing file on every pass and skipped the frames it had already folded, so each pass cost as much as the file's age"
   severity: S2
@@ -3682,6 +3686,7 @@ bugs:
     took_ms said "slow" without saying where; the phase breakdown closes that.
   regression_test:
     - tests/selftest.py::test_incremental_read_resumes_at_the_last_complete_frame
+
 - id: BUG-20260914-094
   summary: "The fold's `lives` phase took 16-22 s of every 5 s pass (named by the BUG-093 phase timings): refresh_order_lives looked for standing lives whose expiry had passed with a predicate no index served, a scan of all 5.9 M order_lives rows on every fold"
   severity: S2
@@ -3716,6 +3721,7 @@ bugs:
 # NUM KBI VAL PRS ETH CFG INF SEC. data_impact reads as reader_impact: which surface,
 # which numbers, with or without their labels.
 # ---------------------------------------------------------------------------
+
 - id: BUG-20261003-095
   area: health
   summary: Kidney strain index glomerular term hard-codes 0.5, 0.5 and 0.1 in engine code; three constants with no parameter row, grade or source
@@ -3925,6 +3931,7 @@ bugs:
     comments. Accepted as cosmetic.
 
 # --- Findings of the clinical-safety review and the rigor-lead review, 2026-10-03 -------
+
 - id: BUG-20261003-100
   area: health
   summary: Published V1 surface frames the kidney strain index as a dose answer without its label (dose panel heading, HUD gauge)
@@ -3969,7 +3976,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: PRS
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T20:15:00-05:00"
   logged_at: "2026-10-03T03:32:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "health-safety-reviewer reading app/ui.js refLines and scenarios.js drink_water_3L_fast"
@@ -3990,11 +3998,19 @@ bugs:
     "hyponatremia risk demo"; the label never said the number is a classification
     definition. HREQ-S-03 did not exist when V1 was built.
   resolution: >-
-    Planned (M1 viewer review, with the display-title map of BUG-102): neutral tone and
-    the config label display.threshold_label on both lines; the description reads "...
-    crosses 135 mmol/L, the classification threshold that defines hyponatremia (a
-    definition, not a safety limit)". Both implementations change together with the
-    version bump.
+    Fixed in the vendored viewer (W-19): the plasma sodium chart takes both lines from their
+    mc false parameter rows (na_normal_low 135, na_normal_high 145) and draws them in one
+    neutral dashed tone (app/charts.js has no alarm tone for a reference line any more),
+    each labelled "135 — classification threshold, not a physiological parameter" (and 145)
+    beside its value, over the band on a surface halo; the label is display.threshold_label
+    byte-equal (app/config.js LABELS), and the card states it again in text under the chart.
+    The scenario description sentence ("... crosses the 135 mmol/L hyponatremia boundary") is
+    engine text in both implementations, held equal by the golden fixture; it is not a
+    threshold line, and it changes with the next MODEL_VERSION bump together with the
+    display-title map of BUG-20261003-102 (W-19). Regression: tools/health_app_smoke.py
+    asserts both labels byte-equal to base.yaml, no tone on either line, the text under the
+    chart, and that "hyponatremia threshold" appears nowhere on the rendered page.
+  regression_test: tools/health_app_smoke.py::main
   monitor_gap: >-
     No string lint for thresholds; the safety checklist now names it.
 
@@ -4035,7 +4051,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: PRS
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T20:15:00-05:00"
   logged_at: "2026-10-03T03:36:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "health-safety-reviewer reading the Chronic tab (index.html) and the expectations list renderer (app/ui.js)"
@@ -4055,11 +4072,22 @@ bugs:
     Expectation rows render only metric and target; the note field, where V1 recorded
     calibration and divergence, is not rendered.
   resolution: >-
-    Planned (M1 viewer review): in-band text under the chronic chart -- "Calibration,
-    not validation: three model parameters were tuned so this result lands in the He
-    2013 band; agreement with it is not evidence. Known divergence: the model expands
-    extracellular fluid under chronic salt; a human study (Heer 2000) found no
-    total-body-water gain." -- fed from the harness rows' role and kind.
+    Fixed in the vendored viewer (W-19): while the chronic scenario is shown (Chronic tab or
+    the dropdown) the mean-arterial-pressure chart reads "Calibration, not validation. ΔMAP at
+    day 30 per +100 mmol/day Na: the He 2013 band is a calibration target for aldo_vol_exp,
+    map_vol_exp, pn_gain (role calibration); agreement with it is not evidence.", the same
+    for the MAP time-course design target (map_auto_tau_h), and the ECF/ICF chart reads
+    "Known divergence. ECF volume change:" followed by the record's own text (the model
+    expands ECF; Heer 2000 found no total-body-water gain). Every word that names a
+    parameter, a source or the divergence is read from the records in engine/scenarios.js
+    (role, calibrates, kind, metric, target; the author and year from the evidence record),
+    so nothing is typed twice; the notes leave with the scenario, and the "What the
+    literature expects" list marks the calibration rows as well. Regression:
+    tools/health_app_smoke.py asserts "the He 2013 band is a calibration target for
+    aldo_vol_exp, map_vol_exp, pn_gain", every calibration record's parameters and the
+    known-divergence record's text under the chronic charts, and their absence under the
+    other six scenarios.
+  regression_test: tools/health_app_smoke.py::main
   monitor_gap: >-
     HREQ-S-07 did not exist; it does now, and the safety checklist names it.
 
@@ -4070,7 +4098,7 @@ bugs:
   priority: P1
   error_class: ETH
   status: fixed
-  resolved_at: "2026-10-03T15:20:00-05:00"
+  resolved_at: "2026-10-03T20:15:00-05:00"
   logged_at: "2026-10-03T03:38:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "health-safety-reviewer comparing engine/index.js DISCLAIMER with the model.js header comment and docs/health/00 §1.4"
@@ -4097,12 +4125,19 @@ bugs:
     simulateMC, saltLoadMetrics, simulateSweep, computeInfluence and paramSummary;
     top-level beside the top-level disclaimer of simulateMC and simulateSweep). The golden
     fixture's header carries validationStatus and its resultLabels section the labels of
-    every JavaScript result, compared key for key with the port. The vendored viewer's
-    rendering of the second sentence (reference/metabolic-map-v1/app) is the viewer
-    builder's and stays open until that builder's commit imports VALIDATION_STATUS.
+    every JavaScript result, compared key for key with the port. The vendored viewer
+    (reference/metabolic-map-v1/app) imports VALIDATION_STATUS beside DISCLAIMER and renders
+    both sentences, from those exports and typed nowhere else, in-band on every surface that
+    shows a number: the HUD, the run panel, every chart card, the dose panel, the evidence
+    drawer, the knowledge-base card's live values and the footer; the narrow-screen strip,
+    which held a typed copy of the first sentence only, is filled from the same exports.
+    tools/health_app_smoke.py asserts "Educational model — not medical advice. Not clinically
+    validated." (model.disclaimer and model.validation_status of config/health/base.yaml) on
+    each of those surfaces in headless Chromium.
   regression_test:
     - tests/health_selftest.py::test_reference_results_carry_validation_status_like_the_port
     - tests/health_selftest.py::test_every_public_result_carries_disclaimer_and_validation_status
+    - tools/health_app_smoke.py::main
   monitor_gap: >-
     No test asserted the surface standard against the rendered string; the safety
     checklist and tests/health_selftest.py now do.
@@ -6109,6 +6144,7 @@ bugs:
   monitor_gap: >-
     No test reads the viewer's chip source; the engine tests prove the lists, not that the
     page shows them.
+
 - id: BUG-20261003-180
   area: health
   summary: "naIn_base_mmold (150 mmol/day, a scenario condition) was graded A-meta from He 2013, whose pooled estimates are blood-pressure effects, not an intake (V1 audit F-12)"
@@ -6309,6 +6345,159 @@ bugs:
     MODEL_VERSION bump (W-14), or add a third case to 03 §4 for a metadata-only change whose
     diff touches only the hash and paramSummary lines.
   monitor_gap: No gate tells a metadata-only params.json change from a value change.
+
+- id: BUG-20261003-194
+  area: health
+  summary: "The viewer's fallback evidence list for the kidney strain index (STRAIN_P) omits the three strain-index rows added with model 1.1.0"
+  severity: S2
+  priority: P3
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-03T20:05:00-05:00"
+  resolved_at: "2026-10-03T20:15:00-05:00"
+  occurred_at: "2026-10-03T15:00:18-05:00"
+  detected_by: "health-physiology-modeler adding strain_w_glomerular_pressure, strain_w_glomerular_filtration and strain_scale_filtration for MODEL_VERSION 1.1.0 (noted in BUG-20261003-095); confirmed by the static check of tools/health_app_smoke.py"
+  detection_channel: agent
+  branch: worktree-agent-a0bc72215e7257f19
+  locations:
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 49}
+  requirement: HREQ-S-06
+  data_impact: >-
+    Reader-facing only when the influence screen throws (the hand-written lists are its
+    fallback): the evidence chip and drawer of the strain chart and of the dose panel would
+    list 12 strain feeders, not 15, and count three fewer grade-E assumptions than the index
+    rests on. With the screen working (every load so far) the chips are complete; no number
+    changes either way.
+  root_cause: >-
+    The fallback list is written by hand in app/ui.js; the engine change that added three
+    parameter rows could not edit the viewer's files, and nothing compared the list with
+    the parameter table.
+  resolution: >-
+    STRAIN_P names the three rows (15 entries, every strain_* row of engine/params.json and
+    the five model parameters the index reads). tools/health_app_smoke.py checks, without a
+    browser, that STRAIN_P names every strain_* row of params.json, so the next row added
+    fails the smoke check until the list follows.
+  regression_test: tools/health_app_smoke.py::main
+  monitor_gap: >-
+    The hand lists are documented as known to under-count, and nothing held even their
+    named parameters to the table; the smoke check's static part now does on every run.
+
+- id: BUG-20261003-195
+  area: health
+  summary: "The viewer fetched kb/ and the engine evidence file relative to the page, so index.html served from any directory but its own lost the curated knowledge base and every citation"
+  severity: S2
+  priority: P2
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-03T20:05:00-05:00"
+  resolved_at: "2026-10-03T20:15:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "viewer builder loading reference/metabolic-map-v1/index.html in headless Chromium with python3 -m http.server run from the repository root (HTTP 404 on /reference/kb/entities.json and /reference/engine/evidence.engine.json)"
+  detection_channel: agent
+  branch: worktree-agent-a0bc72215e7257f19
+  locations:
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 23}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 249}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 260}
+  requirement: HREQ-P-09
+  data_impact: >-
+    Reader-facing whenever index.html is not at the server root: two 404s in the console,
+    the left rail silently falls back to the V1 seed entities instead of the curated
+    knowledge base, and the evidence drawer lists every citation as "(record not found)".
+    The paths were written for app/index.html; from the top-level index.html they only
+    worked because "../" from a server root resolves to the root. No model number changes.
+  root_cause: >-
+    fetch() resolves a relative URL against the page, not against the module that calls
+    it; the two copies of the page sit at different depths, and both had only been opened
+    with their own directory as the server root.
+  resolution: >-
+    app/ui.js resolves kb/entities.json, kb/evidence.json and engine/evidence.engine.json
+    against its own module URL (siblingUrl), so either copy of the page, served from any
+    directory, loads the same files. tools/health_app_smoke.py serves reference/ (the page
+    one directory down) and asserts no HTTP error or failed request from the page's origin,
+    the entity source kb/entities.json and a non-empty evidence map.
+  regression_test: tools/health_app_smoke.py::main
+  monitor_gap: >-
+    No automated load of the page existed, and the README's instruction (serve from this
+    directory) is the one layout that hides the error.
+
+- id: BUG-20261003-196
+  area: health
+  summary: "Two mandated labels were not the config's: the Chronic tab typed its own trajectory label, and custom runs carried no custom-run label at all"
+  severity: S1
+  priority: P1
+  error_class: ETH
+  status: fixed
+  logged_at: "2026-10-03T20:05:00-05:00"
+  resolved_at: "2026-10-03T20:15:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "viewer builder comparing every rendered label with display in config/health/base.yaml while proving HREQ-P-09 in headless Chromium"
+  detection_channel: agent
+  branch: worktree-agent-a0bc72215e7257f19
+  locations:
+  - {file: reference/metabolic-map-v1/index.html, line: 392}
+  - {file: reference/metabolic-map-v1/index.html, line: 377}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 870}
+  requirement: HREQ-P-12
+  data_impact: >-
+    Reader-facing, published: the Custom tab runs any water and salt intervention with no
+    words saying it is the 70 kg reference adult with no registered expectations (HREQ-P-12),
+    so a custom run reads as a result about the reader. The Chronic tab's chip, "Modeled risk
+    trajectory, not a prediction", was a second, differently punctuated copy of
+    display.trajectory_label ("modeled risk trajectory — not a prediction", HREQ-P-13), so
+    tracker D-8's wording decision would not have reached it. No number changes.
+  root_cause: >-
+    V1 typed its labels where it used them; the config keys were reserved with "no reader
+    yet", and nothing compared a rendered label with them.
+  resolution: >-
+    The Chronic tab's chip is the engine's SCENARIOS.chronic_high_salt_30d.label (the string
+    tests/health_selftest.py holds equal to display.trajectory_label), and the Custom tab
+    carries a chip with display.custom_run_label from app/config.js LABELS.
+    tools/health_app_smoke.py asserts both chips byte-equal to base.yaml. Marking inputs
+    outside the cited human-study ranges as "extrapolation beyond the evidence" (the rest of
+    HREQ-P-12) needs those ranges recorded per input and is M1 virtual-lab work, not done here.
+  regression_test: tools/health_app_smoke.py::main
+  monitor_gap: >-
+    No check read display.* from the config; the smoke check now reads every label it
+    asserts from config/health/base.yaml.
+
+- id: BUG-20261003-197
+  area: health
+  summary: "The salt-dose panel does not show that its Suckling 2012 comparison is unverified and a different quantity (HREQ-S-07 beyond the chronic scenario)"
+  severity: S1
+  priority: P2
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-03T20:05:00-05:00"
+  resolved_at: "2026-10-03T20:15:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "viewer builder applying HREQ-S-07 to every registered expectation with role calibration or kind known-divergence or unverified, not only the chronic records of BUG-20261003-103"
+  detection_channel: agent
+  branch: worktree-agent-a0bc72215e7257f19
+  locations:
+  - {file: reference/metabolic-map-v1/index.html, line: 417}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 109}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 888}
+  requirement: HREQ-S-07
+  data_impact: >-
+    Reader-facing, published: the dose panel's evidence drawer lists Suckling 2012 among the
+    "Scenario validation sources" while the record salt_load_sweep/02 says the comparison
+    (+3.13 mmol/L, salted minus matched-water control) is unverified and a different
+    quantity from the panel's rise over each sample's own baseline. Nothing on the panel
+    said so, so a reader could take the curve as checked against that study.
+  root_cause: >-
+    As BUG-20261003-103: the viewer rendered expectation records only as metric and target
+    in the scenario list, so a record's status reached no output it qualifies.
+  resolution: >-
+    The renderer that writes the chronic notes (statusNotes in app/ui.js) also writes the
+    salt sweep's qualifying records under the dose panel: "Unverified." followed by the
+    record's metric and target, read from engine/scenarios.js. tools/health_app_smoke.py
+    asserts that text on the dose panel.
+  regression_test: tools/health_app_smoke.py::main
+  monitor_gap: >-
+    HREQ-S-07 was applied to the one scenario its bug named; nothing enumerated every record
+    with a calibration role or a non-counting kind against the surfaces that show its output.
+
 - id: BUG-20261003-198
   area: health
   summary: "Three checks of kb-v1's self-test assume every registered module is enabled, so the add recipe's first step -- a registry entry with `enabled: false` (docs/health/04 §6.5; 07, 'Adding a module') -- turns tests/health_kb_selftest.py red with nothing wrong"

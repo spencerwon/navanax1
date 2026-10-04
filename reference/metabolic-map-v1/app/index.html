@@ -222,6 +222,14 @@ input[type="range"] { width: 100%; accent-color: var(--accent); margin: 0; }
 .tip-key { width: 12px; height: 2px; border-radius: 1px; }
 .tip-sub { grid-column: 2; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart-foot { font-size: 11px; color: var(--muted); }
+/* HREQ-S-01: both disclaimer sentences, in-band, on every surface that shows a number (filled from the engine by app/ui.js). */
+.disclaim { margin: 0; font-size: 11px; font-weight: 600; color: var(--ink-2); }
+.hud .disclaim { max-width: 260px; padding: 3px 8px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--line); }
+/* HREQ-S-04: the index label on the gauge; HREQ-S-07: calibration and divergence notes under the outputs they affect. */
+.gauge .idx-label { display: block; font-size: 10px; color: var(--muted); }
+.expect-notes:empty { display: none; }
+.expect-note { margin: 0; color: var(--ink-2); }
+.expect-note strong { color: var(--ink); }
 .tablewrap { overflow-x: auto; max-height: 220px; overflow-y: auto; }
 table.data { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
 table.data th, table.data td { padding: 3px 6px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
@@ -284,7 +292,7 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
 @media (max-width: 480px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hud .time { font-size: 20px; }
-  .hud .scen { max-width: 170px; }
+  .hud .scen, .hud .disclaim { max-width: 170px; }
   .gauge { width: 150px; padding: 6px 8px; }
   .brand p { display: none; }
 }
@@ -312,7 +320,7 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
     <div class="cores" id="coresBadge" title="Simulation workers running on this computer">
       <span id="coresText">Starting workers…</span><span class="dotrow" id="coreDots"></span>
     </div>
-    <p class="top-disclaimer" role="note">Educational model — not medical advice.</p>
+    <p class="top-disclaimer" role="note" data-disclaimer></p>
   </header>
 
   <!-- LEFT: where in the body -->
@@ -337,12 +345,13 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
     <div class="hud tr">
       <div class="time" id="hudTime">0.00 h</div>
       <div class="scen" id="hudScen"></div>
+      <p class="disclaim" data-disclaimer></p>
     </div>
     <div class="hud bl">
       <div class="gauge" aria-label="Thirst and kidney strain">
         <div class="lbl"><span>Thirst drive</span><strong id="thirstVal">–</strong></div>
         <div class="meter" role="meter" aria-valuemin="0" aria-valuemax="100" id="thirstMeter"><i id="thirstBar"></i></div>
-        <div class="lbl"><span>Kidney strain index</span><strong id="strainVal">–</strong></div>
+        <div class="lbl"><span>Kidney strain index<small class="idx-label" data-label="index_label"></small></span><strong id="strainVal">–</strong></div>
         <div class="strain-legend" aria-hidden="true"><b id="strainMark" style="left:0%"></b></div>
         <div class="strain-ticks"><span>0</span><span>0.33</span><span>0.66</span><span>1</span></div>
       </div>
@@ -364,6 +373,7 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
         <details class="expects" id="scenarioExpects"><summary>What the literature expects</summary><ul></ul></details>
       </div>
       <form id="mode-custom" hidden style="display:grid;gap:10px">
+        <span class="chip warn" style="justify-self:start" data-label="custom_run_label"></span>
         <div class="range-field"><div class="top-line"><label for="cWater">Water</label><output id="cWaterOut" class="num">1,000 mL</output></div>
           <input type="range" id="cWater" min="0" max="4000" step="50" value="1000"></div>
         <div class="range-field"><div class="top-line"><label for="cSalt">Salt (NaCl)</label><output id="cSaltOut" class="num">0.0 g</output></div>
@@ -378,7 +388,7 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
       </form>
       <div id="mode-chronic" hidden style="display:grid;gap:8px">
         <p class="scen-desc" id="chronicDesc"></p>
-        <span class="chip warn" style="justify-self:start">Modeled risk trajectory, not a prediction</span>
+        <span class="chip warn" style="justify-self:start" id="chronicLabel"></span>
       </div>
       <div class="playbar">
         <button class="btn play" id="playBtn" aria-label="Play"><svg viewBox="0 0 16 16" id="playIcon"><path d="M3 2l11 6-11 6z"/></svg></button>
@@ -387,6 +397,7 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
       </div>
       <div class="progress" aria-hidden="true"><i id="mcProgress"></i></div>
       <div class="mcnote" id="mcNote">Monte Carlo n = 64 · median line, 90% band (q05–q95)</div>
+      <p class="disclaim" data-disclaimer></p>
     </section>
 
     <section class="stats" id="stats" aria-label="Values at the playhead"></section>
@@ -395,13 +406,15 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
 
     <section class="panel" id="dosePanel" aria-label="Salt dose response">
       <div class="dose-head">
-        <h2>How much salt strains the kidney?</h2>
+        <h2>Salt load sweep: the model's kidney strain index — <span data-label="index_label"></span></h2>
         <button class="ev-chip" id="doseEv" type="button"></button>
       </div>
       <p class="scen-desc">Single oral salt loads from 0 to 30 g, each with 0.5 L water, 48 h per dose. Same 64 parameter samples at every dose, so the curve shape is not sampling noise.</p>
       <div class="seg" id="doseMetric" role="group" aria-label="Dose response metric"></div>
       <div class="dose-box" id="doseBox"></div>
       <div class="row" style="justify-content:space-between"><span class="mcnote" id="doseNote">Queued after the main run</span><button class="btn" id="doseRun" type="button">Re-run sweep</button></div>
+      <div class="expect-notes" id="doseNotes"></div>
+      <p class="disclaim" data-disclaimer></p>
     </section>
 
     <section class="panel stress" aria-label="Computer stress test">
@@ -419,6 +432,7 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
   <header>
     <div class="row"><h2 id="drawerTitle">Evidence</h2><button class="btn" id="drawerClose" type="button">Close</button></div>
     <div class="grade-sum" id="drawerSum"></div>
+    <p class="disclaim" data-disclaimer></p>
   </header>
   <div class="body" id="drawerBody"></div>
 </aside>
