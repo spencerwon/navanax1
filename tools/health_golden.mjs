@@ -25,7 +25,9 @@
 // (quantile sort, Math.max and Math.pow on NaN); (o) resultLabels holds, for every public
 // result object of index.js, the labelling fields it carries (disclaimer, validation_status,
 // meta), taken from the same runs as the sections above (since model 1.1.0,
-// BUG-20261003-104). Sections are only ever ADDED: an existing
+// BUG-20261003-104); (p) influenceAll is the influence screen per registered scenario at its
+// own horizon in both directions and the union (HREQ-U-12, since model 1.1.0), written after
+// rejectionMargins. Sections are only ever ADDED: an existing
 // section's bytes change only with a MODEL_VERSION bump. Every Monte
 // Carlo section first checks that no draw sits within 1e-6 of a rejection boundary
 // (HREQ-V-11) and records the smallest margin it saw (rejectionMargins). The header
@@ -42,10 +44,25 @@ const ENGINE = resolve(ENGINE_DIR, 'index.js');
 // HEALTH_GOLDEN_OUT overrides the fixture path (the self-test uses it to check a planted copy).
 const OUT = process.env.HEALTH_GOLDEN_OUT ? resolve(process.env.HEALTH_GOLDEN_OUT)
   : resolve(ROOT, 'tests/fixtures/health/golden_v1.json');
+// HEALTH_GOLDEN_REUSE_INFLUENCE_ALL names a fixture whose influenceAll section (and its
+// resultLabels entry) is taken verbatim instead of recomputing its 805 runs (about 25 s). A
+// test seam for the self-test of the --check logic on a planted copy, which would otherwise
+// run the generator twice and leave the default suite over its time budget (HREQ-N-04).
+// Accepted only with --check AND HEALTH_GOLDEN_OUT (a planted copy), and announced on stderr:
+// the gate and CI set neither variable, so they always recompute every section.
+const REUSE_INFLUENCE_ALL = process.env.HEALTH_GOLDEN_REUSE_INFLUENCE_ALL || '';
+if (REUSE_INFLUENCE_ALL && !(process.argv.includes('--check') && process.env.HEALTH_GOLDEN_OUT)) {
+  console.error('health_golden: HEALTH_GOLDEN_REUSE_INFLUENCE_ALL is a test seam: it needs --check '
+    + 'and HEALTH_GOLDEN_OUT (a planted copy); refusing to write or check the real fixture with it');
+  process.exit(2);
+}
 // Size budget: 400 KB until model 1.1.0, raised to 448 KB when the three strain-index
 // constants (BUG-20261003-095) added 3 x 40 effects to computeInfluence and 3 keys to every
-// drawn sample, and resultLabels was added (the 1.0.1 fixture was 403,140 bytes).
-const MAX_BYTES = 448 * 1024;
+// drawn sample, and resultLabels was added (the 1.0.1 fixture was 403,140 bytes); raised
+// again to 720 KB in the same model version for the influenceAll section (HREQ-U-12,
+// BUG-20261003-096: about 262 KB of feeder lists and effects; the fixture went from 413,597 to
+// 675,873 bytes, 8.3 % headroom).
+const MAX_BYTES = 720 * 1024;
 
 const E = await import(pathToFileURL(ENGINE).href);
 const S = await import(pathToFileURL(resolve(ENGINE_DIR, 'solver.js')).href);
@@ -480,6 +497,42 @@ function goldenNonFinite() {
   };
 }
 
+// (p) influenceAll (HREQ-U-12, BUG-20261003-096): computeInfluenceAll() at its defaults,
+// every registered scenario at its own tEnd and dt, +10 % and -10 %. Written compactly to
+// stay in budget: meta, the union, the per-scenario feeder lists, and per scenario and
+// direction the feeder lists (params) with their effects aligned to them (effects), rounded
+// to INFLUENCE_ALL_DIGITS significant digits. Effects below the threshold are not written:
+// they are implied by the lists. The self-test compares drink_water_1L (one reference run
+// plus 114) by default and every scenario under --robust (tests/health_selftest.py), and
+// tools/health_influence_diff.py diffs a recomputed union against this one (HREQ-V-19).
+const INFLUENCE_ALL_DIGITS = 6;
+function goldenInfluenceAll() {
+  const r = E.computeInfluenceAll();
+  LABELS.computeInfluenceAll = labelsOf(r);
+  const round = (e) => (Number.isFinite(e) ? Number(e.toPrecision(INFLUENCE_ALL_DIGITS)) : e);
+  const runs = {};
+  for (const [sc, byDir] of Object.entries(r.runs)) {
+    runs[sc] = {};
+    for (const [dir, x] of Object.entries(byDir)) {
+      runs[sc][dir] = { params: x.params,
+        effects: Object.fromEntries(Object.entries(x.params).map(([k, l]) => [k, l.map((n) => round(x.effects[k][n]))])) };
+    }
+  }
+  return { effectDigits: INFLUENCE_ALL_DIGITS, meta: r.meta, union: r.union, feeders: r.feeders, runs };
+}
+function reusedInfluenceAll(path) {
+  const revive = (_k, v) => (v !== null && typeof v === 'object' && !Array.isArray(v)
+    && Object.keys(v).length === 1 && '$float' in v ? Number(v.$float) : v);
+  const old = JSON.parse(readFileSync(resolve(path), 'utf8'), revive);
+  if (!old.influenceAll || !old.resultLabels?.computeInfluenceAll) {
+    console.error(`health_golden: ${path} has no influenceAll section to reuse`);
+    process.exit(2);
+  }
+  console.error(`health_golden: influenceAll reused verbatim from ${path} (test seam; that section is not checked)`);
+  LABELS.computeInfluenceAll = old.resultLabels.computeInfluenceAll;
+  return old.influenceAll;
+}
+
 const golden = {
   generator: 'tools/health_golden.mjs',
   regenerate: '/opt/node22/bin/node tools/health_golden.mjs',
@@ -512,6 +565,7 @@ const golden = {
   resultLabels: LABELS,
 };
 golden.rejectionMargins = MARGINS;
+golden.influenceAll = REUSE_INFLUENCE_ALL ? reusedInfluenceAll(REUSE_INFLUENCE_ALL) : goldenInfluenceAll();
 
 const replacer = (_k, v) => (typeof v === 'number' && !Number.isFinite(v) ? { $float: String(v) } : v);
 // Pretty-printed, except that an array of primitives goes on one line (keeps the file

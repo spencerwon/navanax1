@@ -58,12 +58,14 @@ from health.engine import (  # noqa: E402
     VALIDATION_STATUS,
     baseline_inputs,
     compute_influence,
+    compute_influence_all,
     constants,
     default_params,
     derived,
     draw_samples,
     fluxes,
     imul,
+    influence_union,
     initial_state,
     make_salt_load,
     make_scenario,
@@ -416,9 +418,10 @@ def test_reference_engine_files_match_the_fixture_hashes():
 def test_golden_fixture_fits_the_generator_size_budget():
     """BUG-20261003-173: the 1.0.1 fixture (403,140 bytes) sat 1.6 % under the generator's
     400 KB budget, so the 1.1.0 regeneration (three parameter rows: 120 influence effects and
-    24 sample values more, plus resultLabels) was refused at 413,597 bytes. The budget is now
-    448 KB; this test reads it from tools/health_golden.mjs (no Node needed) and reports the
-    headroom, so the next model change sees the margin before the generator refuses."""
+    24 sample values more, plus resultLabels) was refused at 413,597 bytes. The budget became
+    448 KB, then 720 KB for the influenceAll section (HREQ-U-12, BUG-20261003-096; fixture
+    675,873 bytes); this test reads it from tools/health_golden.mjs (no Node needed) and reports
+    the headroom, so the next model change sees the margin before the generator refuses."""
     src = (ROOT / "tools" / "health_golden.mjs").read_text(encoding="utf-8")
     m = re.search(r"^const MAX_BYTES = (\d+) \* 1024;$", src, re.M)
     budget = int(m.group(1)) * 1024 if m else 0
@@ -436,7 +439,10 @@ def test_golden_check_ignores_the_recorded_node_version_but_not_a_value():
     `process.version`. The recorded Node version is provenance, not a value: Node 20.20,
     22.22 and 22.23 regenerate the fixture byte-identically apart from that line. Planted
     on a copy (HEALTH_GOLDEN_OUT): a different recorded version is up to date; one changed
-    value is stale, and the first differing line is named."""
+    value is stale, and the first differing line is named. The planted runs reuse the
+    committed influenceAll section (HEALTH_GOLDEN_REUSE_INFLUENCE_ALL, a seam the generator
+    accepts only with --check on a planted copy) so the two runs stay inside the suite's time
+    budget; the gate's own --check recomputes it, and the seam's refusals are checked here."""
     import re
     import subprocess
     import tempfile
@@ -450,7 +456,8 @@ def test_golden_check_ignores_the_recorded_node_version_but_not_a_value():
             out = Path(d) / "golden.json"
             out.write_text(planted, encoding="utf-8")
             r = subprocess.run([node, str(ROOT / "tools" / "health_golden.mjs"), "--check"],
-                               env={**os.environ, "HEALTH_GOLDEN_OUT": str(out)},
+                               env={**os.environ, "HEALTH_GOLDEN_OUT": str(out),
+                                    "HEALTH_GOLDEN_REUSE_INFLUENCE_ALL": str(GOLDEN_PATH)},
                                capture_output=True, text=True, timeout=300, check=False)
             return r.returncode, r.stdout + r.stderr
 
@@ -466,6 +473,15 @@ def test_golden_check_ignores_the_recorded_node_version_but_not_a_value():
           "is named with both versions of it",
           code == 1 and "stale" in out and "first difference at line" in out and new in out
           and old in out, out[-600:])
+    seam = {**os.environ, "HEALTH_GOLDEN_REUSE_INFLUENCE_ALL": str(GOLDEN_PATH)}
+    seam.pop("HEALTH_GOLDEN_OUT", None)
+    refused = [subprocess.run([node, str(ROOT / "tools" / "health_golden.mjs"), *args], env=seam,
+                              capture_output=True, text=True, timeout=60, check=False)
+               for args in (["--check"], [])]
+    check("golden seam: reusing influenceAll is refused (exit 2, before any run) on the real "
+          "fixture, for --check and for a write",
+          all(r.returncode == 2 and "test seam" in r.stderr for r in refused),
+          " | ".join(r.stderr[-200:] for r in refused))
 
 
 def test_model_version_agrees_everywhere():
@@ -922,6 +938,294 @@ def test_influence_screen_matches_javascript_reference():
           str(d))
     global _INFLUENCE
     _INFLUENCE = r
+
+
+# ---------------------------------------------------------------------------
+# HREQ-U-12 (BUG-20261003-096, W-15): the influence screen per registered scenario, at its own
+# horizon, in both directions, and the union (computeInfluenceAll / compute_influence_all).
+# The fixture's influenceAll section holds the JavaScript result: feeder lists exactly, effects
+# of the feeders to INFLUENCE_ALL_DIGITS significant digits. Pure Python needs minutes for the
+# 30-day scenario, so the default suite recomputes drink_water_1L and reads the union from the
+# fixture; the full recomputation runs under --robust.
+# ---------------------------------------------------------------------------
+#: Effects in influenceAll are written to 6 significant digits (rounding error <= 5e-6
+#: relative); a port value is accepted within 1e-5 relative of the written one.
+INFLUENCE_ALL_EFFECT_REL_TOL = 1e-5
+INFLUENCE_ALL_DEFAULT_SCENARIO = "drink_water_1L"
+#: Feeders of the default screen (salt_load_10g, 24 h, dt 1/20 h, +10 %) that the union over
+#: every registered scenario at its OWN horizon does not list (BUG-20261003-177, open): the
+#: effect is normalised by each run's peak-to-peak range, and the cumulative ledger key
+#: water_out has three times the range over salt_load_10g's 72 h. No displayed quantity.
+UNION_MISSES_DEFAULT_SCREEN = {"water_out": ["V_ecf_0"]}
+
+
+def displayed_quantities() -> list[str]:
+    """Every quantity the viewer draws: the `keys` of its charts and DOSE_KEYS (ui.js)."""
+    ui = (ROOT / "reference" / "metabolic-map-v1" / "app" / "ui.js").read_text(encoding="utf-8")
+    keys = [k for grp in re.findall(r"keys: \[([^\]]*)\]", ui) for k in re.findall(r"'(\w+)'", grp)]
+    m = re.search(r"const DOSE_KEYS = \[([^\]]*)\]", ui)
+    keys += re.findall(r"'(\w+)'", m.group(1)) if m else []
+    return sorted(set(keys))
+
+
+def _influence_all_meta_for(g_meta: Mapping[str, Any], ids: Sequence[str]) -> dict[str, Any]:
+    """The JavaScript meta restricted to `ids`: what computeInfluenceAll({scenarios: ids})
+    returns (meta.scenarios, horizons, infeasible and the run count depend only on the ids)."""
+    out = dict(g_meta)
+    out["scenarios"] = list(ids)
+    out["horizons"] = {s: g_meta["horizons"][s] for s in ids}
+    out["infeasible"] = {s: g_meta["infeasible"][s] for s in ids}
+    out["runs"] = len(ids) * (1 + 2 * g_meta["nParams"])
+    return out
+
+
+def compare_influence_all(r: Mapping[str, Any], ids: Sequence[str], label: str) -> None:
+    """Hold a compute_influence_all(scenarios=ids) result to the fixture, every key."""
+    g = golden()["influenceAll"]
+    tol = INFLUENCE_ALL_EFFECT_REL_TOL
+    check(f"{label}: the fixture writes effects to the digits this suite assumes",
+          g["effectDigits"] == 6 and tol >= 2 * 0.5 * 10 ** (1 - g["effectDigits"]),
+          str(g["effectDigits"]))
+    w = Worst()
+    lists_differ: list[str] = []
+    for sid in ids:
+        for direction in ("up", "down"):
+            got, exp = r["runs"][sid][direction], g["runs"][sid][direction]
+            d = first_difference(got["params"], exp["params"], f"{sid}.{direction}.params")
+            if d:
+                lists_differ.append(d)
+                continue
+            for key, names in exp["params"].items():
+                for name, e in zip(names, exp["effects"][key], strict=True):
+                    w.add(f"{sid}.{direction}.{key}.{name}", got["effects"][key][name], e,
+                          rel=tol, abs_=0.0)
+    check(f"{label}: every per-scenario, per-direction feeder list (>1 % effect, strongest "
+          "first) equals JS", not lists_differ, "; ".join(lists_differ[:3]))
+    check(f"{label}: every feeder's effect matches JS (fixture rounded to 6 digits)", w.ok,
+          w.summary())
+    note(f"{label}: {w.summary()}")
+    d = first_difference({s: r["feeders"][s] for s in ids}, {s: g["feeders"][s] for s in ids})
+    check(f"{label}: per-scenario feeder lists (either direction, strongest first) equal JS",
+          d is None, d or "")
+    d = first_difference(r["meta"], _influence_all_meta_for(g["meta"], ids))
+    check(f"{label}: meta (rel, threshold, directions, horizons, runs, nParams, infeasible, "
+          "disclaimer, validation_status, modelVersion) equals JS, every key", d is None, d or "")
+
+
+def test_influence_union_matches_javascript_reference_on_drink_water_1L():
+    """computeInfluenceAll / compute_influence_all (HREQ-U-12): drink_water_1L at its own
+    horizon (12 h, dt 1/60 h), +10 % and -10 %, one reference run plus 2 x 57 perturbed runs,
+    against the fixture's JavaScript result."""
+    global _INFLUENCE_ALL
+    sid = INFLUENCE_ALL_DEFAULT_SCENARIO
+    t0 = time.perf_counter()
+    r = compute_influence_all(scenarios=[sid])
+    note(f"compute_influence_all(scenarios=[{sid!r}]) took {time.perf_counter() - t0:.2f} s "
+         f"({r['meta']['runs']} runs)")
+    sc = SCENARIOS[sid]
+    check("influence union: the screen runs at the scenario's own horizon (its t_end and dt)",
+          r["meta"]["horizons"] == {sid: {"tEnd": sc.t_end, "dt": sc.dt}}, str(r["meta"]["horizons"]))
+    compare_influence_all(r, [sid], f"computeInfluenceAll[{sid}]")
+    up = r["runs"][sid]["up"]
+    every = {n for lst in r["feeders"][sid].values() for n in lst}
+    check("influence union: per-scenario feeders are exactly the union of the two directions",
+          all(set(r["feeders"][sid][k]) == set(up["params"][k]) | set(r["runs"][sid]["down"]["params"][k])
+              for k in r["feeders"][sid]) and bool(every))
+    check("influence union: with one scenario the union is that scenario's feeder lists",
+          r["union"] == r["feeders"][sid])
+    _INFLUENCE_ALL = r
+
+
+def test_influence_union_shows_pn_gain_feeding_map_over_30_days():
+    """BUG-20261003-096 regression (HREQ-U-12): the default screen (salt_load_10g, 24 h,
+    +10 %) misses pn_gain for MAP, a parameter calibrated against the 30-day ΔMAP band, and
+    thirst_vol_gain for Thirst (max(0, 1 - vr) is zero while salt expands the ECF). The union
+    over every registered scenario at its own horizon in both directions lists both.
+    (1) The fixture's union, from the JavaScript reference, covers every registered scenario
+    at its tEnd and dt and lists them; (2) the port reproduces the two halves of the claim
+    directly with four runs of its own: pn_gain's effect on MAP is under the threshold in the
+    default screen's window and over it in the chronic scenario's."""
+    g = golden()["influenceAll"]
+    meta = g["meta"]
+    want = {sid: {"tEnd": sc.t_end, "dt": sc.dt if sc.dt is not None else 1 / 60}
+            for sid, sc in SCENARIOS.items()}
+    check("influence union (fixture): every registered scenario, at its own tEnd and dt, "
+          "in both directions (+10 %, -10 %)",
+          meta["scenarios"] == list(SCENARIOS) and meta["horizons"] == want
+          and meta["directions"] == {"up": 0.1, "down": -0.1}
+          and all(set(g["runs"][s]) == {"up", "down"} for s in SCENARIOS)
+          and meta["runs"] == len(SCENARIOS) * (1 + 2 * meta["nParams"]), str(meta["horizons"]))
+    check("influence union (fixture): pn_gain feeds MAP in the union and in the chronic "
+          "scenario (BUG-20261003-096)",
+          "pn_gain" in g["union"]["MAP"] and "pn_gain" in g["feeders"]["chronic_high_salt_30d"]["MAP"],
+          str(g["union"]["MAP"]))
+    check("influence union (fixture): thirst_vol_gain feeds Thirst (no_water_24h, -10 %)",
+          "thirst_vol_gain" in g["union"]["Thirst"]
+          and "thirst_vol_gain" in g["runs"]["no_water_24h"]["down"]["params"]["Thirst"],
+          str(g["union"]["Thirst"]))
+    union_sets = {k: sorted(v) for k, v in g["union"].items()}
+    check("influence union (fixture): the union is exactly the OR of the per-scenario feeder "
+          "lists (influence_union), and each per-scenario list the OR of its two directions",
+          influence_union(g) == union_sets
+          and all(set(g["feeders"][s][k]) == set(g["runs"][s]["up"]["params"][k])
+                  | set(g["runs"][s]["down"]["params"][k]) for s in SCENARIOS for k in g["union"]))
+    check("influence union (fixture): the union is never smaller than any one scenario's list",
+          all(set(g["feeders"][s][k]) <= set(g["union"][k]) for s in SCENARIOS for k in g["union"]))
+    check("influence union (fixture): no perturbation in any scenario made the steady state "
+          "infeasible", all(not v for by in meta["infeasible"].values() for v in by.values()),
+          str(meta["infeasible"]))
+
+    def map_effect(scenario: str, t_end: float, dt: float) -> float:
+        p0 = default_params()
+        a = simulate(params=p0, scenario=scenario, t_end=t_end, dt=dt)["states"]["MAP"]
+        b = simulate(params={**p0, "pn_gain": p0["pn_gain"] * 1.1}, scenario=scenario,
+                     t_end=t_end, dt=dt)["states"]["MAP"]
+        big = max(abs(v) for v in a)
+        scale = max(max(a) - min(a), 1e-6 * big, 1e-12)
+        return max(abs(x - y) for x, y in zip(a, b, strict=True)) / scale
+
+    t0 = time.perf_counter()
+    default_screen = compute_influence()
+    note(f"compute_influence() at INFLUENCE_DEFAULTS took {time.perf_counter() - t0:.2f} s")
+    check("default screen (port): pn_gain is NOT among MAP's feeders -- the under-count the "
+          "union exists to fix", "pn_gain" not in default_screen["params"]["MAP"],
+          str(default_screen["params"]["MAP"]))
+    shown = displayed_quantities()
+    gaps = {k: sorted(set(v) - set(g["union"][k])) for k, v in default_screen["params"].items()
+            if set(v) - set(g["union"][k])}
+    check("influence union: covers the default screen's feeders for every displayed quantity "
+          f"({', '.join(shown)})", len(shown) >= 9 and not set(gaps) & set(shown), str(gaps))
+    check("influence union: the only default-screen feeders it does not list are the recorded "
+          "ones (BUG-20261003-177, open: water_out <- V_ecf_0, no displayed quantity)",
+          gaps == UNION_MISSES_DEFAULT_SCREEN, str(gaps))
+    t0 = time.perf_counter()
+    thr = INFLUENCE_DEFAULTS["threshold"]
+    e_default = map_effect(INFLUENCE_DEFAULTS["scenario"], INFLUENCE_DEFAULTS["tEnd"],
+                           INFLUENCE_DEFAULTS["dt"])
+    chronic = SCENARIOS["chronic_high_salt_30d"]
+    e_chronic = map_effect(chronic.id, chronic.t_end, chronic.dt)
+    up = g["runs"]["chronic_high_salt_30d"]["up"]
+    js_chronic = up["effects"]["MAP"][up["params"]["MAP"].index("pn_gain")] \
+        if "pn_gain" in up["params"]["MAP"] else math.nan
+    check("influence union (port): pn_gain +10 % moves MAP by less than the threshold in the "
+          "default screen's window and by more over 30 days -- the under-count and its fix",
+          e_default <= thr < e_chronic, f"default {e_default:.4g}, chronic {e_chronic:.4g}")
+    check("influence union (port): the chronic effect equals the fixture's JavaScript effect",
+          err_ratio(e_chronic, js_chronic, INFLUENCE_ALL_EFFECT_REL_TOL, 0.0) <= 1,
+          f"python {e_chronic!r}, javascript {js_chronic!r}")
+    note(f"pn_gain on MAP: default screen {e_default:.4g}, chronic {e_chronic:.4g} "
+         f"({time.perf_counter() - t0:.2f} s)")
+
+
+def test_params_for_reads_the_union_once_primed():
+    """primeInfluence / prime_influence accept a computeInfluenceAll result, and paramsFor /
+    params_for then answer from its union (so the viewer can show the union with a one-line
+    change in its worker); a computeInfluence result keeps the old behaviour."""
+    g = golden()["influenceAll"]
+    saved = api_module._influence_cache
+    try:
+        api_module.prime_influence({"meta": g["meta"], "union": g["union"], "feeders": g["feeders"]})
+        got = api_module.params_for("MAP")
+        check("params_for: primed with the union, MAP lists pn_gain (the union's list, in order)",
+              got == g["union"]["MAP"] and "pn_gain" in got, str(got))
+        api_module.prime_influence({"params": {"MAP": ["map_vol_exp"]}})
+        check("params_for: primed with a single-screen result, it reads `params` as before",
+              api_module.params_for("MAP") == ["map_vol_exp"])
+        refused = False
+        try:
+            api_module.prime_influence({"meta": {}})
+        except ValueError:
+            refused = True
+        check("prime_influence: a result with neither union nor params is refused", refused)
+    finally:
+        api_module._influence_cache = saved
+    js = (REFERENCE_ENGINE / "index.js").read_text(encoding="utf-8")
+    check("paramsFor (index.js): reads the primed union when there is one, else the screen",
+          "const list = (inf.union || inf.params)[derivedKey];" in js
+          and "const lists = result && (result.union || result.params);" in js)
+
+
+def _influence_diff_tool() -> Any:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "health_influence_diff", ROOT / "tools" / "health_influence_diff.py")
+    assert spec is not None and spec.loader is not None  # noqa: S101 - the file is in this repo
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_influence_diff_tool_reports_added_and_removed_feeders():
+    """HREQ-V-19: tools/health_influence_diff.py is the review record of a model change. On
+    the committed fixture it reports no change (exit 0); against a planted baseline with one
+    feeder removed from a list and one invented feeder added to another it names both, per
+    quantity and per scenario, and exits 1; a re-ranking alone is not a change; a baseline
+    without an influenceAll section is a usage error (exit 2)."""
+    import tempfile
+    tool = _influence_diff_tool()
+    sid = INFLUENCE_ALL_DEFAULT_SCENARIO
+    cur = _INFLUENCE_ALL if _INFLUENCE_ALL is not None else compute_influence_all(scenarios=[sid])
+    check("influence diff: its disclaimer and validation status are the engine's",
+          tool.DISCLAIMER == DISCLAIMER and tool.VALIDATION_STATUS == VALIDATION_STATUS)
+
+    def run(baseline: Mapping[str, Any] | None) -> tuple[int, list[str]]:
+        lines: list[str] = []
+        with tempfile.TemporaryDirectory() as d:
+            path = GOLDEN_PATH
+            if baseline is not None:
+                path = Path(d) / "golden.json"
+                path.write_text(json.dumps(baseline), encoding="utf-8")
+            code = tool.run(["--golden", str(path), "--scenarios", sid], current=cur,
+                            write=lines.append)
+        return code, lines
+
+    code, lines = run(None)
+    check("influence diff: the port's drink_water_1L lists against the committed fixture: no "
+          "change, exit 0, the disclaimer and validation status last",
+          code == 0 and "no feeder list changed" in lines
+          and lines[-2:] == [DISCLAIMER, VALIDATION_STATUS], "\n".join(lines))
+    planted = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"), object_hook=_decode_nonfinite)
+    fd = planted["influenceAll"]["feeders"][sid]
+    dropped = fd["MAP"].pop(0)
+    fd["Na_plasma"].append("not_a_parameter")
+    code, lines = run(planted)
+    text = "\n".join(lines)
+    check("influence diff: a feeder missing from the baseline is reported ADDED and an invented "
+          "one REMOVED, per quantity in the union and per scenario; exit 1",
+          code == 1 and f"  MAP: added {dropped}" in lines
+          and "  Na_plasma: removed not_a_parameter" in lines
+          and "== union over drink_water_1L: 2 of 40 quantities changed" in lines
+          and f"== {sid}: 2 quantities changed" in lines, text)
+    reordered = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"), object_hook=_decode_nonfinite)
+    reordered["influenceAll"]["feeders"][sid]["MAP"].reverse()
+    code, lines = run(reordered)
+    check("influence diff: a re-ranking alone is not a change (exit 0)", code == 0,
+          "\n".join(lines))
+    del reordered["influenceAll"]
+    code, lines = run(reordered)
+    check("influence diff: a baseline without influenceAll is a usage error (exit 2)",
+          code == 2 and "no influenceAll section" in lines[0], "\n".join(lines))
+
+
+@robust
+def test_robust_influence_union_over_every_scenario_matches_javascript():
+    """HREQ-U-12 in full: compute_influence_all() over every registered scenario (805 runs;
+    the 30-day scenario dominates, minutes in pure Python) equals the fixture's JavaScript
+    result: every per-direction list and effect, every per-scenario list, the union and meta."""
+    t0 = time.perf_counter()
+    r = compute_influence_all()
+    note(f"compute_influence_all() took {time.perf_counter() - t0:.1f} s ({r['meta']['runs']} runs)")
+    ids = list(SCENARIOS)
+    compare_influence_all(r, ids, "computeInfluenceAll[every scenario]")
+    d = first_difference(r["union"], golden()["influenceAll"]["union"])
+    check("computeInfluenceAll[every scenario]: the union (strongest first) equals JS",
+          d is None, d or "")
+    check("computeInfluenceAll[every scenario]: pn_gain feeds MAP in the port's own union",
+          "pn_gain" in r["union"]["MAP"], str(r["union"]["MAP"]))
+    lines: list[str] = []
+    code = _influence_diff_tool().run([], current=r, write=lines.append)
+    check("influence diff (HREQ-V-19): the port's full union against the committed fixture: "
+          "no feeder list changed (exit 0)", code == 0, "\n".join(lines))
 
 
 def test_golden_comparison_detects_a_perturbed_model_constant():
@@ -2143,6 +2447,7 @@ def test_every_row_publishes_its_band_fields_and_versions():
 _SWEEP: dict[str, Any] | None = None
 _HARNESS_SUMMARY: dict[str, Any] | None = None
 _INFLUENCE: dict[str, Any] | None = None
+_INFLUENCE_ALL: dict[str, Any] | None = None
 _MC: dict[str, Any] | None = None
 
 
@@ -2335,18 +2640,21 @@ def test_config_agrees_with_engine_and_reference():
 
 
 #: Every index.js function that returns a result object, as recorded in the fixture's
-#: resultLabels section (tools/health_golden.mjs, since model 1.1.0).
+#: resultLabels section (tools/health_golden.mjs, since model 1.1.0; computeInfluenceAll
+#: appended with HREQ-U-12).
 JS_RESULT_FUNCTIONS = ("simulate", "drawSamples", "simulateMC", "saltLoadMetrics",
-                       "simulateSweep", "computeInfluence", "paramSummary")
+                       "simulateSweep", "computeInfluence", "paramSummary", "computeInfluenceAll")
 
 
 def test_reference_results_carry_validation_status_like_the_port():
     """BUG-20261003-104, reference side (W-20): index.js exports VALIDATION_STATUS and puts
     validation_status beside the disclaimer in every result object it returns, in the same
     places as the port: meta of every result (simulate, drawSamples, simulateMC,
-    saltLoadMetrics, simulateSweep, computeInfluence, paramSummary) and top-level beside the
-    top-level disclaimer of simulateMC and simulateSweep. The fixture's resultLabels section
-    holds what the JavaScript returned; the port must return the same labels, every key."""
+    saltLoadMetrics, simulateSweep, computeInfluence, paramSummary, computeInfluenceAll) and
+    top-level beside the top-level disclaimer of simulateMC and simulateSweep. The fixture's
+    resultLabels section holds what the JavaScript returned; the port must return the same
+    labels, every key (computeInfluenceAll: the drink_water_1L run, against the JavaScript
+    meta restricted to that scenario)."""
     js = (REFERENCE_ENGINE / "index.js").read_text(encoding="utf-8")
     m = re.search(r"export const VALIDATION_STATUS = '([^']+)'", js)
     check("validation status: index.js exports VALIDATION_STATUS byte-equal to the port's",
@@ -2388,10 +2696,16 @@ def test_reference_results_carry_validation_status_like_the_port():
         "simulateSweep": lab(sweep),
         "computeInfluence": lab(infl),
         "paramSummary": lab(param_summary()),
+        "computeInfluenceAll": lab(_INFLUENCE_ALL if _INFLUENCE_ALL is not None
+                                   else compute_influence_all(
+                                       scenarios=[INFLUENCE_ALL_DEFAULT_SCENARIO])),
     }
     for name in JS_RESULT_FUNCTIONS:
         js_lab = {k: v for k, v in labels.get(name, {}).items()
                   if k in ("disclaimer", "validation_status", "meta")}
+        if name == "computeInfluenceAll" and "meta" in js_lab:
+            js_lab["meta"] = _influence_all_meta_for(js_lab["meta"],
+                                                     [INFLUENCE_ALL_DEFAULT_SCENARIO])
         d = first_difference(port[name], js_lab, name)
         check(f"labels: the port's {name} carries the same disclaimer / validation_status / "
               "meta as the JavaScript, every key", d is None and bool(js_lab), d or "")
@@ -2411,6 +2725,8 @@ def test_every_public_result_carries_disclaimer_and_validation_status():
     sweep = _SWEEP if _SWEEP is not None else simulate_sweep(n=1, seed=1, values=[0])
     infl = _INFLUENCE if _INFLUENCE is not None else compute_influence(
         scenario="drink_water_1L", t_end=0.5, dt=0.1)
+    infl_all = _INFLUENCE_ALL if _INFLUENCE_ALL is not None else compute_influence_all(
+        scenarios=[INFLUENCE_ALL_DEFAULT_SCENARIO])
     rows = [x for sid in SCENARIOS for x in evaluate_expectations(sid, sim(sid))]
     results: list[tuple[str, Mapping[str, Any]]] = [
         ("simulate", sim("drink_water_1L")),
@@ -2418,6 +2734,7 @@ def test_every_public_result_carries_disclaimer_and_validation_status():
                                     keys=["Na_plasma"])),
         ("simulate_sweep", sweep),
         ("compute_influence", infl),
+        ("compute_influence_all", infl_all),
         ("draw_samples", draw_samples(n=2, seed=1)),
         ("salt_load_metrics", salt_load_metrics(sim("salt_load_10g"))),
         ("param_summary", param_summary()),
@@ -2430,7 +2747,8 @@ def test_every_public_result_carries_disclaimer_and_validation_status():
                or r["meta"].get("validation_status") != VALIDATION_STATUS
                or r["meta"].get("modelVersion") != MODEL_VERSION]
     check(f"every public result ({len(results)} objects: simulate, simulate_mc, simulate_sweep, "
-          "compute_influence, draw_samples, salt_load_metrics, param_summary, monte_carlo_runs, "
+          "compute_influence, compute_influence_all, draw_samples, salt_load_metrics, "
+          "param_summary, monte_carlo_runs, "
           "summarize and all 24 expectation rows) carries meta.disclaimer, "
           "meta.validation_status and meta.modelVersion (HREQ-M-01)", not missing,
           f"missing on: {missing}")

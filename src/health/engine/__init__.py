@@ -14,7 +14,7 @@ Module map (each mirrors one JavaScript file, block for block):
     solver     fixed-step RK4 with events    (solver.js)
     scenarios  named interventions           (scenarios.js)
     mc         PRNG, sampler, quantiles      (mc.js)
-    api        simulate, Monte Carlo, sweep, sensitivity screen (index.js)
+    api        simulate, Monte Carlo, sweep, sensitivity screen and its union (index.js)
     validate   literature-expectation harness (Python only; no JS counterpart)
 
 Example:
@@ -28,13 +28,16 @@ from __future__ import annotations
 from .api import (
     DISCLAIMER,
     INFLUENCE_DEFAULTS,
+    INFLUENCE_DIRECTIONS,
     MAX_STEP_FRACTION_OF_TAU_MIN,
     MAX_TRIES_PER_SAMPLE,
     MODEL_VERSION,
     VALIDATION_STATUS,
     compute_influence,
+    compute_influence_all,
     draw_samples,
     influence,
+    influence_union,
     nearest_index,
     param_summary,
     params_for,
@@ -85,11 +88,12 @@ from .scenarios import (
 
 __all__ = [
     "DERIVED_KEYS", "DISCLAIMER", "GFR_NORM_BSA_M2", "IDX", "INFLUENCE_DEFAULTS",
+    "INFLUENCE_DIRECTIONS",
     "InfeasibleParametersError", "InfeasibleParamsError", "LEDGER_KEYS", "LOG_UNIFORM_RATIO",
     "MAX_STEP_FRACTION_OF_TAU_MIN", "MAX_TRIES_PER_SAMPLE", "MMOL_NA_PER_G_NACL", "MODEL_VERSION",
     "REFERENCE_PERSON", "SCENARIOS", "STATE_KEYS", "Scenario", "Sweep", "VALIDATION_STATUS", "baseline_inputs",
-    "compute_influence", "constants", "default_params", "derived", "draw_samples", "fluxes",
-    "imul", "influence", "initial_state", "make_salt_load", "make_scenario", "make_water_load",
+    "compute_influence", "compute_influence_all", "constants", "default_params", "derived", "draw_samples", "fluxes",
+    "imul", "influence", "influence_union", "initial_state", "make_salt_load", "make_scenario", "make_water_load",
     "mulberry32", "nearest_index", "param_summary", "param_table", "params_for", "prime_influence",
     "quantile_bands", "quantile_sorted", "resolve_scenario", "result_meta", "rhs", "salt_load_metrics",
     "sample_params", "sampling_mode", "simulate", "simulate_mc", "simulate_sweep",

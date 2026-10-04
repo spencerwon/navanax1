@@ -1676,6 +1676,22 @@ a metadata-only edit to `params.json` stales the golden fixture, which 03 §4 le
 regenerated only with a version bump (BUG-20261003-185). All six are open: their regression
 tests and the checker change are proposed to the files' owners.
 
+**The influence union (BUG-20261003-096 fixed; BUG-20261003-177 and BUG-20261003-178
+open; HREQ-U-12, HREQ-V-19, W-15).** Both implementations now run the influence screen
+for every registered scenario at its own horizon, at +10 % and at -10 %, and report the
+union: 805 runs, about 24 s under Node. MAP's feeders grow from 12 to 28 and include
+`pn_gain`, the parameter calibrated to the 30-day band that chart is compared with; Thirst's
+include `thirst_vol_gain`. The default screen's code was factored into one function that
+both screens share, and its golden section stayed byte-identical, which is the proof that
+it did not change. The fixture gained an `influenceAll` section (feeder lists exactly,
+effects to 6 digits), with the budget raised to 720 KB; the default suite holds the port to
+it on one scenario and `--robust` on all seven. `tools/health_influence_diff.py` prints the
+feeders added and removed against a baseline fixture and is the review record for every
+model change. Two findings stay open. The union is not a strict superset of the default
+screen: one cumulative ledger key, never displayed, loses a feeder because a longer horizon
+widens its range (BUG-177). And the viewer still primes the default screen, so the chip on
+the chronic MAP chart still omits `pn_gain` until its worker asks for the union (BUG-178).
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |

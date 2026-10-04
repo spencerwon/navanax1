@@ -3767,8 +3767,9 @@ bugs:
   severity: S1
   priority: P1
   error_class: VAL
-  status: open
+  status: fixed
   logged_at: "2026-10-03T03:12:00-05:00"
+  resolved_at: "2026-10-03T20:10:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "methodology builder running computeInfluence() on every scenario at its own horizon in both directions under Node v22.22.0 (docs/health/01 §8.2)"
   detection_channel: agent
@@ -3791,10 +3792,19 @@ bugs:
     "can only over-count" claim holds for how failures are handled, not for the screen
     as a whole.
   resolution: >-
-    Planned (M1): run the screen for every registered scenario at its own horizon, in
-    both directions, and report the union (HREQ-U-12); the difference in feeder lists is
-    part of every model-change review (HREQ-V-19). Cost measured at about 17 s for the
-    30-day scenario's 108 runs.
+    Engine side fixed in model 1.1.0 (HREQ-U-12, W-15): computeInfluenceAll() in
+    engine/index.js and compute_influence_all() in the port run every registered scenario
+    at its own tEnd and dt, every parameter at +10 % and -10 %, with the default screen's
+    effect and threshold (one shared screenOne / _screen_one), and return the per-direction
+    lists, per-scenario lists and the union; 805 runs, about 24 s under Node. The union
+    lists pn_gain for MAP (MAP 12 -> 28 feeders; 831 entries over 40 quantities against the
+    default screen's 494) and thirst_vol_gain for Thirst. The golden fixture carries it
+    (section influenceAll, 675,873 bytes, budget 720 KB); the default self-test holds the
+    port to it on drink_water_1L and every scenario under --robust; paramsFor/params_for
+    read the union once a computeInfluenceAll result is primed. tools/health_influence_diff.py
+    is the HREQ-V-19 review record. The viewer's chips still come from the default screen
+    until its worker primes the union: BUG-20261003-178 (open), outside this module.
+  regression_test: tests/health_selftest.py::test_influence_union_shows_pn_gain_feeding_map_over_30_days
   monitor_gap: >-
     No test compared feeder lists across scenarios or directions; the influence result
     was cached once per page load and never audited.
@@ -6024,6 +6034,81 @@ bugs:
   monitor_gap: >-
     Only the generator knew the budget, and only when it refused; no test reported the
     headroom.
+
+- id: BUG-20261003-177
+  area: health
+  summary: "The influence union is not a superset of the default screen: V_ecf_0 feeds water_out in the 24 h default window but in no registered scenario at its own horizon"
+  severity: S3
+  priority: P3
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T20:05:00-05:00"
+  occurred_at: "2026-10-03T19:45:00-05:00"
+  detected_by: "health-physiology-modeler comparing computeInfluenceAll()'s union with computeInfluence() at INFLUENCE_DEFAULTS under Node v22.22.0 while building HREQ-U-12"
+  detection_channel: agent
+  branch: worktree-agent-af4d51b0958b95423
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 309}
+  - {file: src/health/engine/api.py, line: 478}
+  requirement: HREQ-U-12
+  data_impact: >-
+    None displayed: water_out (a cumulative ledger key) is not drawn by the viewer, and for
+    every displayed quantity (Na_plasma, osm_plasma, V_ecf, V_icf, urine_flow, U_osm, ADH,
+    MAP, strain_index, na_out) the union contains the default screen's list. But a reader
+    expecting "the union can only add feeders" would be wrong for one of 494 default-screen
+    entries.
+  root_cause: >-
+    The effect is max |delta x| divided by the peak-to-peak range of that run's own default
+    trajectory. The default screen runs salt_load_10g for 24 h at dt 1/20 h; the union runs
+    it for its registered 72 h at dt 1/60 h. water_out grows roughly linearly, so its range
+    triples while V_ecf_0's offset does not, and the effect falls under 1 %. HREQ-U-12 asks
+    for each scenario at its own horizon, which does not include the default window.
+  resolution: >-
+    Open, the Operator's decision: (a) add the default window (INFLUENCE_DEFAULTS) to the
+    union as one more member, so the union contains the default screen by construction
+    (58 more runs); (b) normalise ledger keys by something other than the run's range; or
+    (c) accept and keep the recorded exception. Until then
+    tests/health_selftest.py::test_influence_union_shows_pn_gain_feeding_map_over_30_days
+    pins the exception set (exactly water_out <- V_ecf_0) and fails if a displayed quantity
+    ever joins it.
+  monitor_gap: >-
+    Nothing compared the union with the default screen until this build; the documented
+    "over-count" claim (docs/health/01 §8.1) is about failure handling, not horizons.
+
+- id: BUG-20261003-178
+  area: health
+  summary: The viewer's evidence chips still list the default screen's feeders, not the influence union, so the chronic MAP chart still omits pn_gain
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T20:08:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-physiology-modeler tracing paramsFor() to its callers in reference/metabolic-map-v1/app after adding computeInfluenceAll (HREQ-U-12)"
+  detection_channel: agent
+  branch: worktree-agent-af4d51b0958b95423
+  locations:
+  - {file: reference/metabolic-map-v1/app/worker.js, line: 64}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 312}
+  requirement: HREQ-U-11
+  data_impact: >-
+    Reader-facing, silent, unchanged from BUG-20261003-096: the chip on the chronic-salt MAP
+    chart lists the default screen's 12 feeders where the union lists 28, pn_gain among the
+    missing; its tooltip says "10 g salt, first 24 h", which is true of the list shown.
+  root_cause: >-
+    The engine now computes the union (BUG-20261003-096 fixed), but the viewer's worker
+    still posts computeInfluence() and ui.js primes that; the viewer is outside the engine
+    module's ownership.
+  resolution: >-
+    Open. Proposed (one line in the worker, one sentence in ui.js): worker.js posts
+    computeInfluenceAll() (paramsFor then reads its union through primeInfluence) and
+    INF_NOTE says "+/-10 % ... in any registered scenario at its own horizon". Cost: about
+    24 s of worker time at page load instead of 0.34 s, during which chips show the default
+    screen; whether to compute it in the browser or ship it precomputed with a model-version
+    check is the Operator's decision.
+  monitor_gap: >-
+    No test reads the viewer's chip source; the engine tests prove the lists, not that the
+    page shows them.
 - id: BUG-20261003-180
   area: health
   summary: "naIn_base_mmold (150 mmol/day, a scenario condition) was graded A-meta from He 2013, whose pooled estimates are blood-pressure effects, not an intake (V1 audit F-12)"

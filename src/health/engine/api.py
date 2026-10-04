@@ -43,9 +43,9 @@ from .scenarios import SCENARIOS, Scenario
 from .solver import integrate
 
 __all__ = [
-    "DISCLAIMER", "INFLUENCE_DEFAULTS", "MAX_STEP_FRACTION_OF_TAU_MIN", "MAX_TRIES_PER_SAMPLE",
-    "MODEL_VERSION", "VALIDATION_STATUS", "compute_influence", "draw_samples",
-    "influence", "nearest_index", "param_summary", "params_for", "prime_influence",
+    "DISCLAIMER", "INFLUENCE_DEFAULTS", "INFLUENCE_DIRECTIONS", "MAX_STEP_FRACTION_OF_TAU_MIN",
+    "MAX_TRIES_PER_SAMPLE", "MODEL_VERSION", "VALIDATION_STATUS", "compute_influence",
+    "compute_influence_all", "draw_samples", "influence", "influence_union", "nearest_index", "param_summary", "params_for", "prime_influence",
     "resolve_scenario", "result_meta", "salt_load_metrics", "simulate", "simulate_mc", "simulate_sweep",
 ]
 
@@ -353,29 +353,17 @@ INFLUENCE_DEFAULTS: Mapping[str, Any] = MappingProxyType({
 _influence_cache: dict[str, Any] | None = None
 
 
-def compute_influence(*, scenario: str | Scenario | None = None, t_end: float | None = None,
-                      dt: float | None = None, rel: float | None = None,
-                      threshold: float | None = None) -> dict[str, Any]:
-    """Run the sensitivity screen.
+def _keyed(r: Mapping[str, Any]) -> dict[str, list[float]]:
+    return {**r["states"], **r["derived"], **r["ledger"]}
 
-    Returns {meta, effects: {key: {param: effect}}, params: {key: [param ids, strongest first]}};
-    `meta` uses the JavaScript keys (scenario, tEnd, dt, rel, threshold, infeasible, nParams,
-    modelVersion). Arguments left as None take INFLUENCE_DEFAULTS.
-    """
-    o = dict(INFLUENCE_DEFAULTS)
-    for k, v in (("scenario", scenario), ("tEnd", t_end), ("dt", dt), ("rel", rel),
-                 ("threshold", threshold)):
-        if v is not None:
-            o[k] = v
-    p0 = default_params()
 
-    def keyed(r: Mapping[str, Any]) -> dict[str, list[float]]:
-        return {**r["states"], **r["derived"], **r["ledger"]}
-
-    ref = keyed(simulate(params=p0, scenario=o["scenario"], t_end=o["tEnd"], dt=o["dt"]))
-    keys = list(ref)
+def _screen_reference(p0: Mapping[str, Any], o: Mapping[str, Any]
+                      ) -> tuple[dict[str, list[float]], dict[str, float]]:
+    """The reference run of a screen (keyed series) and each key's response scale
+    (screenReference in index.js)."""
+    ref = _keyed(simulate(params=p0, scenario=o["scenario"], t_end=o["tEnd"], dt=o["dt"]))
     scale: dict[str, float] = {}
-    for k in keys:
+    for k in ref:
         lo, hi, big = math.inf, -math.inf, 0.0
         for v in ref[k]:
             if v < lo:
@@ -384,13 +372,23 @@ def compute_influence(*, scenario: str | Scenario | None = None, t_end: float | 
                 hi = v
             big = _js_max(big, abs(v))
         scale[k] = _js_max(_js_max(hi - lo, 1e-6 * big), 1e-12)
+    return ref, scale
+
+
+def _screen_one(p0: Mapping[str, Any], ref: Mapping[str, list[float]],
+                scale: Mapping[str, float], o: Mapping[str, Any], rel: float) -> dict[str, Any]:
+    """One scenario, one direction of the screen (screenOne in index.js): every parameter of
+    p0 scaled by (1 + rel), the run repeated from its own steady state and compared with
+    `ref`. Shared by compute_influence and compute_influence_all so both apply the same effect
+    and threshold rule. Returns {effects, params, infeasible}."""
+    keys = list(ref)
     effects: dict[str, dict[str, float]] = {k: {} for k in keys}
     infeasible: list[str] = []
     for name in p0:
-        p = {**p0, name: p0[name] * (1 + o["rel"])}
+        p = {**p0, name: p0[name] * (1 + rel)}
         run: dict[str, list[float]] | None = None
         try:
-            run = keyed(simulate(params=p, scenario=o["scenario"], t_end=o["tEnd"], dt=o["dt"]))
+            run = _keyed(simulate(params=p, scenario=o["scenario"], t_end=o["tEnd"], dt=o["dt"]))
         except (HealthError, ArithmeticError, ValueError):
             infeasible.append(name)
         for k in keys:
@@ -413,17 +411,137 @@ def compute_influence(*, scenario: str | Scenario | None = None, t_end: float | 
         hits = [(nm, e) for nm, e in effects[k].items() if e > o["threshold"]]
         hits.sort(key=lambda ne: -ne[1])           # stable, strongest first
         params[k] = [nm for nm, _ in hits]
-    meta = {**o, "infeasible": infeasible, "nParams": len(p0), "modelVersion": MODEL_VERSION,
-            "disclaimer": DISCLAIMER, "validation_status": VALIDATION_STATUS}
+    return {"effects": effects, "params": params, "infeasible": infeasible}
+
+
+def compute_influence(*, scenario: str | Scenario | None = None, t_end: float | None = None,
+                      dt: float | None = None, rel: float | None = None,
+                      threshold: float | None = None) -> dict[str, Any]:
+    """Run the sensitivity screen.
+
+    Returns {meta, effects: {key: {param: effect}}, params: {key: [param ids, strongest first]}};
+    `meta` uses the JavaScript keys (scenario, tEnd, dt, rel, threshold, infeasible, nParams,
+    modelVersion). Arguments left as None take INFLUENCE_DEFAULTS.
+    """
+    o = dict(INFLUENCE_DEFAULTS)
+    for k, v in (("scenario", scenario), ("tEnd", t_end), ("dt", dt), ("rel", rel),
+                 ("threshold", threshold)):
+        if v is not None:
+            o[k] = v
+    p0 = default_params()
+    ref, scale = _screen_reference(p0, o)
+    one = _screen_one(p0, ref, scale, o, o["rel"])
+    meta = {**o, "infeasible": one["infeasible"], "nParams": len(p0),
+            "modelVersion": MODEL_VERSION, "disclaimer": DISCLAIMER,
+            "validation_status": VALIDATION_STATUS}
     if not isinstance(meta["scenario"], str):
         meta["scenario"] = meta["scenario"].id
-    return {"meta": meta, "effects": effects, "params": params}
+    return {"meta": meta, "effects": one["effects"], "params": one["params"]}
+
+
+# ---------------------------------------------------------------------------
+# HREQ-U-12 (BUG-20261003-096, W-15): the screen per registered scenario, at that scenario's
+# own horizon (its t_end and dt), in both directions, and the union. The default screen above
+# is one 24 h window of one scenario in one direction, and it misses parameters whose effect
+# grows over a longer horizon (pn_gain on MAP over 30 days) or whose term is clamped to zero
+# in that direction (thirst_vol_gain on Thirst: max(0, 1 - vr) is zero while salt expands
+# the ECF). Same effect definition, same threshold and same +/-rel as the default screen.
+#   runs[scenario][direction] = {effects, params, infeasible}  (direction "up" = +rel,
+#                               "down" = -rel)
+#   feeders[scenario][key]    = parameters feeding key in that scenario in either direction,
+#                               strongest first (by the larger of the two effects)
+#   union[key]                = parameters feeding key in ANY scenario or direction,
+#                               strongest first (by the largest effect anywhere)
+# Ties keep first-seen (parameter-table) order: both sorts are stable. Cost: per scenario one
+# reference run plus two runs per parameter row; meta.runs counts them. Pure Python is about
+# 12x slower than Node (the 30-day scenario alone takes minutes), so the default self-test
+# runs drink_water_1L and the full union runs under --robust.
+# ---------------------------------------------------------------------------
+INFLUENCE_DIRECTIONS: Mapping[str, int] = MappingProxyType({"up": 1, "down": -1})
+
+
+def _feeders_of(effect_maps: Sequence[Mapping[str, Mapping[str, float]]], key: str,
+                threshold: float) -> list[str]:
+    """feedersOf in index.js: a parameter is listed when its effect exceeds `threshold` in any
+    map, ordered by its largest effect (stable: ties keep first-seen order)."""
+    best: dict[str, float] = {}
+    for eff in effect_maps:
+        for name, e in eff[key].items():
+            if not e > threshold:
+                continue
+            if name not in best or e > best[name]:
+                best[name] = e
+    ranked = sorted(best.items(), key=lambda ne: -ne[1])
+    return [nm for nm, _ in ranked]
+
+
+def compute_influence_all(*, scenarios: Sequence[str] | None = None, rel: float | None = None,
+                          threshold: float | None = None) -> dict[str, Any]:
+    """Influence union over every registered scenario (computeInfluenceAll, HREQ-U-12).
+
+    scenarios  scenario ids (default: every registered scenario, in registration order)
+    rel        relative perturbation (default INFLUENCE_DEFAULTS rel)
+    threshold  feeder threshold (default INFLUENCE_DEFAULTS threshold)
+
+    Returns {meta, runs, feeders, union} with the JavaScript keys; meta carries rel,
+    threshold, directions, scenarios, horizons {id: {tEnd, dt}}, runs (simulations), nParams
+    and infeasible {id: {up: [...], down: [...]}} beside disclaimer, validation_status and
+    modelVersion.
+    """
+    rel_ = INFLUENCE_DEFAULTS["rel"] if rel is None else rel
+    thr = INFLUENCE_DEFAULTS["threshold"] if threshold is None else threshold
+    ids = list(scenarios) if scenarios is not None else list(SCENARIOS)
+    p0 = default_params()
+    runs: dict[str, dict[str, Any]] = {}
+    feeders: dict[str, dict[str, list[str]]] = {}
+    horizons: dict[str, dict[str, float]] = {}
+    infeasible: dict[str, dict[str, list[str]]] = {}
+    n_runs = 0
+    keys: list[str] | None = None
+    for sid in ids:
+        sc = resolve_scenario(sid)
+        o = {"scenario": sc.id, "tEnd": sc.t_end,
+             "dt": sc.dt if sc.dt is not None else 1 / 60, "threshold": thr}
+        ref, scale = _screen_reference(p0, o)
+        n_runs += 1
+        if keys is None:
+            keys = list(ref)
+        runs[sc.id] = {}
+        infeasible[sc.id] = {}
+        for direction, sign in INFLUENCE_DIRECTIONS.items():
+            one = _screen_one(p0, ref, scale, o, sign * rel_)
+            n_runs += len(p0)
+            runs[sc.id][direction] = one
+            infeasible[sc.id][direction] = one["infeasible"]
+        horizons[sc.id] = {"tEnd": o["tEnd"], "dt": o["dt"]}
+        maps = [one["effects"] for one in runs[sc.id].values()]
+        feeders[sc.id] = {k: _feeders_of(maps, k, thr) for k in keys}
+    every = [one["effects"] for by_dir in runs.values() for one in by_dir.values()]
+    union = {k: _feeders_of(every, k, thr) for k in (keys or [])}
+    meta = result_meta(rel=rel_, threshold=thr, directions={"up": rel_, "down": -rel_},
+                       scenarios=[resolve_scenario(s).id for s in ids], horizons=horizons,
+                       runs=n_runs, nParams=len(p0), infeasible=infeasible)
+    return {"meta": meta, "runs": runs, "feeders": feeders, "union": union}
+
+
+def influence_union(result: Mapping[str, Any]) -> dict[str, list[str]]:
+    """influenceUnion in index.js: the union of a compute_influence_all result recomputed
+    from its per-scenario feeder lists (a parameter feeds a key when it feeds it in any
+    scenario), each list sorted by name (the order is not implied)."""
+    out: dict[str, set[str]] = {}
+    for by_key in result["feeders"].values():
+        for k, lst in by_key.items():
+            out.setdefault(k, set()).update(lst)
+    return {k: sorted(v) for k, v in out.items()}
 
 
 def prime_influence(result: Mapping[str, Any]) -> None:
-    """Install a precomputed screen so params_for() does not recompute."""
+    """Install a precomputed screen so params_for() does not recompute. Accepts a
+    compute_influence result or a compute_influence_all result (then params_for reads its
+    union, HREQ-U-12)."""
     global _influence_cache
-    if not result or not isinstance(result.get("params"), Mapping):
+    lists = (result.get("union") or result.get("params")) if result else None
+    if not isinstance(lists, Mapping):
         raise ValueError("primeInfluence: bad result")
     _influence_cache = dict(result)
 
@@ -439,9 +557,11 @@ def influence() -> dict[str, Any]:
 
 def params_for(derived_key: str) -> list[str]:
     """Parameter ids that move `derived_key` (a state, derived or ledger key) by more than
-    1 % of its response scale in the reference screen, strongest first. Raises KeyError on
+    1 % of its response scale in the reference screen, strongest first; in the union of every
+    scenario and direction when a compute_influence_all result was primed. Raises KeyError on
     an unknown key."""
-    lst = influence()["params"].get(derived_key)
+    inf = influence()
+    lst = (inf.get("union") or inf["params"]).get(derived_key)
     if lst is None:
         raise KeyError(f'paramsFor: unknown quantity "{derived_key}"')
     return list(lst)

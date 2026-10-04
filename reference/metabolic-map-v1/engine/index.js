@@ -214,23 +214,20 @@ export function nearestIndex(t, x) {
 export const INFLUENCE_DEFAULTS = Object.freeze({ scenario: 'salt_load_10g', tEnd: 24, dt: 1 / 20, rel: 0.10, threshold: 0.01 });
 let influenceCache = null;
 
-/** Run the sensitivity screen. Returns { meta, effects: {key: {param: effect}}, params: {key: [param ids, strongest first]} }. */
-export function computeInfluence(opts = {}) {
-  const o = { ...INFLUENCE_DEFAULTS, ...opts };
-  const p0 = defaultParams();
+/**
+ * One scenario, one direction of the screen: the reference run `ref` (keyed series), then every
+ * parameter of `p0` scaled by (1 + rel) and the run repeated from its own steady state.
+ * Shared by computeInfluence and computeInfluenceAll so both apply the same effect and
+ * threshold rule. Returns { effects: {key: {param: effect}}, params: {key: [ids, strongest
+ * first]}, infeasible: [ids] }.
+ */
+function screenOne(p0, ref, scale, o, rel) {
   const keyed = (r) => ({ ...r.states, ...r.derived, ...r.ledger });
-  const ref = keyed(simulate({ params: p0, scenario: o.scenario, tEnd: o.tEnd, dt: o.dt }));
   const keys = Object.keys(ref);
-  const scale = {};
-  for (const k of keys) {
-    let lo = Infinity, hi = -Infinity, big = 0;
-    for (const v of ref[k]) { if (v < lo) lo = v; if (v > hi) hi = v; big = Math.max(big, Math.abs(v)); }
-    scale[k] = Math.max(hi - lo, 1e-6 * big, 1e-12);
-  }
   const effects = Object.fromEntries(keys.map((k) => [k, {}]));
   const infeasible = [];
   for (const name of Object.keys(p0)) {
-    const p = { ...p0, [name]: p0[name] * (1 + o.rel) };
+    const p = { ...p0, [name]: p0[name] * (1 + rel) };
     let run = null;
     try { run = keyed(simulate({ params: p, scenario: o.scenario, tEnd: o.tEnd, dt: o.dt })); } catch { infeasible.push(name); }
     for (const k of keys) {
@@ -245,13 +242,124 @@ export function computeInfluence(opts = {}) {
   for (const k of keys) {
     params[k] = Object.entries(effects[k]).filter(([, e]) => e > o.threshold).sort((x, y) => y[1] - x[1]).map(([n]) => n);
   }
+  return { effects, params, infeasible };
+}
+
+/** The reference run of a screen (keyed series) and each key's response scale. */
+function screenReference(p0, o) {
+  const r = simulate({ params: p0, scenario: o.scenario, tEnd: o.tEnd, dt: o.dt });
+  const ref = { ...r.states, ...r.derived, ...r.ledger };
+  const scale = {};
+  for (const k of Object.keys(ref)) {
+    let lo = Infinity, hi = -Infinity, big = 0;
+    for (const v of ref[k]) { if (v < lo) lo = v; if (v > hi) hi = v; big = Math.max(big, Math.abs(v)); }
+    scale[k] = Math.max(hi - lo, 1e-6 * big, 1e-12);
+  }
+  return { ref, scale };
+}
+
+/** Run the sensitivity screen. Returns { meta, effects: {key: {param: effect}}, params: {key: [param ids, strongest first]} }. */
+export function computeInfluence(opts = {}) {
+  const o = { ...INFLUENCE_DEFAULTS, ...opts };
+  const p0 = defaultParams();
+  const { ref, scale } = screenReference(p0, o);
+  const { effects, params, infeasible } = screenOne(p0, ref, scale, o, o.rel);
   return { meta: { ...o, infeasible, nParams: Object.keys(p0).length, modelVersion: MODEL_VERSION,
     disclaimer: DISCLAIMER, validation_status: VALIDATION_STATUS }, effects, params };
 }
 
-/** Install a precomputed screen (e.g. from a Web Worker) so paramsFor() does not recompute. */
+// ---------------------------------------------------------------------------
+// HREQ-U-12 (BUG-20261003-096, W-15): the screen per registered scenario, at that scenario's
+// own horizon (its tEnd and dt), in both directions, and the union. The default screen above
+// is one 24 h window of one scenario in one direction, and it misses parameters whose effect
+// grows over a longer horizon (pn_gain on MAP over 30 days) or whose term is clamped to zero
+// in that direction (thirst_vol_gain on Thirst: max(0, 1 - vr) is zero while salt expands
+// the ECF). Same effect definition, same threshold and same +/-rel as the default screen.
+//   runs[scenario][direction] = { effects, params, infeasible }  (direction 'up' = +rel,
+//                                 'down' = -rel)
+//   feeders[scenario][key]    = parameters feeding key in that scenario in either direction,
+//                               strongest first (by the larger of the two effects)
+//   union[key]                = parameters feeding key in ANY scenario or direction,
+//                               strongest first (by the largest effect anywhere)
+// Ties keep parameter-table order (both sorts are stable). Cost: per scenario one reference
+// run plus two runs per parameter row; meta.runs counts them.
+export const INFLUENCE_DIRECTIONS = Object.freeze({ up: 1, down: -1 });
+
+/** Merge per-direction (or per-scenario) effect maps into a feeder list: a parameter is listed
+ *  when its effect exceeds `threshold` in any map, ordered by its largest effect. */
+function feedersOf(effectMaps, key, threshold) {
+  const best = new Map();
+  for (const eff of effectMaps) {
+    for (const [name, e] of Object.entries(eff[key])) {
+      if (!(e > threshold)) continue;
+      if (!best.has(name) || e > best.get(name)) best.set(name, e);
+    }
+  }
+  return [...best.entries()].sort((x, y) => y[1] - x[1]).map(([n]) => n);
+}
+
+/**
+ * Influence union over every registered scenario (HREQ-U-12).
+ * @param {object} [opts]
+ * @param {string[]} [opts.scenarios] scenario ids (default: every registered scenario)
+ * @param {number} [opts.rel]        relative perturbation (default INFLUENCE_DEFAULTS.rel)
+ * @param {number} [opts.threshold]  feeder threshold (default INFLUENCE_DEFAULTS.threshold)
+ * @returns {{ meta, runs, feeders, union }}
+ */
+export function computeInfluenceAll(opts = {}) {
+  const rel = opts.rel ?? INFLUENCE_DEFAULTS.rel;
+  const threshold = opts.threshold ?? INFLUENCE_DEFAULTS.threshold;
+  const ids = opts.scenarios ? [...opts.scenarios] : Object.keys(SCENARIOS);
+  const p0 = defaultParams();
+  const runs = {}, feeders = {}, horizons = {}, infeasible = {};
+  let nRuns = 0;
+  let keys = null;
+  for (const id of ids) {
+    const sc = resolveScenario(id);
+    const o = { scenario: sc.id, tEnd: sc.tEnd, dt: sc.dt ?? 1 / 60, threshold };
+    const { ref, scale } = screenReference(p0, o);
+    nRuns += 1;
+    keys = keys || Object.keys(ref);
+    runs[sc.id] = {};
+    infeasible[sc.id] = {};
+    for (const [dir, sign] of Object.entries(INFLUENCE_DIRECTIONS)) {
+      const r = screenOne(p0, ref, scale, o, sign * rel);
+      nRuns += Object.keys(p0).length;
+      runs[sc.id][dir] = r;
+      infeasible[sc.id][dir] = r.infeasible;
+    }
+    horizons[sc.id] = { tEnd: o.tEnd, dt: o.dt };
+    const maps = Object.values(runs[sc.id]).map((r) => r.effects);
+    feeders[sc.id] = Object.fromEntries(keys.map((k) => [k, feedersOf(maps, k, threshold)]));
+  }
+  const all = Object.values(runs).flatMap((byDir) => Object.values(byDir).map((r) => r.effects));
+  const union = Object.fromEntries((keys || []).map((k) => [k, feedersOf(all, k, threshold)]));
+  return {
+    meta: resultMeta({ rel, threshold, directions: { up: rel, down: -rel }, scenarios: ids.map((s) => resolveScenario(s).id),
+      horizons, runs: nRuns, nParams: Object.keys(p0).length, infeasible }),
+    runs, feeders, union,
+  };
+}
+
+/** The union of a computeInfluenceAll result, recomputed from its per-scenario feeder lists
+ *  (a parameter feeds a key when it feeds it in any scenario); the order is not implied. */
+export function influenceUnion(all) {
+  const out = {};
+  for (const byKey of Object.values(all.feeders)) {
+    for (const [k, list] of Object.entries(byKey)) {
+      out[k] = out[k] || new Set();
+      for (const n of list) out[k].add(n);
+    }
+  }
+  return Object.fromEntries(Object.entries(out).map(([k, s]) => [k, [...s].sort()]));
+}
+
+/** Install a precomputed screen (e.g. from a Web Worker) so paramsFor() does not recompute.
+ *  Accepts a computeInfluence result or a computeInfluenceAll result (then paramsFor reads its
+ *  union, HREQ-U-12). */
 export function primeInfluence(result) {
-  if (!result || !result.params || typeof result.params !== 'object') throw new Error('primeInfluence: bad result');
+  const lists = result && (result.union || result.params);
+  if (!lists || typeof lists !== 'object') throw new Error('primeInfluence: bad result');
   influenceCache = result;
 }
 
@@ -263,11 +371,13 @@ export function influence() {
 
 /**
  * Parameter ids that move `key` (a state, derived or ledger key, e.g. 'ADH', 'strain_index')
- * by more than 1 % of its response scale in the reference screen, strongest first.
+ * by more than 1 % of its response scale in the reference screen, strongest first; in the
+ * union of every scenario and direction when a computeInfluenceAll result was primed.
  * Throws on an unknown key.
  */
 export function paramsFor(derivedKey) {
-  const list = influence().params[derivedKey];
+  const inf = influence();
+  const list = (inf.union || inf.params)[derivedKey];
   if (!list) throw new Error(`paramsFor: unknown quantity "${derivedKey}"`);
   return [...list];
 }
