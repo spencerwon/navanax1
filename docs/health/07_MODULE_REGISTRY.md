@@ -15,7 +15,7 @@ is not finished.
 
 | id | enabled | phase | owner | depends on | paths | tests | ADR |
 |---|---|---|---|---|---|---|---|
-| `reference-v1` | true | 0 | operator | `process` | `reference/metabolic-map-v1/` | `tests/health_selftest.py::test_params_json_is_byte_identical_to_reference`<br>`tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes`<br>`tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred` | ADR-0001 |
+| `reference-v1` | true | 0 | operator | `process` | `reference/metabolic-map-v1/`<br>`tools/health_app_smoke.py` | `tests/health_selftest.py::test_params_json_is_byte_identical_to_reference`<br>`tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes`<br>`tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred`<br>`tools/health_app_smoke.py::main` | ADR-0001 |
 | `engine-v1` | true | 0 | health-physiology-modeler | `reference-v1`<br>`errors`<br>`process` | `src/health/engine/`<br>`tests/health_selftest.py`<br>`tests/fixtures/health/golden_v1.json`<br>`tools/health_golden.mjs`<br>`tools/health_influence_diff.py` | `tests/health_selftest.py` | ADR-0002 |
 | `kb-v1` | true | 0 | health-literature-curator | `reference-v1`<br>`process` | `src/health/kb/`<br>`tests/health_kb_selftest.py` | `tests/health_kb_selftest.py` | ADR-0003 |
 | `cli` | true | 0 | platform-engineer | `engine-v1`<br>`kb-v1`<br>`process` | `src/health/cli.py` | `tests/health_kb_selftest.py::test_cli_kb_check_exit_codes`<br>`tests/health_kb_selftest.py::test_status_prints_the_disclaimer`<br>`tests/health_kb_selftest.py::test_status_expectations_line`<br>`tests/health_kb_selftest.py::test_cli_constants_match_engine_and_config`<br>`tests/health_kb_selftest.py::test_status_lists_every_registered_module`<br>`tests/health_kb_selftest.py::test_status_honours_the_module_flags` | ADR-0003 |
@@ -33,8 +33,10 @@ is not finished.
    `removed_with_module: reference-v1` to every ledger entry citing these files that
    has no such field yet; in 07's order on 2026-10-03: BUG-20261003-099, 100, 103,
    114, 116).
-4. Delete `reference/metabolic-map-v1/`. The original stays at the artifact URL its
-   README recorded (git history keeps the README).
+4. Delete `reference/metabolic-map-v1/` and `tools/health_app_smoke.py`; in
+   `tools/gates.py` delete `health_app_smoke()` and the line that calls it. The
+   original stays at the artifact URL its README recorded (git history keeps the
+   README).
 5. `config/health/base.yaml`: replace the `model.version` comment with
    "# The model version (a bump in one place and not another is a CFG defect,
    docs/health/05 §3)." on two comment lines.

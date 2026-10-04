@@ -97,8 +97,8 @@ display:
   # The mandated labels (HREQ-S-03, S-04, P-12, P-13); documents quote these. Only
   # trajectory_label has a reader: tests/health_selftest.py (test_config_agrees_with_engine_and_reference)
   # holds it equal to the chronic scenario's label (the string V1 shows; wording is tracker D-8).
-  index_label: "an index, not a clinical measure"   # reserved: no reader yet (surface layer, M1)
-  threshold_label: "classification threshold, not a physiological parameter"   # reserved: no reader yet (surface layer, M1)
+  index_label: "an index, not a clinical measure"  # read by the vendored app (app/config.js LABELS); the app smoke check holds every rendered copy equal
+  threshold_label: "classification threshold, not a physiological parameter"  # read by the vendored app (app/config.js LABELS); the app smoke check holds every rendered copy equal
   trajectory_label: "modeled risk trajectory — not a prediction"
-  custom_run_label: "custom intervention on the 70 kg reference adult — no registered expectations"   # reserved: no reader yet (surface layer, M1)
+  custom_run_label: "custom intervention on the 70 kg reference adult — no registered expectations"  # read by the vendored app (app/config.js LABELS); the app smoke check holds every rendered copy equal
   extrapolation_label: "extrapolation beyond the evidence"   # reserved: no reader yet (surface layer, M1)

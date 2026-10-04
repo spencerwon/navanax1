@@ -21,6 +21,7 @@ own line here with its step below:
   health module registry          python -m health.registry --check (process)
   health kb-check                 python -m health.cli kb-check (cli)
   health golden fixture           the golden fixture is what the JavaScript reference writes today (engine-v1)
+  health app smoke                the vendored app in headless Chromium: every scenario, the safety texts (reference-v1)
 `health.cli status` is not a gate: it is a surface, run by hand.
 
 The last line is `ALL GATES GREEN` only when every gate ran and passed; a gate that could
@@ -99,6 +100,25 @@ def health_golden_check() -> None:
         SKIPPED.append("health golden fixture (no Node binary: golden --check not run)")
         return
     run("health golden fixture", [node, "tools/health_golden.mjs", "--check"])
+
+
+def health_app_smoke() -> None:
+    """reference-v1 (HREQ-P-09; HREQ-S-01, S-03, S-04, S-07): the vendored V1 app loads in
+    headless Chromium with no console error from its own origin, every scenario renders, and
+    the safety texts are on the page byte-equal to config/health/base.yaml. Without Chromium,
+    Node or Playwright the browser part is SKIPPED (exit 3), loudly, and counted."""
+    label, cmd = "health app smoke", [sys.executable, "tools/health_app_smoke.py"]
+    print(f"\n=== {label}: tools/health_app_smoke.py")
+    t0 = time.time()
+    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    print("\n".join((p.stdout + p.stderr).strip().splitlines()[-6:]))
+    if p.returncode == 3:
+        print(f"--- {label}: SKIPPED in {time.time() - t0:.1f}s")
+        SKIPPED.append(f"{label} (no Chromium, Node or Playwright: the app was not loaded)")
+        return
+    print(f"--- {label}: {'OK' if p.returncode == 0 else 'FAILED'} in {time.time() - t0:.1f}s")
+    if p.returncode != 0:
+        raise SystemExit(f"gate failed: {label}")
 
 
 def verdict() -> str:
@@ -197,6 +217,7 @@ def main() -> int:
     run("health kb-check", [py, "-m", "health.cli", "kb-check"],
         env_extra={"PYTHONPATH": str(ROOT / "src")})
     health_golden_check()
+    health_app_smoke()   # reference-v1
     if a.corpus:
         corpus_fold(Path(a.corpus[0]), Path(a.corpus[1]))
     print(f"\n{verdict()}")

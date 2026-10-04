@@ -27,17 +27,19 @@ modules:
     owner: operator
     adr: ADR-0001
     description: >
-      The Metabolic Map V1 artifact, vendored byte for byte: engine (JavaScript), knowledge
-      base, app. Read-only; the golden fixture and the Python knowledge-base data derive
-      from it. It has no test of its own: its consumers verify it (the engine port's
-      byte-identity and fixture-hash tests, the knowledge base's params-mirror check), so
-      its `tests` name those functions and each consumer's recipe deletes its entries.
-    paths: [reference/metabolic-map-v1/]
+      The Metabolic Map V1 artifact, vendored from its published version: engine
+      (JavaScript), knowledge base, app, with the app's M1 safety fixes (W-19). The golden
+      fixture and the Python knowledge-base data derive from it. Its consumers verify the
+      engine and the knowledge base (the engine port's byte-identity and fixture-hash tests,
+      the knowledge base's params-mirror check; each consumer's recipe deletes its entries),
+      and tools/health_app_smoke.py loads the app in headless Chromium (HREQ-P-09).
+    paths: [reference/metabolic-map-v1/, tools/health_app_smoke.py]
     depends_on: [process]
     tests:
       - tests/health_selftest.py::test_params_json_is_byte_identical_to_reference
       - tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes
       - tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred
+      - tools/health_app_smoke.py::main
     removal: |
       1. Only after engine-v1, kb-v1 and desktop-app are removed (all three read it).
       2. Set `enabled: false` on this entry.
@@ -45,8 +47,10 @@ modules:
          `removed_with_module: reference-v1` to every ledger entry citing these files that
          has no such field yet; in 07's order on 2026-10-03: BUG-20261003-099, 100, 103,
          114, 116).
-      4. Delete `reference/metabolic-map-v1/`. The original stays at the artifact URL its
-         README recorded (git history keeps the README).
+      4. Delete `reference/metabolic-map-v1/` and `tools/health_app_smoke.py`; in
+         `tools/gates.py` delete `health_app_smoke()` and the line that calls it. The
+         original stays at the artifact URL its README recorded (git history keeps the
+         README).
       5. `config/health/base.yaml`: replace the `model.version` comment with
          "# The model version (a bump in one place and not another is a CFG defect,
          docs/health/05 §3)." on two comment lines.
