@@ -75,6 +75,7 @@ modules:
       - tests/health_selftest.py
       - tests/fixtures/health/golden_v1.json
       - tools/health_golden.mjs
+      - tools/health_influence_diff.py
     depends_on: [reference-v1, errors, process]
     tests: [tests/health_selftest.py]
     removal: |
@@ -87,7 +88,7 @@ modules:
          `removed_with_module: engine-v1` to every ledger entry citing these paths or this
          test that has no such field yet; in 07's order on 2026-10-03: BUG-20261003-095,
          096, 097, 098, 101, 102, 115).
-      4. Delete `src/health/engine/`, `tests/health_selftest.py`,
+      4. Delete `src/health/engine/`, `tests/health_selftest.py`, `tools/health_influence_diff.py`,
          `tests/fixtures/health/golden_v1.json` and `tools/health_golden.mjs`.
       5. `tools/gates.py`: delete the `("health selftest", "tests/health_selftest.py")` row
          of `HEALTH_SUITES`, the `health_golden_check()` call in `main()`, the functions

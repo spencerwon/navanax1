@@ -16,7 +16,7 @@ is not finished.
 | id | enabled | phase | owner | depends on | paths | tests | ADR |
 |---|---|---|---|---|---|---|---|
 | `reference-v1` | true | 0 | operator | `process` | `reference/metabolic-map-v1/` | `tests/health_selftest.py::test_params_json_is_byte_identical_to_reference`<br>`tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes`<br>`tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred` | ADR-0001 |
-| `engine-v1` | true | 0 | health-physiology-modeler | `reference-v1`<br>`errors`<br>`process` | `src/health/engine/`<br>`tests/health_selftest.py`<br>`tests/fixtures/health/golden_v1.json`<br>`tools/health_golden.mjs` | `tests/health_selftest.py` | ADR-0002 |
+| `engine-v1` | true | 0 | health-physiology-modeler | `reference-v1`<br>`errors`<br>`process` | `src/health/engine/`<br>`tests/health_selftest.py`<br>`tests/fixtures/health/golden_v1.json`<br>`tools/health_golden.mjs`<br>`tools/health_influence_diff.py` | `tests/health_selftest.py` | ADR-0002 |
 | `kb-v1` | true | 0 | health-literature-curator | `reference-v1`<br>`process` | `src/health/kb/`<br>`tests/health_kb_selftest.py` | `tests/health_kb_selftest.py` | ADR-0003 |
 | `cli` | true | 0 | platform-engineer | `engine-v1`<br>`kb-v1`<br>`process` | `src/health/cli.py` | `tests/health_kb_selftest.py::test_cli_kb_check_exit_codes`<br>`tests/health_kb_selftest.py::test_status_prints_the_disclaimer`<br>`tests/health_kb_selftest.py::test_status_expectations_line`<br>`tests/health_kb_selftest.py::test_cli_constants_match_engine_and_config`<br>`tests/health_kb_selftest.py::test_status_lists_every_registered_module`<br>`tests/health_kb_selftest.py::test_status_honours_the_module_flags` | ADR-0003 |
 | `errors` | true | 0 | health-physiology-modeler | `process` | `src/health/errors.py`<br>`tests/health_errors_selftest.py` | `tests/health_errors_selftest.py` | ADR-0001 |
@@ -59,7 +59,7 @@ beyond the four the requirement names.
    `removed_with_module: engine-v1` to every ledger entry citing these paths or this
    test that has no such field yet; in 07's order on 2026-10-03: BUG-20261003-095,
    096, 097, 098, 101, 102, 115).
-4. Delete `src/health/engine/`, `tests/health_selftest.py`,
+4. Delete `src/health/engine/`, `tests/health_selftest.py`, `tools/health_influence_diff.py`,
    `tests/fixtures/health/golden_v1.json` and `tools/health_golden.mjs`.
 5. `tools/gates.py`: delete the `("health selftest", "tests/health_selftest.py")` row
    of `HEALTH_SUITES`, the `health_golden_check()` call in `main()`, the functions
