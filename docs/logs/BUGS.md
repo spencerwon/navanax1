@@ -1752,6 +1752,14 @@ exempt from `unused-evidence`, and `engine-only-evidence` holds the marker to ac
 knowledge-base record or parameter cites it; `citedBy` is exactly the expectations in
 `scenarios.js` that cite it).
 
+**The viewer reads the influence union (BUG-20261003-178 fixed; HREQ-U-12).** The page
+now asks its worker for the union over every registered scenario and both directions (805
+runs, about 25 s in one worker) after the default screen, which still fills the chips at
+first paint; when the union arrives it replaces the default lists, and the chip on the
+chronic MAP chart lists 28 feeders with `pn_gain` among them. The drawer note says which
+screen is shown. The smoke check waits for the union and asserts `pn_gain` and the union's
+note on that chip (20 checks).
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |

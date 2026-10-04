@@ -6116,7 +6116,8 @@ bugs:
   severity: S1
   priority: P1
   error_class: VAL
-  status: open
+  status: fixed
+  resolved_at: "2026-10-03T20:25:00-05:00"
   logged_at: "2026-10-03T20:08:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "health-physiology-modeler tracing paramsFor() to its callers in reference/metabolic-map-v1/app after adding computeInfluenceAll (HREQ-U-12)"
@@ -6135,12 +6136,20 @@ bugs:
     still posts computeInfluence() and ui.js primes that; the viewer is outside the engine
     module's ownership.
   resolution: >-
-    Open. Proposed (one line in the worker, one sentence in ui.js): worker.js posts
-    computeInfluenceAll() (paramsFor then reads its union through primeInfluence) and
-    INF_NOTE says "+/-10 % ... in any registered scenario at its own horizon". Cost: about
-    24 s of worker time at page load instead of 0.34 s, during which chips show the default
-    screen; whether to compute it in the browser or ship it precomputed with a model-version
-    check is the Operator's decision.
+    Fixed in the viewer. The worker answers a new 'influenceAll' message with
+    computeInfluenceAll() (805 runs, about 24 s in one worker; the union was primed 26.7 s
+    after load in headless Chromium here), and ui.js primes it, so paramsFor() and every
+    evidence chip read the union: the chronic MAP chip lists 28 feeders, pn_gain among them.
+    First paint is not held for it: the default screen (about 0.3 s) is posted first and
+    fills the chips at once, then the union replaces it. INF.screen records which one is
+    shown, and the drawer note and chip tooltip say so: the union reads "+/-10 % change moves
+    this quantity by more than 1 % of its range in any registered scenario at its own horizon
+    (one-at-a-time screen)", the interim default screen keeps its "10 g salt, first 24 h"
+    wording and says the union replaces it. Without workers the union runs once on the main
+    thread. Whether to ship the union precomputed with a model-version check instead stays
+    the Operator's decision. tools/health_app_smoke.py waits for the union and asserts that
+    the chronic MAP chip's drawer lists pn_gain and carries that note.
+  regression_test: tools/health_app_smoke.py::main
   monitor_gap: >-
     No test reads the viewer's chip source; the engine tests prove the lists, not that the
     page shows them.

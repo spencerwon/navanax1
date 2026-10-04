@@ -27,8 +27,10 @@ from the dropdown and both the Chronic and Custom tabs, and checks:
          unverified row on the dose panel (BUG-20261003-197);
     plus display.index_label on every surface that shows the kidney strain index (HREQ-S-04,
     BUG-20261003-100 in the vendored copy), display.trajectory_label on the Chronic tab and
-    display.custom_run_label on the Custom tab (BUG-20261003-196), and the curated knowledge
-    base loaded from the subdirectory (BUG-20261003-195).
+    display.custom_run_label on the Custom tab (BUG-20261003-196), the curated knowledge
+    base loaded from the subdirectory (BUG-20261003-195), and, once the worker has primed
+    the influence union, pn_gain on the evidence chip of the chronic MAP chart
+    (HREQ-U-12, BUG-20261003-178).
 
 Three static checks run with or without a browser: app/config.js carries the labels
 byte-equal to base.yaml, the fallback STRAIN_P list in app/ui.js names every strain_*
@@ -209,6 +211,7 @@ try {
   }).map(([id]) => id));
   const PANEL = 'section.panel[aria-label="Choose an intervention"]';
 
+  const tLoad = Date.now();
   await page.goto(cfg.url, { waitUntil: 'load' });
   await ready();
   await page.waitForFunction(() => /doses ×|failed/.test(document.getElementById('doseNote').textContent), null, { timeout: cfg.timeoutMs });
@@ -252,6 +255,19 @@ try {
   const cc = await cards();
   out.chronic = { chip: await raw('#mode-chronic .chip'), map: cc.map, vol: cc.vol, bad: await chartsOk(), hud: await raw('#hudScen') };
   await shot('chronic-panel', PANEL); await shot('chronic-chart-map', '[data-smoke="map"]'); await shot('chronic-chart-volume', '[data-smoke="vol"]');
+  // The evidence chip on the chronic MAP chart, once the worker has primed the influence union.
+  out.influence = {};
+  try {
+    await page.waitForFunction(() => window.__mm.INF?.screen === 'union', null, { timeout: cfg.timeoutMs });
+    out.influence.secondsAfterLoad = (Date.now() - tLoad) / 1000;
+  } catch (err) { out.influence.error = `no union primed within ${cfg.timeoutMs / 1000} s`; }
+  out.influence.screen = await page.evaluate(() => window.__mm.INF?.screen ?? null);
+  await page.click('[data-smoke="map"] .ev-chip');
+  await page.waitForSelector('#drawer:not([hidden])');
+  out.influence.mapDrawer = await text('#drawer'); out.influence.mapChip = await raw('[data-smoke="map"] .ev-chip');
+  out.influence.mapParams = await page.evaluate(() => [...document.querySelectorAll('#drawerBody .prm code')].map((c) => c.textContent));
+  await shot('chronic-map-evidence', '#drawer');
+  await page.click('#drawerClose');
   await run(() => page.click('#tab-custom'));
   out.custom = { chip: await raw('#mode-custom .chip'), bad: await chartsOk(), hud: await raw('#hudScen') };
   await shot('custom-panel', PANEL);
@@ -385,7 +401,19 @@ def browser_checks(cfg: dict[str, str], obs: dict) -> None:
           "evidence records (BUG-20261003-195)",
           kb.get("entities") == "kb/entities.json" and (kb.get("evidence") or 0) > 0, f"kb {kb}")
 
-    print(f"      viewer: {obs.get('viewer')}; scenario runs: "
+    inf = obs.get("influence") or {}
+    drawer = inf.get("mapDrawer") or ""
+    union_note = "in any registered scenario at its own horizon (one-at-a-time screen)"
+    listed = inf.get("mapParams") or []
+    check("evidence: once the worker primes the influence union, the chronic MAP chart's chip lists "
+          f"pn_gain and its drawer says \"{union_note}\" (HREQ-U-12, BUG-20261003-178)",
+          inf.get("screen") == "union" and "pn_gain" in listed and union_note in drawer,
+          f"{inf.get('error') or 'union primed'}; screen {inf.get('screen')!r}, chip {inf.get('mapChip')!r}, "
+          f"{len(listed)} parameters listed, pn_gain among them: {'pn_gain' in listed}; drawer {drawer[:300]!r}")
+
+    primed = (f"influence union primed {inf['secondsAfterLoad']:.1f} s after load" if "secondsAfterLoad" in inf
+              else f"influence union NOT primed ({inf.get('error')})")
+    print(f"      viewer: {obs.get('viewer')}; {primed} (MAP chip {inf.get('mapChip')!r}); scenario runs: "
           + ", ".join(f"{r['id']} {r['seconds']:.1f} s" for r in runs))
     for p in external:
         print(f"WARN  external resource, not the app (not failing): {p['kind']} {p['text']} {p['url']}".rstrip())

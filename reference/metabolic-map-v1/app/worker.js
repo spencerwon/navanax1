@@ -4,7 +4,9 @@
 // order, so pooled results equal simulateMC()/simulateSweep() exactly.
 // EDUCATIONAL MODEL — NOT MEDICAL ADVICE.
 
-import { simulate, simulateSweep, drawSamples, makeScenario, makeWaterLoad, makeSaltLoad, SCENARIOS, computeInfluence } from '../engine/index.js';
+import {
+  simulate, simulateSweep, drawSamples, makeScenario, makeWaterLoad, makeSaltLoad, SCENARIOS, computeInfluence, computeInfluenceAll,
+} from '../engine/index.js';
 
 const sampleCache = new Map(); // `${n}:${seed}` -> samples
 
@@ -60,8 +62,12 @@ self.onmessage = (ev) => {
       self.postMessage({ id: msg.id, ok: true, values: r.values, metrics: r.metrics, rejected: r.rejected,
         ms: performance.now() - t0 });
     } else if (msg.type === 'influence') {
-      // Sensitivity screen behind the evidence chips (audit F-01); ~53 runs, once per page load.
+      // Default sensitivity screen (audit F-01): one scenario, 24 h, ~53 runs; fills the evidence
+      // chips at first paint until the union below arrives (BUG-20261003-178).
       self.postMessage({ id: msg.id, ok: true, result: computeInfluence(), ms: performance.now() - t0 });
+    } else if (msg.type === 'influenceAll') {
+      // Influence union behind the evidence chips (HREQ-U-12); 805 runs, about 24 s, once per page load.
+      self.postMessage({ id: msg.id, ok: true, result: computeInfluenceAll(), ms: performance.now() - t0 });
     } else if (msg.type === 'ping') {
       self.postMessage({ id: msg.id, ok: true });
     }

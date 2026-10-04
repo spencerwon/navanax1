@@ -5,7 +5,7 @@
 import {
   SCENARIOS, paramTable, DISCLAIMER, VALIDATION_STATUS, MODEL_VERSION, simulate, simulateSweep, drawSamples,
   makeScenario, makeWaterLoad, makeSaltLoad, MMOL_NA_PER_G_NACL, REFERENCE_PERSON, paramsFor, primeInfluence, computeInfluence,
-  INFLUENCE_DEFAULTS,
+  computeInfluenceAll, INFLUENCE_DEFAULTS,
 } from '../engine/index.js';
 import { quantileBands } from '../engine/mc.js';
 import { BandChart, DoseChart, fmt, fmtSigned } from './charts.js';
@@ -180,6 +180,8 @@ function runLocal(msg) {
       resolve({ values: r.values, metrics: r.metrics }); return;
     }
     if (msg.type === 'influence') { resolve({ result: computeInfluence() }); return; }
+    // Without workers the union (about 24 s) blocks this thread once; a complete evidence list is worth it.
+    if (msg.type === 'influenceAll') { resolve({ result: computeInfluenceAll() }); return; }
     const { samples } = drawSamples({ n: msg.n, seed: msg.seed });
     const sc = scenarioFromSpec(msg.scenario);
     let t = null; const data = Object.fromEntries(msg.keys.map((k) => [k, []]));
@@ -340,16 +342,25 @@ function evChip(btn, params, fallback = false) {
   btn.replaceChildren(document.createTextNode(`Evidence · ${names.length}`));
   if (e) btn.append(el('span', 'e', `${e} E`));
   btn.title = `${names.length} parameters, ${e} assumed (grade E). Open the citations.` +
-    (fallback ? ' (Fallback hand-written list: the automatic screen failed, so this may under-count.)' : '');
+    (fallback ? ' (Fallback hand-written list: the automatic screen failed, so this may under-count.)'
+      : INF.screen !== 'union' ? ' (Default 24 h screen while the union over every registered scenario is computed.)' : '');
 }
 
-// Evidence lists from the engine's sensitivity screen (audit F-01). The screen (~53 runs) is done once in
-// a worker at start-up and installed with primeInfluence(); until then chips show "…", and a click
-// computes it on the main thread (paramsFor caches). Hand lists are used only if paramsFor throws.
-const INF = { failed: false };
+// Evidence lists from the engine's sensitivity screen (audit F-01, HREQ-U-12). The screen (the union,
+// 805 runs) is done once in a worker at start-up, after the default screen (one scenario, 24 h, ~53 runs)
+// that fills the chips within a second; each is installed with primeInfluence() as it arrives, and
+// INF.screen says which one the chips show (BUG-20261003-178). Until the first arrives chips show "…",
+// and a click computes the default screen on the main thread (paramsFor caches). Hand lists are used
+// only if paramsFor throws.
+const INF = { failed: false, screen: null };
 const DOSE_KEYS = ['strain_index', 'Na_plasma', 'V_ecf', 'MAP', 'na_out']; // the sweep metrics' sources
-const INF_NOTE = `Listed: every parameter whose +${INFLUENCE_DEFAULTS.rel * 100}% change moves this quantity by more than ` +
-  `${INFLUENCE_DEFAULTS.threshold * 100}% of its range (one-at-a-time screen, 10 g salt, first 24 h). The 90% band samples every ranged parameter.`;
+const INF_NOTE = `Listed: every parameter whose +/-${INFLUENCE_DEFAULTS.rel * 100} % change moves this quantity by more than ` +
+  `${INFLUENCE_DEFAULTS.threshold * 100} % of its range in any registered scenario at its own horizon (one-at-a-time screen). ` +
+  'The 90% band samples every ranged parameter.';
+const INF_NOTE_DEFAULT = `Listed: every parameter whose +${INFLUENCE_DEFAULTS.rel * 100}% change moves this quantity by more than ` +
+  `${INFLUENCE_DEFAULTS.threshold * 100}% of its range (one-at-a-time screen, 10 g salt, first 24 h); the union over every ` +
+  'registered scenario replaces this list when the worker finishes it. The 90% band samples every ranged parameter.';
+const infNote = () => (INF.screen === 'union' ? INF_NOTE : INF_NOTE_DEFAULT);
 function influenced(keys, fallback) {
   if (INF.failed) return { list: fallback, fallback: true };
   try { const list = [...new Set(keys.flatMap((k) => paramsFor(k)))]; return { list, fallback: false }; }
@@ -366,11 +377,13 @@ function refreshChips() {
   const d = doseParams(); evChip($('doseEv'), d.list, d.fallback);
 }
 async function loadInfluence() {
-  try {
-    const r = await exec({ type: 'influence' }, 'influence');
-    primeInfluence(r.result);
-  } catch (err) { console.warn('Influence screen in worker failed; computing on demand:', err); }
-  refreshChips();
+  for (const [type, screen] of [['influence', 'default'], ['influenceAll', 'union']]) {
+    try {
+      const r = await exec({ type }, 'influence');
+      primeInfluence(r.result); INF.screen = screen;
+    } catch (err) { console.warn(`Influence screen (${screen}) in worker failed; the chips keep the last list:`, err); }
+    refreshChips();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +399,7 @@ function buildCharts() {
     const chip = el('button', 'ev-chip'); chip.type = 'button'; chipPending(chip);
     chip.addEventListener('click', () => {
       const r = chartParams(c); refreshChips();
-      openDrawer(c.title, r.list, scenarioEvidence(), [c.note, r.fallback ? null : INF_NOTE].filter(Boolean).join(' '));
+      openDrawer(c.title, r.list, scenarioEvidence(), [c.note, r.fallback ? null : infNote()].filter(Boolean).join(' '));
     });
     tools.append(tb, chip); head.append(tools); card.append(head);
     if (c.keys.length > 1) {
@@ -654,7 +667,7 @@ function buildDose() {
     const r = doseParams(); refreshChips();
     openDrawer('Salt dose response', r.list, SCENARIOS.salt_load_sweep.validation.evidence,
       'Each dose runs 48 h. Peak strain index is the highest index value after the load; the index is a model construct, not a clinical measure.' +
-      (r.fallback ? '' : ` ${INF_NOTE}`));
+      (r.fallback ? '' : ` ${infNote()}`));
   });
   $('doseRun').addEventListener('click', () => doSweep());
 }
@@ -905,7 +918,7 @@ async function main() {
     const m = el('div', 'webgl-msg', 'The 3D view needs WebGL, which this browser has turned off. Charts and controls below still work.');
     $('view').append(m);
   }
-  window.__mm = { S, pool, selectEntity, runMC, setPlayIndex }; // test hook
+  window.__mm = { S, pool, selectEntity, runMC, setPlayIndex, INF }; // test hook
   selectEntity('organism:body');
 
   // workers
