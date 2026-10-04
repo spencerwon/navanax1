@@ -14,8 +14,8 @@
   "reference/metabolic-map-v1/engine/index.js": "6d1b9049bc055347a89b158c3a305f33731dfe5aada9d946a1d392f2094227a4",
   "reference/metabolic-map-v1/engine/mc.js": "e1d6551c596dc903ede434f22c980af16723a517b3dc647616caefdea735e125",
   "reference/metabolic-map-v1/engine/model.js": "fb4917a164255bfcaaceb04fd6f93069c5237dd74d3710ac513a952ac71a723c",
-  "reference/metabolic-map-v1/engine/params.data.js": "7b8b010e3a20dd0c6ac70ac300c25faae053ec0a1feded02f156e8f208146a12",
-  "reference/metabolic-map-v1/engine/params.json": "036ef6298e01e35454c5ffff30f8f3e40494677ae270f114982c44ac4d0f5ae2",
+  "reference/metabolic-map-v1/engine/params.data.js": "75bd057a2f183bcd55fc400ecd6a5089c578e55b306381c23690821adad7217c",
+  "reference/metabolic-map-v1/engine/params.json": "899c7b8ad4f55dc51ea990cdaeb142d3f29f1ce241aba223d03d3ea9109fa758",
   "reference/metabolic-map-v1/engine/scenarios.js": "b4c87381506f78997002acdc0663337ec1e683612b5f95f07973ce824b53b0e8",
   "reference/metabolic-map-v1/engine/solver.js": "a2c1b80f7ecffa939e42ad7118504cf1e0c049605307cfbb208d428d92e4190a"
  },
@@ -7261,10 +7261,10 @@
   "atLeastB": 24,
   "pctAtLeastB": 42.10526315789474,
   "byGrade": {
-   "B-textbook": 15,
+   "B-textbook": 16,
    "A-primary": 6,
    "E-assumption": 33,
-   "A-meta": 3
+   "A-meta": 2
   }
  },
  "findings": {

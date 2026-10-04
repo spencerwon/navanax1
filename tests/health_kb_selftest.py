@@ -159,8 +159,10 @@ HEART = "organ:heart"                           # scale 2, parent scale 1
 TEXTBOOK = "ev:guyton-hall-2021"                # B-textbook; cited by entities and params
 PRIMARY = "ev:robertson-athar-1976"             # kind doi, cited, verified, titleMatch true
 FREE_PARAM = "V_ecf_0"                          # a params.json row no quantity mirrors
+#: ev:suckling-2012 left this set on 2026-10-03 (cited by rel:gut:na-absorption, W-6); the
+#: five that remain carry `engineOnly` and clear when the checker reads it (BUG-20261003-183).
 SHIPPED_UNUSED = {"ev:shafiee-2005", "ev:crowe-1987", "ev:uttamsingh-1985", "ev:heer-2000",
-                  "ev:rakova-2017", "ev:suckling-2012"}
+                  "ev:rakova-2017"}
 
 
 def nephron_q(kb: dict[str, Any]) -> dict[str, Any]:
@@ -576,13 +578,13 @@ def test_shipped_kb_passes_every_contract_rule() -> None:
           & {f.code for f in findings})
     warn = sorted((f.code, f.where) for f in findings if f.severity == "warn")
     expected = sorted(("unused-evidence", f"evidence.json[{v}]") for v in SHIPPED_UNUSED)
-    check("shipped KB: the warning set is pinned -- exactly the six unused-evidence records, "
+    check("shipped KB: the warning set is pinned -- exactly the five unused-evidence records, "
           "no other code (a checker that stopped counting params.json citations gave 12)",
           warn == expected, f"got {warn}")
     info = sorted(f.message for f in findings if f.severity == "info")
-    check("shipped KB: info is exactly the two E-assumption shares (5 of 20; 30 of 54)",
+    check("shipped KB: info is exactly the two E-assumption shares (5 of 20; 33 of 57)",
           len(info) == 2 and any("5 of 20 quantities (25.0%)" in m for m in info)
-          and any("30 of 54 engine params (55.6%)" in m for m in info), str(info))
+          and any("33 of 57 engine params (57.9%)" in m for m in info), str(info))
     check("shipped KB: every finding's code and severity are registered",
           all(f.code in RULES and RULES[f.code][0] == f.severity for f in findings))
     shipped = {name: (DATA_DIR / name).stat().st_size for name in
@@ -980,7 +982,7 @@ def test_summary_counts_match_the_data() -> None:
                      if row["grade"] in ("A-meta", "A-primary", "B-textbook"))
     share = s["paramsGradedAtLeastB"]
     check("summary: params graded >= B equals an independent count over params.json",
-          (share["count"], share["total"]) == (at_least_b, len(raw_params)) == (24, 54),
+          (share["count"], share["total"]) == (at_least_b, len(raw_params)) == (24, 57),
           f"{share} vs {at_least_b}/{len(raw_params)}")
     check("summary: >= B means exactly A-meta, A-primary, B-textbook",
           GRADE_B_OR_BETTER == ("A-meta", "A-primary", "B-textbook") == GRADES[:3],
@@ -1125,7 +1127,7 @@ def test_status_prints_the_disclaimer(tmp: Path) -> None:
           -1 not in order and order == sorted(order), f"{order}\n{r.stdout}")
     share_line = lines[order[5]] if order[5] >= 0 else ""
     check("cli status: the >= B share and the E-assumption count come from the files",
-          "24/54 (44.4%)" in share_line and "E-assumption: 30" in share_line, share_line)
+          "24/57 (42.1%)" in share_line and "E-assumption: 33" in share_line, share_line)
 
     r = _run_cli("status", "--fast", "--root", str(tmp / "no-such-kb"))
     check("cli status: an unloadable KB exits 1, says unavailable, and still ends with the "
