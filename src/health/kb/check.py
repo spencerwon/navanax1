@@ -26,12 +26,29 @@ Two layers.
    depend on for meaning -- the grade enum (its ranking drives grade-ceiling and the
    >= B share), the sourceType enum (the §3.2 default-grade mapping) and the fields the
    cross-file rules read.
+   Two more documents are validated when the schema declares their definitions (the M1
+   extensions): params.json against #/definitions/EngineParams (after the cross-file
+   parameter rules, which keep the fields they read: PARAM_RULE_FIELDS) and
+   VERIFICATION_LOG.json's curationRecords against #/definitions/CurationRecord.
 
 2. CROSS-FILE. What JSON Schema cannot say (the schema's own description; docs/health/03
-   §6; docs/health/01 HREQ-E-01..E-07): references resolve, parent scale <= child scale,
-   engine mirrors, params.data.js == params.json, verified external identifiers (the
-   LATEST log record for an entity/db/id governs: the log is append-only), word limits,
-   unsourced conflicts say so, the grade ceiling, ranges hold their values.
+   §6; docs/health/01 HREQ-E-01..E-07, E-10, U-01): references resolve, parent scale <=
+   child scale, engine mirrors, params.data.js == params.json, verified external
+   identifiers (the LATEST log record for an entity/db/id governs: the log is
+   append-only), word limits, unsourced conflicts say so, the grade ceiling, ranges hold
+   their values, every params.json row Monte Carlo holds fixed records why (fixed-reason),
+   calibratedAgainst agrees with the expectations' calibrates (calibration-link), and an
+   evidence record marked engineOnly is cited by exactly the expectations its citedBy
+   lists and by no knowledge-base record (engine-only-evidence; the marker is what exempts
+   it from unused-evidence).
+
+   calibration-link and engine-only-evidence read the expectation registry from the
+   reference engine's scenarios.js AS TEXT (`expectation_records`): the knowledge base
+   depends on the reference, never on the Python engine, so it does not import
+   health.engine. The text comes from `kb["scenarios_js"]` when the caller supplies it
+   (tests plant it there), else from scenarios.js beside the params.json in use, else from
+   the reference checkout. A registry it cannot find, read or find an expectation id in is
+   an error (expectations-unavailable), never a quiet pass.
 
 Each rule has its own code in RULES; tests/health_kb_selftest.py plants a violation of
 every one and checks it fires alone. DOCUMENTED_RULES maps every rule of the docs/03 §6
@@ -54,8 +71,9 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass
-from functools import cache
-from typing import Any
+from functools import cache, lru_cache
+from pathlib import Path
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 from . import DATA_FILES, RECORD_KEYS
@@ -104,7 +122,8 @@ RULES: dict[str, tuple[str, str]] = {
                              "no Unicode space of any kind)"),
     "pmid-pattern": ("error", "evidence pmid does not match its schema pattern"),
     "url-https": ("error", "evidence url does not match its schema pattern (https://)"),
-    "date-pattern": ("error", "accessed / checkedOn is not YYYY-MM-DD"),
+    "date-pattern": ("error", "accessed / checkedOn (or any definitions/isoDate) is not "
+                              "YYYY-MM-DD"),
     "pattern-mismatch": ("error", "a string fails a schema pattern that has no more specific "
                                   "code"),
     "doi-required": ("error", "evidence with kind 'doi' has no doi (schema if/then)"),
@@ -133,6 +152,28 @@ RULES: dict[str, tuple[str, str]] = {
                              "grade from the enum (HREQ-E-01)"),
     "param-evidence-unresolved": ("error", "a params.json row cites an evidence id not in "
                                            "evidence.json"),
+    "fixed-reason": ("error", "a params.json row Monte Carlo holds fixed lacks mc: false with a "
+                              "fixedReason of scenario-condition, classification-threshold or "
+                              "index-constant (HREQ-U-01): mc: false with no or another reason; "
+                              "a single-point range without mc: false; a sampled row carrying "
+                              "a reason; an mc that is not a boolean"),
+    "calibration-link": ("error", "params.json calibratedAgainst and the scenarios.js "
+                                  "expectations' calibrates disagree, an entry is not an "
+                                  "expectation id <scenario_id>/<NN> or names no registered "
+                                  "expectation, a row whose notes say its value was "
+                                  "calibrated, co-developed, tuned or chosen to hit a target "
+                                  "carries no calibratedAgainst, or scenarios.js registers an "
+                                  "expectation id twice (HREQ-E-10)"),
+    "expectations-unavailable": ("error", "scenarios.js was not found, cannot be read, or "
+                                          "registers no expectation id, so calibratedAgainst "
+                                          "and engineOnly.citedBy cannot be resolved and "
+                                          "calibration-link checks only the params.json side"),
+    "engine-only-evidence": ("error", "an evidence record marked engineOnly is cited by a "
+                                      "knowledge-base record or a params.json row, or its "
+                                      "citedBy disagrees with the scenarios.js expectations "
+                                      "that cite it (an id no expectation registers, an "
+                                      "expectation that does not cite it, one that does and "
+                                      "is not listed)"),
     "external-id-unverified": ("error", "an externalIds value whose LATEST VERIFICATION_LOG "
                                         "record for that entity/db/id is not resolved: true "
                                         "(or has none)"),
@@ -162,7 +203,7 @@ RULES: dict[str, tuple[str, str]] = {
                                          "titleMatch: false (HREQ-D-02)"),
     # -- warnings: legal but suspect --------------------------------------------------------
     "unused-evidence": ("warn", "an evidence record no entity, relation, quantity, conflict or "
-                                "engine param cites"),
+                                "engine param cites, and that is not marked engineOnly"),
     "orphan-verification": ("warn", "a resolved (latest) VERIFICATION_LOG record for an id its "
                                     "entity no longer carries"),
     "parent-cycle": ("warn", "following parent links returns to the start entity"),
@@ -193,6 +234,8 @@ DOCUMENTED_RULES: dict[str, tuple[str, ...]] = {
     "grade-ceiling": ("grade-ceiling",),
     "range-contains-value": ("value-outside-range", "range-order"),
     "unique-ids": ("duplicate-id",),
+    "fixed-reason": ("fixed-reason",),
+    "calibration-link": ("calibration-link", "expectations-unavailable"),
     "append-only": ("entity-removed",),          # partial; the rest is DEFERRED below
 }
 """docs/health/03 §6 rule name -> the RULES codes that implement it (all `error`)."""
@@ -201,10 +244,6 @@ DEFERRED_RULES: dict[str, str] = {
     "range-kind": "needs a structured range-kind field on every sampled parameter (HREQ-E-08; "
                   "M1, tracker W-18); today the kind is prose in `notes`",
     "dispersion": "needs structured dispersion type and n fields (HREQ-E-09; M1, tracker W-18)",
-    "calibration-link": "needs `calibratedAgainst` on params.json rows; `calibrates` lives only "
-                        "on scenario expectations today (HREQ-E-10; M1, tracker W-18)",
-    "fixed-reason": "needs a structured reason field on every `mc: false` row (HREQ-U-01; M1, "
-                    "tracker W-18)",
     "append-only": "needs the last released snapshot of the KB and evidence ledger to compare "
                    "against, and a `supersedes` field the schema does not have (HREQ-E-06, "
                    "HREQ-V-18); until then only entity-removed runs",
@@ -213,6 +252,32 @@ DEFERRED_RULES: dict[str, str] = {
 
 GRADES = ("A-meta", "A-primary", "B-textbook", "C-model", "D-animal", "E-assumption")
 """Best first. The ranking grade-ceiling and `report`'s 'graded >= B' use."""
+
+FIXED_REASONS = ("scenario-condition", "classification-threshold", "index-constant")
+"""docs/health/01 §4.4, HREQ-U-01: the only reasons a params.json row may be held fixed in
+Monte Carlo, as its `fixedReason` field spells them (rule fixed-reason)."""
+
+EXPECTATION_ID_PATTERN = r"^[A-Za-z0-9_]+/[0-9]{2}$"
+"""`<scenario_id>/<NN>` (docs/health/01 §6.3, HREQ-E-13): what a calibratedAgainst entry
+names and what scenarios.js gives each expectation record as its `id`."""
+
+PARAM_RULE_FIELDS = ("value", "unit", "range", "evidence", "grade", "mc", "fixedReason",
+                     "calibratedAgainst")
+"""The params.json row fields the cross-file rules read (param-field, range-contains-value,
+ref-resolves, grade-ceiling, fixed-reason, calibration-link). When schema.json declares
+#/definitions/EngineParams the table is validated against it too, and a schema violation
+in one of these fields is left to the rule that already reported the field (one finding per
+malformed value)."""
+
+SCENARIOS_JS_FILE = "scenarios.js"
+_REFERENCE_SCENARIOS_JS = (Path(__file__).resolve().parents[3] / "reference" / "metabolic-map-v1"
+                           / "engine" / SCENARIOS_JS_FILE)
+
+_CALIBRATION_NOTE = re.compile(
+    r"\b(?:calibrat\w*|co-?developed|tuned|chosen\s+(?:so|to|for|with))\b", re.I)
+"""Wording in a params.json row's notes that says its value was set to make an output hit a
+target. Such a row must carry calibratedAgainst (HREQ-E-10). Deliberately broad: a note
+that only mentions calibration must be reworded or linked, never silently passed."""
 
 DEFAULT_GRADE_BY_SOURCE: dict[str, str] = {
     "meta-analysis": "A-meta", "systematic-review": "A-meta",
@@ -247,6 +312,13 @@ _RULE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 """Schema fields the cross-file rules read: renaming one away is schema-drift."""
 
+_OPTIONAL_RULE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("/definitions/Param/properties", PARAM_RULE_FIELDS),
+    ("/definitions/Evidence/properties/engineOnly/properties", ("citedBy",)),
+)
+"""The same, for nodes a schema may declare (the M1 extensions): checked when the node that
+holds the properties (Param, engineOnly) is declared at all."""
+
 _PATTERN_CODES: tuple[tuple[str, str], ...] = (
     ("#/definitions/id/", "id-pattern"),
     ("#/definitions/evidenceId/", "evidence-id-pattern"),
@@ -257,6 +329,7 @@ _PATTERN_CODES: tuple[tuple[str, str], ...] = (
     ("#/definitions/Evidence/properties/url/", "url-https"),
     ("#/definitions/Evidence/properties/accessed/", "date-pattern"),
     ("#/definitions/Evidence/properties/verification/properties/checkedOn/", "date-pattern"),
+    ("#/definitions/isoDate/", "date-pattern"),
 )
 """Where a failing `pattern` sits in the schema -> the finding's code (naming only)."""
 
@@ -266,6 +339,9 @@ _REF_CODES: dict[str, tuple[str, str]] = {
 """A $ref target whose violations are reported as ONE finding at the referring value."""
 
 _CONDITIONAL_REQUIRED = {"doi": "doi-required", "pmid": "pmid-required"}
+
+_PARAM_WHERE = re.compile(r"^params\.json\[([^\]]*)\](?:\.([A-Za-z_$][\w$]*))?")
+"""A finding's `where` on a params.json row: the row name and the field, if any."""
 
 _UNSOURCED_CLAUSE = re.compile(r"(?:unsourced|no verified sources?)\b", re.I)
 _CLAUSE_SPLIT = re.compile(r"[.;:\n]+")
@@ -999,6 +1075,241 @@ def _describe_condition(cond: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# scenarios.js, read as text (calibration-link)
+# ---------------------------------------------------------------------------
+class ScriptError(ValueError):
+    """scenarios.js text the expectation scanner cannot read: an unterminated string,
+    template literal or comment, or unbalanced brackets."""
+
+
+_JS_PUNCT = "{}[](),:;"
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+_JS_KEY = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+_EXPR = object()
+"""A value the scanner does not evaluate (an identifier, a call, a template literal with a
+substitution, an array holding anything but string literals)."""
+
+
+def _js_line(text: str, pos: int) -> int:
+    return text.count("\n", 0, pos) + 1
+
+
+def _js_string(text: str, i: int) -> tuple[str, int]:
+    """The string literal opening at text[i] (' or "): its value and the index after it."""
+    quote, j, n, buf = text[i], i + 1, len(text), []
+    while j < n:
+        ch = text[j]
+        if ch == quote:
+            return "".join(buf), j + 1
+        if ch == "\n":
+            break
+        if ch == "\\" and j + 1 < n:
+            nxt = text[j + 1]
+            j += 2
+            if nxt in "ux":
+                width = 4 if nxt == "u" else 2
+                digits = text[j:j + width]
+                if nxt == "u" and text.startswith("{", j):
+                    end = text.find("}", j)
+                    digits, width = (text[j + 1:end], end - j + 1) if end > 0 else ("", 0)
+                try:
+                    buf.append(chr(int(digits, 16)))
+                except ValueError as exc:
+                    raise ScriptError(f"bad \\{nxt} escape at line {_js_line(text, j)}") from exc
+                j += width
+            elif nxt == "\r" and text.startswith("\n", j):
+                j += 1                                   # line continuation (CRLF)
+            elif nxt != "\n":                            # "\<newline>" continues the line
+                buf.append(_JS_ESCAPES.get(nxt, nxt))
+            continue
+        buf.append(ch)
+        j += 1
+    raise ScriptError(f"unterminated string literal at line {_js_line(text, i)}")
+
+
+def _js_skip_code(text: str, i: int) -> int:
+    """Skip a template substitution's code from text[i] to its closing }; the index after."""
+    depth, n = 1, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "'\"":
+            i = _js_string(text, i)[1]
+        elif ch == "`":
+            i = _js_template(text, i)[1]
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end + 1
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end < 0:
+                break
+            i = end + 2
+        else:
+            depth += {"{": 1, "}": -1}.get(ch, 0)
+            i += 1
+            if depth == 0:
+                return i
+    raise ScriptError(f"unterminated template substitution at line {_js_line(text, i)}")
+
+
+def _js_template(text: str, i: int) -> tuple[str | None, int]:
+    """The template literal opening at text[i]: its text (None when it has a ${...}
+    substitution, whose value the scanner does not compute) and the index after it."""
+    j, n, buf, substituted = i + 1, len(text), [], False
+    while j < n:
+        ch = text[j]
+        if ch == "`":
+            return (None if substituted else "".join(buf)), j + 1
+        if ch == "\\" and j + 1 < n:
+            buf.append(_JS_ESCAPES.get(text[j + 1], text[j + 1]))
+            j += 2
+        elif text.startswith("${", j):
+            substituted = True
+            j = _js_skip_code(text, j + 2)
+        else:
+            buf.append(ch)
+            j += 1
+    raise ScriptError(f"unterminated template literal at line {_js_line(text, i)}")
+
+
+def js_tokens(text: str) -> list[tuple[str, Any]]:
+    """The tokens of JavaScript source that object literals are made of: ("str", value) for a
+    string or substitution-free template literal, ("expr", None) for a template with a
+    substitution, ("p", c) for each of {}[](),:; and ("w", run) for any other run of
+    characters. Comments and whitespace are dropped. A `/` is read as division: regular
+    expression literals are not recognised (scenarios.js has none)."""
+    out: list[tuple[str, Any]] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            i += 1
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end + 1
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end < 0:
+                raise ScriptError(f"unterminated comment at line {_js_line(text, i)}")
+            i = end + 2
+        elif ch in "'\"":
+            value, i = _js_string(text, i)
+            out.append(("str", value))
+        elif ch == "`":
+            tvalue, i = _js_template(text, i)
+            out.append(("str", tvalue) if tvalue is not None else ("expr", None))
+        elif ch in _JS_PUNCT:
+            out.append(("p", ch))
+            i += 1
+        else:
+            j = i + 1
+            while j < n and not (text[j].isspace() or text[j] in _JS_PUNCT or text[j] in "'\"`"
+                                 or text.startswith("//", j) or text.startswith("/*", j)):
+                j += 1
+            out.append(("w", text[i:j]))
+            i = j
+    return out
+
+
+def _js_key(toks: list[tuple[str, Any]], k: int) -> str | None:
+    """The property name at toks[k] when toks[k] is one (a name or string literal right after
+    `{` or `,`, followed by `:`), else None."""
+    if k < 1 or toks[k - 1] not in (("p", "{"), ("p", ",")):
+        return None
+    kind, value = toks[k]
+    if kind == "str" or (kind == "w" and _JS_KEY.match(value)):
+        return value
+    return None
+
+
+class Expectation(NamedTuple):
+    """One expectation record of scenarios.js as the scanner reads it. `calibrates` and
+    `evidence` are tuples of strings for a literal array of string literals, None when the
+    record has no such key, and _EXPR for any other value; `role` is the string, None or
+    _EXPR."""
+    id: str
+    calibrates: Any
+    role: Any
+    evidence: Any
+
+
+@lru_cache(maxsize=8)
+def expectation_records(text: str) -> tuple[Expectation, ...]:
+    """Every object literal in scenarios.js whose `id` is a string matching
+    EXPECTATION_ID_PATTERN, in source order, as an Expectation (id, calibrates, role,
+    evidence).
+
+    The scan is structural, not a JavaScript evaluator: it tracks {}, [] and () and reads
+    `name: 'string'` and `name: ['a', 'b']` inside object literals, which is how the
+    reference writes its expectation records. Raises ScriptError on text it cannot
+    tokenise or whose brackets do not balance."""
+    toks = js_tokens(text)
+    closer = {"}": "{", "]": "[", ")": "("}
+    stack: list[dict[str, Any]] = []
+    found: list[Expectation] = []
+    for k, (kind, value) in enumerate(toks):
+        top = stack[-1] if stack else None
+        if kind == "p" and value in "{[(":
+            if top is not None and top["kind"] == "[":
+                top["literal"] = False
+            frame: dict[str, Any] = {"kind": value, "keys": {}, "items": [], "literal": True,
+                                     "owner": None}
+            if value == "[" and top is not None and top["kind"] == "{" and k >= 2 \
+                    and toks[k - 1] == ("p", ":") and _js_key(toks, k - 2) is not None:
+                frame["owner"] = (top, _js_key(toks, k - 2))
+            stack.append(frame)
+            continue
+        if kind == "p" and value in closer:
+            if top is None or top["kind"] != closer[value]:
+                raise ScriptError(f"unbalanced {value!r} (token {k})")
+            stack.pop()
+            if value == "]" and top["owner"] is not None:
+                owner, key = top["owner"]
+                owner["keys"][key] = tuple(top["items"]) if top["literal"] else _EXPR
+            elif value == "}":
+                eid = top["keys"].get("id")
+                if isinstance(eid, str) and matches(EXPECTATION_ID_PATTERN, eid):
+                    keys = top["keys"]
+                    found.append(Expectation(eid, keys.get("calibrates"), keys.get("role"),
+                                             keys.get("evidence")))
+            continue
+        if top is not None and top["kind"] == "[":
+            if kind == "str":
+                top["items"].append(value)
+            elif (kind, value) != ("p", ","):
+                top["literal"] = False
+        if (kind, value) == ("p", ":") and top is not None and top["kind"] == "{":
+            key = _js_key(toks, k - 1)
+            if key is None:
+                continue
+            nxt = toks[k + 1] if k + 1 < len(toks) else None
+            after = toks[k + 2] if k + 2 < len(toks) else None
+            if nxt is not None and nxt[0] == "str" and after in (("p", ","), ("p", "}")):
+                top["keys"][key] = nxt[1]
+            elif nxt != ("p", "["):
+                top["keys"][key] = _EXPR             # an array is recorded when it closes
+    if stack:
+        raise ScriptError(f"{len(stack)} unclosed bracket(s) at the end of the text")
+    return tuple(found)
+
+
+def scenarios_js_path(params_path: Any = None) -> Path | None:
+    """Where calibration-link reads the expectation registry from when the caller supplies
+    no text: scenarios.js beside the params.json in use, else the reference checkout."""
+    candidates = []
+    if isinstance(params_path, str) and params_path:
+        candidates.append(Path(params_path).with_name(SCENARIOS_JS_FILE))
+    candidates.append(_REFERENCE_SCENARIOS_JS)
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
 # The checker
 # ---------------------------------------------------------------------------
 class _Checker:
@@ -1008,6 +1319,8 @@ class _Checker:
         self.bad: set[tuple] = set()          # instance paths that broke a schema/log rule
         self.lists: dict[str, list[Any] | None] = {}
         self.ev_refs: list[tuple[str, str]] = []     # (evidence id, where)
+        self.schema: _Schema | None = None           # the linted schema, once schema_layer ran
+        self._exps: Any = _MISSING                   # expectations(): computed once per run
 
     # -- emit ---------------------------------------------------------------------------
     def add(self, code: str, where: str, message: str) -> None:
@@ -1043,7 +1356,7 @@ class _Checker:
                                             f"{_jtype(schema_doc)}; no schema rule can be "
                                             "evaluated")
         else:
-            schema = _Schema(schema_doc)
+            schema = self.schema = _Schema(schema_doc)
             schema.lint()
             for ptr, msg in schema.drift:
                 self.add("schema-drift", f"{fname}{ptr}", msg)
@@ -1073,7 +1386,24 @@ class _Checker:
                      f"the §3.2 default-grade mapping covers {sorted(DEFAULT_GRADE_BY_SOURCE)} but "
                      f"the schema's sourceType enum is {_show(sources)}; extend "
                      "DEFAULT_GRADE_BY_SOURCE (docs/health/01 §3.2)")
-        for ptr, fields in _RULE_FIELDS:
+        # Optional nodes: a schema that declares the params.json fields must agree with the
+        # rules that enforce them (fixed-reason, calibration-link).
+        reasons = _pointer(schema, "/definitions/fixedReason/enum")
+        if reasons is not _MISSING and (not isinstance(reasons, list)
+                                        or set(map(str, reasons)) != set(FIXED_REASONS)):
+            self.add("schema-drift", f"{fname}#/definitions/fixedReason/enum",
+                     f"fixed-reason permits {list(FIXED_REASONS)} (HREQ-U-01) but the schema's "
+                     f"fixedReason enum is {_show(reasons)}; change HREQ-U-01 and "
+                     "health/kb/check.py FIXED_REASONS with it")
+        pattern = _pointer(schema, "/definitions/expectationId/pattern")
+        if pattern is not _MISSING and pattern != EXPECTATION_ID_PATTERN:
+            self.add("schema-drift", f"{fname}#/definitions/expectationId/pattern",
+                     f"calibration-link reads expectation ids as {EXPECTATION_ID_PATTERN} but "
+                     f"the schema's expectationId pattern is {_show(pattern)}; change "
+                     "health/kb/check.py EXPECTATION_ID_PATTERN with it")
+        optional = [(ptr, fields) for ptr, fields in _OPTIONAL_RULE_FIELDS
+                    if _pointer(schema, ptr.rsplit("/", 1)[0]) is not _MISSING]
+        for ptr, fields in (*_RULE_FIELDS, *optional):
             node = _pointer(schema, ptr)
             missing = [f for f in fields if not (isinstance(node, dict) and f in node)]
             if missing:
@@ -1141,6 +1471,30 @@ class _Checker:
                 elif not matches(LOG_DATE_PATTERN, v):
                     self.add("date-pattern", f"{w}.checkedOn",
                              f"{v!r} does not match {LOG_DATE_PATTERN}")
+        self.curation_records(doc)
+
+    def curation_records(self, doc: dict[str, Any]) -> None:
+        """VERIFICATION_LOG.json `curationRecords` (checks, fetch attempts and changes that
+        are not external identifiers), validated against #/definitions/CurationRecord when
+        the schema declares it. The external-identifier `records` keep their own rules."""
+        items = doc.get("curationRecords", _MISSING)
+        if items is _MISSING:
+            return
+        fname = DATA_FILES["verification"]
+        if not isinstance(items, list):
+            self.add("file-shape", f"{fname}.curationRecords",
+                     f"expected an array, got {_jtype(items)}")
+            return
+        ref = "#/definitions/CurationRecord"
+        if self.schema is None or self.schema.ref(ref)[0] is _MISSING:
+            return
+        for i, r in enumerate(items):
+            out: list = []
+            self.schema.validate(r, {"$ref": ref}, "#", ("verification", "curationRecords", i),
+                                 out)
+            for path, _ptr, _kw, code, message, _extra in out:
+                self.bad.add(path)
+                self.add(code, self.where(path), message)
 
     # -- cross-file -------------------------------------------------------------------------
     def string(self, obj: dict[str, Any], key: str, path: tuple) -> str | None:
@@ -1277,15 +1631,17 @@ class _Checker:
                     self.add("dangling-evidence", where, f"{ref!r} is not an evidence.json record")
             cited = {ref for ref, _ in self.ev_refs} | params_cited
             self.cited_evidence(evidence, cited)
+            self.engine_only(evs, params_cited)
             if params_ok and ents is not None and rels is not None:
                 for i, v in enumerate(evs):
-                    if not isinstance(v, dict):
-                        continue
+                    if not isinstance(v, dict) or "engineOnly" in v:
+                        continue                   # engine-only-evidence holds the claim to account
                     vid = self.string(v, "id", ("evidence", "evidence", i))
                     if vid is not None and vid not in cited:
                         self.add("unused-evidence", self.where(("evidence", "evidence", i)),
                                  "cited by no entity, relation, quantity, conflict or params.json "
-                                 "row (engine validation scenarios are not scanned)")
+                                 "row, and not marked engineOnly (a source only the engine's "
+                                 "scenario expectations cite says so in engineOnly.citedBy)")
             for q, qpath, qwhere in quantities:
                 grade = self.string(q, "grade", qpath)
                 refs = q.get("evidence") if self.clean(qpath + ("evidence",)) else None
@@ -1312,6 +1668,64 @@ class _Checker:
                          "conflict cites no evidence, so a sentence or clause of its note must "
                          "begin with 'Unsourced' or 'No verified source'; note reads "
                          f"{note[:80]!r}")
+
+    def engine_only(self, evs: list[Any], params_cited: set[str]) -> None:
+        """Evidence.engineOnly (tracker W-6): a source cited by the engine's scenario
+        expectations (or only its bibliography) and by no knowledge-base record. The marker
+        exempts the record from unused-evidence, so the claim is checked: no knowledge-base
+        record or params.json row cites it, and citedBy is exactly the set of expectations
+        scenarios.js registers that cite it (an empty list: none does). A malformed marker is
+        the schema layer's to report, once."""
+        kb_cites: dict[str, list[str]] = {}
+        for ref, where in self.ev_refs:
+            kb_cites.setdefault(ref, []).append(where)
+        for i, v in enumerate(evs):
+            if not isinstance(v, dict) or not isinstance(v.get("engineOnly"), dict):
+                continue
+            path = ("evidence", "evidence", i)
+            vid = self.string(v, "id", path)
+            marker = v["engineOnly"]
+            if vid is None or not self.clean(path + ("engineOnly",)):
+                continue
+            where = f"{DATA_FILES['evidence']}[{vid}].engineOnly"
+            citing = kb_cites.get(vid, []) + (["params.json"] if vid in params_cited else [])
+            if citing:
+                shown = ", ".join(citing[:3]) + (" ..." if len(citing) > 3 else "")
+                self.add("engine-only-evidence", where,
+                         f"marked engine-only, but cited by {shown}: a source a knowledge-base "
+                         "record or a parameter cites is not engine-only; drop the marker")
+            listed = marker.get("citedBy")
+            if not (isinstance(listed, list) and all(isinstance(x, str) for x in listed)
+                    and self.clean(path + ("engineOnly", "citedBy"))
+                    and all(self.clean(path + ("engineOnly", "citedBy", j))
+                            for j in range(len(listed)))):
+                continue
+            exps = self.expectations()
+            if exps is None:
+                continue                                   # expectations-unavailable reports it
+            unknown = [x for x in listed if x not in exps]
+            unread = [x for x in listed if x in exps and exps[x].evidence is _EXPR]
+            silent = [x for x in listed if x in exps and x not in unread
+                      and not (isinstance(exps[x].evidence, tuple) and vid in exps[x].evidence)]
+            missed = [eid for eid, rec in exps.items()
+                      if isinstance(rec.evidence, tuple) and vid in rec.evidence
+                      and eid not in listed]
+            problems = []
+            if unknown:
+                problems.append(f"{unknown} name(s) no expectation {SCENARIOS_JS_FILE} registers")
+            if unread:
+                problems.append(f"{unread} carry an evidence value that is not a literal array "
+                                "of string literals, which the checker reads as text and cannot "
+                                "resolve")
+            if silent:
+                problems.append(f"{silent} do(es) not cite {vid}")
+            if missed:
+                problems.append(f"{missed} cite(s) {vid} but "
+                                f"{'is' if len(missed) == 1 else 'are'} not listed")
+            if problems:
+                self.add("engine-only-evidence", f"{where}.citedBy",
+                         "; ".join(problems) + ": citedBy lists exactly the expectations that "
+                         "cite the record (the claim that exempts it from unused-evidence)")
 
     def evidence_grading(self, v: dict[str, Any], path: tuple, where: str) -> None:
         missing = [k for k in ("sourceType", "defaultGrade") if k not in v]
@@ -1474,8 +1888,227 @@ class _Checker:
             if diffs:
                 self.add("engine-param-mismatch", f"{qwhere}.engineParam",
                          f"mirrors params.json[{name!r}] but " + "; ".join(diffs))
+        self.fixed_reasons(params)
+        self.calibration_links(params)
         self.params_mirror(params, errors, paths)
+        self.params_schema(params)
         return True, cited
+
+    def params_schema(self, params: dict[str, Any]) -> None:
+        """params.json validated against #/definitions/EngineParams when schema.json declares
+        it (the M1 extension): what the hand-written rules above do not read is enforced from
+        the live schema -- an undeclared or misspelt field, a missing description or notes, a
+        malformed row name. A violation in a field one of those rules already reported for
+        that row (PARAM_RULE_FIELDS; fixed-reason answers for mc and fixedReason together) is
+        dropped, so a malformed value is still reported once, by the rule it breaks."""
+        ref = "#/definitions/EngineParams"
+        if self.schema is None or self.schema.ref(ref)[0] is _MISSING:
+            return
+        reported: set[tuple[str, str]] = set()
+        for f in self.findings:
+            m = _PARAM_WHERE.match(f.where)
+            if m is None:
+                continue
+            name, field = m.group(1), m.group(2) or "*"
+            reported.update((name, x) for x in (("mc", "fixedReason") if f.code == "fixed-reason"
+                                                 and field in ("mc", "fixedReason") else (field,)))
+        out: list = []
+        self.schema.validate(params, {"$ref": ref}, "#", ("params",), out)
+        for path, _ptr, kw, code, message, extra in out:
+            name = str(path[1]) if len(path) > 1 else None
+            field = (str(path[2]) if len(path) > 2
+                     else str(extra) if kw == "required" and extra is not None else None)
+            if name is not None and ((name, "*") in reported
+                                     or (field is not None and (name, field) in reported)):
+                continue
+            where = "params.json" + "".join(f"[{part}]" if i == 0 else
+                                            (f"[{part}]" if isinstance(part, int) else f".{part}")
+                                            for i, part in enumerate(path[1:]))
+            self.add(code, where, message)
+
+    def fixed_reasons(self, params: dict[str, Any]) -> None:
+        """HREQ-U-01 (rule fixed-reason): a row is held fixed in Monte Carlo only as a scenario
+        condition, a classification threshold or an index-definition constant, recorded as
+        `fixedReason`. Both engines hold a row fixed when `mc` is exactly false OR its range
+        is a single point (samplingMode), so both ways in are checked."""
+        permitted = ", ".join(FIXED_REASONS)
+        for name, row in params.items():
+            if not isinstance(row, dict):
+                continue                                   # param-field reports it
+            where = f"params.json[{name}]"
+            mc, reason = row.get("mc", _MISSING), row.get("fixedReason", _MISSING)
+            if mc is not _MISSING and not isinstance(mc, bool):
+                self.add("fixed-reason", f"{where}.mc",
+                         f"expected true or false, got {_show(mc)}: both engines hold a row "
+                         "fixed only when mc is exactly false, so this row is sampled whatever "
+                         "it was meant to say")
+            elif mc is False and reason is _MISSING:
+                self.add("fixed-reason", f"{where}.fixedReason",
+                         f"mc: false but no fixedReason: a row is held fixed in Monte Carlo only "
+                         f"as one of {permitted} (HREQ-U-01), recorded as a field, not as prose "
+                         "in notes")
+            elif mc is False and reason not in FIXED_REASONS:
+                self.add("fixed-reason", f"{where}.fixedReason",
+                         f"{_show(reason)} is not a permitted reason; HREQ-U-01 allows only "
+                         f"{permitted}")
+            elif mc is not False and reason is not _MISSING:
+                self.add("fixed-reason", f"{where}.fixedReason",
+                         f"carries fixedReason {_show(reason)} but is sampled "
+                         f"({'mc: true' if mc is True else 'no mc: false'}): a reason without a "
+                         "fixed row is a contradiction; set mc: false or drop the field")
+            elif mc is not False:
+                rng = row.get("range")
+                if (isinstance(rng, list) and len(rng) == 2 and all(_is_number(x) for x in rng)
+                        and rng[0] == rng[1]):
+                    self.add("fixed-reason", f"{where}.range",
+                             f"the range [{rng[0]}, {rng[1]}] is a single point, so Monte Carlo "
+                             "holds the row fixed (samplingMode), but it is not mc: false and "
+                             f"records no fixedReason ({permitted}; HREQ-U-01)")
+
+    def scenarios_text(self) -> tuple[str | None, str, str | None]:
+        """(the scenarios.js text, where it came from, why it is unusable or None)."""
+        paths = self.kb.get("paths") if isinstance(self.kb.get("paths"), dict) else {}
+        errors = self.kb.get("load_errors") if isinstance(self.kb.get("load_errors"), dict) else {}
+        label = str(paths.get("scenarios_js") or SCENARIOS_JS_FILE)
+        if errors.get("scenarios_js"):
+            return None, label, str(errors["scenarios_js"])
+        if "scenarios_js" in self.kb:
+            text = self.kb["scenarios_js"]
+            if not isinstance(text, str):
+                return None, label, ("no scenarios.js found" if text is None
+                                     else f"expected the file's text, got {_jtype(text)}")
+            return text, label, None
+        src = scenarios_js_path(paths.get("params"))
+        if src is None:
+            return None, SCENARIOS_JS_FILE, ("not found beside params.json or in the reference "
+                                             "checkout (reference/metabolic-map-v1/engine)")
+        try:
+            return src.read_text(encoding="utf-8"), str(src), None
+        except (OSError, UnicodeDecodeError) as exc:
+            return None, str(src), f"cannot be read ({exc})"
+
+    def expectations(self) -> dict[str, Expectation] | None:
+        """Expectation id -> its record in scenarios.js; None (and one
+        expectations-unavailable error) when the registry cannot be had. Read once per run:
+        calibration-link and engine-only-evidence share it. An id registered twice is a
+        calibration-link error (which record governs is undefined); the first is used."""
+        if self._exps is _MISSING:
+            self._exps = self._read_expectations()
+        return self._exps
+
+    def _read_expectations(self) -> dict[str, Expectation] | None:
+        params = self.kb.get("params") if isinstance(self.kb.get("params"), dict) else {}
+        evs = self.lists.get("evidence") or []
+        text, label, why = self.scenarios_text()
+        records: tuple[Expectation, ...] = ()
+        if text is not None:
+            try:
+                records = expectation_records(text)
+            except ScriptError as exc:
+                why = f"cannot be read as JavaScript ({exc})"
+            else:
+                if not records:
+                    why = ("registers no expectation id (each record in a scenario's expects "
+                           "carries id: '<scenario_id>/<NN>')")
+        if why is not None:
+            rows = [n for n, r in params.items()
+                    if isinstance(r, dict) and "calibratedAgainst" in r]
+            marked = [v["id"] for v in evs if isinstance(v, dict) and "engineOnly" in v
+                      and isinstance(v.get("id"), str)]
+            self.add("expectations-unavailable", SCENARIOS_JS_FILE,
+                     f"{label}: {why}. Not checked: whether the calibratedAgainst of "
+                     f"{len(rows)} params.json row(s) ({', '.join(map(str, rows)) or 'none'}) "
+                     "name registered expectations, and whether every expectation's "
+                     "calibrates agrees with them (calibration-link, HREQ-E-10); nor the "
+                     f"engineOnly.citedBy of {len(marked)} evidence record(s) "
+                     f"({', '.join(marked) or 'none'}; engine-only-evidence)")
+            return None
+        out: dict[str, Expectation] = {}
+        for rec in records:
+            out.setdefault(rec.id, rec)
+        for eid, n in Counter(rec.id for rec in records).items():
+            if n > 1:
+                self.add("calibration-link", f"{SCENARIOS_JS_FILE}[{eid}]",
+                         f"registered {n} times: an expectation id names one record (HREQ-E-13), "
+                         "so calibratedAgainst and engineOnly.citedBy cannot tell which of them "
+                         "they name")
+        return out
+
+    def calibration_links(self, params: dict[str, Any]) -> None:
+        """HREQ-E-10 (rule calibration-link): a parameter whose value was chosen to make an
+        output match a target lists that expectation in calibratedAgainst; the expectation
+        lists the parameter in calibrates; the two lists agree."""
+        exps = self.expectations()
+        listed: dict[str, list[str]] = {}          # row name -> expectations whose calibrates name it
+        for eid, rec in (exps or {}).items():
+            cal = rec.calibrates
+            if cal is None:
+                continue
+            where = f"{SCENARIOS_JS_FILE}[{eid}].calibrates"
+            if not isinstance(cal, tuple):
+                self.add("calibration-link", where,
+                         "expected a literal array of params.json row names ('name', ...); the "
+                         "checker reads scenarios.js as text and cannot resolve anything else")
+                continue
+            for pname in cal:
+                if isinstance(params.get(pname), dict):
+                    listed.setdefault(pname, []).append(eid)
+                else:
+                    self.add("calibration-link", where,
+                             f"names {pname!r}, which is not a params.json row")
+        for name, row in params.items():
+            if not isinstance(row, dict):
+                continue
+            where = f"params.json[{name}].calibratedAgainst"
+            against = row.get("calibratedAgainst", _MISSING)
+            notes = row.get("notes")
+            said = _CALIBRATION_NOTE.search(notes) if isinstance(notes, str) else None
+            if against is _MISSING:
+                why = []
+                if said is not None:
+                    why.append(f"its notes say {notes[said.start():said.end() + 50]!r}...")
+                if name in listed:
+                    why.append(f"{SCENARIOS_JS_FILE} {', '.join(listed[name])} list(s) it in "
+                               "calibrates")
+                if why:
+                    self.add("calibration-link", where,
+                             "absent, but " + " and ".join(why) + ": a parameter tuned to a "
+                             "target names that expectation in calibratedAgainst (HREQ-E-10)")
+                continue
+            if not (isinstance(against, list) and against
+                    and all(isinstance(x, str) for x in against)):
+                self.add("calibration-link", where,
+                         "expected a non-empty array of expectation ids (<scenario_id>/<NN>), "
+                         f"got {_show(against)}")
+                continue
+            bad = [x for x in against if not matches(EXPECTATION_ID_PATTERN, x)]
+            twice = sorted({x for x in against if against.count(x) > 1})
+            if bad or twice:
+                self.add("calibration-link", where,
+                         (f"{bad} {'is' if len(bad) == 1 else 'are'} not an expectation id "
+                          f"({EXPECTATION_ID_PATTERN}, the scenario id and the two-digit "
+                          "position)" if bad else f"names {twice} more than once"))
+                continue
+            if exps is None:
+                continue                                   # expectations-unavailable reports it
+            for eid in against:
+                if eid not in exps:
+                    self.add("calibration-link", where,
+                             f"{eid!r} names no expectation {SCENARIOS_JS_FILE} registers")
+                    continue
+                cal = exps[eid].calibrates
+                if cal is _EXPR or (isinstance(cal, tuple) and name in cal):
+                    continue                               # malformed calibrates: reported once
+                self.add("calibration-link", where,
+                         f"names {eid!r}, but that expectation's calibrates "
+                         + (f"lists {list(cal)}" if isinstance(cal, tuple) else "is absent")
+                         + f", not {name!r}: the two lists must agree (HREQ-E-10)")
+            for eid in listed.get(name, []):
+                if eid not in against:
+                    self.add("calibration-link", where,
+                             f"{SCENARIOS_JS_FILE} {eid} lists this row in calibrates, but "
+                             f"calibratedAgainst {against} does not name it: the two lists "
+                             "must agree (HREQ-E-10)")
 
     def params_mirror(self, params: dict[str, Any], errors: dict[str, Any],
                       paths: dict[str, Any]) -> None:
@@ -1595,6 +2228,8 @@ def counts_by_severity(findings: list[Finding]) -> dict[str, int]:
     return {s: c.get(s, 0) for s in SEVERITIES}
 
 
-__all__ = ["DEFAULT_GRADE_BY_SOURCE", "DEFERRED_RULES", "DOCUMENTED_RULES", "GRADES",
-           "PatternError", "RULES", "SEVERITIES", "Finding", "check_kb", "counts_by_severity",
-           "ecma_to_python", "matches", "word_count"]
+__all__ = ["DEFAULT_GRADE_BY_SOURCE", "DEFERRED_RULES", "DOCUMENTED_RULES",
+           "EXPECTATION_ID_PATTERN", "FIXED_REASONS", "GRADES", "PARAM_RULE_FIELDS", "RULES",
+           "SCENARIOS_JS_FILE", "SEVERITIES", "Expectation", "Finding", "PatternError",
+           "ScriptError", "check_kb", "counts_by_severity", "ecma_to_python",
+           "expectation_records", "js_tokens", "matches", "scenarios_js_path", "word_count"]

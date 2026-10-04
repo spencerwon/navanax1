@@ -35,6 +35,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -46,12 +47,17 @@ from health.kb import KBLoadError, load_kb, parse_json, parse_params_js, records
 from health.kb.check import (  # noqa: E402
     DEFERRED_RULES,
     DOCUMENTED_RULES,
+    EXPECTATION_ID_PATTERN,
+    FIXED_REASONS,
     GRADES,
     RULES,
     Finding,
     PatternError,
+    ScriptError,
     check_kb,
     ecma_to_python,
+    expectation_records,
+    js_tokens,
     matches,
     word_count,
 )
@@ -60,6 +66,7 @@ from health.kb.report import GRADE_B_OR_BETTER, summary  # noqa: E402
 DATA_DIR = ROOT / "src" / "health" / "kb" / "data"
 DOC_03 = ROOT / "docs" / "health" / "03_VALIDATION_AND_TESTING.md"
 PARAMS_DATA_JS = ROOT / "reference" / "metabolic-map-v1" / "engine" / "params.data.js"
+SCENARIOS_JS = ROOT / "reference" / "metabolic-map-v1" / "engine" / "scenarios.js"
 BASE_YAML = ROOT / "config" / "health" / "base.yaml"
 
 PASS: list[str] = []
@@ -159,10 +166,12 @@ HEART = "organ:heart"                           # scale 2, parent scale 1
 TEXTBOOK = "ev:guyton-hall-2021"                # B-textbook; cited by entities and params
 PRIMARY = "ev:robertson-athar-1976"             # kind doi, cited, verified, titleMatch true
 FREE_PARAM = "V_ecf_0"                          # a params.json row no quantity mirrors
-#: ev:suckling-2012 left this set on 2026-10-03 (cited by rel:gut:na-absorption, W-6); the
-#: five that remain carry `engineOnly` and clear when the checker reads it (BUG-20261003-183).
-SHIPPED_UNUSED = {"ev:shafiee-2005", "ev:crowe-1987", "ev:uttamsingh-1985", "ev:heer-2000",
-                  "ev:rakova-2017"}
+ENGINE_ONLY = "ev:crowe-1987"                   # cited only by drink_water_1L expectations
+V1_UNUSED = {"ev:shafiee-2005", "ev:crowe-1987", "ev:uttamsingh-1985", "ev:heer-2000",
+             "ev:rakova-2017", "ev:suckling-2012"}
+"""The six evidence records V1 shipped uncited by any knowledge-base record or params.json
+row (tracker W-6). From the curator's M1 records on, each is cited (Suckling 2012) or marked
+engineOnly; no other record may become unused without this set changing."""
 
 
 def nephron_q(kb: dict[str, Any]) -> dict[str, Any]:
@@ -215,6 +224,244 @@ def _unsourced(note: str) -> Callable[[dict[str, Any]], None]:
     def mutate(kb: dict[str, Any]) -> None:
         next(c for c in rel(kb, UNSOURCED)["quantity"]["conflicts"]
              if not c["evidence"]).update(note=note)
+    return mutate
+
+
+CALIBRATED = {"map_vol_exp": "chronic_high_salt_30d/01", "pn_gain": "chronic_high_salt_30d/01",
+              "aldo_vol_exp": "chronic_high_salt_30d/01",
+              "map_auto_tau_h": "chronic_high_salt_30d/02"}
+"""The four calibrated parameters and the expectation each was tuned to (docs/health/01
+§6.3: the expectation records' `calibrates`)."""
+
+
+def _fixed_reason(name: str) -> str | None:
+    """The reason docs/health/01 §4.4 gives a shipped `mc: false` row."""
+    if name.endswith(("_base_Ld", "_base_mmold")):
+        return "scenario-condition"
+    if name.startswith("na_normal_"):
+        return "classification-threshold"
+    if name.startswith("strain_"):
+        return "index-constant"
+    return None
+
+
+_M1_DEFINITIONS: dict[str, Any] = {
+    "isoDate": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+    "expectationId": {"type": "string", "pattern": EXPECTATION_ID_PATTERN},
+    "fixedReason": {"type": "string", "enum": list(FIXED_REASONS)},
+    "Param": {
+        "type": "object",
+        "required": ["value", "unit", "range", "description", "evidence", "grade", "notes"],
+        "properties": {
+            "value": {"type": "number"}, "unit": {"type": "string", "minLength": 1},
+            "range": {"$ref": "#/definitions/range"}, "mc": {"type": "boolean"},
+            "fixedReason": {"$ref": "#/definitions/fixedReason"},
+            "description": {"type": "string", "minLength": 1},
+            "evidence": {"allOf": [{"$ref": "#/definitions/evidenceList"}, {"minItems": 1}]},
+            "grade": {"$ref": "#/definitions/grade"},
+            "calibratedAgainst": {"type": "array", "items": {"$ref": "#/definitions/expectationId"},
+                                  "minItems": 1, "uniqueItems": True},
+            "notes": {"type": "string"}},
+        "allOf": [
+            {"if": {"properties": {"mc": {"const": False}}, "required": ["mc"]},
+             "then": {"required": ["fixedReason"]}},
+            {"if": {"required": ["fixedReason"]},
+             "then": {"properties": {"mc": {"const": False}}, "required": ["mc"]}}],
+        "additionalProperties": False},
+    "EngineParams": {"type": "object", "propertyNames": {"pattern": "^[A-Za-z][A-Za-z0-9_]*$"},
+                     "additionalProperties": {"$ref": "#/definitions/Param"}, "minProperties": 1},
+    "CurationRecord": {
+        "type": "object",
+        "required": ["seq", "checkedOn", "by", "subject", "action", "method", "result"],
+        "properties": {
+            "seq": {"type": "integer", "minimum": 1},
+            "checkedOn": {"$ref": "#/definitions/isoDate"},
+            "by": {"type": "string", "minLength": 1}, "subject": {"type": "string", "minLength": 1},
+            "action": {"type": "string", "enum": [
+                "schema-change", "field-added", "grade-superseded", "citation-added",
+                "notes-appended", "engine-only-marked", "fetch-attempt", "finding"]},
+            "method": {"type": "string", "minLength": 1},
+            "result": {"type": "string", "minLength": 1},
+            "previous": {"type": "string"}, "reason": {"type": "string"},
+            "refs": {"type": "array", "items": {"type": "string", "minLength": 1},
+                     "uniqueItems": True},
+            "supersedes": {"type": "integer", "minimum": 1}},
+        "additionalProperties": False},
+}
+_M1_ENGINE_ONLY: dict[str, Any] = {
+    "type": "object", "required": ["reason", "citedBy", "recordedOn", "by"],
+    "properties": {"reason": {"type": "string", "minLength": 1},
+                   "citedBy": {"type": "array", "items": {"$ref": "#/definitions/expectationId"},
+                               "uniqueItems": True},
+                   "recordedOn": {"$ref": "#/definitions/isoDate"},
+                   "by": {"type": "string", "minLength": 1}},
+    "additionalProperties": False}
+"""The schema extensions the curator's M1 records add (schema.json definitions Param,
+EngineParams, CurationRecord, fixedReason, expectationId, isoDate and Evidence.engineOnly),
+constraints only. `_linked` inserts each one ONLY where the shipped schema lacks it."""
+
+VALID_CURATION = {"seq": 1, "checkedOn": "2026-10-03", "by": "planted",
+                  "subject": "evidence:ev:crowe-1987", "action": "finding",
+                  "method": "planted record", "result": "planted record"}
+
+
+def _kb_citations(kb: dict[str, Any]) -> set[str]:
+    """Every evidence id an entity, relation, quantity, conflict or params.json row cites,
+    collected by walking the documents (independently of the checker's own walk)."""
+    out: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if key == "evidence" and isinstance(val, list):
+                    out.update(x for x in val if isinstance(x, str))
+                walk(val)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+    walk(records(kb, "entities"))
+    walk(records(kb, "relations"))
+    for row in (kb["params"] or {}).values():
+        out.update(x for x in row.get("evidence", []) if isinstance(x, str))
+    return out
+
+
+def _citing(text: str) -> dict[str, list[str]]:
+    """Evidence id -> the expectation ids in scenarios.js `text` whose evidence lists it."""
+    out: dict[str, list[str]] = {}
+    for rec in expectation_records(text):
+        for vid in rec.evidence if isinstance(rec.evidence, tuple) else ():
+            out.setdefault(vid, []).append(rec.id)
+    return out
+
+
+def _expected_unused(kb: dict[str, Any]) -> set[str]:
+    """The unused-evidence warnings the data calls for, counted here, not by the checker."""
+    return {v["id"] for v in records(kb, "evidence")
+            if v["id"] not in _kb_citations(kb) and "engineOnly" not in v}
+
+
+@cache
+def _shipped_scenarios_text() -> str:
+    return SCENARIOS_JS.read_text(encoding="utf-8")
+
+
+@cache
+def _linked_scenarios_text() -> str:
+    """scenarios.js with every expectation record carrying its `id`, and the calibration
+    records their `role` and `calibrates`, as the reference carries them from model 1.1.0
+    (tracker W-13). The shipped text itself when it already does."""
+    text = _shipped_scenarios_text()
+    if expectation_records(text):
+        return text
+    extra: dict[str, list[str]] = {}
+    for param, eid in CALIBRATED.items():
+        extra.setdefault(eid, []).append(param)
+    out, sid, n = [], None, 0
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"\s*id: '([A-Za-z0-9_]+)', title:", line)
+        sid = m.group(1) if m else sid
+        n = 0 if re.match(r"\s*expects: \[", line) else n
+        if sid and re.match(r"\s*\{ metric: ", line):
+            n += 1
+            eid = f"{sid}/{n:02d}"
+            line = line.replace("{ metric: ", f"{{ id: '{eid}', metric: ", 1)
+            if eid in extra:
+                head, _, tail = line.rpartition(" },")
+                names = ", ".join(f"'{p}'" for p in extra[eid])
+                line = f"{head}, role: 'calibration', calibrates: [{names}] }},{tail}"
+        out.append(line)
+    return "".join(out)
+
+
+def _linked(kb: dict[str, Any]) -> dict[str, Any]:
+    """The M1 data, filled in ONLY where the shipped data lacks it: the schema extensions
+    (`_M1_DEFINITIONS`, Evidence.engineOnly), `fixedReason` on every `mc: false` row
+    (docs/health/01 §4.4), `calibratedAgainst` on the four calibrated rows (§6.3),
+    expectation ids with `role`/`calibrates` in the scenarios.js text, and an engineOnly
+    marker, with citedBy read from that text, on each evidence record nothing in the
+    knowledge base cites. Where the curator's records and the reference's ids have landed
+    this changes nothing; before they land it gives every M1 plant a clean start. The
+    shipped data itself is held to every rule by test_shipped_kb_passes_every_contract_rule."""
+    defs = kb["schema"].get("definitions") if isinstance(kb.get("schema"), dict) else None
+    if isinstance(defs, dict):
+        for name, node in _M1_DEFINITIONS.items():
+            defs.setdefault(name, copy.deepcopy(node))
+        ev_props = (defs.get("Evidence") or {}).get("properties")
+        if isinstance(ev_props, dict):
+            ev_props.setdefault("engineOnly", copy.deepcopy(_M1_ENGINE_ONLY))
+
+    def fill(p: dict[str, Any]) -> None:
+        for name, row in p.items():
+            if row.get("mc") is False and "fixedReason" not in row and _fixed_reason(name):
+                row["fixedReason"] = _fixed_reason(name)
+            if name in CALIBRATED and "calibratedAgainst" not in row:
+                row["calibratedAgainst"] = [CALIBRATED[name]]
+    _params(kb, fill)
+    if _linked_scenarios_text() != _shipped_scenarios_text():
+        kb["scenarios_js"] = _linked_scenarios_text()
+    citing = _citing(kb.get("scenarios_js", _shipped_scenarios_text()))
+    for vid in _expected_unused(kb):
+        ev(kb, vid)["engineOnly"] = {"reason": "test fill-in: no knowledge-base record cites it",
+                                     "citedBy": citing.get(vid, []), "recordedOn": "2026-10-03",
+                                     "by": "tests/health_kb_selftest.py"}
+    return kb
+
+
+def _linked_params(fn: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], None]:
+    """A plant: the M1 fields filled in (`_linked`), then `fn` applied to params.json and its
+    params.data.js mirror alike."""
+    def mutate(kb: dict[str, Any]) -> None:
+        _params(_linked(kb), fn)
+    return mutate
+
+
+def _linked_scenarios(old: str, new: str) -> Callable[[dict[str, Any]], None]:
+    """A plant: the M1 fields filled in, then one edit to the scenarios.js text."""
+    def mutate(kb: dict[str, Any]) -> None:
+        _linked(kb)
+        text = kb.get("scenarios_js", _shipped_scenarios_text())
+        assert old in text, f"plant anchor {old!r} is not in scenarios.js"
+        kb["scenarios_js"] = text.replace(old, new, 1)
+    return mutate
+
+
+def _scenarios_text_is(text: Any) -> Callable[[dict[str, Any]], None]:
+    """A plant: the M1 fields filled in, then the scenarios.js text replaced by `text`."""
+    def mutate(kb: dict[str, Any]) -> None:
+        _linked(kb)["scenarios_js"] = text
+    return mutate
+
+
+def _linked_kb(fn: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], None]:
+    """A plant: the M1 fields filled in, then `fn` applied to the whole KB."""
+    def mutate(kb: dict[str, Any]) -> None:
+        fn(_linked(kb))
+    return mutate
+
+
+def _engine_only(fn: Callable[[dict[str, Any], dict[str, Any]], Any]
+                 ) -> Callable[[dict[str, Any]], None]:
+    """A plant: the M1 fields filled in, ENGINE_ONLY marked engine-only with the citedBy the
+    registry gives it (the curator's record, where it has landed), then `fn(kb, marker)`."""
+    def mutate(kb: dict[str, Any]) -> None:
+        _linked(kb)
+        citing = _citing(kb.get("scenarios_js", _shipped_scenarios_text()))
+        marker = ev(kb, ENGINE_ONLY).setdefault("engineOnly", {
+            "reason": "planted", "citedBy": [], "recordedOn": "2026-10-03", "by": "planted"})
+        marker["citedBy"] = list(citing.get(ENGINE_ONLY, []))
+        fn(kb, marker)
+    return mutate
+
+
+def _curation(fn: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], None]:
+    """A plant: the M1 fields filled in, a valid curation record appended to
+    VERIFICATION_LOG.json curationRecords, then `fn` applied to that record."""
+    def mutate(kb: dict[str, Any]) -> None:
+        recs = _linked(kb)["verification"].setdefault("curationRecords", [])
+        rec = dict(VALID_CURATION, seq=len(recs) + 1)
+        recs.append(rec)
+        fn(rec)
     return mutate
 
 
@@ -394,6 +641,23 @@ PLANTS: list[Plant] = [
      lambda kb: _schema_def(kb, "Relation", "properties", "notes").update(pattern="\\p{L}")),
     ("schema-drift", "schema declares JSON Schema 2020-12",
      lambda kb: kb["schema"].update({"$schema": "https://json-schema.org/draft/2020-12/schema"})),
+    ("schema-drift", "schema's fixedReason enum admits a fourth reason HREQ-U-01 does not",
+     lambda kb: _schema_def(kb).update(
+         fixedReason={"type": "string", "enum": [*FIXED_REASONS, "convenience"]})),
+    ("schema-drift", "schema's expectationId pattern admits ids calibration-link refuses "
+                     "(three-digit positions; every shipped id still matches it)",
+     lambda kb: _schema_def(kb).update(
+         expectationId={"type": "string", "pattern": "^[A-Za-z0-9_]+/[0-9]{2,3}$"})),
+    ("schema-drift", "schema's Param stops declaring mc, a field fixed-reason reads (its "
+                     "additionalProperties relaxed, so no row breaks the edit)",
+     _linked_kb(lambda kb: (_schema_def(kb, "Param", "properties").pop("mc"),
+                            _schema_def(kb, "Param").update(additionalProperties=True)))),
+    ("schema-drift", "schema's Evidence.engineOnly stops declaring citedBy, the field "
+                     "engine-only-evidence reads",
+     _linked_kb(lambda kb: (_schema_def(kb, "Evidence", "properties", "engineOnly",
+                                        "properties").pop("citedBy"),
+                            _schema_def(kb, "Evidence", "properties", "engineOnly").update(
+                                additionalProperties=True)))),
     # -- cross-file ------------------------------------------------------------------------
     ("duplicate-id", "an evidence record appears twice",
      lambda kb: records(kb, "evidence").append(copy.deepcopy(ev(kb, "ev:thompson-1986")))),
@@ -448,6 +712,91 @@ PLANTS: list[Plant] = [
      lambda kb: _params(kb, lambda p: p[FREE_PARAM].update(value="14"))),
     ("param-evidence-unresolved", "params.json row cites an unknown evidence id",
      lambda kb: _params(kb, lambda p: p[FREE_PARAM]["evidence"].append("ev:nope"))),
+    # fixed-reason (HREQ-U-01): every way a row comes to be held fixed, and the converse.
+    ("fixed-reason", "a sampled row turned mc: false with no fixedReason",
+     _linked_params(lambda p: p[FREE_PARAM].update(mc=False))),
+    ("fixed-reason", "an mc: false row whose fixedReason is not one of the three",
+     _linked_params(lambda p: p["na_normal_low"].update(fixedReason="convenience"))),
+    ("fixed-reason", "a sampled row carrying a fixedReason",
+     _linked_params(lambda p: p[FREE_PARAM].update(fixedReason="scenario-condition"))),
+    ("fixed-reason", "a single-point range held fixed by samplingMode without mc: false",
+     _linked_params(lambda p: p[FREE_PARAM].update(range=[14.0, 14.0]))),
+    ("fixed-reason", "mc is the string 'false' (both engines sample the row)",
+     _linked_params(lambda p: p["na_normal_low"].update(mc="false"))),
+    # calibration-link (HREQ-E-10): both sides of the link, and the notes that betray one.
+    ("calibration-link", "a row whose notes say it was calibrated carries no calibratedAgainst",
+     _linked_params(lambda p: p[FREE_PARAM].update(
+         notes=p[FREE_PARAM]["notes"] + " Calibrated against the chronic salt band."))),
+    ("calibration-link", "a calibrated row lost its calibratedAgainst",
+     _linked_params(lambda p: p["map_auto_tau_h"].pop("calibratedAgainst"))),
+    ("calibration-link", "a calibratedAgainst entry that is not <scenario_id>/<NN>",
+     _linked_params(lambda p: p["pn_gain"].update(calibratedAgainst=["chronic_high_salt_30d:0"]))),
+    ("calibration-link", "a calibratedAgainst entry naming no registered expectation",
+     _linked_params(lambda p: p["map_auto_tau_h"]["calibratedAgainst"].append(
+         "chronic_high_salt_30d/09"))),
+    ("calibration-link", "calibratedAgainst names an expectation whose calibrates omits the row",
+     _linked_params(lambda p: p[FREE_PARAM].update(calibratedAgainst=["drink_water_1L/01"]))),
+    ("calibration-link", "an expectation's calibrates names a row whose calibratedAgainst "
+                         "omits it",
+     _linked_scenarios("calibrates: ['map_auto_tau_h']",
+                       f"calibrates: ['map_auto_tau_h', '{FREE_PARAM}']")),
+    ("calibration-link", "an expectation's calibrates names a row whose calibratedAgainst names "
+                         "only other expectations",
+     _linked_scenarios("calibrates: ['map_vol_exp', 'pn_gain', 'aldo_vol_exp']",
+                       "calibrates: ['map_vol_exp', 'pn_gain', 'aldo_vol_exp', 'map_auto_tau_h']")),
+    ("calibration-link", "an expectation's calibrates names no params.json row",
+     _linked_scenarios("calibrates: ['map_auto_tau_h']",
+                       "calibrates: ['map_auto_tau_h', 'no_such_param']")),
+    ("calibration-link", "an expectation's calibrates is not a literal array",
+     _linked_scenarios("calibrates: ['map_auto_tau_h']", "calibrates: TUNED")),
+    ("expectations-unavailable", "scenarios.js registers no expectation id",
+     _scenarios_text_is("export const SCENARIOS = Object.freeze({});\n")),
+    ("expectations-unavailable", "scenarios.js cannot be tokenised (an unterminated string)",
+     _scenarios_text_is("const x = { id: 'baseline/01 };\n")),
+    ("expectations-unavailable", "no scenarios.js text at all",
+     _scenarios_text_is(None)),
+    ("calibration-link", "scenarios.js registers an expectation id twice",
+     _linked_scenarios("{ id: 'no_water_24h/04', ", "{ id: 'no_water_24h/03', ")),
+    # engine-only-evidence (W-6): the marker that exempts a record from unused-evidence is a
+    # claim about the registry and the knowledge base, held to both.
+    ("engine-only-evidence", "an engine-only record a relation cites",
+     _engine_only(lambda kb, m: rel(kb, NEPHRON)["evidence"].append(ENGINE_ONLY))),
+    ("engine-only-evidence", "an engine-only record a params.json row cites",
+     _engine_only(lambda kb, m: _params(kb, lambda p: p[FREE_PARAM]["evidence"].append(
+         ENGINE_ONLY)))),
+    ("engine-only-evidence", "engineOnly.citedBy names an expectation scenarios.js does not "
+                             "register",
+     _engine_only(lambda kb, m: m["citedBy"].append("drink_water_1L/09"))),
+    ("engine-only-evidence", "engineOnly.citedBy names an expectation that does not cite the "
+                             "record",
+     _engine_only(lambda kb, m: m["citedBy"].append("drink_water_1L/05"))),
+    ("engine-only-evidence", "engineOnly.citedBy omits an expectation that cites the record",
+     _engine_only(lambda kb, m: m["citedBy"].pop(0))),
+    ("pattern-mismatch", "an engineOnly.citedBy entry that is not <scenario_id>/<NN> (the "
+                         "schema's to report; the registry comparison is skipped, not repeated)",
+     _engine_only(lambda kb, m: m["citedBy"].append("drink_water_1L-02"))),
+    # params.json against the schema's EngineParams, and the curation log against
+    # CurationRecord, where the schema declares them (the curator's M1 extensions).
+    ("unknown-key", "a params.json row carries a misspelt field (calibratedAgaints)",
+     _linked_params(lambda p: p[FREE_PARAM].update(calibratedAgaints=["drink_water_1L/01"]))),
+    ("unknown-key", "a params.json row name that is not an identifier (EngineParams "
+                    "propertyNames)",
+     _linked_params(lambda p: p.update({"V ecf 0": p.pop(FREE_PARAM)}))),
+    ("missing-field", "a params.json row without its description (EngineParams)",
+     _linked_params(lambda p: p[FREE_PARAM].pop("description"))),
+    ("wrong-type", "a params.json row's notes is a number (EngineParams)",
+     _linked_params(lambda p: p[FREE_PARAM].update(notes=3))),
+    ("not-unique", "a params.json row cites the same evidence twice (EngineParams; no "
+                   "hand-written rule reads it)",
+     _linked_params(lambda p: p[FREE_PARAM]["evidence"].append(p[FREE_PARAM]["evidence"][0]))),
+    ("bad-enum", "a curation record's action outside the enum (CurationRecord)",
+     _curation(lambda r: r.update(action="edited"))),
+    ("missing-field", "a curation record without seq (CurationRecord)",
+     _curation(lambda r: r.pop("seq"))),
+    ("date-pattern", "a curation record's checkedOn is not YYYY-MM-DD (definitions/isoDate)",
+     _curation(lambda r: r.update(checkedOn="3 Oct 2026"))),
+    ("file-shape", "VERIFICATION_LOG curationRecords is an object, not an array",
+     _linked_kb(lambda kb: kb["verification"].update(curationRecords={}))),
     ("external-id-unverified", "log record says resolved: false",
      lambda kb: log_record(kb, BODY).update(resolved=False)),
     ("external-id-unverified", "externalIds value has no log record",
@@ -577,14 +926,23 @@ def test_shipped_kb_passes_every_contract_rule() -> None:
           and not {"engine-params-unavailable", "params-mirror-unchecked"}
           & {f.code for f in findings})
     warn = sorted((f.code, f.where) for f in findings if f.severity == "warn")
-    expected = sorted(("unused-evidence", f"evidence.json[{v}]") for v in SHIPPED_UNUSED)
-    check("shipped KB: the warning set is pinned -- exactly the five unused-evidence records, "
-          "no other code (a checker that stopped counting params.json citations gave 12)",
-          warn == expected, f"got {warn}")
+    unused = _expected_unused(kb)
+    expected = sorted(("unused-evidence", f"evidence.json[{v}]") for v in unused)
+    check(f"shipped KB: the warning set is pinned -- exactly the {len(unused)} unused-evidence "
+          "record(s) an independent walk of the documents finds (neither cited by a knowledge-"
+          "base record or params.json row nor marked engineOnly), no other code (a checker that "
+          "stopped counting params.json citations gave 12)", warn == expected, f"got {warn}")
+    check(f"shipped KB: every unused record is one of the six V1 shipped uncited (W-6); none "
+          f"is new ({len(unused)} of 6 left: 6 before the curator's M1 records, 0 after)",
+          unused <= V1_UNUSED, str(sorted(unused - V1_UNUSED)))
+    raw = json.loads(Path(kb["paths"]["params"]).read_text(encoding="utf-8"))
+    n_e = sum(1 for row in raw.values() if row["grade"] == "E-assumption")
+    want = f"{n_e} of {len(raw)} engine params ({100.0 * n_e / len(raw):.1f}%)"
     info = sorted(f.message for f in findings if f.severity == "info")
-    check("shipped KB: info is exactly the two E-assumption shares (5 of 20; 33 of 57)",
+    check(f"shipped KB: info is exactly the two E-assumption shares (5 of 20 quantities; {want}, "
+          "counted here from params.json)",
           len(info) == 2 and any("5 of 20 quantities (25.0%)" in m for m in info)
-          and any("33 of 57 engine params (57.9%)" in m for m in info), str(info))
+          and any(want in m for m in info), str(info))
     check("shipped KB: every finding's code and severity are registered",
           all(f.code in RULES and RULES[f.code][0] == f.severity for f in findings))
     shipped = {name: (DATA_DIR / name).stat().st_size for name in
@@ -669,6 +1027,457 @@ def test_every_documented_rule_is_implemented_or_deferred() -> None:
           js == base_kb()["params"])
 
 
+def _linked_new(mutate: Callable[[dict[str, Any]], Any]) -> list[Finding]:
+    """The findings `mutate` adds to the shipped KB with its M1 fields filled in (`_linked`)."""
+    kb = _linked(base_kb())
+    before = set(check_kb(kb))
+    mutate(kb)
+    return [f for f in check_kb(kb) if f not in before]
+
+
+def _plants(code: str) -> list[Plant]:
+    return [p for p in PLANTS if p[0] == code]
+
+
+def test_fixed_reason_is_required_on_every_row_monte_carlo_holds_fixed() -> None:
+    """HREQ-U-01 (BUG-20261003-186): a parameter is held fixed in Monte Carlo only as a
+    scenario condition, a classification threshold or an index-definition constant, and the
+    reason is a field. Both engines hold a row fixed when `mc` is exactly false or its range
+    is a single point (samplingMode), so both ways in need the field; a sampled row with a
+    reason is a contradiction."""
+    check("fixed-reason is enforced by an error code, not deferred",
+          DOCUMENTED_RULES.get("fixed-reason") == ("fixed-reason",)
+          and RULES["fixed-reason"][0] == "error" and "fixed-reason" not in DEFERRED_RULES)
+    where = {
+        "a sampled row turned mc: false with no fixedReason":
+            f"params.json[{FREE_PARAM}].fixedReason",
+        "an mc: false row whose fixedReason is not one of the three":
+            "params.json[na_normal_low].fixedReason",
+        "a sampled row carrying a fixedReason": f"params.json[{FREE_PARAM}].fixedReason",
+        "a single-point range held fixed by samplingMode without mc: false":
+            f"params.json[{FREE_PARAM}].range",
+        "mc is the string 'false' (both engines sample the row)": "params.json[na_normal_low].mc",
+    }
+    check("fixed-reason: every planted case has its expected location here",
+          {p[1] for p in _plants("fixed-reason")} == set(where))
+    for _code, what, mutate in _plants("fixed-reason"):
+        got = _linked_new(mutate)
+        check(f"fixed-reason: {what} -- one error, naming the row",
+              [(f.code, f.severity, f.where) for f in got]
+              == [("fixed-reason", "error", where.get(what))], str([str(f) for f in got]))
+    got = _linked_new(_plants("fixed-reason")[0][2])
+    check("fixed-reason: the message says the reason is missing (not that some value is "
+          "wrong) and names the three permitted reasons and HREQ-U-01",
+          len(got) == 1 and "mc: false but no fixedReason" in got[0].message
+          and all(r in got[0].message for r in FIXED_REASONS)
+          and "HREQ-U-01" in got[0].message, str([str(f) for f in got]))
+    got = _linked_new(_plants("fixed-reason")[1][2])
+    check("fixed-reason: an unknown reason is quoted in the message",
+          len(got) == 1 and '"convenience" is not a permitted reason' in got[0].message,
+          str([str(f) for f in got]))
+    for reason in FIXED_REASONS:
+        got = _linked_new(lambda kb, r=reason: _params(
+            kb, lambda p: p["na_normal_low"].update(fixedReason=r)))
+        check(f"fixed-reason: {reason!r} on an mc: false row is accepted", not got,
+              str([str(f) for f in got]))
+    got = _linked_new(lambda kb: _params(kb, lambda p: p[FREE_PARAM].update(mc=True)))
+    check("fixed-reason: a sampled row with mc: true and no reason is legal", not got,
+          str([str(f) for f in got]))
+    got = _linked_new(lambda kb: _params(kb, lambda p: p[FREE_PARAM].update(
+        mc=False, fixedReason="scenario-condition")))
+    check("fixed-reason: mc: false on a wide range is legal when it records a reason (mc "
+          "governs, not the range)", not got, str([str(f) for f in got]))
+    # The shipped data, at whatever stage the curator's fields have reached: the rule names
+    # exactly the rows it should, and degrades by reporting, never by raising.
+    def breaks_rule(row: dict[str, Any]) -> bool:
+        if "mc" in row and not isinstance(row["mc"], bool):
+            return True
+        if row.get("mc") is False:
+            return row.get("fixedReason") not in FIXED_REASONS
+        return "fixedReason" in row or row["range"][0] == row["range"][1]
+    kb = base_kb()
+    found = sorted({f.where.split("]")[0] + "]" for f in check_kb(kb) if f.code == "fixed-reason"})
+    want = sorted(f"params.json[{name}]" for name, row in kb["params"].items()
+                  if breaks_rule(row))
+    check(f"fixed-reason on the shipped data names exactly the rows held fixed without a "
+          f"permitted reason ({len(want)} of {len(kb['params'])} rows)", found == want,
+          f"found {found}, want {want}")
+
+
+def test_calibration_link_holds_both_sides_to_the_expectation_registry() -> None:
+    """HREQ-E-10 (BUG-20261003-187): a parameter whose value was chosen to make an output
+    match a target lists that expectation in calibratedAgainst, the expectation lists the
+    parameter in calibrates, and the two lists agree. The expectation registry is read from
+    the reference's scenarios.js as text; a registry that cannot be had is an error."""
+    check("calibration-link is enforced by error codes, not deferred",
+          DOCUMENTED_RULES.get("calibration-link") == ("calibration-link",
+                                                      "expectations-unavailable")
+          and RULES["calibration-link"][0] == RULES["expectations-unavailable"][0] == "error"
+          and "calibration-link" not in DEFERRED_RULES)
+    cal_where = f"params.json[{FREE_PARAM}].calibratedAgainst"
+    where = {
+        "a row whose notes say it was calibrated carries no calibratedAgainst": cal_where,
+        "a calibrated row lost its calibratedAgainst": "params.json[map_auto_tau_h].calibratedAgainst",
+        "a calibratedAgainst entry that is not <scenario_id>/<NN>":
+            "params.json[pn_gain].calibratedAgainst",
+        "a calibratedAgainst entry naming no registered expectation":
+            "params.json[map_auto_tau_h].calibratedAgainst",
+        "calibratedAgainst names an expectation whose calibrates omits the row": cal_where,
+        "an expectation's calibrates names a row whose calibratedAgainst omits it": cal_where,
+        "an expectation's calibrates names a row whose calibratedAgainst names only other "
+        "expectations": "params.json[map_auto_tau_h].calibratedAgainst",
+        "an expectation's calibrates names no params.json row":
+            "scenarios.js[chronic_high_salt_30d/02].calibrates",
+        "an expectation's calibrates is not a literal array":
+            "scenarios.js[chronic_high_salt_30d/02].calibrates",
+        "scenarios.js registers an expectation id twice": "scenarios.js[no_water_24h/03]",
+        "scenarios.js registers no expectation id": "scenarios.js",
+        "scenarios.js cannot be tokenised (an unterminated string)": "scenarios.js",
+        "no scenarios.js text at all": "scenarios.js",
+    }
+    plants = _plants("calibration-link") + _plants("expectations-unavailable")
+    check("calibration-link: every planted case has its expected location here",
+          {p[1] for p in plants} == set(where))
+    messages: dict[str, str] = {}
+    for code, what, mutate in plants:
+        got = _linked_new(mutate)
+        messages[what] = got[0].message if len(got) == 1 else ""
+        check(f"{code}: {what} -- one error, naming the row or record",
+              [(f.code, f.severity, f.where) for f in got] == [(code, "error", where.get(what))],
+              str([str(f) for f in got]))
+    lost = messages["a calibrated row lost its calibratedAgainst"]
+    check("calibration-link: a calibrated row without its link is reported once, with both "
+          "reasons (its notes and the expectation that lists it)",
+          "notes say" in lost and "chronic_high_salt_30d/02" in lost, lost)
+    unavailable = messages["scenarios.js registers no expectation id"]
+    check("expectations-unavailable: names what went unchecked (the rows carrying "
+          "calibratedAgainst)", all(p in unavailable for p in CALIBRATED), unavailable)
+
+    kb = _linked(base_kb())
+    codes = {f.code for f in check_kb(kb)}
+    check("calibration-link: the linked data (four rows, two expectations) is clean",
+          not codes & {"calibration-link", "expectations-unavailable"}, str(codes))
+    text = kb.get("scenarios_js", _shipped_scenarios_text())
+    back = {p: rec.id for rec in expectation_records(text) if isinstance(rec.calibrates, tuple)
+            for p in rec.calibrates}
+    check("calibration-link: the registry's calibrates, read as text, is the inverse of the "
+          "four calibratedAgainst links", back == CALIBRATED, str(back))
+
+    def unlinked(kb: dict[str, Any]) -> None:
+        _params(kb, lambda p: [row.pop("calibratedAgainst", None) for row in p.values()])
+        kb["scenarios_js"] = ""
+    got = {f.where for f in _linked_new(unlinked) if f.code == "calibration-link"}
+    check("calibration-link: the notes wording flags exactly the four calibrated rows and no "
+          "other shipped row", got == {f"params.json[{p}].calibratedAgainst" for p in CALIBRATED},
+          str(sorted(got)))
+    # The shipped data, at whatever stage: a reference without ids is one loud error, and
+    # each calibrated row without its link is named.
+    kb = base_kb()
+    found = check_kb(kb)
+    ids = expectation_records(_shipped_scenarios_text())
+    check(f"shipped data: expectations-unavailable fires exactly when the reference scenarios.js "
+          f"registers no expectation id (it registers {len(ids)})",
+          (sum(f.code == "expectations-unavailable" for f in found) == 1) == (not ids))
+    missing = {f"params.json[{p}].calibratedAgainst" for p in CALIBRATED
+               if "calibratedAgainst" not in kb["params"][p]}
+    check(f"shipped data: each calibrated row without calibratedAgainst is named "
+          f"({len(missing)} today)",
+          missing <= {f.where for f in found if f.code == "calibration-link"})
+
+
+def test_scenarios_js_is_read_as_text_never_imported() -> None:
+    """calibration-link reads the expectation registry from the reference's scenarios.js by
+    scanning its object literals; kb-v1 depends on reference-v1, never on engine-v1."""
+    tricky = """// { id: 'commented/01', calibrates: ['x'] }
+/* { id: 'block/01' } */
+const t = `template ${ {a: '}'}['a'] } { id: 'templ/01' }`;
+export const S = Object.freeze({
+  s: makeScenario({ id: 's', title: `T ${1}`, dt: 1 / 60, validation: { expects: [
+    { id: 's/01', metric: 'it\\'s "quoted"', calibrates: ['p1', "p2"], role: 'calibration',
+      evidence: ['ev:a', "ev:b"] },
+    { id: 's/02', metric: 'x', calibrates: CAL, evidence: EV },
+    { id: 's/03', metric: 'y', calibrates: ['p', other] },
+    { id: "s/04", note: flag ? 'a' : 'b', role: 'structural' },
+    { metric: 'no id' }, { id: 's/5' },
+  ] } }),
+});
+"""
+    recs = {rec.id: (rec.calibrates, rec.role) for rec in expectation_records(tricky)}
+    evidence = {rec.id: rec.evidence for rec in expectation_records(tricky)}
+    check("scenarios.js scan: ids come from object literals only, never from comments or "
+          "template text, and only in the <scenario_id>/<NN> form",
+          list(recs) == ["s/01", "s/02", "s/03", "s/04"], str(list(recs)))
+    check("scenarios.js scan: a literal calibrates array is read with both quote styles and "
+          "escapes", recs.get("s/01") == (("p1", "p2"), "calibration"), str(recs.get("s/01")))
+    check("scenarios.js scan: a calibrates that is not an array of string literals is never "
+          "read as a list", all(not isinstance(recs[k][0], tuple) and recs[k][0] is not None
+                                for k in ("s/02", "s/03")), str(recs))
+    check("scenarios.js scan: a record without calibrates reads None; a ternary is not a key",
+          recs.get("s/04") == (None, "structural"), str(recs.get("s/04")))
+    check("scenarios.js scan: an expectation's evidence is read like calibrates (a literal "
+          "array; anything else never as a list; absent is None)",
+          evidence.get("s/01") == ("ev:a", "ev:b") and evidence.get("s/03") is None
+          and evidence.get("s/02") is not None and not isinstance(evidence.get("s/02"), tuple),
+          str(evidence))
+    check("scenarios.js scan: tokens keep the division and drop the comments",
+          ("w", "/") in js_tokens("a / b // c") and ("w", "c") not in js_tokens("a / b // c"))
+    for bad in ("const x = 'open;\n", "/* never closed", "const t = `open ${x}", "{ id: 's/01' ]",
+                "{ { }", "const s = 'bad \\u12G4';"):
+        try:
+            expectation_records(bad)
+            refused = False
+        except ScriptError:
+            refused = True
+        check(f"scenarios.js scan: refused, as ScriptError -- {bad[:24]!r}", refused)
+    shipped = expectation_records(_shipped_scenarios_text())
+    check(f"scenarios.js scan: the reference registers 0 ids (before model 1.1.0) or all 24 "
+          f"(it registers {len(shipped)})", len(shipped) in (0, 24))
+    linked = [rec.id for rec in expectation_records(_linked_scenarios_text())]
+    by_scenario: dict[str, list[str]] = {}
+    for eid in linked:
+        by_scenario.setdefault(eid.split("/")[0], []).append(eid.split("/")[1])
+    check("scenarios.js scan: the registry carries the 24 V1 expectations, ids unique and "
+          "numbered 01.. in registration order per scenario",
+          len(linked) == len(set(linked)) == 24
+          and all(nn == [f"{i:02d}" for i in range(1, len(nn) + 1)]
+                  for nn in by_scenario.values()), str(by_scenario))
+    for g in (True, 1.5, [None], {"x": 1}, ""):
+        got = _linked_new(lambda kb, g=g: kb.update(scenarios_js=g))
+        check(f"scenarios.js text {g!r}: reported (expectations-unavailable), never raised",
+              {f.code for f in got} == {"expectations-unavailable"}, str([str(f) for f in got]))
+    got = _linked_new(lambda kb: kb["load_errors"].update(scenarios_js="planted: unreadable"))
+    check("scenarios.js load error: reported with the loader's reason",
+          [f.code for f in got] == ["expectations-unavailable"]
+          and "planted: unreadable" in got[0].message, str([str(f) for f in got]))
+    engine_imports = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "src" / "health" / "kb")
+                            .rglob("*.py")
+                            if re.search(r"^\s*(?:from|import)\s+(?:health\.engine|\.\.engine)\b",
+                                         p.read_text(encoding="utf-8"), re.M))
+    check("kb-v1 never imports the engine (kb-v1 depends on reference-v1, not engine-v1)",
+          not engine_imports, str(engine_imports))
+
+
+def _one(what: str, got: list[Finding], want: tuple[str, str, str]) -> None:
+    check(f"{want[0]}: {what} -- one {want[1]}, naming the record",
+          [(f.code, f.severity, f.where) for f in got] == [want], str([str(f) for f in got]))
+
+
+def test_engine_only_evidence_and_curation_records_are_structured() -> None:
+    """Tracker W-6 (the curator's ledger entry for it names this test): a source only the
+    engine's scenario expectations cite says so in Evidence.engineOnly, and the marker
+    exempts it from unused-evidence only as a claim the checker verifies -- no
+    knowledge-base record or params.json row cites it, and citedBy is exactly the set of
+    scenarios.js expectations that cite it. VERIFICATION_LOG.json curationRecords validate
+    against #/definitions/CurationRecord (BUG-20261003-188). Then the curator's records."""
+    check("engine-only-evidence is an error code; unused-evidence stays a warning",
+          RULES["engine-only-evidence"][0] == "error" and RULES["unused-evidence"][0] == "warn")
+    marker, cited_by = f"evidence.json[{ENGINE_ONLY}].engineOnly", \
+        f"evidence.json[{ENGINE_ONLY}].engineOnly.citedBy"
+    where = {
+        "an engine-only record a relation cites": marker,
+        "an engine-only record a params.json row cites": marker,
+        "engineOnly.citedBy names an expectation scenarios.js does not register": cited_by,
+        "engineOnly.citedBy names an expectation that does not cite the record": cited_by,
+        "engineOnly.citedBy omits an expectation that cites the record": cited_by,
+    }
+    plants = _plants("engine-only-evidence")
+    check("engine-only-evidence: every planted case has its expected location here",
+          {p[1] for p in plants} == set(where))
+    for _code, what, mutate in plants:
+        _one(what, _linked_new(mutate), ("engine-only-evidence", "error", where.get(what, "?")))
+    got = _linked_new(next(p[2] for p in PLANTS if p[0] == "pattern-mismatch"
+                           and "engineOnly.citedBy" in p[1]))
+    _one("a malformed citedBy entry is the schema's (pattern-mismatch), never also a registry "
+         "mismatch", got, ("pattern-mismatch", "error", f"{cited_by}[4]"))
+
+    kb = _linked(base_kb())
+    text = kb.get("scenarios_js", _shipped_scenarios_text())
+    want_cited = sorted(_citing(text).get(ENGINE_ONLY, []))
+    check(f"engineOnly: {ENGINE_ONLY} is cited by the four drink_water_1L expectations the "
+          f"curator listed ({want_cited})", want_cited == [
+              "drink_water_1L/02", "drink_water_1L/03", "drink_water_1L/04", "drink_water_1L/06"])
+    about = [str(f) for f in check_kb(kb) if ENGINE_ONLY in f.where]
+    check("engineOnly: a marker whose citedBy is exactly the citing expectations is accepted, "
+          "and exempts the record from unused-evidence", not about, str(about))
+    got = _linked_new(lambda kb: ev(kb, ENGINE_ONLY).pop("engineOnly"))
+    _one("the marker dropped: the record is unused again", got,
+         ("unused-evidence", "warn", f"evidence.json[{ENGINE_ONLY}]"))
+    got = _linked_new(lambda kb: _new_evidence(kb, "ev:planted-engine").update(engineOnly={
+        "reason": "only the engine bibliography lists it", "citedBy": [],
+        "recordedOn": "2026-10-03", "by": "planted"}))
+    check("engineOnly: citedBy [] on a record no expectation cites (the bibliography-only case) "
+          "is accepted and not reported unused", not got, str([str(f) for f in got]))
+    anchor = "range: [0, 6], kind: 'quantitative', evidence: ['ev:crowe-1987']"
+
+    def unreadable(kb: dict[str, Any]) -> None:
+        text = _linked(kb).get("scenarios_js", _shipped_scenarios_text())
+        kb["scenarios_js"] = text.replace(anchor, "range: [0, 6], kind: 'quantitative', "
+                                                  "evidence: CROWE")
+    got = _linked_new(unreadable)
+    check("engineOnly: a listed expectation whose evidence is not a literal array is reported "
+          "as unreadable, never as 'does not cite'",
+          [(f.code, f.where) for f in got] == [("engine-only-evidence", cited_by)]
+          and "not a literal array" in got[0].message and "do(es) not cite" not in got[0].message,
+          str([str(f) for f in got]))
+    got = _linked_new(lambda kb: kb.update(scenarios_js=""))
+    check("engineOnly: with no registry the markers go unchecked, and expectations-unavailable "
+          "names them", [f.code for f in got] == ["expectations-unavailable"]
+          and ENGINE_ONLY in got[0].message, str([str(f) for f in got]))
+
+    n = len(base_kb()["verification"].get("curationRecords", []))
+    log = f"VERIFICATION_LOG.json.curationRecords[#{n}]"
+    for code, what, mutate in PLANTS:
+        if "curation record" in what or "curationRecords" in what:
+            spot = {"bad-enum": f"{log}.action", "missing-field": log,
+                    "date-pattern": f"{log}.checkedOn",
+                    "file-shape": "VERIFICATION_LOG.json.curationRecords"}[code]
+            _one(what, _linked_new(mutate), (code, "error", spot))
+    got = _linked_new(_curation(lambda r: r.update(previous="x", reason="y", refs=["W-6"],
+                                                   supersedes=1)))
+    check("curation records: a complete record with every optional field is accepted", not got,
+          str([str(f) for f in got]))
+
+    # The shipped data. The rule half holds at every stage; the record half (the curator's
+    # M1 data, W-6) holds once it has landed.
+    kb = base_kb()
+    shipped = check_kb(kb)
+    check("shipped data: every engineOnly marker agrees with the registry and the knowledge base "
+          "(no engine-only-evidence finding)",
+          not [f for f in shipped if f.code == "engine-only-evidence"])
+    marked = {v["id"] for v in records(kb, "evidence") if "engineOnly" in v}
+    check("evidence: the five engine-only sources are marked (the curator's W-6 decision)",
+          marked == {"ev:shafiee-2005", "ev:crowe-1987", "ev:heer-2000", "ev:rakova-2017",
+                     "ev:uttamsingh-1985"}, str(sorted(marked)))
+    gut = rel(kb, "rel:gut:na-absorption")
+    check("evidence: ev:suckling-2012 is cited by the relation it supports, for direction only "
+          "(not by its quantity)", "ev:suckling-2012" in gut.get("evidence", [])
+          and "ev:suckling-2012" not in (gut.get("quantity") or {}).get("evidence", []))
+    seqs = [r.get("seq") for r in kb["verification"].get("curationRecords", [])]
+    check(f"log: the curation records validate and are numbered 1..n in append order "
+          f"({len(seqs)})", bool(seqs) and seqs == list(range(1, len(seqs) + 1))
+          and not [f for f in shipped if "curationRecords" in f.where], str(seqs[:5]))
+
+
+def test_params_json_is_validated_against_the_schema_it_declares() -> None:
+    """BUG-20261003-188: schema.json declares #/definitions/EngineParams (the parameter table)
+    and CurationRecord, and kb-check validated neither, so a misspelt field
+    (`calibratedAgaints`), a row without its description or a duplicated citation passed.
+    The table is validated against the live definition when the schema declares it; a
+    field the hand-written parameter rules already reported for that row is not reported a
+    second time (PARAM_RULE_FIELDS)."""
+    row = f"params.json[{FREE_PARAM}]"
+    where = {
+        "a params.json row carries a misspelt field (calibratedAgaints)":
+            ("unknown-key", f"{row}.calibratedAgaints"),
+        "a params.json row name that is not an identifier (EngineParams propertyNames)":
+            ("unknown-key", "params.json[V ecf 0]"),
+        "a params.json row without its description (EngineParams)": ("missing-field", row),
+        "a params.json row's notes is a number (EngineParams)": ("wrong-type", f"{row}.notes"),
+        "a params.json row cites the same evidence twice (EngineParams; no hand-written rule "
+        "reads it)": ("not-unique", f"{row}.evidence"),
+    }
+    plants = [p for p in PLANTS if p[1] in where]
+    check("EngineParams: every planted case is in PLANTS", {p[1] for p in plants} == set(where))
+    for code, what, mutate in plants:
+        _one(what, _linked_new(mutate), (code, "error", where[what][1]))
+    check("EngineParams: the fixed-reason and calibration-link plants ran with the schema "
+          "declaring EngineParams, so each of their single findings is the rule's alone",
+          "EngineParams" in _linked(base_kb())["schema"]["definitions"])
+    for label, mutate, want in (
+            ("mc: false without fixedReason (the schema's if/then says it too)",
+             lambda p: p["na_normal_low"].pop("fixedReason"), "fixed-reason"),
+            ("fixedReason outside the enum (the schema's enum says it too)",
+             lambda p: p["na_normal_low"].update(fixedReason="convenience"), "fixed-reason"),
+            ("calibratedAgainst entry malformed (the schema's pattern says it too)",
+             lambda p: p["pn_gain"].update(calibratedAgainst=["x"]), "calibration-link"),
+            ("a row that is not an object (the schema's type says it too)",
+             lambda p: p.update({FREE_PARAM: 5}), "param-field")):
+        got = [f for f in _linked_new(lambda kb, m=mutate: _params(kb, m))
+               if f.severity == "error"]
+        check(f"EngineParams: {label} -- reported once, by {want}",
+              [f.code for f in got] == [want], str([str(f) for f in got]))
+    got = _linked_new(lambda kb: (kb["schema"]["definitions"].pop("EngineParams"), _params(
+        kb, lambda p: p[FREE_PARAM].update(calibratedAgaints=["drink_water_1L/01"]))))
+    check("EngineParams: a schema that does not declare it leaves params.json to the "
+          "hand-written rules (the table is validated when declared)", not got,
+          str([str(f) for f in got]))
+    got = _linked_new(lambda kb: (kb["schema"]["definitions"].pop("CurationRecord"),
+                                  kb["verification"].setdefault("curationRecords", []).append(
+                                      {"seq": "one"})))
+    check("CurationRecord: likewise, curation records are validated when the schema declares "
+          "the definition", not got, str([str(f) for f in got]))
+    params_findings = [str(f) for f in check_kb(base_kb())
+                       if f.where.startswith("params.json") and f.code in DOCUMENTED_RULES["schema"]]
+    check("shipped data: params.json validates against the shipped schema's EngineParams "
+          "(where it declares one)", not params_findings, str(params_findings))
+
+
+def _params_table() -> dict[str, Any]:
+    return json.loads((ROOT / "src" / "health" / "engine" / "params.json").read_text(
+        encoding="utf-8"))
+
+
+def test_scenario_condition_rows_are_not_graded_as_pooled_estimates() -> None:
+    """V1 audit F-12 (tracker W-7; the curator's ledger entry names this test):
+    `naIn_base_mmold` was graded A-meta from He 2013 although 150 mmol/day is a scenario
+    condition, not the meta-analysis's pooled estimate. grade-ceiling cannot see it (A-meta
+    evidence admits an A-meta grade), so this pins the superseding record: no scenario
+    condition carries A-meta, and the row keeps its old grade, the date and the reason in
+    notes (04 §6.1)."""
+    table = _params_table()
+    conditions = {n: r for n, r in table.items() if r.get("fixedReason") == "scenario-condition"}
+    check("params: the three V1 scenario conditions carry fixedReason scenario-condition",
+          {"waterIn_base_Ld", "naIn_base_mmold", "kIn_base_mmold"} <= set(conditions),
+          str(sorted(conditions)))
+    check("params: no scenario-condition row is graded A-meta (a condition is not a pooled "
+          "estimate)", all(r.get("grade") != "A-meta" for r in conditions.values()),
+          str({n: r.get("grade") for n, r in conditions.items()}))
+    na = table["naIn_base_mmold"]
+    check("params: naIn_base_mmold's notes keep the superseded grade, the date and the reason",
+          "SUPERSEDED 2026-10-03" in na["notes"] and "grade A-meta -> B-textbook" in na["notes"]
+          and "scenario condition" in na["notes"], na["notes"][-300:])
+
+
+def test_fixed_and_calibrated_rows_carry_structured_reasons() -> None:
+    """W-18 data fields on the shipped table (HREQ-U-01, HREQ-E-10; the rules are
+    BUG-20261003-186 and -187): every `mc: false` row names one of the three permitted
+    reasons, the four calibrated parameters name the expectation ids they were tuned to,
+    and the schema's EngineParams admits the table while refusing a fixed row without a
+    reason."""
+    table = _params_table()
+    fixed = {n: r.get("fixedReason") for n, r in table.items() if r.get("mc") is False}
+    check(f"params: every mc: false row ({len(fixed)}) has a fixedReason from the three "
+          "permitted reasons", bool(fixed) and all(v in FIXED_REASONS for v in fixed.values()),
+          str(fixed))
+    check("params: no sampled row carries a fixedReason",
+          not [n for n, r in table.items() if "fixedReason" in r and r.get("mc") is not False])
+    cal = {n: r["calibratedAgainst"] for n, r in table.items() if "calibratedAgainst" in r}
+    check("params: the four calibrated parameters name their expectations",
+          cal == {n: [eid] for n, eid in CALIBRATED.items()}, str(cal))
+    schema = base_kb()["schema"]
+    check("schema: the shipped schema declares EngineParams, Param and fixedReason",
+          all(k in schema.get("definitions", {}) for k in ("EngineParams", "Param", "fixedReason")))
+    got = _linked_new(lambda kb: _params(kb, lambda p: p["na_normal_low"].pop("fixedReason")))
+    check("schema + rule: a fixed row without fixedReason is refused, once",
+          [(f.code, f.where) for f in got]
+          == [("fixed-reason", "params.json[na_normal_low].fixedReason")],
+          str([str(f) for f in got]))
+
+
+def test_untyped_dispersions_are_marked_unverified() -> None:
+    """V1 audit F-02/F-03 (tracker W-9; the curator's ledger entry names this test):
+    Suckling 2012's +3.13 ± 0.75 mmol/L, and the untyped ± of three other water/salt
+    expectation sources, are marked "SEM/SD unverified" in the evidence record itself, and
+    Suckling's quote is recorded as the abstract's, until the full text settles the
+    dispersion type (HREQ-E-09)."""
+    kb = base_kb()
+    for vid in ("ev:suckling-2012", "ev:shafiee-2005", "ev:crowe-1987", "ev:heer-2000"):
+        check(f"evidence: {vid} says SEM/SD unverified",
+              "SEM/SD unverified" in ev(kb, vid).get("notes", ""))
+    check("evidence: ev:suckling-2012's quote is recorded as the abstract's",
+          ev(kb, "ev:suckling-2012").get("verification", {}).get("quoteSource") == "abstract")
+
+
 # ---------------------------------------------------------------------------
 # Tests: boundaries and semantics (the rigor review's pinning checks)
 # ---------------------------------------------------------------------------
@@ -700,9 +1509,15 @@ def test_boundaries_kill_the_surviving_mutants() -> None:
                   value=nephron_q(kb)["range"][end])))
     check("boundary: a degenerate range [v, v] holding v is legal (no range-order)",
           not new_codes(lambda kb: nephron_q(kb).update(value=5, range=[5, 5])))
-    check("boundary: a params.json row with value == hi and a degenerate range is legal",
+    check("boundary: a params.json row with value == hi and a degenerate range, held fixed "
+          "with mc: false and a fixedReason, is legal",
           not new_codes(lambda kb: _params(kb, lambda p: p[FREE_PARAM].update(
-              value=16, range=[16, 16]))))
+              value=16, range=[16, 16], mc=False, fixedReason="scenario-condition"))))
+    got = new_codes(lambda kb: _params(kb, lambda p: p[FREE_PARAM].update(
+        value=16, range=[16, 16])))
+    check("boundary: the same degenerate range without mc: false breaks no range rule, only "
+          "fixed-reason (samplingMode holds it fixed with no recorded reason)",
+          got == {"fixed-reason"}, str(got))
     for key, field in (("evidence", "curator"), ("relations", "generated"),
                        ("entities", "kbVersion")):
         check(f"meta-mismatch fires on {field} alone",
@@ -981,8 +1796,10 @@ def test_summary_counts_match_the_data() -> None:
     at_least_b = sum(1 for row in raw_params.values()
                      if row["grade"] in ("A-meta", "A-primary", "B-textbook"))
     share = s["paramsGradedAtLeastB"]
-    check("summary: params graded >= B equals an independent count over params.json",
-          (share["count"], share["total"]) == (at_least_b, len(raw_params)) == (24, 57),
+    check(f"summary: params graded >= B equals an independent count over params.json "
+          f"({at_least_b} of {len(raw_params)})",
+          (share["count"], share["total"]) == (at_least_b, len(raw_params))
+          and len(raw_params) == s["counts"]["params"] and at_least_b > 0,
           f"{share} vs {at_least_b}/{len(raw_params)}")
     check("summary: >= B means exactly A-meta, A-primary, B-textbook",
           GRADE_B_OR_BETTER == ("A-meta", "A-primary", "B-textbook") == GRADES[:3],
@@ -1126,8 +1943,15 @@ def test_status_prints_the_disclaimer(tmp: Path) -> None:
           "disclaimer, validation status",
           -1 not in order and order == sorted(order), f"{order}\n{r.stdout}")
     share_line = lines[order[5]] if order[5] >= 0 else ""
-    check("cli status: the >= B share and the E-assumption count come from the files",
-          "24/57 (42.1%)" in share_line and "E-assumption: 33" in share_line, share_line)
+    raw = json.loads((ROOT / "src" / "health" / "engine" / "params.json")
+                     .read_text(encoding="utf-8"))
+    at_least_b = sum(1 for row in raw.values() if row["grade"] in GRADES[:3])
+    n_e = sum(1 for row in raw.values() if row["grade"] == "E-assumption")
+    want = (f"{at_least_b}/{len(raw)} ({100.0 * at_least_b / len(raw):.1f}%)",
+            f"E-assumption: {n_e}")
+    check(f"cli status: the >= B share and the E-assumption count come from the files "
+          f"({want[0]}, {want[1]}, counted here from params.json)",
+          all(w in share_line for w in want), share_line)
 
     r = _run_cli("status", "--fast", "--root", str(tmp / "no-such-kb"))
     check("cli status: an unloadable KB exits 1, says unavailable, and still ends with the "

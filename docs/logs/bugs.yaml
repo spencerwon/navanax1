@@ -6346,6 +6346,143 @@ bugs:
     diff touches only the hash and paramSummary lines.
   monitor_gap: No gate tells a metadata-only params.json change from a value change.
 
+- id: BUG-20261003-186
+  area: health
+  summary: "HREQ-U-01 had no check: fixed-reason sat in DEFERRED_RULES, the reason a params.json row is held fixed in Monte Carlo was prose in its notes, and a single-point range held a row fixed (samplingMode) without mc: false at all"
+  severity: S2
+  priority: P1
+  error_class: KBI
+  status: fixed
+  logged_at: "2026-10-03T15:20:00-05:00"
+  resolved_at: "2026-10-03T20:17:00-05:00"
+  occurred_at: "2026-10-03T03:00:00-05:00"
+  detected_by: "M1 slice, builder K, promoting the DEFERRED_RULES entry (tracker W-18; deferred by BUG-20261003-112); reading samplingMode in engine/mc.js found the second way in (a single-point range is held fixed whatever mc says)"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-3
+  locations:
+  - {file: src/health/kb/check.py, line: 155}
+  - {file: src/health/kb/check.py, line: 1929}
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 263}
+  requirement: HREQ-U-01
+  data_impact: >-
+    None on any number. The 12 mc: false rows at b181c4b (3 scenario conditions, 2
+    classification thresholds, 7 strain-index constants; 15 with the three strain-index rows
+    of model 1.1.0) are each held fixed for a permitted reason, stated in their notes. What
+    was missing is the gate: a sampled parameter could be set mc: false, or given a
+    single-point range, and its uncertainty would leave every Monte Carlo band with no
+    recorded reason and no error; the threshold-versus-physiology label (HREQ-M-14) had no
+    field to read. On the data at b181c4b alone the rule reports the 12 rows; with the
+    curator's fixedReason fields (and model 1.1.0's rows) it reports none.
+  root_cause: >-
+    The rule needed a structured field the data did not have, so it was deferred by name
+    (BUG-20261003-112). The 03 §6 statement named only mc: false rows, while both engines
+    also hold a row fixed when its range is a single point.
+  resolution: >-
+    fixed-reason is an error code. Every row Monte Carlo holds fixed (mc: false, or a
+    single-point range) must be mc: false with fixedReason scenario-condition,
+    classification-threshold or index-constant; a sampled row carrying a reason and an mc
+    that is not a boolean are errors too; a schema whose fixedReason enum differs from the
+    three is schema-drift, and where the schema's Param says the same thing (its if/then
+    and enum) the finding is the rule's alone. Five planted violations each fire the rule
+    alone, each naming its row, and each permitted reason, mc true and mc false on a wide
+    range are shown legal; 03 §6 and 01 Appendix A (HREQ-U-01) say Enforced.
+  regression_test: tests/health_kb_selftest.py::test_fixed_reason_is_required_on_every_row_monte_carlo_holds_fixed
+  monitor_gap: The deferral was visible (DEFERRED_RULES, the 03 §6 status column), but nothing compared the rule's statement with how the engines decide that a row is fixed; the single-point range was a second way in that no statement named.
+
+- id: BUG-20261003-187
+  area: health
+  summary: "HREQ-E-10 had no check: calibration-link sat in DEFERRED_RULES, so a parameter tuned to a target that no calibrates list names, or a calibratedAgainst naming no expectation, passed every gate, and the target could count as an independent validation pass"
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  logged_at: "2026-10-03T15:20:00-05:00"
+  resolved_at: "2026-10-03T20:17:00-05:00"
+  occurred_at: "2026-10-03T03:00:00-05:00"
+  detected_by: "M1 slice, builder K, promoting the DEFERRED_RULES entry (tracker W-18; deferred by BUG-20261003-112, documented by BUG-20261003-143)"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-3
+  locations:
+  - {file: src/health/kb/check.py, line: 160}
+  - {file: src/health/kb/check.py, line: 2037}
+  - {file: src/health/kb/check.py, line: 1237}
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 262}
+  requirement: HREQ-E-10
+  data_impact: >-
+    None on any shipped number. The four calibrated parameters (map_vol_exp, pn_gain and
+    aldo_vol_exp to chronic_high_salt_30d/01; map_auto_tau_h to chronic_high_salt_30d/02)
+    are named in the Python registry's calibrates, so their targets are already excluded
+    from the validation count. The parameter side existed only as prose in notes and
+    nothing compared it with the expectations. On the data at b181c4b alone the rule
+    reports the four rows and the id-less reference scenarios.js; with the curator's
+    calibratedAgainst and model 1.1.0's expectation ids it reports none.
+  root_cause: >-
+    The parameter side (calibratedAgainst) did not exist and the JavaScript registry
+    carried no expectation ids, so the rule was deferred by name; and the knowledge base
+    may not import the Python engine (kb-v1 depends on reference-v1 only), so the
+    expectation registry had no reader on the knowledge-base side.
+  resolution: >-
+    calibration-link is an error code. Every calibratedAgainst entry must match
+    <scenario_id>/<NN> and name an expectation that the reference's scenarios.js
+    registers (read as text by a structural scanner, never imported), whose calibrates
+    lists the row, and every row a calibrates names must list that expectation back; a row
+    whose notes say its value was calibrated, co-developed, tuned or chosen to hit a target
+    must carry calibratedAgainst; an expectation id registered twice is an error.
+    expectations-unavailable makes a missing, unreadable or id-less registry an error,
+    never a quiet pass; a schema whose expectationId pattern differs is schema-drift.
+    Thirteen planted violations (ten calibration-link, three expectations-unavailable) each
+    fire their code alone, each naming its row or record, and the linked data is shown
+    clean.
+  regression_test:
+    - tests/health_kb_selftest.py::test_calibration_link_holds_both_sides_to_the_expectation_registry
+    - tests/health_kb_selftest.py::test_scenarios_js_is_read_as_text_never_imported
+  monitor_gap: The two halves of the link lived in two implementations and one free-text field; a rule deferred by name cannot fail, so a fifth calibrated parameter added with a note and no calibrates entry would have been invisible to every gate.
+
+- id: BUG-20261003-188
+  area: health
+  summary: "schema.json's M1 extensions were declared but not enforced: kb-check validated only the three knowledge-base documents, so params.json was never held to #/definitions/EngineParams nor VERIFICATION_LOG.json curationRecords to #/definitions/CurationRecord, and a misspelt field such as calibratedAgaints passed"
+  severity: S3
+  priority: P2
+  error_class: KBI
+  status: fixed
+  logged_at: "2026-10-03T20:17:00-05:00"
+  resolved_at: "2026-10-03T20:17:00-05:00"
+  occurred_at: "2026-10-03T15:00:05-05:00"
+  detected_by: "M1 slice, builder K, reading the curator's commit db497cb (its first curation record says params.json is not yet validated against EngineParams by kb-check) and planting a misspelt field on a scratch merge of it"
+  detection_channel: agent
+  branch: worktree-wf_d120077b-662-3
+  locations:
+  - {file: src/health/kb/check.py, line: 1897}
+  - {file: src/health/kb/check.py, line: 1476}
+  - {file: src/health/kb/check.py, line: 1672}
+  requirement: HREQ-V-16
+  data_impact: >-
+    None on any number: on the merged data every params.json row and all 31 curation
+    records validate. What slipped through was structure the hand-written parameter rules
+    do not read: an undeclared or misspelt field on a row (a misspelt fixedReason or
+    calibratedAgainst is then also reported by the rule that misses it, but an extra field
+    anywhere else was silent), a row without its description or notes, a duplicated
+    citation, a row name that is not an identifier, and every field of a curation record
+    (seq, date, action enum).
+  root_cause: >-
+    The schema layer validates a fixed list of documents (entities, relations, evidence);
+    the curator added definitions for two more documents in the same schema, which the
+    checker's generic validator could evaluate but nothing pointed it at.
+  resolution: >-
+    When schema.json declares #/definitions/EngineParams, params.json is validated against
+    it after the hand-written parameter rules, and a violation in a field one of those rules
+    already reported for that row (PARAM_RULE_FIELDS; fixed-reason answers for mc and
+    fixedReason together) is dropped, so a malformed value is still reported once. When it
+    declares #/definitions/CurationRecord, every curationRecords entry is validated, and
+    definitions/isoDate failures are date-pattern. A schema whose Param or Evidence.engineOnly
+    stops declaring a field the rules read is schema-drift. Planted violations (misspelt
+    field, row name, missing description, notes type, duplicated citation, curation action,
+    seq, date, a non-array curationRecords, two schema-drift edits) each fire one code alone.
+  regression_test:
+    - tests/health_kb_selftest.py::test_params_json_is_validated_against_the_schema_it_declares
+    - tests/health_kb_selftest.py::test_engine_only_evidence_and_curation_records_are_structured
+  monitor_gap: A schema definition with no document validated against it looks enforced to a reader of the schema; nothing listed which definitions the checker actually applies.
+
 - id: BUG-20261003-194
   area: health
   summary: "The viewer's fallback evidence list for the kidney strain index (STRAIN_P) omits the three strain-index rows added with model 1.1.0"

@@ -1724,6 +1724,33 @@ custom-run label at all (BUG-196). The fallback strain-index evidence list gaine
 rows of model 1.1.0 (BUG-194). `tools/health_app_smoke.py` runs every scenario and both tabs
 and checks each text against `config/health/base.yaml`: 14 of its 19 checks failed on the
 app before these changes, and all 19 pass after.
+**BUG-20261003-186 (S2/P1) and BUG-20261003-187 (S1/P1).** Two of the five knowledge-base
+rules deferred until their data fields existed (W-18) are errors now. `fixed-reason`
+(HREQ-U-01): every row Monte Carlo holds fixed is `mc: false` with a `fixedReason` of
+`scenario-condition`, `classification-threshold` or `index-constant`; a sampled row with a
+reason, an `mc` that is not a boolean, and a single-point range without `mc: false` (which
+`samplingMode` holds fixed whatever `mc` says, a second way in that the old statement did
+not name) are errors. `calibration-link` (HREQ-E-10): every `calibratedAgainst` entry is an
+expectation id that the reference's `scenarios.js` registers and whose `calibrates` lists
+the row, and back; a row whose notes say it was calibrated or chosen to hit a target must
+carry the field; an expectation id registered twice is an error. The registry is read from
+`scenarios.js` as text, because the knowledge base may not import the engine, and a
+registry that cannot be found, read or found to carry an id is its own error
+(`expectations-unavailable`). Every case has a planted violation that fires alone. On the
+data at b181c4b alone the rules report 17 errors (12 fixed rows without a reason, 4
+calibrated rows without a link, the id-less reference); on a scratch merge with the
+curator's fields and model 1.1.0's expectation ids, kb-check reports 0 errors and 0
+warnings.
+
+**BUG-20261003-188 (S3/P2).** The curator's schema extensions declared two more documents,
+the parameter table (`EngineParams`) and the curation log (`CurationRecord`), and the
+checker validated neither, so a misspelt `calibratedAgaints` on a row passed. Both are now
+validated against the live definitions when the schema declares them; a field the
+hand-written parameter rules already reported is not reported a second time. The same
+change gives `Evidence.engineOnly` its checker side (tracker W-6): a marked record is
+exempt from `unused-evidence`, and `engine-only-evidence` holds the marker to account (no
+knowledge-base record or parameter cites it; `citedBy` is exactly the expectations in
+`scenarios.js` that cite it).
 
 ### Still open
 
