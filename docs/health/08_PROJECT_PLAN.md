@@ -121,7 +121,7 @@ cite them rather than guess.
 | A plausible wrong number reaches a learner | Safety review on every surface; disclaimer in-band; indices and thresholds labelled; S0a halts the surface | health-safety-reviewer |
 | Assumptions quietly become "facts" | Grade E loud (HREQ-S-06); curator and modeler own different fields of the same row; calibration never counts as validation | health-literature-curator |
 | The two implementations drift | Golden fixture, 1e-9, regenerated on every model change, S0b on divergence | health-physiology-modeler |
-| The knowledge base rots | 54 checker codes (47 blocking), each with a planted violation that fires alone; 11 of the 16 documented rules enforced, 5 deferred until their data fields exist (W-18), so append-only is checked only for deleted entities | health-rigor-lead |
+| The knowledge base rots | 58 checker codes (51 blocking), each with a planted violation that fires alone; 13 of the 16 documented rules enforced, 3 deferred (range-kind and dispersion until their data fields exist, W-18; append-only until a released snapshot exists), so append-only is checked only for deleted entities | health-rigor-lead |
 | Scope grows without a record | Module registry, two-PR enable, ADR per module | orchestrator |
 | The project lives in two places (this repo and the Mac) | Q1 decided before M1; until then the Mac repo is the Operator's and this branch is the platform | Spencer |
 

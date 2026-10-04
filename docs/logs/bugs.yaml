@@ -6151,8 +6151,9 @@ bugs:
   severity: S2
   priority: P2
   error_class: EVD
-  status: open
+  status: fixed
   logged_at: "2026-10-03T14:55:00-05:00"
+  resolved_at: "2026-10-03T20:30:00-05:00"
   occurred_at: "2026-10-01T00:00:00-05:00"
   detected_by: "V1 audit F-12 (the row's own notes said grade B would be more honest); confirmed by the health-literature-curator against docs/health/01 §3.1-3.2 while working tracker W-7"
   detection_channel: agent
@@ -6171,12 +6172,12 @@ bugs:
     admits any grade at or below the best cited defaultGrade, so it cannot tell a pooled
     estimate from a sentence in the same paper.
   resolution: >-
-    Open until its regression test lands. On this branch: grade superseded to B-textbook,
-    with the old grade, the date and the reason appended to the row's notes (04 §6.1) and
-    fixedReason scenario-condition, in both params.json copies, params.data.js regenerated;
-    VERIFICATION_LOG.json curationRecords #18. Proposed test (outside the curator's files):
-    tests/health_kb_selftest.py::test_scenario_condition_rows_are_not_graded_as_pooled_estimates,
-    which fails on b181c4b and passes on the branch. The Operator may choose E-assumption.
+    Grade superseded to B-textbook, with the old grade, the date and the reason appended to
+    the row's notes (04 §6.1) and fixedReason scenario-condition, in both params.json
+    copies, params.data.js regenerated; VERIFICATION_LOG.json curationRecords #18. The
+    regression test (builder K's file) fails on b181c4b and passes on the merge. The
+    Operator may still choose E-assumption.
+  regression_test: tests/health_kb_selftest.py::test_scenario_condition_rows_are_not_graded_as_pooled_estimates
   monitor_gap: No rule related a row's grade to the kind of number it is; the fixedReason field now lets a test say a scenario condition is never a pooled estimate.
 
 - id: BUG-20261003-181
@@ -6255,8 +6256,9 @@ bugs:
   severity: S3
   priority: P2
   error_class: KBI
-  status: open
+  status: fixed
   logged_at: "2026-10-03T14:58:00-05:00"
+  resolved_at: "2026-10-03T20:30:00-05:00"
   occurred_at: "2026-10-03T00:00:00-05:00"
   detected_by: "health-literature-curator working tracker W-6 (six unused-evidence warnings: shafiee-2005, crowe-1987, heer-2000, rakova-2017, suckling-2012, uttamsingh-1985)"
   detection_channel: agent
@@ -6276,13 +6278,15 @@ bugs:
     expectations, and the schema had no field for a deliberate engine-only source; the
     verification log was designed for external identifiers only.
   resolution: >-
-    Open until the checker reads the new field and its test lands. On this branch:
-    ev:suckling-2012 is cited by rel:gut:na-absorption, where it is true (warnings 6 -> 5);
-    the other five carry Evidence.engineOnly {reason, citedBy, recordedOn, by}; schema.json
-    gains #/definitions/CurationRecord and VERIFICATION_LOG.json a curationRecords array
-    (31 records). Proposed: the checker skips engineOnly records in unused-evidence and
-    checks citedBy against the scenario registry (builder K); test
-    tests/health_kb_selftest.py::test_engine_only_evidence_and_curation_records_are_structured.
+    Data (builder CUR): ev:suckling-2012 is cited by rel:gut:na-absorption, where it is
+    true; the other five carry Evidence.engineOnly {reason, citedBy, recordedOn, by};
+    schema.json gains #/definitions/CurationRecord and VERIFICATION_LOG.json a
+    curationRecords array (31 records). Checker (builder K, BUG-20261003-188): a record
+    carrying engineOnly is exempt from unused-evidence, and engine-only-evidence (error)
+    holds the marker to account -- no knowledge-base record or params.json row cites it,
+    and citedBy is exactly the scenarios.js expectations that cite it; curationRecords
+    validate against CurationRecord. kb-check on the merged data: 0 errors, 0 warnings.
+  regression_test: tests/health_kb_selftest.py::test_engine_only_evidence_and_curation_records_are_structured
   monitor_gap: The shipped-KB test pinned the six warnings as expected, which made a permanent warning look intended.
 
 - id: BUG-20261003-184
