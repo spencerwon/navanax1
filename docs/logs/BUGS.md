@@ -1636,70 +1636,16 @@ whole files, so the runner's Node 22.23.3 read a value-identical fixture as stal
 recorded version as provenance, names the first differing line when something real
 changed, and a test plants both cases on a copy.
 
-**Model 1.1.0, the reference change planned for M1 (BUG-20261003-095, BUG-20261003-099,
-BUG-20261003-104, BUG-20261003-116, BUG-20261003-172, BUG-20261003-173; W-13, W-14, W-16,
-W-20).** The JavaScript reference and the port moved
-together, with the golden fixture regenerated and a section-by-section comparison against
-the 1.0.1 fixture: 16 of 26 top-level sections byte-identical (every trajectory, the stiff
-corner, the solver coverage, the Monte Carlo bands, the sweep, the steady state and the
-findings), and the rest changed only as intended. The three strain-index constants that M10
-hard-coded are parameter rows (BUG-095): 57 parameters, 33 E-assumption, 24 of 57 graded at
-least B, every strain value unchanged. The expectation records in `scenarios.js` carry the
-same `id`, `role` and `calibrates` as the port's, so no key is Python-only (W-13). The
-reference exports `VALIDATION_STATUS` and puts it beside the disclaimer on every result
-(BUG-104); doing so showed that six of its seven results also lacked the model version, the
-disclaimer or both, which HREQ-M-01 requires (BUG-172, S1), now carried by one `resultMeta()` in
-both implementations. M9 now labels the outputs that do not feed back, and the comment
-counts are gone (BUG-099). Three latent edge cases are fixed on both sides (BUG-116): a
-NaN anywhere in an influence difference counts, scenario inputs read frozen copies, and a
-quantile between two equal infinities is that infinity; four non-finite fixture values
-moved from NaN. The generator then refused the new fixture: the old one had used 98.4 % of
-a 400 KB budget (BUG-173, raised to 448 KB, the Operator's to confirm). Every new test was
-shown to fail without its change: 17 single-change mutants, 17 killed.
-**The curator's M1 slice (BUG-20261003-180 … BUG-20261003-185).** The literature
-curator gave the parameter table its two missing structured fields — `fixedReason` on the
-twelve `mc: false` rows and `calibratedAgainst` on the four calibrated ones, both in
-`schema.json` — and worked the open audit items. `naIn_base_mmold` was graded A-meta from
-He 2013 although 150 mmol/day is a scenario condition: superseded to B-textbook with the
-old grade and the reason in its notes (BUG-20261003-180, V1 F-12; the Operator may choose
-E-assumption). The He 2013 band [0.7, 3.2] mmHg turns out to be exactly the
-perfect-correlation limit of the SBP and DBP intervals — [1.06, 2.87] if they were
-uncorrelated — a conservative envelope, not a MAP confidence interval; the range is the
-Operator's (BUG-20261003-181, V1 F-06). Every literature registry and publisher was refused
-by the session's egress policy, so Suckling, Baylis, Crowe and He could not be re-read and
-W-9, D-10 and D-11 stay open with each attempt logged (BUG-20261003-182). The six
-unused-evidence warnings had no structured exit: Suckling 2012 is now cited where it is true
-and the other five carry an `engineOnly` block, and the verification log gained
-`curationRecords` for checks that are not external identifiers (BUG-20261003-183). Four
-quotes carried an untyped ± with no "SEM/SD unverified" on the record (BUG-20261003-184), and
-a metadata-only edit to `params.json` stales the golden fixture, which 03 §4 lets be
-regenerated only with a version bump (BUG-20261003-185). All six are open: their regression
-tests and the checker change are proposed to the files' owners.
-
-**The influence union (BUG-20261003-096 fixed; BUG-20261003-177 and BUG-20261003-178
-open; HREQ-U-12, HREQ-V-19, W-15).** Both implementations now run the influence screen
-for every registered scenario at its own horizon, at +10 % and at -10 %, and report the
-union: 805 runs, about 24 s under Node. MAP's feeders grow from 12 to 28 and include
-`pn_gain`, the parameter calibrated to the 30-day band that chart is compared with; Thirst's
-include `thirst_vol_gain`. The default screen's code was factored into one function that
-both screens share, and its golden section stayed byte-identical, which is the proof that
-it did not change. The fixture gained an `influenceAll` section (feeder lists exactly,
-effects to 6 digits), with the budget raised to 720 KB; the default suite holds the port to
-it on one scenario and `--robust` on all seven. `tools/health_influence_diff.py` prints the
-feeders added and removed against a baseline fixture and is the review record for every
-model change. Two findings stay open. The union is not a strict superset of the default
-screen: one cumulative ledger key, never displayed, loses a feeder because a longer horizon
-widens its range (BUG-177). And the viewer still primes the default screen, so the chip on
-the chronic MAP chart still omits `pn_gain` until its worker asks for the union (BUG-178).
-**BUG-20261003-198 (S3/P1) and BUG-20261003-199 (S3/P2), open.** Found while adding the
+**BUG-20261003-198 (S3/P1) and BUG-20261003-199 (S3/P2).** Found while adding the
 `desktop-app` module (ADR-0007). Its registry entry lands with `enabled: false`, as
 `04 §6.5` requires, and four checks in `tests/health_kb_selftest.py` went red with nothing
 wrong: written when every module was on, one requires `<id> on` for every registered id and
 two compare the whole DISABLED line with a single id (BUG-198). And the registry gate
 searches the live files for a module's path as a bare substring, so `desktop/` — the first
 one-segment path — is "named" by any file that says desktop, prose or the module's id; one
-appended sentence in `docs/README.md` turned the gate red (BUG-199). Both fixes edit files
-the desktop-app module does not own and are proposed with its pull request.
+appended sentence in `docs/README.md` turned the gate red (BUG-199). Both fixed with the
+module: the checks read the disabled ids from the registry, and a one-segment directory is
+searched for with its slash; each has a planted test.
 
 ### Still open
 

@@ -6315,8 +6315,9 @@ bugs:
   severity: S3
   priority: P1
   error_class: CFG
-  status: open
+  status: fixed
   logged_at: "2026-10-03T19:40:00-05:00"
+  resolved_at: "2026-10-03T20:00:00-05:00"
   occurred_at: "2026-10-03T05:54:48-05:00"
   detected_by: "the desktop-app builder, registering the module with `enabled: false`: four checks failed (`every registered module is on the modules line with its state`, `a disabled module (reference-v1) is named on its own DISABLED line`, and `engine-v1 off -> ... the module as DISABLED` for `status` and `status --fast`) while `health.registry --check` passed"
   detection_channel: agent
@@ -6332,11 +6333,12 @@ bugs:
     modules line for every registered id, and two compare the whole DISABLED line with a
     single id (`modules DISABLED: <id>`), so a second disabled module breaks them.
   resolution: >-
-    Open -- an edit to kb-v1's suite, which the desktop-app module does not own, proposed
-    with its pull request: an enabled module must appear as `<id> on`, the DISABLED line
-    must list exactly the disabled ids in registry order (and be absent when there are
-    none), and the two planted checks look for their id in the DISABLED list instead of
-    matching the whole line.
+    An enabled module must appear as `<id> on`, the DISABLED line must list exactly the
+    disabled ids in registry order (and be absent when there are none), and the two
+    planted checks look for their id in the DISABLED list instead of matching the whole
+    line. The shipped registry now holds a disabled module (desktop-app), so the suite
+    runs the case on every gate.
+  regression_test: tests/health_kb_selftest.py::test_status_lists_every_registered_module
   monitor_gap: No test ran against a registry holding a disabled module; the suite's own plants switch one module off at a time in an all-on registry.
 
 - id: BUG-20261003-199
@@ -6345,8 +6347,9 @@ bugs:
   severity: S3
   priority: P2
   error_class: CFG
-  status: open
+  status: fixed
   logged_at: "2026-10-03T19:40:00-05:00"
+  resolved_at: "2026-10-03T20:00:00-05:00"
   occurred_at: "2026-10-03T05:54:48-05:00"
   detected_by: "the desktop-app builder, probing the gate before relying on it: one appended sentence, 'The Operator works at a standing desktop.', in docs/README.md made `python -m health.registry --check` report \"module 'desktop-app': docs/README.md names desktop\" and FAIL"
   detection_channel: agent
@@ -6362,8 +6365,8 @@ bugs:
     enough; `desktop/` is the first one-segment directory, and without its slash it is an
     English word.
   resolution: >-
-    Open -- an edit to src/health/registry.py (module process), proposed with the
-    desktop-app pull request: a one-segment directory path is searched for with its
-    trailing slash (`desktop/`), every other path as before; a new test plants prose and a
-    real reference on a scratch tree.
+    A one-segment directory path is searched for with its trailing slash (`desktop/`),
+    every other path as before; a test plants prose, a module id and a real reference on a
+    scratch tree, and the probe sentence in docs/README.md now passes the gate.
+  regression_test: tests/health_kb_selftest.py::test_registry_one_segment_directory_is_matched_with_its_slash
   monitor_gap: The recipe-gap plants all use multi-segment paths.

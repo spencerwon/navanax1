@@ -13,8 +13,8 @@
 # disabled module stays verified. The merge is the code switch; the flag is the surface
 # switch.
 #
-# Removal order follows the dependency edges backwards: cli first; then engine-v1 or
-# kb-v1; errors once engine-v1 is gone; reference-v1 once engine-v1 and kb-v1 are gone;
+# Removal order follows the dependency edges backwards: cli and desktop-app first; then engine-v1 or
+# kb-v1; errors once engine-v1 is gone; reference-v1 once engine-v1, kb-v1 and desktop-app are gone;
 # process last, because every other module reads its configuration, its documents or its
 # registry, or lives in its package.
 
@@ -39,7 +39,7 @@ modules:
       - tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes
       - tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred
     removal: |
-      1. Only after engine-v1 and kb-v1 are removed (both read it).
+      1. Only after engine-v1, kb-v1 and desktop-app are removed (all three read it).
       2. Set `enabled: false` on this entry.
       3. Run `python3 tools/buglog.py --mark-removed reference-v1` (adds
          `removed_with_module: reference-v1` to every ledger entry citing these files that

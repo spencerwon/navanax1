@@ -1256,9 +1256,14 @@ def test_status_lists_every_registered_module(tmp: Path) -> None:
     disc = next((i for i, line in enumerate(lines) if line == DISCLAIMER), -1)
     check("cli status: a modules line exists and precedes the disclaimer",
           0 <= mod_line < disc, r.stdout)
-    check("cli status: every registered module is on the modules line with its state",
-          mod_line >= 0 and bool(ids) and all(f"{i} on" in lines[mod_line] for i in ids),
-          lines[mod_line] if mod_line >= 0 else "")
+    off = [m["id"] for m in mods if m.get("enabled") is not True]   # a module lands off
+    disabled = [ln for ln in lines if ln.startswith("modules DISABLED: ")]
+    check("cli status: every registered module is on the modules line with its state -- an "
+          "enabled one as `<id> on`, a disabled one on the DISABLED line (BUG-20261003-198)",
+          mod_line >= 0 and bool(ids)
+          and all(f"{i} on" in lines[mod_line] for i in ids if i not in off)
+          and disabled == ([f"modules DISABLED: {' · '.join(off)}"] if off else []),
+          "\n".join([lines[mod_line] if mod_line >= 0 else "", *disabled]))
     check("cli status: the modules line is read from the registry file, not typed",
           mod_line >= 0 and lines[mod_line].startswith(f"modules ({len(mods)}):"),
           lines[mod_line] if mod_line >= 0 else "")
@@ -1267,8 +1272,10 @@ def test_status_lists_every_registered_module(tmp: Path) -> None:
     alt.write_text(re.sub(rf"(  - id: {re.escape(first)}\n    enabled: )true", r"\1false",
                           _registry_text(), count=1), encoding="utf-8")
     r = _run_cli("status", "--fast", env_extra={ENV_PATH: str(alt)})
+    named = [ln[len("modules DISABLED: "):].split(" · ") for ln in r.stdout.splitlines()
+             if ln.startswith("modules DISABLED: ")]
     check(f"cli status: a disabled module ({first}) is named on its own DISABLED line and "
-          "not shown as on", f"modules DISABLED: {first}" in r.stdout.splitlines()
+          "not shown as on", len(named) == 1 and first in named[0]
           and f"{first} on" not in r.stdout, r.stdout[-400:])
 
 
@@ -1301,7 +1308,9 @@ def test_status_honours_the_module_flags(tmp: Path) -> None:
               "exits 0 and ends with the footer",
               f"model unavailable (engine-v1 disabled in {off})" in lines
               and "expectations: skipped (engine-v1 disabled)" in lines
-              and "modules DISABLED: engine-v1" in lines
+              and any(ln.startswith("modules DISABLED: ")
+                      and "engine-v1" in ln[len("modules DISABLED: "):].split(" · ")
+                      for ln in lines)
               and not any(ln.startswith("expectations ") for ln in lines)
               and r.returncode == 0 and _footer_ok(r.stdout),
               f"exit {r.returncode}\n{r.stdout}\n{r.stderr[-300:]}")
@@ -1656,6 +1665,28 @@ def test_registry_live_scan_reads_tracked_files_only(tmp: Path) -> None:
     stray = [r for r in real if ".egg-info" in r or ".claude/worktrees" in r]
     check("registry live scan: the repository scan holds no ignored path", real and not stray,
           str(stray[:5]))
+
+
+def test_registry_one_segment_directory_is_matched_with_its_slash(tmp: Path) -> None:
+    """BUG-20261003-199: the live-reference scan searched for a path with its slash
+    stripped, so a one-segment directory was "named" by any file that said the word --
+    prose, or a module id spelled like it -- and the gate failed. Planted on a scratch tree
+    (no .git, so it is walked) with `kiosk/`: prose is not a reference; `kiosk/...` is."""
+    from health.registry import recipe_gaps
+    tree = tmp / "one-segment"
+    (tree / "docs").mkdir(parents=True)
+    (tree / "README.md").write_text("Runs as a kiosk app (module kiosk-app).\n",
+                                    encoding="utf-8")
+    (tree / "docs" / "README.md").write_text("Double-click kiosk/Kiosk.app.\n",
+                                             encoding="utf-8")
+    mod = {"id": "planted", "paths": ["kiosk/"], "depends_on": [],
+           "removal": "Set `enabled: false`; remove this entry; run tools/gates.py."}
+    got = recipe_gaps([mod], tree)
+    check("registry one-segment path: prose and the module id are not references",
+          not any(" README.md names" in g for g in got), str(got))
+    check("registry one-segment path: `kiosk/...` is, and the recipe must name its file",
+          any(g.startswith("module 'planted': docs/README.md names kiosk/") for g in got),
+          str(got))
 
 
 def test_buglog_rule_4_reads_tracked_files_only(tmp: Path) -> None:

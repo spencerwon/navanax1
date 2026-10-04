@@ -27,7 +27,7 @@ is not finished.
 
 #### `reference-v1`
 
-1. Only after engine-v1 and kb-v1 are removed (both read it).
+1. Only after engine-v1, kb-v1 and desktop-app are removed (all three read it).
 2. Set `enabled: false` on this entry.
 3. Run `python3 tools/buglog.py --mark-removed reference-v1` (adds
    `removed_with_module: reference-v1` to every ledger entry citing these files that

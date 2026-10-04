@@ -1134,7 +1134,10 @@ def recipe_gaps(modules: list[dict[str, Any]], root: Path = ROOT) -> list[str]:
         mid = str(m.get("id"))
         own = _strs(m, "paths")
         gone = own + [p for d in dependants(modules, mid) for p in _strs(by_id[d], "paths")]
-        needles = [_norm(p) for p in own if _norm(p)]
+        # A one-segment directory (`name/`) is searched for with its slash: as a bare
+        # word it is prose or a module id, not a path (BUG-20261003-199).
+        needles = [_norm(p) + "/" if p.strip().endswith("/") and "/" not in _norm(p)
+                   else _norm(p) for p in own if _norm(p)]
         removal = m.get("removal") if isinstance(m.get("removal"), str) else ""
         for rel, text in live:
             if rel == registry or _under(rel, gone) or _names_file(removal, rel):
