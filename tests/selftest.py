@@ -7064,7 +7064,7 @@ def test_analyze_runs_on_growth_not_on_every_fold(tmp: Path) -> None:
     store it reads every index end to end, so a fold of 17,000 rows took 354 s
     and the page was always minutes behind the stream. It must run when the
     store has no statistics, and again only when `events` has grown by
-    ANALYZE_GROWTH -- never on every fold of a large store.
+    nothing on its own once large (BUG-095) -- never on every fold of a large store.
     """
     import navanax.normalize as _nm
     from navanax.normalize import Normalizer
@@ -7080,7 +7080,7 @@ def test_analyze_runs_on_growth_not_on_every_fold(tmp: Path) -> None:
         n.conn.commit()
     n.conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
     n.conn.commit()
-    saved = (_nm.ANALYZE_MIN_ROWS, _nm.ANALYZE_GROWTH)
+    saved = _nm.ANALYZE_MIN_ROWS
     _nm.ANALYZE_MIN_ROWS = 10           # pretend 10 rows is "large"
     try:
         add(20)
@@ -7091,17 +7091,24 @@ def test_analyze_runs_on_growth_not_on_every_fold(tmp: Path) -> None:
         add(1)
         check("analyze: a large store that grew by 5% is NOT analyzed again on the next fold",
               n._maybe_analyze() is False)
-        add(3)                            # 24 rows: +20% over the 20 analyzed
-        check("analyze: ...and is analyzed once it has grown by ANALYZE_GROWTH",
-              n._maybe_analyze() is True)
+        add(30)                           # +150%: still never, on a large store (BUG-095: 929 s)
+        check("analyze: ...and a large store is NEVER re-analyzed on its own, however much it grows "
+              "(BUG-095: the growth trigger stalled the Operator's fold for 929 s)",
+              n._maybe_analyze() is False)
+        _nm.ANALYZE_MIN_ROWS = 60          # now the store (51 rows) is "small" again, then crosses
+        add(1)
+        check("analyze: a small store is analyzed on every fold that adds rows", n._maybe_analyze() is True)
+        add(10)                           # 62 rows: crosses 60
+        check("analyze: ...and once more when it first crosses ANALYZE_MIN_ROWS",
+              n._maybe_analyze() is True and n._maybe_analyze() is False)
     finally:
-        _nm.ANALYZE_MIN_ROWS, _nm.ANALYZE_GROWTH = saved
+        _nm.ANALYZE_MIN_ROWS = saved
         n.close()
     # A store that already carries statistics counts growth from its size at open.
     n2 = Normalizer(tmp / "empty-lz", tmp / "analyze.sqlite")
     try:
         check("analyze: a store opened WITH statistics is not re-analyzed on its first fold",
-              n2._maybe_analyze() is False and n2._analyzed_rows == 24, str(n2._analyzed_rows))
+              n2._maybe_analyze() is False and n2._analyzed_rows == 62, str(n2._analyzed_rows))
     finally:
         n2.close()
 
@@ -7217,6 +7224,151 @@ def test_expired_standing_lives_are_found_by_index_not_by_scan(tmp: Path) -> Non
     check("expiring lives: the index is PARTIAL over exit_reason='censored', so it holds only standing lives",
           "WHERE exit_reason = 'censored'" in sql, sql)
     n.close()
+
+
+@needs("yaml")
+def test_maker_hour_rollup_answers_exactly_what_events_would(tmp: Path) -> None:
+    """BUG-20260915-096. makers over 30 days took 398 s live: every panel that
+    groups by maker read every row of the window. The fold now keeps a per-hour
+    rollup; whole hours come from it, partial edge hours and rows appended after
+    its watermark from `events`. The rollup path must equal the events path
+    exactly -- counts, per-type splits, first/last seen, ranking -- for windows
+    that start and end mid-hour, with NULL makers and out-of-order arrivals.
+    """
+    import random
+
+    import navanax.metrics as _mm
+    from navanax.metrics import MetricEngine, load_intervals
+    from navanax.normalize import Normalizer
+
+    n = Normalizer(tmp / "empty-lz", tmp / "rollup.sqlite")
+    rnd = random.Random(96)
+    base = 1_757_000_000.0
+    types = ("item_received_bid", "item_cancelled", "item_listed", "item_sold", "collection_offer",
+             "trait_offer", "order_invalidate")
+    makers = [f"0xm{i:02d}" for i in range(15)] + [None]
+    seq = [0]
+    def add(k: int, spread: float) -> None:
+        rows = []
+        for _ in range(k):
+            seq[0] += 1
+            ts = base + rnd.uniform(0, spread)                 # arrival order != valid_ts order
+            rows.append(("r", seq[0], "f", "x", "x", ts, ts, rnd.choice(types), "argonauts",
+                         str(rnd.randint(1, 40)), f"0xh{seq[0]}", rnd.choice(makers)))
+        n.conn.executemany(
+            "INSERT INTO events (run,seq,file,observed_at,valid_at,observed_ts,valid_ts,event_type,collection,"
+            "token_id,order_hash,maker) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        n.conn.commit()
+    add(4000, 3 * 86400)
+    check("rollup: advance_rollup folds every appended row, chunked",
+          n.advance_rollup(max_rows=1500) == 1500 and n.advance_rollup(max_rows=1500) == 1500
+          and n.advance_rollup() == 1000 and n.advance_rollup() == 0)
+    add(300, 3 * 86400)                                   # appended AFTER the watermark: not yet rolled up
+    eng = MetricEngine(n.conn, load_intervals(ROOT / "config" / "intervals.yaml"), "America/Chicago")
+    windows = [(base + 1234.5, base + 2 * 86400 + 777.25), (base + 100, base + 2000),
+               (base + 3600 * 5, base + 3600 * 29), (base - 50000, base + 4 * 86400)]
+    saved = _mm.ROLLUP_MAX_LAG
+    for s_, e_ in windows:
+        via_rollup = (eng.makers("argonauts", s_, e_, limit=50), eng.wallets("argonauts", s_, e_, limit=50, min_events=3),
+                      eng.event_mix("argonauts", s_, e_))
+        check("rollup: the rollup path was actually taken for this window",
+              eng._maker_type_agg("argonauts", s_, e_) is not None)
+        _mm.ROLLUP_MAX_LAG = -1                            # force the events path
+        try:
+            via_events = (eng.makers("argonauts", s_, e_, limit=50), eng.wallets("argonauts", s_, e_, limit=50, min_events=3),
+                          eng.event_mix("argonauts", s_, e_))
+        finally:
+            _mm.ROLLUP_MAX_LAG = saved
+        mk_r, mk_e = via_rollup[0], via_events[0]
+        check(f"rollup: makers equal the events path ({(e_ - s_) / 3600:.1f} h window)",
+              mk_r["top"] == mk_e["top"] and mk_r["total_events_with_maker"] == mk_e["total_events_with_maker"],
+              f"{mk_r['top'][:2]} vs {mk_e['top'][:2]}")
+        w_r, w_e = via_rollup[1], via_events[1]
+        check(f"rollup: wallets equal the events path -- rows, splits, first/last, totals ({(e_ - s_) / 3600:.1f} h)",
+              w_r["rows"] == w_e["rows"] and w_r["total_events"] == w_e["total_events"]
+              and w_r["total_events_with_maker"] == w_e["total_events_with_maker"]
+              and w_r["distinct_addresses"] == w_e["distinct_addresses"],
+              f"{w_r['rows'][:1]} vs {w_e['rows'][:1]}")
+        check(f"rollup: event mix equals the events path ({(e_ - s_) / 3600:.1f} h)",
+              sorted((x["event_type"], x["n"]) for x in via_rollup[2]) == sorted((x["event_type"], x["n"]) for x in via_events[2]))
+    s_, e_ = windows[0]
+    by_r = eng.wallets("argonauts", s_, e_, limit=5, sort="sales_as_maker")["rows"]
+    _mm.ROLLUP_MAX_LAG = -1
+    try:
+        by_e = eng.wallets("argonauts", s_, e_, limit=5, sort="sales_as_maker")["rows"]
+    finally:
+        _mm.ROLLUP_MAX_LAG = saved
+    check("wallets: ranking by another column (sales as maker) agrees on both paths and is descending",
+          by_r == by_e and [r["sales_as_maker"] for r in by_r] == sorted((r["sales_as_maker"] for r in by_r), reverse=True),
+          f"{[r['sales_as_maker'] for r in by_r]} vs {[r['sales_as_maker'] for r in by_e]}")
+    check("wallets: an unknown sort key falls back to events and is never interpolated into SQL",
+          eng.wallets("argonauts", s_, e_, limit=3, sort="n; DROP TABLE events")["rows"][0]["events"]
+          == eng.wallets("argonauts", s_, e_, limit=3)["rows"][0]["events"])
+    _mm.ROLLUP_MAX_LAG = 10                                # 300 rows behind > 10: falls back
+    try:
+        check("rollup: while the rollup lags the head of events it is not used (panels read events)",
+              eng._maker_type_agg("argonauts", base, base + 86400) is None)
+    finally:
+        _mm.ROLLUP_MAX_LAG = saved
+    cleared = n.reset_for_refold()
+    check("rollup: reset_for_refold clears the rollup with the rows it was derived from",
+          "maker_hour" in cleared and n.conn.execute("SELECT COUNT(*) FROM maker_hour").fetchone()[0] == 0
+          and n.conn.execute("SELECT COUNT(*) FROM rollup_state").fetchone()[0] == 0)
+    n.close()
+
+
+def test_cluster_bootstrap_counts_are_bit_identical_to_pooling() -> None:
+    """BUG-20260915-097. The bootstrap pooled each replicate's orders and refit
+    km_curve -- 96 % of a 14 s Flow request. It now sums per-cluster counts with
+    a multiplicity per cluster. Same rng draws, same integers, same arithmetic:
+    the band must be EXACTLY the band the pooled refit gives, on data with tied
+    durations, censoring, and an ended order whose cause is not a listed cause.
+    """
+    import bisect as _bs
+    import random
+
+    from navanax.metrics import SURVIVAL_CAUSES, _quantile, cluster_bootstrap, km_curve
+
+    rnd = random.Random(97)
+    clusters: dict[str, list[tuple[float, bool, str | None]]] = {}
+    for k in range(40):
+        obs = []
+        for _ in range(rnd.randint(1, 12)):
+            d = float(rnd.choice([1, 2, 3, 5, 8, 13, 21, 34, 55, 89]) + rnd.choice([0, 0, 0.5]))
+            ended = rnd.random() < 0.8
+            cause = rnd.choice(list(SURVIVAL_CAUSES) + ["unknown"]) if ended else None
+            obs.append((d, ended, cause))
+        clusters[f"c{k}"] = obs
+    grid = [0.0, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 100.0]
+    got = cluster_bootstrap(clusters, grid, b=60, seed=11)
+
+    # the pre-BUG-097 implementation, verbatim in substance
+    keys = list(clusters)
+    rng = random.Random(11)
+    s_draws = [[] for _ in grid]
+    c_draws = {c: [[] for _ in grid] for c in SURVIVAL_CAUSES}
+    for _ in range(60):
+        sample = []
+        for _ in range(len(keys)):
+            sample.extend(clusters[keys[rng.randrange(len(keys))]])
+        cur = km_curve(sample, SURVIVAL_CAUSES)
+        for gi, g in enumerate(grid):
+            i = _bs.bisect_right(cur["t"], g) - 1
+            s_draws[gi].append(cur["s"][i] if i >= 0 else 1.0)
+            for c in SURVIVAL_CAUSES:
+                c_draws[c][gi].append(cur["cif"][c][i] if i >= 0 else 0.0)
+    def band(draws):
+        lo, hi = [], []
+        for col in draws:
+            col.sort()
+            lo.append(_quantile(col, 0.025))
+            hi.append(_quantile(col, 0.975))
+        return lo, hi
+    ref_lo, ref_hi = band(s_draws)
+    check("bootstrap: the survival band is bit-identical to pooling and refitting every replicate",
+          got["s_lower"] == ref_lo and got["s_upper"] == ref_hi, f"{got['s_lower']} vs {ref_lo}")
+    same_cif = all(band(c_draws[c]) == (got["cif_lower"][c], got["cif_upper"][c]) for c in SURVIVAL_CAUSES)
+    check("bootstrap: ...and so is every cause's cumulative-incidence band", same_cif)
 
 
 @needs("yaml")

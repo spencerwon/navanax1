@@ -994,7 +994,7 @@ class Dashboard:
         slug = self._slug(q)
         with self.reader() as (_, eng):
             out = eng.wallets(slug, s, e, limit=int(q.get("limit", "50")),
-                              min_events=int(q.get("min_events", "0")))
+                              min_events=int(q.get("min_events", "0")), sort=q.get("sort", "events"))
             out["adjacency"] = eng.counterparty_adjacency(
                 slug, s, e, limit=min(40, int(q.get("adjacency_limit", "40"))))
         return out

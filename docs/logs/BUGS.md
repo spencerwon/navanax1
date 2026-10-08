@@ -1323,13 +1323,32 @@ orders whose expiry has passed scanned all 5.9 million lives to find the
 fourteen thousand standing ones, five times a minute. A partial index over the
 standing lives makes it a seek.
 
+## Round 27 — making it usable, 2026-10-08
+
+**BUG-20260915-095 (S2/P1).** The phase timings caught one fold stalled for
+929 s on `analyze`: the growth trigger's "sampled" ANALYZE was not cheap on a
+13 M-row store. Statistics describe the shape of the data, and a large store
+does not change shape by growing; ANALYZE now runs while the store is small,
+once when it crosses `ANALYZE_MIN_ROWS`, and never on its own after that.
+
+**BUG-20260915-096 (S2/P1).** Makers over 30 days: 398 s. Any count by maker
+over a window is a scan of the window. The fold now keeps an hourly
+per-maker, per-type rollup; makers, wallets and event mix read whole hours
+from it and only the edge hours from `events`, and every answer is asserted
+equal to the events path. Wallets can be ranked by any count column.
+
+**BUG-20260915-097 (S3/P2).** The Flow tab spent 96 % of each request in the
+bootstrap re-pooling the same orders fifty times. Replicates now sum
+per-cluster counts; the band is bit-identical, and an hour's curve went from
+14 s to 2.4 s.
+
 ### Still open
 
 | ID | Sev | Pri | Summary | Why it is open |
 |---|---|---|---|---|
 | BUG-20260910-065 | S3 | P3 | `bid_lifetimes` reads terminations as of the fold, with no `as_of` | Not reachable from the page; `survival()` supersedes it. Settling recommendation: delete `bid_lifetimes` after PR-8's corpus run, once the median comparison has been made. |
 
-93 of 94 logged bugs are fixed.
+96 of 97 logged bugs are fixed.
 
 ### The lesson
 
