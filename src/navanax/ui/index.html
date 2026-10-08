@@ -370,7 +370,9 @@ const C={ask:tok('--ask'),bid:tok('--bid'),coll:tok('--coll'),trait:tok('--trait
 const $=s=>document.querySelector(s);
 const esc=v=>v==null?'':String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeImg=u=>(typeof u==='string'&&/^(https:\/\/|data:image\/)/i.test(u))?esc(u):'';
-const J=async u=>{const r=await fetch(u);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
+const J=async u=>{const r=await fetch(u);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);// BUG-172: a cached answer carries when it was computed; never pass it off as fresh
+ const age=r.headers.get('X-Navanax-Age-Seconds');if(age!=null&&j&&typeof j==='object'&&!Array.isArray(j))Object.defineProperty(j,'_served',{value:{at:r.headers.get('X-Navanax-Computed-At'),age:+age},enumerable:false});return j};
+const servedNote=j=>{const s=j&&j._served;if(!s||s.age<20)return '';const m=Math.round(s.age/60);return ` · computed ${s.age<90?Math.round(s.age)+' s':m+' min'} ago (heavy panels refresh every few minutes)`};
 const qs=o=>Object.entries(o).filter(([,v])=>v!==undefined&&v!=='').map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join('&');
 const traitSpec=()=>Object.entries(S.traits).filter(([,v])=>v.length).map(([t,v])=>`${t}:${v.join('|')}`).join(';');
 const base=()=>({collection:$('#collection').value,interval:$('#interval').value,range:$('#range').value,denom:S.denom,transform:S.transform,traits:traitSpec()});
@@ -527,7 +529,7 @@ function priceCard(title,s,color,noun){
  const obs=v.filter(x=>x!=null).length;
  return kpiCard(title,iShow<0?'—':money2(v[iShow],S.denom),chip,v,color,stamps,
   `hourly buckets · ${obs} of ${v.length} hours had ${noun} · % = now vs 24 h ago`)}
-async function kpis(){const p=base();const m=await J('/api/multi?'+qs({collection:p.collection,traits:p.traits,denom:S.denom,transform:'ABS',interval:'1h',range:'24h',metrics:'floor_ask,collection_bid,volume,sales_count'}));
+async function kpis(){const p=base();const m=await J('/api/multi?'+qs({collection:p.collection,traits:p.traits,denom:S.denom,transform:'ABS',interval:'1h',range:'24h',metrics:'floor_ask,collection_bid,volume,sales_count',live:1}));
  const sum=v=>v.reduce((a,x)=>a+(x||0),0);const n=v=>v.filter(x=>x!=null).length;
  const vol=m.volume.v,sc=m.sales_count.v,t=m.volume.t;
  const volHoles=vol.length-n(vol),scHoles=sc.length-n(sc);
@@ -797,7 +799,7 @@ function survHead(r){
   +`${pcts}\n${rm}${res?'\nresidual survival — '+res:''}`}
 function survBasis(r){
  const out=[];
- out.push(`as of ${clock(r.basis.as_of)} ${S.tz} · window ${clock(r.basis.window.start)} → ${clock(r.basis.window.end)} · kind ${r.kind}`);   // textContent: see BUG-20260910-066
+ out.push(`as of ${clock(r.basis.as_of)} ${S.tz} · window ${clock(r.basis.window.start)} → ${clock(r.basis.window.end)} · kind ${r.kind}${servedNote(r)}`);   // textContent: see BUG-20260910-066
  out.push(`estimator: ${r.basis.estimator}`);
  out.push(`censoring: ${r.basis.censoring}`);
  if(r.unknown_terminator_n)out.push(`${fmt(r.unknown_terminator_n,0)} life/lives had a terminator we could not place in time — excluded from the risk set and counted, never called censored`);
@@ -820,8 +822,8 @@ async function surv(){
  if(!window.Plotly)return;
  const strip=r.mode==='strip';
  $('#s-sub').textContent=strip
-  ? `strip, no curve (n_eff = ${r.n_eff} < ${r.min_clusters}) — every observation, no percentiles`
-  : 'Kaplan–Meier · right-censored at as_of · competing risks · maker-episode cluster band';
+  ? `strip, no curve (n_eff = ${r.n_eff} < ${r.min_clusters}) — every observation, no percentiles`+servedNote(r)
+  : 'Kaplan–Meier · right-censored at as_of · competing risks · maker-episode cluster band'+servedNote(r);
  const xax={...L().xaxis,type:SURV.log?'log':'linear',fixedrange:true,showspikes:false,title:{text:'lifetime (s, log)',font:{color:C.tick,size:10}}};
  // (a) curve or strip -----------------------------------------------------
  let traces=[],lay;

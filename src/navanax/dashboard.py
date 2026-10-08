@@ -97,8 +97,225 @@ STORE_REOPEN_SECONDS = 60
 # even listening (`/api/gaps`, which is read from the landing zone's manifests).
 DEGRADED_ROUTES = frozenset({"/api/health", "/api/meta", "/api/gaps"})
 
+#: BUG-20261008-172. How long one computed answer is served before it is
+#: computed again, per route. The page reloads every panel of the open tab
+#: every 10 s, and on the Operator's 58 GB store the Flow tab's survival
+#: estimate takes 40-80 s: the next reload was queued behind the last, so the
+#: dashboard recomputed the same 1.3M-order curve back to back, forever, and
+#: the pure-Python bootstrap held the interpreter lock while it did -- the
+#: fold behind it stalled (25 s "read+insert" for 478 rows) and every other
+#: panel waited. An answer about the last 24 hours does not change in
+#: 10 seconds. Each response says when it was computed (`X-Navanax-Computed-At`
+#: and `X-Navanax-Age-Seconds`), so a cached answer is never passed off as a
+#: fresh one. Routes not listed here are always computed per request.
+RESPONSE_TTL_SECONDS: dict[str, float] = {
+    "/api/survival": 300.0,
+    "/api/survival_drill": 300.0,
+    "/api/trait_series": 30.0,
+    "/api/series": 15.0,
+    "/api/multi": 15.0,
+    "/api/trait_floors": 30.0,
+    "/api/screener": 15.0,
+}
+#: Routes whose expired answer is still served -- marked with its age -- while
+#: ONE background thread computes the next, up to this many seconds old. Only
+#: the slow statistical panels: waiting a minute for a curve that was already on
+#: screen is worse than seeing it labelled "computed 6 min ago" for that minute.
+RESPONSE_STALE_MAX_SECONDS: dict[str, float] = {
+    "/api/survival": 1800.0,
+    "/api/survival_drill": 1800.0,
+}
+#: Distinct answers kept. Each is the encoded JSON body, so a hit costs a dict
+#: lookup and a socket write -- not a re-serialisation of a large payload.
+RESPONSE_CACHE_MAX_ENTRIES = 64
+#: Total bytes of encoded answers kept, and the largest single answer worth
+#: keeping: a `/api/multi` of many metrics over 20k buckets is computed per
+#: request rather than parked in memory.
+RESPONSE_CACHE_MAX_BYTES = 64 * 1024 * 1024
+RESPONSE_CACHE_MAX_BODY_BYTES = 4 * 1024 * 1024
+#: Background refreshes running at once. Each is a heavy statistical
+#: computation that competes with the fold for the interpreter; two of them at
+#: once would rebuild the stall this cache exists to remove.
+RESPONSE_CACHE_MAX_REFRESHES = 1
+
+
+class _Flight:
+    """One computation in progress: waiters block on `done`; `error` is the owner's failure."""
+
+    __slots__ = ("done", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
+class ResponseCache:
+    """Encoded answers per (route, query, store generation), computed once at a time.
+
+    * **Single flight.** Requests for the same answer while it is being computed
+      -- the page's own next reload, a second tab -- WAIT for that computation
+      and get its answer, or its error, instead of starting another.
+    * **Honest age.** The stamp is taken when the computation STARTS, which is
+      the instant the answer describes (a survival curve's `as_of` defaults to
+      the end of its window, i.e. then). Every response reports it.
+    * **Stale while revalidate**, for the routes in `stale_max` only: an expired
+      answer is served, with its age, while ONE background thread computes the
+      next. A refresh that fails is not retried for one ttl.
+    * **Errors are never cached.** A failure is remembered only to stop retries
+      for one ttl; the stale answer keeps being served meanwhile.
+    * **The store generation is part of the key**, so nothing computed from a
+      store that has since been reopened (rebuilt, moved aside) is ever served.
+    * **Bounded** in entries and in bytes; expired entries go first, then the
+      ones that expire soonest -- never the expensive answer just because it is
+      computed rarely.
+    """
+
+    def __init__(self, ttl: dict[str, float] | None = None,
+                 stale_max: dict[str, float] | None = None,
+                 max_entries: int = RESPONSE_CACHE_MAX_ENTRIES,
+                 max_bytes: int = RESPONSE_CACHE_MAX_BYTES,
+                 max_body_bytes: int = RESPONSE_CACHE_MAX_BODY_BYTES,
+                 max_refreshes: int = RESPONSE_CACHE_MAX_REFRESHES,
+                 clock: Any = time.monotonic, wall: Any = time.time) -> None:
+        self.ttl = dict(RESPONSE_TTL_SECONDS if ttl is None else ttl)
+        self.stale_max = dict(RESPONSE_STALE_MAX_SECONDS if stale_max is None else stale_max)
+        self.max_entries, self.max_bytes, self.max_body_bytes = max_entries, max_bytes, max_body_bytes
+        self._clock, self._wall = clock, wall
+        self._lock = threading.Lock()
+        # key -> (mono at compute start, wall at compute start, body)
+        self._entries: dict[tuple[Any, ...], tuple[float, float, bytes]] = {}
+        self._inflight: dict[tuple[Any, ...], _Flight] = {}
+        self._failed_at: dict[tuple[Any, ...], float] = {}
+        self._refresh_slots = threading.BoundedSemaphore(max_refreshes)
+        self.stats = {"hits": 0, "stale_hits": 0, "misses": 0, "waited": 0, "refreshes": 0,
+                      "refresh_skipped": 0, "uncacheable_size": 0}
+
+    def cacheable(self, path: str) -> bool:
+        return path in self.ttl
+
+    @staticmethod
+    def key(path: str, q: dict[str, str], generation: int = 0) -> tuple[Any, ...]:
+        return (path, tuple(sorted(q.items())), generation)
+
+    def _keep_for(self, path: str) -> float:
+        return max(self.ttl[path], self.stale_max.get(path, 0.0))
+
+    def get(self, path: str, q: dict[str, str], compute: Any,
+            generation: int = 0) -> tuple[bytes, float, float]:
+        """(body, computed_at_wall, age_seconds). `compute()` returns encoded bytes."""
+        k = self.key(path, q, generation)
+        ttl = self.ttl[path]
+        stale_max = self.stale_max.get(path, 0.0)
+        while True:
+            with self._lock:
+                now = self._clock()
+                ent = self._entries.get(k)
+                if ent is not None:
+                    age = now - ent[0]
+                    if age < ttl:
+                        self.stats["hits"] += 1
+                        return ent[2], ent[1], age
+                    if age < stale_max:
+                        self.stats["stale_hits"] += 1
+                        self._maybe_refresh(k, compute, now, ttl)
+                        return ent[2], ent[1], age
+                flight = self._inflight.get(k)
+                if flight is None:
+                    flight = _Flight()
+                    self._inflight[k] = flight
+                    self.stats["misses"] += 1
+                    mine = True
+                else:
+                    self.stats["waited"] += 1
+                    mine = False
+            if not mine:
+                flight.done.wait()
+                if flight.error is not None:
+                    raise flight.error
+                continue          # the owner stored it: read it back under the lock
+            mono, wall = self._clock(), self._wall()
+            try:
+                body = compute()
+            except BaseException as exc:
+                flight.error = exc
+                raise
+            else:
+                self._store(k, mono, wall, body)
+                return body, wall, max(0.0, self._clock() - mono)
+            finally:
+                with self._lock:
+                    self._inflight.pop(k, None)
+                flight.done.set()
+
+    def _maybe_refresh(self, k: tuple[Any, ...], compute: Any, now: float, ttl: float) -> None:
+        """Start ONE background refresh for `k`, unless one is running or it failed recently.
+
+        Called with `_lock` held.
+        """
+        if k in self._inflight:
+            return
+        failed = self._failed_at.get(k)
+        if failed is not None and now - failed < ttl:
+            self.stats["refresh_skipped"] += 1
+            return
+        if not self._refresh_slots.acquire(blocking=False):
+            self.stats["refresh_skipped"] += 1       # another heavy refresh is running; next reload
+            return
+        flight = _Flight()
+        self._inflight[k] = flight
+        self.stats["refreshes"] += 1
+        threading.Thread(target=self._refresh, args=(k, compute, flight),
+                         daemon=True, name="navanax-cache-refresh").start()
+
+    def _refresh(self, k: tuple[Any, ...], compute: Any, flight: _Flight) -> None:
+        try:
+            mono, wall = self._clock(), self._wall()
+            self._store(k, mono, wall, compute())
+            with self._lock:
+                self._failed_at.pop(k, None)
+        except Exception as exc:  # noqa: BLE001 - the stale answer stays; retried after one ttl
+            flight.error = exc
+            with self._lock:
+                self._failed_at[k] = self._clock()
+            log.warning("background refresh of %s failed: %s: %s", k[0], type(exc).__name__, exc)
+        finally:
+            with self._lock:
+                self._inflight.pop(k, None)
+            flight.done.set()
+            self._refresh_slots.release()
+
+    def _store(self, k: tuple[Any, ...], mono: float, wall: float, body: bytes) -> None:
+        if len(body) > self.max_body_bytes:
+            with self._lock:
+                self.stats["uncacheable_size"] += 1
+                self._entries.pop(k, None)
+            return
+        with self._lock:
+            self._entries[k] = (mono, wall, body)
+            now = self._clock()
+            # 1. what can never be served again goes first
+            for kk in [kk for kk, (m, _w, _b) in self._entries.items()
+                       if now - m >= self._keep_for(kk[0])]:
+                del self._entries[kk]
+            # 2. then, over a bound, the answer that expires soonest
+            def size() -> int:
+                return sum(len(b) for _m, _w, b in self._entries.values())
+            while self._entries and (len(self._entries) > self.max_entries or size() > self.max_bytes):
+                soonest = min(self._entries,
+                              key=lambda kk: self._entries[kk][0] + self.ttl[kk[0]])
+                del self._entries[soonest]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._failed_at.clear()
+
+
 
 class Dashboard:
+    #: Set by `make_handler` (BUG-172); None when no HTTP server was made.
+    response_cache: ResponseCache | None = None
+
     def __init__(self, root: Path, cfg: dict[str, Any], slugs: list[str]) -> None:
         self.root = root
         self.cfg = cfg
@@ -163,6 +380,10 @@ class Dashboard:
         self.engine: MetricEngine | None = None
         self.store_error: dict[str, Any] | None = None
         self._reopen_mono: float = 0.0
+        #: Bumped whenever the store is (re)opened or its readers dropped
+        #: (BUG-172): cached answers and pooled readers from an older
+        #: generation are never used again.
+        self.store_generation = 0
         self._open_store()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="navanax-normalizer", daemon=True)
@@ -263,6 +484,7 @@ class Dashboard:
             return
         with self._readers_lock:
             pair = pool.pop() if pool else None
+            gen = getattr(self, "store_generation", 0)
         if pair is None:
             conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                    check_same_thread=False, timeout=30)
@@ -277,7 +499,8 @@ class Dashboard:
                 pair[0].rollback()
             keep = False
             with self._readers_lock:
-                if self.norm is not None and len(pool) < READER_POOL_MAX:
+                if (self.norm is not None and len(pool) < READER_POOL_MAX
+                        and gen == getattr(self, "store_generation", 0)):
                     pool.append(pair)
                     keep = True
             if not keep:
@@ -287,7 +510,11 @@ class Dashboard:
     def _drop_readers(self) -> None:
         """Close every pooled reader: the store was reopened or went bad."""
         with self._readers_lock:
+            self.store_generation = getattr(self, "store_generation", 0) + 1
             pairs, self._readers[:] = list(self._readers), []
+        cache = getattr(self, "response_cache", None)
+        if cache is not None:
+            cache.clear()
         for conn, _ in pairs:
             with contextlib.suppress(Exception):   # a close that fails has nothing left to lose
                 conn.close()
@@ -1329,6 +1556,9 @@ def make_handler(dash: Dashboard):
     # path per design §8.2.3, and a prefix match here is clearer than a regex
     # table for one entry.
     WALLET_PREFIX = "/api/wallet/"
+    # BUG-172: one cache per server, reachable from the Dashboard for tests and Health.
+    cache = ResponseCache()
+    dash.response_cache = cache
 
     class H(BaseHTTPRequestHandler):
         server_version = "navanax-dashboard/0.1"
@@ -1336,11 +1566,14 @@ def make_handler(dash: Dashboard):
         def log_message(self, fmt: str, *args: Any) -> None:
             log.debug(fmt, *args)
 
-        def _send(self, code: int, body: bytes, ctype: str) -> None:
+        def _send(self, code: int, body: bytes, ctype: str,
+                  extra: dict[str, str] | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for hk, hv in (extra or {}).items():
+                self.send_header(hk, hv)
             self.end_headers()
             self.wfile.write(body)
 
@@ -1366,11 +1599,22 @@ def make_handler(dash: Dashboard):
                     return
                 t_req = time.monotonic()
                 try:
-                    payload = handler(q)
+                    # `live=1`: a number the page presents as "now" (the KPI cards) asks
+                    # for a fresh computation and never a cached one (BUG-172).
+                    live = q.pop("live", None) == "1"
+                    if cache.cacheable(u.path) and not live:
+                        body, at, age = cache.get(
+                            u.path, q, lambda h=handler, qq=q: json.dumps(h(qq), default=str).encode(),
+                            getattr(dash, "store_generation", 0))
+                        extra = {"X-Navanax-Computed-At": datetime.fromtimestamp(at, tz=timezone.utc)
+                                 .isoformat().replace("+00:00", "Z"),
+                                 "X-Navanax-Age-Seconds": f"{age:.1f}"}
+                    else:
+                        body, extra = json.dumps(handler(q), default=str).encode(), None
                     took = time.monotonic() - t_req
                     if took >= SLOW_REQUEST_SECONDS:
                         log.warning("slow request: %s took %.1fs", self.path, took)
-                    self._send(200, json.dumps(payload, default=str).encode(), "application/json")
+                    self._send(200, body, "application/json", extra)
                 except (BrokenPipeError, ConnectionResetError):
                     # The browser gave up (a reload, a closed tab, its own
                     # timeout) before the answer was written. One line, not a

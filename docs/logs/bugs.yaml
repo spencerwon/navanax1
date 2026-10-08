@@ -3798,6 +3798,53 @@ bugs:
   monitor_gap: None new.
   regression_test:
     - tests/selftest.py::test_cluster_bootstrap_counts_are_bit_identical_to_pooling
+- id: BUG-20261008-172
+  summary: "After #23 deployed, the Flow tab's survival curve took 40-80 s per request on the 58 GB store and was recomputed back to back for as long as the tab was open; the 7-day trait chart took 55 s; a fold of 478 rows stalled 25 s behind them"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-08T02:10:00-05:00"
+  occurred_at: "2026-09-10T00:00:00-05:00"
+  resolved_at: "2026-10-08T02:40:00-05:00"
+  detected_by: "slow-request log after the #23 deploy: /api/survival range=24h 53-80 s and range=6h 37-41 s, repeating; cProfile on the snapshot: 1.34 M item-bid lives in one day, fetch 39 s, bootstrap 69 s"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/dashboard.py, line: 111}
+  - {file: src/navanax/ui/index.html, line: 373}
+  requirement: REQ-F-12
+  data_impact: None. Numbers are unchanged; a cached answer is served with the time it was computed (X-Navanax-Computed-At, X-Navanax-Age-Seconds) and the Flow panel prints its age.
+  root_cause: >-
+    The page reloads every panel of the open tab every 10 s and queues the next
+    reload behind the last. Each reload recomputed every answer from scratch, so
+    a 40-80 s survival estimate ran continuously, and its pure-Python bootstrap
+    held the interpreter lock while it did -- starving the fold and every other
+    request. The store grew about 4x since the last tuning (58 GB, 35 M events,
+    about 1.3 M item-bid lives a day), which moved survival from seconds to a
+    minute.
+  fix: >-
+    A per-route response cache in the HTTP handler. Survival and its drill-down
+    are kept 5 min and, once expired, served with their age while ONE background
+    thread recomputes (up to 30 min old, then recomputed in the request); trait
+    series, trait floors 30 s; series, multi, screener 15 s. Concurrent requests
+    for the same answer wait for one computation instead of starting another.
+    Errors are never cached; status, book, tape, ledger and health are never
+    cached, and the KPI cards ask with live=1, so a number shown as "now" is
+    always computed fresh. The encoded body is stored, so a hit costs a
+    dictionary lookup. Tech-lead review added: the stamp is taken when the
+    computation starts; waiters receive the owner's error; a failed refresh is
+    not retried for one ttl; one background refresh at a time; the store
+    generation is part of the key and a reopen clears the cache and retires old
+    pooled readers; bounded at 64 entries / 64 MB, answers over 4 MB not kept,
+    expired entries evicted first, then the soonest to expire.
+  monitor_gap: >-
+    The survival computation itself still scales with the number of item bids in
+    the window; it now runs at most once per five minutes per question, but each
+    run still competes with the fold. Moving it off the dashboard's interpreter
+    (a worker process) is the next step if the fold stalls persist.
+  regression_test:
+    - tests/selftest.py::test_a_heavy_panel_is_computed_once_not_on_every_reload
 
 
 # ---------------------------------------------------------------------------

@@ -1342,6 +1342,16 @@ bootstrap re-pooling the same orders fifty times. Replicates now sum
 per-cluster counts; the band is bit-identical, and an hour's curve went from
 14 s to 2.4 s.
 
+**BUG-20261008-172 (S2/P1).** Deployed, #23 made makers, wallets and mix
+instant, and the request log then named what was left: the Flow tab's survival
+curve took 40–80 s on a store that has grown to 58 GB and about 1.3 M item bids
+a day, and the page asked for it again every 10 s, so it was recomputed back to
+back for as long as the tab was open — and the fold stalled behind it. Heavy
+answers are now computed once per window (survival 5 min, trait charts 30 s,
+series 15 s), shared by every request that asks meanwhile, and served with the
+time they were computed; an expired survival curve stays on screen, labelled
+with its age, while one background refresh computes the next.
+
 ## Health subsystem — 2026-10-03
 
 The health subsystem (`docs/health/`) shares this ledger; its entries carry
@@ -1674,7 +1684,7 @@ changed, and a test plants both cases on a copy.
 | BUG-20261003-127 | S1 | P1 | The counted row drink_water_1L/05 (minimum urine osmolality) shares its only evidence (Baylis 1986) with U_os… | Open -- the curator's decision (row not changed; ranges are never widened): cite an independent source for the row and drop Baylis 1986 fro… |
 | BUG-20261003-128 | S2 | P1 | The registered "< 6 h" bound of the sodium recovery row has no traceable Crowe 1987 source value, and the row… | Open -- curator (extends BUG-20261003-115): find and quote the source value for 6 h, or record the bound as an assumption with that grade;… |
 
-159 of 173 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
+160 of 174 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
 
 ### The lesson
 
