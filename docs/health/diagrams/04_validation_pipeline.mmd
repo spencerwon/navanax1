@@ -1,0 +1,13 @@
+%% docs/health/06_ARCHITECTURE.md §4 — the validation pipeline from push to approval
+flowchart LR
+  subgraph CI["CI: push to main, pull request to main"]
+    direction LR
+    c1["selftest.py<br/>(stdlib, market)"] --> c2["health_selftest.py<br/>(stdlib)"] --> c3["health_kb_selftest.py<br/>(stdlib)"] --> c4["health_errors_selftest.py<br/>(stdlib)"] --> c5["pip install"] --> c6["all four, --no-skips"] --> c7["health.registry --check"] --> c8["health.cli kb-check"] --> c9["Node 22 · health_golden.mjs --check"] --> c10["zstd probe · codec contract<br/>(market)"] --> c11["buglog.py --check"] --> c12["ruff"] --> c13["pytest"] --> c14["secrets_check.py"] --> c15["signing grep · swallow_check.py ×2"]
+  end
+  subgraph REF["Model change, or new fixture sections"]
+    r1["node tools/health_golden.mjs"] --> r2["golden_v1.json regenerated<br/>(old sections byte-identical when only sections are added)"] --> r3["diff explained line by line"]
+  end
+  subgraph REV["Review"]
+    v1["health-rigor-lead<br/>re-derive · perturb · plant violations"] --> v2["tech-lead<br/>traceability · reality · PR description"] --> v3["health-safety-reviewer<br/>disclaimer · labels · framing"] --> v4(("⛔ Spencer"))
+  end
+  CI --> REF --> REV

@@ -1,0 +1,23 @@
+%% docs/health/06_ARCHITECTURE.md §1 — system context
+flowchart LR
+  Op(("Spencer<br/>Operator · L4<br/>approves every PR"))
+  subgraph SRC["Outside the repository"]
+    Lit["Literature<br/>DOI · PMID · textbooks"]
+    Onto["Ontologies and registries<br/>UBERON · CL · GO · KEGG · Reactome · UniProt · ChEBI · HGNC"]
+  end
+  subgraph HP["Health platform (this repository)"]
+    direction TB
+    KB[("Knowledge base<br/>entities · relations · evidence · verification log")]
+    PR[("Parameter table<br/>params.json — value · unit · range · grade · source")]
+    EN["Engine<br/>solver · model · scenarios · Monte Carlo · validate"]
+    VH["Validation<br/>golden equivalence · expectations · kb-check · gates"]
+    SF["Surfaces<br/>reference app · health.cli · (future) dashboard"]
+  end
+  Lit -->|"curator verifies, grades"| KB
+  Onto -->|"ids resolved, labels compared"| KB
+  KB -->|"quantities mirror rows"| PR
+  PR --> EN
+  EN --> VH
+  VH -->|"results with band, labels, disclaimer; expectation status beside them, not a filter"| SF
+  SF --> Op
+  Op -.->|"direction · decisions · PR approval"| HP

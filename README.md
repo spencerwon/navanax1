@@ -50,13 +50,41 @@ python3 tests/selftest.py --no-skips   # strict: a skip is a failure. What gates
 
 ```
 config/       thresholds, watchlist, intervals -- never in code (REQ-N-09)
+config/health/   the health subsystem's tolerances, seeds and module registry
 docs/         the contract: requirements, methodology, agents, validation,
               environments, bug taxonomy, time/units, storage
-.claude/      agent definitions (11), with model tiering for cost control
+docs/health/  the health subsystem's contract, architecture diagrams, ADRs, process log
+.claude/      agent definitions (15 shared + 4 health), with model tiering for cost control
 src/navanax/  errors · codec · landing · governor · opstore · stream · cli
+src/health/   the health subsystem's modules, one row each in docs/health/07
+reference/metabolic-map-v1/   the Operator's Metabolic Map V1, vendored verbatim
 tests/        selftest.py runs with zero third-party deps; tests that need one skip loudly
+              the health_*_selftest.py suites follow the same rule
 data/         landing zone + stores (gitignored -- irreplaceable, back up separately)
 ```
+
+## The health subsystem
+
+The same discipline applied to mechanistic models of human physiology, beginning with
+the Metabolic Map V1 (water, sodium, the kidney, arterial pressure): every parameter
+with a source and a grade, every output with an uncertainty band, every new expectation
+registered before its result (V1's were co-developed with the model), one model in two
+implementations held equal to 1e-9 on golden trajectories, and every module removable by
+a written recipe. **Educational and research only; never
+medical advice.** Start at [`docs/health/README.md`](docs/health/README.md).
+
+```bash
+PYTHONPATH=src python3 -m health.cli status      # versions, KB counts, grade share, KB contract, expectations, module flags, the disclaimer
+PYTHONPATH=src python3 -m health.cli kb-check    # every knowledge-base contract rule; exit 1 on an error
+PYTHONPATH=src python3 -m health.registry --check   # every module: fields, paths, tests, dependencies, removal recipe
+python3 tests/health_selftest.py --no-skips      # engine: golden equivalence, conservation, expectations
+python3 tests/health_kb_selftest.py --no-skips   # knowledge base: every rule, each with a planted violation
+python3 tests/health_errors_selftest.py --no-skips   # error hierarchy: severities, halt flags, never swallowed
+python3 tools/gates.py                           # every line above except `status` (a surface, not a gate), plus golden --check (a counted SKIPPED without Node), plus the repository's own gates
+```
+
+Every health module has a flag and a written removal recipe, held to the repository by a
+gate: [`docs/health/07_MODULE_REGISTRY.md`](docs/health/07_MODULE_REGISTRY.md).
 
 ## Storage, in one line each
 
@@ -74,4 +102,4 @@ Start at [`docs/README.md`](docs/README.md). Any new agent session reads docs 00
 
 `tests/selftest.py` is the real suite and covers the logic that is genuinely tricky: frame-flush crash recovery, manifest integrity and tamper detection, event-time range resolution across arrival-hour partitions, budget arithmetic, priority starvation, and out-of-order stream handling. It is the first thing CI runs, before any dependency is installed.
 
-The *runner* needs only the standard library; some tests do not. 79 of 187 test functions read `config/*.yaml` through PyYAML, declare it with `@needs("yaml")`, and are reported as **SKIPPED** — printed by name, counted in their own column, never counted as passed — when the module is absent. Run with `--no-skips` and a skip becomes a failure: that is the mode `tools/gates.py` uses, and the mode of the CI step that runs *after* `pip install`, so those 79 tests are genuinely executed on every push. Details and the rule against widening a `@needs` declaration: [`docs/03_VALIDATION_AND_TESTING.md` §4.6](docs/03_VALIDATION_AND_TESTING.md).
+The *runner* needs only the standard library; some tests do not. 88 of 202 test functions read `config/*.yaml` through PyYAML, declare it with `@needs("yaml")`, and are reported as **SKIPPED** — printed by name, counted in their own column, never counted as passed — when the module is absent. Run with `--no-skips` and a skip becomes a failure: that is the mode `tools/gates.py` uses, and the mode of the CI step that runs *after* `pip install`, so those 88 tests are genuinely executed on every push. Details and the rule against widening a `@needs` declaration: [`docs/03_VALIDATION_AND_TESTING.md` §4.6](docs/03_VALIDATION_AND_TESTING.md).

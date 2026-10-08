@@ -1,0 +1,2537 @@
+{
+  "kbVersion": "1.0.0",
+  "generated": "2026-10-01",
+  "curator": "Literature Curator + Data-Rigor Lead (Opus)",
+  "schema": "./schema.json",
+  "relations": [
+    {
+      "id": "rel:part_of:system:cardiovascular",
+      "from": "system:cardiovascular",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:system:renal",
+      "from": "system:renal",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:system:gi",
+      "from": "system:gi",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:leiper-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:system:endocrine",
+      "from": "system:endocrine",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:system:nervous",
+      "from": "system:nervous",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bourque-2008"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:system:musculoskeletal",
+      "from": "system:musculoskeletal",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:system:integumentary",
+      "from": "system:integumentary",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:wiig-2018"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:system:respiratory",
+      "from": "system:respiratory",
+      "to": "organism:body",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:heart",
+      "from": "organ:heart",
+      "to": "system:cardiovascular",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:aorta",
+      "from": "organ:aorta",
+      "to": "system:cardiovascular",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:vena-cava",
+      "from": "organ:vena-cava",
+      "to": "system:cardiovascular",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:potter-2006"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:kidney",
+      "from": "organ:kidney",
+      "to": "system:renal",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:ureters",
+      "from": "organ:ureters",
+      "to": "system:renal",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:bladder",
+      "from": "organ:bladder",
+      "to": "system:renal",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:stomach",
+      "from": "organ:stomach",
+      "to": "system:gi",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:leiper-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:intestine",
+      "from": "organ:intestine",
+      "to": "system:gi",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:peronnet-2012"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:small-intestine",
+      "from": "organ:small-intestine",
+      "to": "organ:intestine",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:leiper-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:liver",
+      "from": "organ:liver",
+      "to": "system:gi",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:lung",
+      "from": "organ:lung",
+      "to": "system:respiratory",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:pituitary",
+      "from": "organ:pituitary",
+      "to": "system:endocrine",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bourque-2008"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:hypothalamus",
+      "from": "organ:hypothalamus",
+      "to": "organ:brain",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bourque-2008"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:adrenal",
+      "from": "organ:adrenal",
+      "to": "system:endocrine",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:brain",
+      "from": "organ:brain",
+      "to": "system:nervous",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:zimmerman-2017"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organ:skin",
+      "from": "organ:skin",
+      "to": "system:integumentary",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:wiig-2018"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:muscle",
+      "from": "tissue:muscle",
+      "to": "system:musculoskeletal",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:cardiac-atrium",
+      "from": "tissue:cardiac-atrium",
+      "to": "organ:heart",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:potter-2006"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:supraoptic-nucleus",
+      "from": "tissue:supraoptic-nucleus",
+      "to": "organ:hypothalamus",
+      "type": "part_of",
+      "evidence": [
+        "ev:bourque-2008"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:paraventricular-nucleus",
+      "from": "tissue:paraventricular-nucleus",
+      "to": "organ:hypothalamus",
+      "type": "part_of",
+      "evidence": [
+        "ev:bourque-2008"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:ovlt",
+      "from": "tissue:ovlt",
+      "to": "organ:brain",
+      "type": "part_of",
+      "evidence": [
+        "ev:bourque-2008",
+        "ev:zimmerman-2017"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:subfornical-organ",
+      "from": "tissue:subfornical-organ",
+      "to": "organ:brain",
+      "type": "part_of",
+      "evidence": [
+        "ev:zimmerman-2017"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:adrenal-cortex",
+      "from": "tissue:adrenal-cortex",
+      "to": "organ:adrenal",
+      "type": "part_of",
+      "evidence": [
+        "ev:vinson-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:zona-glomerulosa",
+      "from": "tissue:zona-glomerulosa",
+      "to": "tissue:adrenal-cortex",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:renal-cortex",
+      "from": "tissue:renal-cortex",
+      "to": "organ:kidney",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:renal-medulla",
+      "from": "tissue:renal-medulla",
+      "to": "organ:kidney",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:brezis-rosen-1995"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:nephron",
+      "from": "tissue:nephron",
+      "to": "organ:kidney",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:bertram-2011"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder). Carries the nephron-count quantity.",
+      "quantity": {
+        "value": 950000,
+        "unit": "nephrons per kidney",
+        "range": [
+          200000,
+          2500000
+        ],
+        "grade": "B-textbook",
+        "evidence": [
+          "ev:bertram-2011"
+        ],
+        "measure": "Nephron (glomerular) number per kidney, adult human autopsy stereology",
+        "notes": "Average \"approximately 900,000 to 1 million\"; individual kidneys range \"approximately 200,000 to >2.5 million\" (inter-individual extremes, not a CI). Value = midpoint of the reported average. Graded B because the number is taken from a narrative review (of the authors' own autopsy stereology series), not from the primary papers; V2: cite the primary stereology papers to reach A-primary."
+      }
+    },
+    {
+      "id": "rel:part_of:tissue:glomerulus",
+      "from": "tissue:glomerulus",
+      "to": "tissue:nephron",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:pavenstadt-2003"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:proximal-tubule",
+      "from": "tissue:proximal-tubule",
+      "to": "tissue:nephron",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:loop-of-henle",
+      "from": "tissue:loop-of-henle",
+      "to": "tissue:nephron",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:gamba-2005"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:thick-ascending-limb",
+      "from": "tissue:thick-ascending-limb",
+      "to": "tissue:loop-of-henle",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:gamba-2005"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:distal-tubule",
+      "from": "tissue:distal-tubule",
+      "to": "tissue:nephron",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:distal-convoluted-tubule",
+      "from": "tissue:distal-convoluted-tubule",
+      "to": "tissue:distal-tubule",
+      "type": "part_of",
+      "evidence": [
+        "ev:gamba-2005",
+        "ev:palmer-schnermann-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:collecting-duct",
+      "from": "tissue:collecting-duct",
+      "to": "tissue:nephron",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:juxtaglomerular-apparatus",
+      "from": "tissue:juxtaglomerular-apparatus",
+      "to": "tissue:nephron",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:tissue:macula-densa",
+      "from": "tissue:macula-densa",
+      "to": "tissue:juxtaglomerular-apparatus",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:principal",
+      "from": "cell:principal",
+      "to": "tissue:nephron",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:intercalated",
+      "from": "cell:intercalated",
+      "to": "tissue:collecting-duct",
+      "type": "part_of",
+      "evidence": [
+        "ev:roy-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:podocyte",
+      "from": "cell:podocyte",
+      "to": "tissue:glomerulus",
+      "type": "part_of",
+      "evidence": [
+        "ev:pavenstadt-2003"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:juxtaglomerular",
+      "from": "cell:juxtaglomerular",
+      "to": "tissue:juxtaglomerular-apparatus",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:pt-epithelial",
+      "from": "cell:pt-epithelial",
+      "to": "tissue:proximal-tubule",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:tal-epithelial",
+      "from": "cell:tal-epithelial",
+      "to": "tissue:thick-ascending-limb",
+      "type": "part_of",
+      "evidence": [
+        "ev:gamba-2005"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:dct-epithelial",
+      "from": "cell:dct-epithelial",
+      "to": "tissue:distal-convoluted-tubule",
+      "type": "part_of",
+      "evidence": [
+        "ev:gamba-2005"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:macula-densa",
+      "from": "cell:macula-densa",
+      "to": "tissue:macula-densa",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:magnocellular",
+      "from": "cell:magnocellular",
+      "to": "tissue:supraoptic-nucleus",
+      "type": "part_of",
+      "evidence": [
+        "ev:bourque-2008"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:zona-glomerulosa",
+      "from": "cell:zona-glomerulosa",
+      "to": "tissue:zona-glomerulosa",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:atrial-myocyte",
+      "from": "cell:atrial-myocyte",
+      "to": "tissue:cardiac-atrium",
+      "type": "part_of",
+      "evidence": [
+        "ev:potter-2006"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:cell:skeletal-muscle-fiber",
+      "from": "cell:skeletal-muscle-fiber",
+      "to": "tissue:muscle",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organelle:principal-apical-membrane",
+      "from": "organelle:principal-apical-membrane",
+      "to": "cell:principal",
+      "type": "part_of",
+      "evidence": [
+        "ev:pearce-2015",
+        "ev:nielsen-1995"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organelle:principal-basolateral-membrane",
+      "from": "organelle:principal-basolateral-membrane",
+      "to": "cell:principal",
+      "type": "part_of",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organelle:aqp2-vesicle",
+      "from": "organelle:aqp2-vesicle",
+      "to": "cell:principal",
+      "type": "part_of",
+      "evidence": [
+        "ev:nielsen-1995"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organelle:principal-nucleus",
+      "from": "organelle:principal-nucleus",
+      "to": "cell:principal",
+      "type": "part_of",
+      "evidence": [
+        "ev:rossier-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organelle:avp-neurosecretory-vesicle",
+      "from": "organelle:avp-neurosecretory-vesicle",
+      "to": "cell:magnocellular",
+      "type": "part_of",
+      "evidence": [
+        "ev:bourque-2008"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:organelle:jg-secretory-granule",
+      "from": "organelle:jg-secretory-granule",
+      "to": "cell:juxtaglomerular",
+      "type": "part_of",
+      "evidence": [
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:pathway:adh-aqp2",
+      "from": "pathway:adh-aqp2",
+      "to": "cell:principal",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-1995"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:pathway:raas",
+      "from": "pathway:raas",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:pathway:aldosterone-mr-enac",
+      "from": "pathway:aldosterone-mr-enac",
+      "to": "cell:principal",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:rossier-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:pathway:anp-npra-cgmp",
+      "from": "pathway:anp-npra-cgmp",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:potter-2006",
+        "ev:kuhn-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:osmoreception",
+      "from": "process:osmoreception",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:bourque-2008",
+        "ev:robertson-athar-1976"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:thirst",
+      "from": "process:thirst",
+      "to": "organ:brain",
+      "type": "located_in",
+      "evidence": [
+        "ev:zimmerman-2017",
+        "ev:hughes-2018"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:pressure-natriuresis",
+      "from": "process:pressure-natriuresis",
+      "to": "organ:kidney",
+      "type": "located_in",
+      "evidence": [
+        "ev:ivy-bailey-2014",
+        "ev:hall-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:na-k-atpase-cycle",
+      "from": "process:na-k-atpase-cycle",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:post-jolly-1957"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:glomerular-filtration",
+      "from": "process:glomerular-filtration",
+      "to": "tissue:glomerulus",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:levey-2009"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:tubular-na-reabsorption",
+      "from": "process:tubular-na-reabsorption",
+      "to": "tissue:nephron",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:renin-secretion",
+      "from": "process:renin-secretion",
+      "to": "cell:juxtaglomerular",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:process:aldosterone-synthesis",
+      "from": "process:aldosterone-synthesis",
+      "to": "cell:zona-glomerulosa",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:water",
+      "from": "molecule:water",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:na",
+      "from": "molecule:na",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:hew-butler-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:k",
+      "from": "molecule:k",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:cl",
+      "from": "molecule:cl",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:gamba-2005"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:urea",
+      "from": "molecule:urea",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:glucose",
+      "from": "molecule:glucose",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:avp",
+      "from": "molecule:avp",
+      "to": "pathway:adh-aqp2",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:robertson-athar-1976"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:aldosterone",
+      "from": "molecule:aldosterone",
+      "to": "cell:zona-glomerulosa",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:rossier-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:anp",
+      "from": "molecule:anp",
+      "to": "cell:atrial-myocyte",
+      "type": "located_in",
+      "evidence": [
+        "ev:potter-2006",
+        "ev:yandle-1986"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:angiotensinogen",
+      "from": "molecule:angiotensinogen",
+      "to": "pathway:raas",
+      "type": "part_of",
+      "evidence": [
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:angiotensin-i",
+      "from": "molecule:angiotensin-i",
+      "to": "pathway:raas",
+      "type": "part_of",
+      "evidence": [
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:angiotensin-ii",
+      "from": "molecule:angiotensin-ii",
+      "to": "pathway:raas",
+      "type": "part_of",
+      "evidence": [
+        "ev:sparks-2014",
+        "ev:forrester-2018"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:renin",
+      "from": "molecule:renin",
+      "to": "cell:juxtaglomerular",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:ace",
+      "from": "molecule:ace",
+      "to": "pathway:raas",
+      "type": "part_of",
+      "evidence": [
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:camp",
+      "from": "molecule:camp",
+      "to": "pathway:adh-aqp2",
+      "type": "part_of",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:guyton-hall-2021"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:cgmp",
+      "from": "molecule:cgmp",
+      "to": "pathway:anp-npra-cgmp",
+      "type": "part_of",
+      "evidence": [
+        "ev:potter-2006"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:atp",
+      "from": "molecule:atp",
+      "to": "organism:body",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sejersted-1982"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:aqp2",
+      "from": "molecule:aqp2",
+      "to": "organelle:principal-apical-membrane",
+      "type": "located_in",
+      "evidence": [
+        "ev:nielsen-1995",
+        "ev:nielsen-2002"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:aqp3",
+      "from": "molecule:aqp3",
+      "to": "organelle:principal-basolateral-membrane",
+      "type": "located_in",
+      "evidence": [
+        "ev:nielsen-2002"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:enac",
+      "from": "molecule:enac",
+      "to": "organelle:principal-apical-membrane",
+      "type": "located_in",
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:na-k-atpase",
+      "from": "molecule:na-k-atpase",
+      "to": "process:na-k-atpase-cycle",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:skou-1957"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:nkcc2",
+      "from": "molecule:nkcc2",
+      "to": "cell:tal-epithelial",
+      "type": "located_in",
+      "evidence": [
+        "ev:gamba-2005"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:ncc",
+      "from": "molecule:ncc",
+      "to": "cell:dct-epithelial",
+      "type": "located_in",
+      "evidence": [
+        "ev:gamba-2005"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:v2r",
+      "from": "molecule:v2r",
+      "to": "organelle:principal-basolateral-membrane",
+      "type": "located_in",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:at1r",
+      "from": "molecule:at1r",
+      "to": "pathway:raas",
+      "type": "part_of",
+      "evidence": [
+        "ev:forrester-2018",
+        "ev:sparks-2014"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:mr",
+      "from": "molecule:mr",
+      "to": "pathway:aldosterone-mr-enac",
+      "type": "part_of",
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:npr-a",
+      "from": "molecule:npr-a",
+      "to": "pathway:anp-npra-cgmp",
+      "type": "part_of",
+      "evidence": [
+        "ev:potter-2006",
+        "ev:kuhn-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:gs-alpha",
+      "from": "molecule:gs-alpha",
+      "to": "pathway:adh-aqp2",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:ac6",
+      "from": "molecule:ac6",
+      "to": "pathway:adh-aqp2",
+      "type": "part_of",
+      "evidence": [
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:pka",
+      "from": "molecule:pka",
+      "to": "pathway:adh-aqp2",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:located_in:molecule:romk",
+      "from": "molecule:romk",
+      "to": "organelle:principal-apical-membrane",
+      "type": "located_in",
+      "evidence": [
+        "ev:pearce-2015"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:part_of:molecule:cyp11b2",
+      "from": "molecule:cyp11b2",
+      "to": "process:aldosterone-synthesis",
+      "type": "part_of",
+      "evidence": [
+        "ev:vinson-2016"
+      ],
+      "notes": "Hierarchy edge mirroring the entity parent field (primary containment used by the scale ladder)."
+    },
+    {
+      "id": "rel:loc:principal-in-cd",
+      "from": "cell:principal",
+      "to": "tissue:collecting-duct",
+      "type": "located_in",
+      "notes": "The entity parent is tissue:nephron (kept for the viewer ladder chain); this edge records the exact segment.",
+      "evidence": [
+        "ev:pearce-2015",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "rel:loc:magnocellular-in-pvn",
+      "from": "cell:magnocellular",
+      "to": "tissue:paraventricular-nucleus",
+      "type": "located_in",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "rel:loc:avp-vesicles-in-pituitary",
+      "from": "organelle:avp-neurosecretory-vesicle",
+      "to": "organ:pituitary",
+      "type": "located_in",
+      "evidence": [
+        "ev:bourque-2008",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:loc:pt-in-cortex",
+      "from": "tissue:proximal-tubule",
+      "to": "tissue:renal-cortex",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:loc:glomerulus-in-cortex",
+      "from": "tissue:glomerulus",
+      "to": "tissue:renal-cortex",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:loc:loop-in-medulla",
+      "from": "tissue:loop-of-henle",
+      "to": "tissue:renal-medulla",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:loc:cd-spans-medulla",
+      "from": "tissue:collecting-duct",
+      "to": "tissue:renal-medulla",
+      "type": "located_in",
+      "notes": "Collecting ducts run from cortex through medulla; recorded for the medullary part.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:loc:md-part-of-tal",
+      "from": "tissue:macula-densa",
+      "to": "tissue:thick-ascending-limb",
+      "type": "part_of",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "rel:loc:kidney-adrenal",
+      "from": "organ:adrenal",
+      "to": "organ:kidney",
+      "type": "located_in",
+      "notes": "Anatomical adjacency (adrenal sits on the upper pole); not a part-of relation.",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:expr:aqp2-principal",
+      "from": "molecule:aqp2",
+      "to": "cell:principal",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "rel:expr:aqp3-principal",
+      "from": "molecule:aqp3",
+      "to": "cell:principal",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "rel:expr:enac-principal",
+      "from": "molecule:enac",
+      "to": "cell:principal",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:pearce-2015",
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "rel:expr:romk-principal",
+      "from": "molecule:romk",
+      "to": "cell:principal",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:expr:v2r-principal",
+      "from": "molecule:v2r",
+      "to": "cell:principal",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:expr:mr-principal",
+      "from": "molecule:mr",
+      "to": "cell:principal",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:expr:nka-principal",
+      "from": "molecule:na-k-atpase",
+      "to": "cell:principal",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "rel:expr:nka-pt",
+      "from": "molecule:na-k-atpase",
+      "to": "cell:pt-epithelial",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:expr:nka-tal",
+      "from": "molecule:na-k-atpase",
+      "to": "cell:tal-epithelial",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:expr:nkcc2-tal",
+      "from": "molecule:nkcc2",
+      "to": "cell:tal-epithelial",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:expr:nkcc2-md",
+      "from": "molecule:nkcc2",
+      "to": "cell:macula-densa",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:gamba-2005",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:expr:ncc-dct",
+      "from": "molecule:ncc",
+      "to": "cell:dct-epithelial",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:expr:renin-jg",
+      "from": "molecule:renin",
+      "to": "cell:juxtaglomerular",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:expr:agt-liver",
+      "from": "molecule:angiotensinogen",
+      "to": "organ:liver",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:sparks-2014",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:expr:ace-lung",
+      "from": "molecule:ace",
+      "to": "organ:lung",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:expr:at1r-zg",
+      "from": "molecule:at1r",
+      "to": "cell:zona-glomerulosa",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:forrester-2018",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:expr:at1r-pt",
+      "from": "molecule:at1r",
+      "to": "cell:pt-epithelial",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:forrester-2018",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:expr:cyp11b2-zg",
+      "from": "molecule:cyp11b2",
+      "to": "cell:zona-glomerulosa",
+      "type": "expressed_in",
+      "conflicts": [
+        {
+          "claim": "Glomerulosa may lack the full enzyme suite for autonomous aldosterone synthesis (zonal cooperation proposed).",
+          "evidence": [
+            "ev:vinson-2016"
+          ],
+          "note": "Vinson 2016 (largely rodent data) challenges strict zonal autonomy; the textbook model (Guyton & Hall) assigns aldosterone synthesis to the zona glomerulosa. Both kept; V1 viewer follows the textbook model."
+        }
+      ],
+      "evidence": [
+        "ev:vinson-2016"
+      ]
+    },
+    {
+      "id": "rel:expr:npra-cd",
+      "from": "molecule:npr-a",
+      "to": "tissue:collecting-duct",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "rel:expr:avp-magno",
+      "from": "molecule:avp",
+      "to": "cell:magnocellular",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "rel:expr:anp-atrial",
+      "from": "molecule:anp",
+      "to": "cell:atrial-myocyte",
+      "type": "expressed_in",
+      "evidence": [
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "rel:adh:pituitary-produces-avp",
+      "from": "organ:pituitary",
+      "to": "molecule:avp",
+      "type": "produces",
+      "quantity": {
+        "value": 1.4,
+        "unit": "pg/mL",
+        "range": [
+          0.76,
+          2.06
+        ],
+        "grade": "A-primary",
+        "evidence": [
+          "ev:baylis-1986"
+        ],
+        "measure": "Basal plasma AVP, healthy hydrated adult men (immunoassay)",
+        "notes": "Baylis 1986: immunoreactive AVP 1.3 ± 0.3 pmol/L (mean ± SEM, n = 8). Converted with M = 1084.25 g/mol (ChEBI CHEBI:34543): 1.41 pg/mL. Range = mean ± 2 SEM. Assay-dependent: see conflicts.",
+        "conflicts": [
+          {
+            "claim": "Cytochemical bioassay in the same subjects gave 0.96 ± 0.14 pmol/L (≈1.04 pg/mL).",
+            "value": 1.04,
+            "unit": "pg/mL",
+            "evidence": [
+              "ev:baylis-1986"
+            ],
+            "note": "Same study, different assay; both kept."
+          },
+          {
+            "claim": "Regression y = 0.35(x − 281.0) predicts ≈2.1 pg/mL at a plasma osmolality of 287 mOsm/kg.",
+            "value": 2.1,
+            "unit": "pg/mL",
+            "evidence": [
+              "ev:robertson-athar-1976"
+            ],
+            "note": "Different cohort and assay; the engine state ADH (typical 1–3 pg/mL) spans both."
+          }
+        ]
+      },
+      "evidence": [
+        "ev:baylis-1986",
+        "ev:robertson-athar-1976"
+      ]
+    },
+    {
+      "id": "rel:adh:magno-produces-avp",
+      "from": "cell:magnocellular",
+      "to": "molecule:avp",
+      "type": "produces",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "rel:adh:avp-activates-v2r",
+      "from": "molecule:avp",
+      "to": "molecule:v2r",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:adh:v2r-activates-gs",
+      "from": "molecule:v2r",
+      "to": "molecule:gs-alpha",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "rel:adh:gs-activates-ac6",
+      "from": "molecule:gs-alpha",
+      "to": "molecule:ac6",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:adh:ac6-produces-camp",
+      "from": "molecule:ac6",
+      "to": "molecule:camp",
+      "type": "produces",
+      "evidence": [
+        "ev:pearce-2015",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:adh:ac6-consumes-atp",
+      "from": "molecule:ac6",
+      "to": "molecule:atp",
+      "type": "consumes",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:adh:camp-activates-pka",
+      "from": "molecule:camp",
+      "to": "molecule:pka",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "rel:adh:pka-aqp2-insertion",
+      "from": "molecule:pka",
+      "to": "molecule:aqp2",
+      "type": "regulates_up",
+      "notes": "Phosphorylation-dependent translocation of AQP2 from storage vesicles to the apical membrane; reversible on AVP withdrawal (Nielsen 1995, rat).",
+      "evidence": [
+        "ev:nielsen-2002",
+        "ev:nielsen-1995"
+      ]
+    },
+    {
+      "id": "rel:adh:aqp2-vesicle-store",
+      "from": "molecule:aqp2",
+      "to": "organelle:aqp2-vesicle",
+      "type": "located_in",
+      "evidence": [
+        "ev:nielsen-1995"
+      ]
+    },
+    {
+      "id": "rel:adh:aqp2-transports-water",
+      "from": "molecule:aqp2",
+      "to": "molecule:water",
+      "type": "transports",
+      "quantity": {
+        "value": 92,
+        "unit": "µm/s",
+        "range": [
+          55,
+          146
+        ],
+        "grade": "D-animal",
+        "evidence": [
+          "ev:wang-2020"
+        ],
+        "measure": "Vasopressin-stimulated (50 pM) osmotic water permeability Pf of isolated perfused rat inner medullary collecting duct",
+        "notes": "Three series in Wang 2020: 146 ± 16 (female, N=3), 92 ± 14 (male, N=3), 55 ± 10 µm/s (N=4); value = median of series means, range = span of series means. Rat, in vitro; the human value and the fold-change versus no AVP are NOT established here (V2 gap).",
+        "conflicts": [
+          {
+            "claim": "Vasopressin-independent Pf of about 300 µm/s in IMCDs from 24-h water-deprived rats.",
+            "value": 300,
+            "unit": "µm/s",
+            "evidence": [
+              "ev:han-1994"
+            ],
+            "note": "Higher than the AVP-stimulated values above; differs in animal hydration state (dehydrated donors) and laboratory. Not reconciled."
+          },
+          {
+            "claim": "Transcellular Posm 36.0 ± 2.4 µm/s with AVP in thirsted-rat IMCDs.",
+            "value": 36,
+            "unit": "µm/s",
+            "evidence": [
+              "ev:flamion-1995"
+            ],
+            "note": "Expressed per unit basolateral membrane area corrected for infoldings, so not on the same area basis as luminal Pf; not directly comparable."
+          }
+        ]
+      },
+      "evidence": [
+        "ev:wang-2020",
+        "ev:nielsen-1995"
+      ]
+    },
+    {
+      "id": "rel:adh:aqp3-transports-water",
+      "from": "molecule:aqp3",
+      "to": "molecule:water",
+      "type": "transports",
+      "evidence": [
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "rel:adh:pathway-regulates-water-reabsorption",
+      "from": "pathway:adh-aqp2",
+      "to": "tissue:collecting-duct",
+      "type": "regulates_up",
+      "notes": "Net effect: increases collecting-duct water permeability and water reabsorption (antidiuresis).",
+      "evidence": [
+        "ev:nielsen-1995",
+        "ev:nielsen-2002"
+      ]
+    },
+    {
+      "id": "rel:osm:ovlt-osmoreception",
+      "from": "tissue:ovlt",
+      "to": "process:osmoreception",
+      "type": "part_of",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "rel:osm:magno-osmoreception",
+      "from": "cell:magnocellular",
+      "to": "process:osmoreception",
+      "type": "part_of",
+      "notes": "Magnocellular neurons are themselves intrinsically osmosensitive (rodent cellular data).",
+      "evidence": [
+        "ev:bourque-2008"
+      ]
+    },
+    {
+      "id": "rel:osm:osmoreception-avp",
+      "from": "process:osmoreception",
+      "to": "molecule:avp",
+      "type": "regulates_up",
+      "quantity": {
+        "value": 0.35,
+        "unit": "pg/mL per mOsm/kg",
+        "range": [
+          0.25,
+          0.45
+        ],
+        "grade": "A-primary",
+        "evidence": [
+          "ev:robertson-athar-1976",
+          "ev:thompson-1986"
+        ],
+        "engineParam": "adh_slope",
+        "measure": "Slope of plasma AVP vs plasma osmolality above threshold",
+        "notes": "Mirrors engine parameter adh_slope. Threshold (x-intercept) is engine adh_threshold = 281.0 [278.0, 285.5] mOsm/kg.",
+        "conflicts": [
+          {
+            "claim": "Osmotic threshold 281.0 mOsm/kg recumbent; 277.8 upright; 282 during hypertonic saline.",
+            "evidence": [
+              "ev:robertson-athar-1976"
+            ],
+            "note": "Volume status shifts the threshold."
+          },
+          {
+            "claim": "Osmotic threshold about 285 mOsm/kg.",
+            "value": 285,
+            "unit": "mOsm/kg",
+            "evidence": [
+              "ev:thompson-1986"
+            ],
+            "note": "Different cohort and protocol (hypertonic saline infusion). Inside the engine range [278.0, 285.5]."
+          },
+          {
+            "claim": "Pooled AVP threshold 284.3 ± 0.71 mOsm/kg.",
+            "value": 284.3,
+            "unit": "mOsm/kg",
+            "evidence": [
+              "ev:hughes-2018"
+            ],
+            "note": "Systematic-review pooled value; higher than Robertson & Athar recumbent 281.0. Inside the engine range."
+          },
+          {
+            "claim": "Curvilinear AVP-osmolality relation that \"militated against the concept of an osmotic threshold\".",
+            "evidence": [
+              "ev:baylis-1986"
+            ],
+            "note": "Structural disagreement with the threshold-linear model used by the engine; kept visible."
+          }
+        ]
+      },
+      "evidence": [
+        "ev:robertson-athar-1976",
+        "ev:thompson-1986",
+        "ev:baylis-1986"
+      ]
+    },
+    {
+      "id": "rel:osm:osmoreception-thirst",
+      "from": "process:osmoreception",
+      "to": "process:thirst",
+      "type": "regulates_up",
+      "quantity": {
+        "value": 285.2,
+        "unit": "mOsm/kg",
+        "range": [
+          281,
+          287
+        ],
+        "grade": "A-meta",
+        "evidence": [
+          "ev:hughes-2018",
+          "ev:thompson-1986"
+        ],
+        "engineParam": "thirst_threshold",
+        "measure": "Plasma osmolality at which thirst begins",
+        "notes": "Mirrors engine parameter thirst_threshold (systematic review pooled value).",
+        "conflicts": [
+          {
+            "claim": "Thirst threshold 281 mOsm/kg, similar to the AVP threshold.",
+            "value": 281,
+            "unit": "mOsm/kg",
+            "evidence": [
+              "ev:thompson-1986"
+            ],
+            "note": "Single study; at the lower bound of the engine range [281, 287]."
+          },
+          {
+            "claim": "Common teaching that the thirst threshold lies several mOsm/kg above the AVP threshold.",
+            "evidence": [
+              "ev:hughes-2018",
+              "ev:thompson-1986"
+            ],
+            "note": "Not supported by these sources, which find the thresholds similar. Teaching claim is not itself cited here because no verified source for it was located."
+          }
+        ]
+      },
+      "evidence": [
+        "ev:hughes-2018",
+        "ev:thompson-1986",
+        "ev:zimmerman-2017"
+      ]
+    },
+    {
+      "id": "rel:thirst:sfo-thirst",
+      "from": "tissue:subfornical-organ",
+      "to": "process:thirst",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:zimmerman-2017"
+      ]
+    },
+    {
+      "id": "rel:thirst:angii-thirst",
+      "from": "molecule:angiotensin-ii",
+      "to": "process:thirst",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:zimmerman-2017",
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:thirst:brain-hosts-thirst",
+      "from": "process:thirst",
+      "to": "organ:brain",
+      "type": "located_in",
+      "evidence": [
+        "ev:zimmerman-2017"
+      ]
+    },
+    {
+      "id": "rel:avp:body-clears-avp",
+      "from": "organism:body",
+      "to": "molecule:avp",
+      "type": "consumes",
+      "quantity": {
+        "value": 0.4,
+        "unit": "h",
+        "range": [
+          0.27,
+          0.5
+        ],
+        "grade": "A-primary",
+        "evidence": [
+          "ev:baumann-dingman-1976"
+        ],
+        "engineParam": "adh_thalf_h",
+        "measure": "Plasma half-life of AVP",
+        "conflicts": [
+          {
+            "claim": "Task brief suggested 15–20 min.",
+            "value": 0.29,
+            "unit": "h",
+            "evidence": [],
+            "note": "Unsourced brief value; the verified primary value (24.1 min mean, n = 10) is used. Recorded for traceability."
+          }
+        ]
+      },
+      "evidence": [
+        "ev:baumann-dingman-1976"
+      ]
+    },
+    {
+      "id": "rel:raas:jg-renin-secretion",
+      "from": "cell:juxtaglomerular",
+      "to": "process:renin-secretion",
+      "type": "part_of",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:raas:jg-produces-renin",
+      "from": "cell:juxtaglomerular",
+      "to": "molecule:renin",
+      "type": "produces",
+      "evidence": [
+        "ev:sparks-2014",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:raas:md-regulates-renin",
+      "from": "cell:macula-densa",
+      "to": "process:renin-secretion",
+      "type": "regulates_down",
+      "notes": "High distal NaCl delivery sensed at the macula densa suppresses renin release (low delivery stimulates it).",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "rel:raas:liver-produces-agt",
+      "from": "organ:liver",
+      "to": "molecule:angiotensinogen",
+      "type": "produces",
+      "evidence": [
+        "ev:sparks-2014",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:raas:renin-catalyzes",
+      "from": "molecule:renin",
+      "to": "molecule:angiotensinogen",
+      "type": "catalyzes",
+      "notes": "Edge target is the substrate; product is angiotensin I (see rel:raas:agt-to-angi).",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:raas:agt-to-angi",
+      "from": "molecule:angiotensinogen",
+      "to": "molecule:angiotensin-i",
+      "type": "produces",
+      "notes": "Renin-catalysed cleavage.",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:raas:ace-catalyzes",
+      "from": "molecule:ace",
+      "to": "molecule:angiotensin-i",
+      "type": "catalyzes",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:raas:angi-to-angii",
+      "from": "molecule:angiotensin-i",
+      "to": "molecule:angiotensin-ii",
+      "type": "produces",
+      "notes": "ACE-catalysed conversion.",
+      "evidence": [
+        "ev:sparks-2014"
+      ]
+    },
+    {
+      "id": "rel:raas:angii-at1r",
+      "from": "molecule:angiotensin-ii",
+      "to": "molecule:at1r",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:forrester-2018"
+      ]
+    },
+    {
+      "id": "rel:raas:at1r-aldo-synthesis",
+      "from": "molecule:at1r",
+      "to": "process:aldosterone-synthesis",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:forrester-2018",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:raas:at1r-pt-reabsorption",
+      "from": "molecule:at1r",
+      "to": "process:tubular-na-reabsorption",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:sparks-2014",
+        "ev:forrester-2018"
+      ]
+    },
+    {
+      "id": "rel:raas:cyp11b2-catalyzes",
+      "from": "molecule:cyp11b2",
+      "to": "molecule:aldosterone",
+      "type": "catalyzes",
+      "notes": "Edge target is the product here (aldosterone synthase final steps).",
+      "evidence": [
+        "ev:vinson-2016",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:raas:zg-produces-aldo",
+      "from": "cell:zona-glomerulosa",
+      "to": "molecule:aldosterone",
+      "type": "produces",
+      "conflicts": [
+        {
+          "claim": "Zona glomerulosa may not synthesise aldosterone autonomously.",
+          "evidence": [
+            "ev:vinson-2016"
+          ],
+          "note": "See rel:expr:cyp11b2-zg."
+        }
+      ],
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:vinson-2016"
+      ]
+    },
+    {
+      "id": "rel:raas:k-stimulates-aldo",
+      "from": "molecule:k",
+      "to": "process:aldosterone-synthesis",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:raas:volume-aldo",
+      "from": "molecule:aldosterone",
+      "to": "process:tubular-na-reabsorption",
+      "type": "regulates_up",
+      "quantity": {
+        "value": 10,
+        "unit": "1",
+        "range": [
+          5,
+          20
+        ],
+        "grade": "E-assumption",
+        "evidence": [
+          "ev:he-2013",
+          "ev:hallow-2017"
+        ],
+        "engineParam": "aldo_vol_exp",
+        "measure": "Engine sensitivity of aldosterone target to ECF volume (dimensionless exponent)",
+        "notes": "Mirrors engine parameter; lumps the whole RAAS into one volume-sensing gain. E-assumption: surfaced in the UI."
+      },
+      "evidence": [
+        "ev:he-2013",
+        "ev:hallow-2017",
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "rel:aldo:aldo-mr",
+      "from": "molecule:aldosterone",
+      "to": "molecule:mr",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:aldo:mr-in-nucleus",
+      "from": "molecule:mr",
+      "to": "organelle:principal-nucleus",
+      "type": "located_in",
+      "notes": "Ligand-bound MR acts in the nucleus.",
+      "evidence": [
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "rel:aldo:mr-enac",
+      "from": "molecule:mr",
+      "to": "molecule:enac",
+      "type": "regulates_up",
+      "quantity": {
+        "value": 1,
+        "unit": "1",
+        "range": [
+          0.5,
+          1.5
+        ],
+        "grade": "E-assumption",
+        "evidence": [
+          "ev:hallow-2014"
+        ],
+        "engineParam": "aldo_effect_exp",
+        "measure": "Engine exponent of aldosterone effect on fractional Na excretion",
+        "notes": "Mirrors engine parameter. E-assumption: surfaced in the UI."
+      },
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:aldo:mr-nka",
+      "from": "molecule:mr",
+      "to": "molecule:na-k-atpase",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "rel:aldo:enac-transports-na",
+      "from": "molecule:enac",
+      "to": "molecule:na",
+      "type": "transports",
+      "evidence": [
+        "ev:rossier-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:aldo:romk-transports-k",
+      "from": "molecule:romk",
+      "to": "molecule:k",
+      "type": "transports",
+      "evidence": [
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:anp:atria-produce-anp",
+      "from": "cell:atrial-myocyte",
+      "to": "molecule:anp",
+      "type": "produces",
+      "evidence": [
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "rel:anp:anp-npra",
+      "from": "molecule:anp",
+      "to": "molecule:npr-a",
+      "type": "regulates_up",
+      "evidence": [
+        "ev:potter-2006",
+        "ev:kuhn-2016"
+      ]
+    },
+    {
+      "id": "rel:anp:npra-produces-cgmp",
+      "from": "molecule:npr-a",
+      "to": "molecule:cgmp",
+      "type": "produces",
+      "evidence": [
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "rel:anp:anp-suppresses-renin",
+      "from": "molecule:anp",
+      "to": "process:renin-secretion",
+      "type": "regulates_down",
+      "evidence": [
+        "ev:potter-2006"
+      ]
+    },
+    {
+      "id": "rel:anp:anp-natriuresis",
+      "from": "molecule:anp",
+      "to": "process:tubular-na-reabsorption",
+      "type": "regulates_down",
+      "quantity": {
+        "value": 0.3,
+        "unit": "1",
+        "range": [
+          0,
+          0.6
+        ],
+        "grade": "E-assumption",
+        "evidence": [
+          "ev:andersen-1998",
+          "ev:andersen-2002"
+        ],
+        "engineParam": "anp_effect_exp",
+        "measure": "Engine exponent of ANP effect on fractional Na excretion",
+        "notes": "Mirrors engine parameter; deliberately weak.",
+        "conflicts": [
+          {
+            "claim": "Plasma ANP did not change during salt-load natriuresis in healthy humans.",
+            "evidence": [
+              "ev:andersen-1998",
+              "ev:andersen-2002"
+            ],
+            "note": "Contrasts with the classical natriuretic role of ANP (Potter 2006; Kuhn 2016). Both kept; the engine uses a weak ANP effect."
+          }
+        ]
+      },
+      "evidence": [
+        "ev:potter-2006",
+        "ev:andersen-2002",
+        "ev:andersen-1998"
+      ]
+    },
+    {
+      "id": "rel:anp:body-clears-anp",
+      "from": "organism:body",
+      "to": "molecule:anp",
+      "type": "consumes",
+      "quantity": {
+        "value": 0.052,
+        "unit": "h",
+        "range": [
+          0.042,
+          0.06
+        ],
+        "grade": "A-primary",
+        "evidence": [
+          "ev:yandle-1986"
+        ],
+        "engineParam": "anp_thalf_h",
+        "measure": "Plasma half-life of ANP"
+      },
+      "evidence": [
+        "ev:yandle-1986"
+      ]
+    },
+    {
+      "id": "rel:nka:transports-na",
+      "from": "molecule:na-k-atpase",
+      "to": "molecule:na",
+      "type": "transports",
+      "quantity": {
+        "value": 3,
+        "unit": "Na+ exported per ATP hydrolysed",
+        "range": [
+          3,
+          3
+        ],
+        "grade": "B-textbook",
+        "evidence": [
+          "ev:guyton-hall-2021",
+          "ev:post-jolly-1957"
+        ],
+        "measure": "Pump stoichiometry (Na+)",
+        "notes": "Textbook 3 Na+ out : 2 K+ in per cycle. Post & Jolly 1957 is the historical origin; its full text was not reviewed, so the grade rests on the textbook. Fixed stoichiometry (degenerate range by definition)."
+      },
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:post-jolly-1957"
+      ]
+    },
+    {
+      "id": "rel:nka:transports-k",
+      "from": "molecule:na-k-atpase",
+      "to": "molecule:k",
+      "type": "transports",
+      "quantity": {
+        "value": 2,
+        "unit": "K+ imported per ATP hydrolysed",
+        "range": [
+          2,
+          2
+        ],
+        "grade": "B-textbook",
+        "evidence": [
+          "ev:guyton-hall-2021",
+          "ev:post-jolly-1957"
+        ],
+        "measure": "Pump stoichiometry (K+)",
+        "notes": "See rel:nka:transports-na."
+      },
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:post-jolly-1957"
+      ]
+    },
+    {
+      "id": "rel:nka:consumes-atp",
+      "from": "molecule:na-k-atpase",
+      "to": "molecule:atp",
+      "type": "consumes",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:skou-1957"
+      ]
+    },
+    {
+      "id": "rel:nka:powers-reabsorption",
+      "from": "process:na-k-atpase-cycle",
+      "to": "process:tubular-na-reabsorption",
+      "type": "regulates_up",
+      "notes": "Basolateral pumping sets the gradient for apical Na entry in every reabsorbing segment.",
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:sejersted-1982",
+        "ev:rossier-2015"
+      ]
+    },
+    {
+      "id": "rel:filt:glomerulus-filters-water",
+      "from": "tissue:glomerulus",
+      "to": "molecule:water",
+      "type": "transports",
+      "quantity": {
+        "value": 94.5,
+        "unit": "mL/min/1.73 m²",
+        "range": [
+          79.7,
+          108.1
+        ],
+        "grade": "A-primary",
+        "evidence": [
+          "ev:levey-2009"
+        ],
+        "measure": "Glomerular filtration rate, adult population (US NHANES 1999–2006, CKD-EPI estimate)",
+        "notes": "Median and IQR of estimated (not measured) GFR in the general adult population, all ages. Values are body-surface-area normalised.",
+        "conflicts": [
+          {
+            "claim": "Textbook GFR about 125 mL/min (180 L/day) in a young adult (not BSA-normalised); engine GFR_0 = 125 [100, 140] mL/min.",
+            "value": 125,
+            "unit": "mL/min",
+            "evidence": [
+              "ev:guyton-hall-2021"
+            ],
+            "note": "Different population (young reference adult vs whole population), measurement (classic clearance vs creatinine estimate) and normalisation. For a 70 kg adult with BSA about 1.8–1.9 m², 125 mL/min ≈ 115–120 mL/min/1.73 m²."
+          },
+          {
+            "claim": "Median eGFR 85 (men) and 83 (women) mL/min/1.73 m² at age 30–34 in healthy Dutch adults; decline ≈0.4 mL/min/year.",
+            "value": 85,
+            "unit": "mL/min/1.73 m²",
+            "evidence": [
+              "ev:wetzels-2007"
+            ],
+            "note": "MDRD equation, which underestimates at higher GFR (Levey 2009)."
+          },
+          {
+            "claim": "Brief-supplied \"normal\" range 90–120 mL/min/1.73 m².",
+            "range": [
+              90,
+              120
+            ],
+            "unit": "mL/min/1.73 m²",
+            "evidence": [],
+            "note": "Conventional teaching range; no verified source for it located in this pass (KDIGO 2024 metadata verified but its G1 ≥90 threshold could not be read in an accessible text). Not used."
+          }
+        ]
+      },
+      "evidence": [
+        "ev:levey-2009",
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:filt:glomerulus-filtration-process",
+      "from": "process:glomerular-filtration",
+      "to": "tissue:glomerulus",
+      "type": "located_in",
+      "evidence": [
+        "ev:guyton-hall-2021"
+      ]
+    },
+    {
+      "id": "rel:filt:podocyte-barrier",
+      "from": "cell:podocyte",
+      "to": "process:glomerular-filtration",
+      "type": "regulates_down",
+      "notes": "Slit diaphragm restricts passage of macromolecules (selective permeability), not water flux per se.",
+      "evidence": [
+        "ev:pavenstadt-2003"
+      ]
+    },
+    {
+      "id": "rel:seg:pt-na",
+      "from": "tissue:proximal-tubule",
+      "to": "molecule:na",
+      "type": "transports",
+      "quantity": {
+        "value": 0.66,
+        "unit": "fraction of filtered Na load reabsorbed",
+        "range": [
+          0.6,
+          0.7
+        ],
+        "grade": "B-textbook",
+        "evidence": [
+          "ev:guyton-hall-2021"
+        ],
+        "measure": "Segmental fractional Na reabsorption, proximal tubule",
+        "notes": "Textbook point value (Guyton & Hall 2021; chapter/page not verified by this agent). Range is a curator assumption of about ±5 percentage points around the textbook value. Palmer & Schnermann 2015 supports the qualitative division of labour; its percentages were not accessible. Point value 0.66 chosen inside the textbook 65–70% so the four segment point values sum to 0.99 (fractional excretion ≈1%, consistent with >99% total reabsorption)."
+      },
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015"
+      ]
+    },
+    {
+      "id": "rel:seg:loop-na",
+      "from": "tissue:thick-ascending-limb",
+      "to": "molecule:na",
+      "type": "transports",
+      "quantity": {
+        "value": 0.25,
+        "unit": "fraction of filtered Na load reabsorbed",
+        "range": [
+          0.2,
+          0.3
+        ],
+        "grade": "B-textbook",
+        "evidence": [
+          "ev:guyton-hall-2021"
+        ],
+        "measure": "Segmental fractional Na reabsorption, loop of Henle (thick ascending limb)",
+        "notes": "Textbook point value (Guyton & Hall 2021; chapter/page not verified by this agent). Range is a curator assumption of about ±5 percentage points around the textbook value. Palmer & Schnermann 2015 supports the qualitative division of labour; its percentages were not accessible."
+      },
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015",
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:seg:dct-na",
+      "from": "tissue:distal-convoluted-tubule",
+      "to": "molecule:na",
+      "type": "transports",
+      "quantity": {
+        "value": 0.05,
+        "unit": "fraction of filtered Na load reabsorbed",
+        "range": [
+          0.03,
+          0.08
+        ],
+        "grade": "B-textbook",
+        "evidence": [
+          "ev:guyton-hall-2021"
+        ],
+        "measure": "Segmental fractional Na reabsorption, distal convoluted tubule",
+        "notes": "Textbook point value (Guyton & Hall 2021; chapter/page not verified by this agent). Range is a curator assumption of about ±5 percentage points around the textbook value. Palmer & Schnermann 2015 supports the qualitative division of labour; its percentages were not accessible. Palmer & Schnermann: the DCT vs downstream split is variable and coupled to K balance."
+      },
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015",
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:seg:cd-na",
+      "from": "tissue:collecting-duct",
+      "to": "molecule:na",
+      "type": "transports",
+      "quantity": {
+        "value": 0.03,
+        "unit": "fraction of filtered Na load reabsorbed",
+        "range": [
+          0.01,
+          0.05
+        ],
+        "grade": "B-textbook",
+        "evidence": [
+          "ev:guyton-hall-2021"
+        ],
+        "measure": "Segmental fractional Na reabsorption, connecting tubule + collecting duct (aldosterone-regulated)",
+        "notes": "Textbook point value (Guyton & Hall 2021; chapter/page not verified by this agent). Range is a curator assumption of about ±5 percentage points around the textbook value. Palmer & Schnermann 2015 supports the qualitative division of labour; its percentages were not accessible."
+      },
+      "evidence": [
+        "ev:guyton-hall-2021",
+        "ev:palmer-schnermann-2015",
+        "ev:pearce-2015"
+      ]
+    },
+    {
+      "id": "rel:seg:nkcc2-na",
+      "from": "molecule:nkcc2",
+      "to": "molecule:na",
+      "type": "transports",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:seg:nkcc2-cl",
+      "from": "molecule:nkcc2",
+      "to": "molecule:cl",
+      "type": "transports",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:seg:ncc-na",
+      "from": "molecule:ncc",
+      "to": "molecule:na",
+      "type": "transports",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:seg:ncc-cl",
+      "from": "molecule:ncc",
+      "to": "molecule:cl",
+      "type": "transports",
+      "evidence": [
+        "ev:gamba-2005"
+      ]
+    },
+    {
+      "id": "rel:pn:inhibits-pt-reabsorption",
+      "from": "process:pressure-natriuresis",
+      "to": "process:tubular-na-reabsorption",
+      "type": "regulates_down",
+      "quantity": {
+        "value": 0.05,
+        "unit": "per mmHg",
+        "range": [
+          0.02,
+          0.1
+        ],
+        "grade": "E-assumption",
+        "evidence": [
+          "ev:guyton-1972",
+          "ev:hall-2016",
+          "ev:karaaslan-2005"
+        ],
+        "engineParam": "pn_gain",
+        "measure": "Engine gain of pressure natriuresis on fractional Na excretion",
+        "notes": "Mirrors engine parameter. Mechanism (proximal) per Ivy & Bailey 2014. E-assumption: surfaced in the UI."
+      },
+      "evidence": [
+        "ev:ivy-bailey-2014",
+        "ev:hall-2016",
+        "ev:guyton-1972"
+      ]
+    },
+    {
+      "id": "rel:pn:aorta-pressure",
+      "from": "organ:aorta",
+      "to": "process:pressure-natriuresis",
+      "type": "regulates_up",
+      "notes": "Arterial (renal perfusion) pressure is the input to pressure natriuresis.",
+      "evidence": [
+        "ev:guyton-1972",
+        "ev:hall-2016"
+      ]
+    },
+    {
+      "id": "rel:gut:water-absorption",
+      "from": "organ:intestine",
+      "to": "molecule:water",
+      "type": "transports",
+      "quantity": {
+        "value": 0.2,
+        "unit": "h",
+        "range": [
+          0.13,
+          0.33
+        ],
+        "grade": "A-primary",
+        "evidence": [
+          "ev:peronnet-2012",
+          "ev:leiper-2015"
+        ],
+        "engineParam": "gut_water_thalf_h",
+        "measure": "Half-time of absorption of ingested plain water"
+      },
+      "evidence": [
+        "ev:peronnet-2012",
+        "ev:leiper-2015"
+      ]
+    },
+    {
+      "id": "rel:gut:na-absorption",
+      "from": "organ:intestine",
+      "to": "molecule:na",
+      "type": "transports",
+      "quantity": {
+        "value": 0.5,
+        "unit": "h",
+        "range": [
+          0.25,
+          1.5
+        ],
+        "grade": "E-assumption",
+        "evidence": [
+          "ev:leiper-2015"
+        ],
+        "engineParam": "gut_na_thalf_h",
+        "measure": "Half-time of intestinal absorption of ingested sodium",
+        "notes": "E-assumption: surfaced in the UI."
+      },
+      "evidence": [
+        "ev:leiper-2015"
+      ]
+    }
+  ]
+}

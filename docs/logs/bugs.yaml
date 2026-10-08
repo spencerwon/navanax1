@@ -3798,3 +3798,2196 @@ bugs:
   monitor_gap: None new.
   regression_test:
     - tests/selftest.py::test_cluster_bootstrap_counts_are_bit_identical_to_pooling
+
+
+# ---------------------------------------------------------------------------
+# Health subsystem (docs/health/05_BUG_TAXONOMY.md; area: health). Classes MDL PRM EVD
+# NUM KBI VAL PRS ETH CFG INF SEC. data_impact reads as reader_impact: which surface,
+# which numbers, with or without their labels.
+# ---------------------------------------------------------------------------
+- id: BUG-20261003-095
+  area: health
+  summary: Kidney strain index glomerular term hard-codes 0.5, 0.5 and 0.1 in engine code; three constants with no parameter row, grade or source
+  severity: S2
+  priority: P2
+  error_class: PRM
+  status: open
+  logged_at: "2026-10-03T03:10:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "methodology builder reading reference/metabolic-map-v1/engine/model.js M10 while writing docs/health/01 §4.7 and §9"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/model.js, line: 335}
+  - {file: src/health/engine/model.py, line: 481}
+  requirement: HREQ-M-07
+  data_impact: >-
+    Reader-facing: the salt dose-sweep panel's strain curve and the kidney colour depend
+    on three constants the evidence drawer cannot list, so the drawer's "parameters that
+    feed this" is incomplete for strain_index. No number is wrong; its provenance is.
+  root_cause: >-
+    The glomerular load averages a pressure term and a hyperfiltration term with weights
+    0.5/0.5 and scales the GFR rise by 0.1 inline, while the sibling weights and scales
+    live in params.json as E-assumptions. The index was written as code first and the
+    table filled in after; three constants never made the trip.
+  resolution: >-
+    Planned (M1, WF-H-01): three params.json rows (strain_w_glomerular_pressure,
+    strain_w_glomerular_filtration, strain_scale_filtration), grade E-assumption, mc:
+    false; both implementations read them; MODEL_VERSION bump; golden regenerated.
+    Until then the index band must say its definition constants are fixed (HREQ-M-10).
+  monitor_gap: >-
+    No lint over engine source for numeric literals (HREQ-M-07 names one); the KB
+    engineParam mirror can only check rows that exist.
+
+- id: BUG-20261003-096
+  area: health
+  summary: Default influence screen under-counts the parameters that feed a quantity; evidence chips omit the calibrated pn_gain for MAP over 30 days
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T03:12:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "methodology builder running computeInfluence() on every scenario at its own horizon in both directions under Node v22.22.0 (docs/health/01 §8.2)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 201}
+  - {file: src/health/engine/api.py, line: 282}
+  requirement: HREQ-U-12
+  data_impact: >-
+    Reader-facing, silent: the evidence chip on the chronic-salt MAP chart lists 12
+    feeders where 15 move MAP over 30 days; one of the six missing is pn_gain, a
+    parameter calibrated to the very band that chart is compared with. thirst_vol_gain
+    has exactly zero effect in the salt screen (the hypovolemic term is max(0, 1 - vr)
+    and salt expands the ECF) so it never appears for Thirst, though it feeds Thirst in
+    no_water_24h. The lists look complete and are not.
+  root_cause: >-
+    One reference run (salt_load_10g, 24 h, +10 %) for every quantity. A parameter whose
+    effect is small at 24 h but grows over 30 days, or whose term is clamped to zero in
+    that scenario's direction, is below the 1 % threshold or exactly zero. The screen's
+    "can only over-count" claim holds for how failures are handled, not for the screen
+    as a whole.
+  resolution: >-
+    Planned (M1): run the screen for every registered scenario at its own horizon, in
+    both directions, and report the union (HREQ-U-12); the difference in feeder lists is
+    part of every model-change review (HREQ-V-19). Cost measured at about 17 s for the
+    30-day scenario's 108 runs.
+  monitor_gap: >-
+    No test compared feeder lists across scenarios or directions; the influence result
+    was cached once per page load and never audited.
+
+- id: BUG-20261003-097
+  area: health
+  summary: Expectation harness has no role field, so a calibration target (chronic salt vs He 2013) would be counted as a validation pass
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T04:20:00-05:00"
+  logged_at: "2026-10-03T03:14:00-05:00"
+  occurred_at: "2026-10-03T02:50:00-05:00"
+  detected_by: "methodology builder reading src/health/engine/validate.py summarize() against docs/health/01 §6 (calibration is never validation)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 328}
+  - {file: src/health/engine/scenarios.py, line: 1}
+  requirement: HREQ-E-11
+  data_impact: >-
+    Reader-facing if shipped: the status line and any summary would report the He 2013
+    MAP band as a literature pass, when map_vol_exp, pn_gain and aldo_vol_exp were
+    chosen to hit it. The "Na excretion within 2 % of intake by day 30" row would also
+    count, though it holds for any parameter set that reaches balance (structural).
+  root_cause: >-
+    V1 records calibration only in free-text notes on the parameter rows and in the
+    expectation's note; nothing machine-readable connects an expectation to the
+    parameters tuned against it, and the port's summarize() counts by status alone.
+  resolution: >-
+    Fixed in this PR (commit with the engine port): Python-side `role` (validation | calibration | structural) and
+    `calibrates` on the two rows; summarize() reports counted passes and fails separately
+    and never counts calibration or structural rows; the JS reference gains the same
+    fields at M1 with the version bump (tracker W-13).
+  monitor_gap: >-
+    No test planted a passing calibration row and asserted the validation count did not
+    move; docs/health/03 §5.2 now requires it.
+  regression_test:
+    - tests/health_selftest.py::test_calibration_and_structural_rows_are_never_counted_as_validation
+
+- id: BUG-20261003-098
+  area: health
+  summary: Golden fixture omitted chronic_high_salt_30d (the longest run, 41,664 steps), the stiff corner and the step checkpoints
+  severity: S3
+  priority: P1
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T04:20:00-05:00"
+  logged_at: "2026-10-03T03:16:00-05:00"
+  occurred_at: "2026-10-03T02:55:00-05:00"
+  detected_by: "methodology builder comparing tools/health_golden.mjs with docs/health/03 §4.2"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/health_golden.mjs, line: 1}
+  - {file: tests/fixtures/health/golden_v1.json, line: 1}
+  requirement: HREQ-V-08
+  data_impact: >-
+    None reached a reader. Equivalence was proven on the four short scenarios only; the
+    scenario a reader is most likely to act on (chronic salt, 744 h, dt 0.25, 41,664
+    steps) and the stiffest parameter corner were not in the fixture, so a divergence
+    that grows with run length or stiffness would not have been seen.
+  root_cause: >-
+    The fixture generator was written to the builder brief's list of four scenarios
+    before docs/health/03 §4.2 specified the full content.
+  resolution: >-
+    Fixed in this PR (commit with the engine port): chronic_high_salt_30d thinned to <= 1,000 recorded points with the
+    exact step count asserted; the §3.5 stiff corner on chronic_high_salt_30d and
+    drink_water_3L_fast; checkpoints (constants, initial state, rhs at t = 0, one RK4
+    step); SHA-256 of every reference engine file in the header, compared on disk.
+  monitor_gap: >-
+    No test asserted that the fixture covers every registered scenario; the port's
+    trajectory test now lists what the fixture covers and fails on a missing one.
+  regression_test:
+    - tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+    - tests/health_selftest.py::test_reference_engine_files_match_the_fixture_hashes
+    - tests/health_selftest.py::test_divergence_checkpoints_match_javascript_reference
+
+- id: BUG-20261003-099
+  area: health
+  summary: Reference engine comments say 52 parameters and ~53 influence runs; the table has had 54 rows since D-2, and there is no M9 block label
+  severity: S4
+  priority: P3
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:18:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "methodology builder counting params.json rows against the index.js comment (docs/health/01 §8.1)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 187}
+  - {file: reference/metabolic-map-v1/engine/model.js, line: 1}
+  requirement: HREQ-E-04
+  data_impact: >-
+    None. A count in a code comment, not on a surface; the status line computes the real
+    count (54) from the table. Logged because an unrefreshed count in a comment is the
+    shape of drift this project keeps catching.
+  root_cause: >-
+    D-2 added map_auto_frac and map_auto_tau_h to the table; the comment that quoted the
+    count was not revisited. M9 was never assigned a block.
+  resolution: >-
+    Planned (M1, with the next reference change): fix the comment, add the M9 label or
+    renumber M10 to M9, mirror in model.py.
+  monitor_gap: >-
+    Counts in comments are not computed from data; HREQ-E-04 covers surfaces, not
+    comments. Accepted as cosmetic.
+
+# --- Findings of the clinical-safety review and the rigor-lead review, 2026-10-03 -------
+- id: BUG-20261003-100
+  area: health
+  summary: Published V1 surface frames the kidney strain index as a dose answer without its label (dose panel heading, HUD gauge)
+  severity: S0a
+  priority: P0
+  error_class: ETH
+  status: open
+  logged_at: "2026-10-03T03:30:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading reference/metabolic-map-v1/index.html and app/ui.js (source only, not rendered)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/index.html, line: 396}
+  - {file: reference/metabolic-map-v1/index.html, line: 353}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 607}
+  requirement: HREQ-S-04
+  data_impact: >-
+    Reader-facing, published: the dose panel is headed "How much salt strains the kidney?"
+    and shows peak strain-index values; "an index, not a clinical measure" appears only
+    inside the click-to-open evidence drawer. The HUD gauge shows "Kidney strain index"
+    with ticks 0 / 0.33 / 0.66 / 1 and no index or display-choice label. An unlabelled
+    model index is framed as answering a dose question on the Operator's published
+    artifact. No number is wrong; its framing is.
+  root_cause: >-
+    The label was written once, in the drawer, and the two surfaces that show the number
+    most prominently were built without it; nothing checked every surface for the label.
+  resolution: >-
+    Decision for the Operator (tracker A-2): patch the published artifact (heading "Salt
+    load sweep 0-30 g: the model's kidney strain index for the 70 kg reference adult --
+    an index, not a clinical measure; no amount here is safe or unsafe for any person";
+    gauge label "Kidney strain index -- a model index, not a clinical measure; colour
+    bands are display choices") or accept until M1's viewer review. The vendored copy is
+    not edited (HREQ-P-09); the fix lands in the artifact and in every new surface.
+  monitor_gap: >-
+    No surface-string lint and no rendered safety review before V1 published; WF-H-06
+    and the HREQ-S checklist now stand before every release.
+
+- id: BUG-20261003-101
+  area: health
+  summary: V1 surface draws the 135 mmol/L classification threshold as a red "critical" danger line labelled "hyponatremia threshold"
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:32:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading app/ui.js refLines and scenarios.js drink_water_3L_fast"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 47}
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 105}
+  - {file: src/health/engine/scenarios.py, line: 198}
+  requirement: HREQ-S-03
+  data_impact: >-
+    Reader-facing, published: "135 hyponatremia threshold" in the critical tone, and the
+    scenario text "Shows where plasma Na crosses the 135 mmol/L hyponatremia boundary",
+    present a definition as a physiological limit. The Python port carries the same
+    description verbatim (golden string equality).
+  root_cause: >-
+    The reference line was styled as a danger line because the scenario is a
+    "hyponatremia risk demo"; the label never said the number is a classification
+    definition. HREQ-S-03 did not exist when V1 was built.
+  resolution: >-
+    Planned (M1 viewer review, with the display-title map of BUG-102): neutral tone and
+    the config label display.threshold_label on both lines; the description reads "...
+    crosses 135 mmol/L, the classification threshold that defines hyponatremia (a
+    definition, not a safety limit)". Both implementations change together with the
+    version bump.
+  monitor_gap: >-
+    No string lint for thresholds; the safety checklist now names it.
+
+- id: BUG-20261003-102
+  area: health
+  summary: Scenario titles are imperatives with no reference person ("Drink 1 L of water in 10 min", "Eat 10 g salt")
+  severity: S1
+  priority: P1
+  error_class: ETH
+  status: open
+  logged_at: "2026-10-03T03:34:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading scenarios.js titles rendered as the scenario dropdown (app/ui.js)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 86}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 815}
+  - {file: src/health/engine/scenarios.py, line: 144}
+  requirement: HREQ-S-02
+  data_impact: >-
+    Reader-facing, published: the dropdown reads as instructions ("Drink 1 L", "Eat 10 g
+    salt"), and no scenario description names the 70 kg reference adult. Nothing is
+    wrong numerically; the framing addresses the reader.
+  root_cause: >-
+    Titles were written as scenario shorthand; the equivalence rule (HREQ-V-09) requires
+    the port's strings to match the JavaScript exactly, so the port cannot fix them alone.
+  resolution: >-
+    Decision taken (tracker W-19): a display-title map keyed by scenario id in the
+    surface layer at M1 ("1 L water over 10 min -- 70 kg reference adult", etc.), with the
+    engine strings unchanged until the next MODEL_VERSION bump mirrors them.
+  monitor_gap: >-
+    No imperative lint on user-facing strings; docs/health/03 §8.2 now requires one.
+
+- id: BUG-20261003-103
+  area: health
+  summary: The chronic-salt result shows neither its known divergence nor that its literature band is a calibration target
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: open
+  logged_at: "2026-10-03T03:36:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer reading the Chronic tab (index.html) and the expectations list renderer (app/ui.js)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/index.html, line: 381}
+  - {file: reference/metabolic-map-v1/app/ui.js, line: 558}
+  requirement: HREQ-S-07
+  data_impact: >-
+    Reader-facing, published: the Chronic tab shows the description and the chip "Modeled
+    risk trajectory, not a prediction" only. The He 2013 row appears under "What the
+    literature expects" with no sign that three parameters were tuned to it, and the
+    Heer 2000 known divergence (no total-body-water gain) is not on the surface at all.
+    A reader can take agreement with the band as evidence.
+  root_cause: >-
+    Expectation rows render only metric and target; the note field, where V1 recorded
+    calibration and divergence, is not rendered.
+  resolution: >-
+    Planned (M1 viewer review): in-band text under the chronic chart -- "Calibration,
+    not validation: three model parameters were tuned so this result lands in the He
+    2013 band; agreement with it is not evidence. Known divergence: the model expands
+    extracellular fluid under chronic salt; a human study (Heer 2000) found no
+    total-body-water gain." -- fed from the harness rows' role and kind.
+  monitor_gap: >-
+    HREQ-S-07 did not exist; it does now, and the safety checklist names it.
+
+- id: BUG-20261003-104
+  area: health
+  summary: V1 renders only the first sentence of the disclaimer; "Not clinically validated." exists only as a code comment
+  severity: S1
+  priority: P1
+  error_class: ETH
+  status: open
+  logged_at: "2026-10-03T03:38:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer comparing engine/index.js DISCLAIMER with the model.js header comment and docs/health/00 §1.4"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 19}
+  - {file: reference/metabolic-map-v1/engine/model.js, line: 3}
+  - {file: src/health/cli.py, line: 23}
+  requirement: HREQ-S-01
+  data_impact: >-
+    Reader-facing, published: the one sentence that disclaims clinical validation is
+    missing from every result object and every surface, while the audience now includes
+    clinicians in training. docs/health/00 §1.4 and the vendored README misquoted V1 as
+    rendering both sentences (corrected in this PR).
+  root_cause: >-
+    DISCLAIMER was defined once as one sentence; the second sentence lived in a comment.
+  resolution: >-
+    In this PR on the Python side: meta.validation_status = "Not clinically validated."
+    on every result and expectation row, and the CLI prints both lines last (config
+    model.validation_status). The reference gains it with the next version bump (W-20).
+  monitor_gap: >-
+    No test asserted the surface standard against the rendered string; the safety
+    checklist and tests/health_selftest.py now do.
+
+- id: BUG-20261003-105
+  area: health
+  summary: report.py crashes with a traceback on a list- or object-typed field, and status then prints no disclaimer
+  severity: S3
+  priority: P1
+  error_class: PRS
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:40:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: entities[0].type = [\"organism\"] under --root; status tracebacks with empty stdout"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/report.py, line: 68}
+  - {file: src/health/cli.py, line: 95}
+  requirement: HREQ-S-01
+  data_impact: >-
+    Not reader-facing on shipped data. On a malformed KB the status surface fails without
+    its disclaimer, which HREQ-S-01 forbids even on failure (the KB-unavailable path
+    prints it; this path did not).
+  root_cause: >-
+    summary() uses field values as dict keys and sort keys; a list is unhashable and an
+    object is unorderable, and the garbage test only substituted whole documents.
+  resolution: >-
+    Fixed in this PR: summary() buckets non-string values under "(invalid)"; status
+    prints findings and the disclaimer last with exit 1; regression test on an
+    array-typed field.
+  monitor_gap: >-
+    The never-raises test substituted whole documents, never single fields.
+  regression_test:
+    - tests/health_kb_selftest.py::test_checker_never_raises_on_garbage
+    - tests/health_kb_selftest.py::test_status_prints_the_disclaimer
+
+- id: BUG-20261003-106
+  area: health
+  summary: The KB loader accepts NaN and Infinity JSON tokens that the reference app's JSON.parse rejects
+  severity: S3
+  priority: P1
+  error_class: KBI
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:42:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: a quantity with value Infinity passes kb-check; Node JSON.parse throws on the same file"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/__init__.py, line: 81}
+  requirement: HREQ-P-09
+  data_impact: >-
+    None on shipped data. A KB file the Python gate passes could break the published app
+    at load, the opposite of what the gate is for.
+  root_cause: Python's json accepts the non-standard tokens by default.
+  resolution: "Fixed in this PR: json.loads(parse_constant=...) raises; regression test."
+  monitor_gap: No test fed non-standard JSON to the loader.
+  regression_test:
+    - tests/health_kb_selftest.py::test_strict_json_and_params_data_js
+
+- id: BUG-20261003-107
+  area: health
+  summary: Schema patterns compiled with re.ASCII let a DOI containing a Unicode space pass doi-pattern
+  severity: S2
+  priority: P1
+  error_class: KBI
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:44:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: DOI 10.1016/s0889<NBSP>8529 accepted in Python, rejected by ECMA-262 in Node"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 261}
+  requirement: HREQ-D-02
+  data_impact: >-
+    None on shipped data. An evidence id that does not resolve could pass the gate with
+    an invisible character in it, which is provenance loss by the back door.
+  root_cause: "re.ASCII changes \\S to match non-ASCII whitespace; the schema's patterns are ECMA-262."
+  resolution: "Fixed in this PR: ECMA-262 class semantics for \\s \\S \\d \\w; regression test."
+  monitor_gap: No test used non-ASCII whitespace.
+  regression_test:
+    - tests/health_kb_selftest.py::test_patterns_have_ecma_262_semantics
+
+- id: BUG-20261003-108
+  area: health
+  summary: Any verification record with resolved true verifies an external id forever; a later resolved false record is ignored
+  severity: S2
+  priority: P1
+  error_class: KBI
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:46:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead mutation: appended a later resolved:false record for organism:body / UBERON; no finding"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 787}
+  requirement: HREQ-D-04
+  data_impact: >-
+    None on shipped data (all 154 records resolve). The append-only log cannot retire an
+    identifier, which defeats the point of supersession.
+  root_cause: The check tested membership of any resolved record rather than the latest.
+  resolution: "Fixed in this PR: the latest record per (entity, db, id) governs; regression test."
+  monitor_gap: No plant appended a superseding record.
+  regression_test:
+    - tests/health_kb_selftest.py::test_verification_log_latest_record_governs
+
+- id: BUG-20261003-109
+  area: health
+  summary: 'status prints "E-assumption: 0" and a share of "n/a" when params.json is unusable, instead of "unavailable"'
+  severity: S1
+  priority: P1
+  error_class: PRS
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:48:00-05:00"
+  occurred_at: "2026-10-03T02:30:00-05:00"
+  detected_by: "health-rigor-lead: --params pointing at a file containing null; status exits 0 showing E-assumption: 0 (real count 30)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/cli.py, line: 104}
+  requirement: HREQ-N-01
+  data_impact: >-
+    Reader-facing on the status surface: a zero where the honest answer is "unavailable",
+    the exact substitution HREQ-N-01 forbids.
+  root_cause: The grade distribution defaults to zero counts when no rows load.
+  resolution: "Fixed in this PR: both figures print unavailable with the reason on stderr; regression test."
+  monitor_gap: The CLI test only exercised a missing KB root, not a bad params file.
+  regression_test:
+    - tests/health_kb_selftest.py::test_summary_counts_match_the_data
+    - tests/health_kb_selftest.py::test_status_prints_the_disclaimer
+
+- id: BUG-20261003-110
+  area: health
+  summary: Module-registry scanner disagrees with PyYAML in 17 of 20 crafted cases; a safe_dump round-trip reads as zero modules
+  severity: S3
+  priority: P1
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:50:00-05:00"
+  occurred_at: "2026-10-03T02:45:00-05:00"
+  detected_by: "health-rigor-lead registry_probe.py: comments on flags, yes/on/TRUE, 4-space indent, id not first, flow mappings, quoted lists, ~, tabs"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/registry.py, line: 24}
+  requirement: HREQ-X-01
+  data_impact: >-
+    Reader-facing on the status surface before pip install: an edited registry could show
+    "modules (0): (none enabled)" or a disabled module that is enabled, and the shipped-file
+    test would not catch it.
+  root_cause: >-
+    A line-regex scanner for the shipped file's exact shape, compared with PyYAML only on
+    that file.
+  resolution: "Fixed in this PR: a correct YAML-subset parser; tests compare it with PyYAML on five variants."
+  monitor_gap: The agreement test used one file.
+  regression_test:
+    - tests/health_kb_selftest.py::test_registry_reader_agrees_with_pyyaml
+    - tests/health_kb_selftest.py::test_registry_reader_reads_the_yaml_subset
+
+- id: BUG-20261003-111
+  area: health
+  summary: A schema tightening the shipped data violates is reported as a schema-drift warning and the gate passes
+  severity: S3
+  priority: P1
+  error_class: KBI
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:52:00-05:00"
+  occurred_at: "2026-10-03T02:45:00-05:00"
+  detected_by: "health-rigor-lead mutation: maxLength 5 on Entity.name -> schema-drift warn, PASS"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 859}
+  requirement: HREQ-D-03
+  data_impact: None on shipped data; a changed contract would not be enforced on it.
+  root_cause: The checker mirrors the schema by hand and only warns when the mirror and the file differ.
+  resolution: "Fixed in this PR: evaluate the live schema generically; a violation of it is an error."
+  monitor_gap: The drift check watched the file hash, not the data.
+  regression_test:
+    - tests/health_kb_selftest.py::test_schema_edits_are_enforced_not_just_detected
+
+- id: BUG-20261003-112
+  area: health
+  summary: docs/health/03 §6 names 16 knowledge-base rules; 7 are not implemented and 4 are warnings that never block
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:54:00-05:00"
+  occurred_at: "2026-10-03T03:00:00-05:00"
+  detected_by: "health-rigor-lead reconciliation of the 03 §6 table against check.py RULES (requested by the orchestrator)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 1}
+  - {file: src/health/kb/check.py, line: 106}
+  requirement: HREQ-V-16
+  data_impact: >-
+    Reader-facing in the documents: 03 §6 says "check.py enforces every rule" and HREQ-V-16
+    says each rule blocks a merge. Not implemented: params-mirror, grade-ceiling,
+    range-kind, dispersion, calibration-link, fixed-reason, append-only. Warn-only:
+    param-evidence-unresolved, conflict-unsourced-note, value-outside-range, range-order.
+    HREQ-E-01 (params rows) and HREQ-E-02 (sourceType/defaultGrade required) also
+    unimplemented. The document was committed after the code.
+  root_cause: >-
+    The document and the checker were written concurrently by different builders; the
+    meta-test compared plants with RULES, which cannot see a documented rule the code
+    never had.
+  resolution: >-
+    In this PR: the four warnings become errors; params-mirror, grade-ceiling, HREQ-E-01
+    and HREQ-E-02 implemented; the five rules that need data fields are listed in
+    DEFERRED_RULES, and a meta-test parses the 03 §6 table and fails if a documented rule
+    has neither a code nor a deferral. 03 §6 gains a status column (tracker W-17).
+  monitor_gap: >-
+    No test read the document; the gate now does.
+  regression_test:
+    - tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred
+    - tests/health_kb_selftest.py::test_every_contract_rule_fires_on_a_planted_violation
+
+- id: BUG-20261003-113
+  area: health
+  summary: Checker hygiene — extra record arrays unvalidated, cubic cycle walk, seven surviving mutants, plants that cascade
+  severity: S4
+  priority: P2
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T04:40:00-05:00"
+  logged_at: "2026-10-03T03:56:00-05:00"
+  occurred_at: "2026-10-03T02:45:00-05:00"
+  detected_by: "health-rigor-lead mutants.py and edge.py"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/kb/check.py, line: 509}
+  - {file: src/health/kb/check.py, line: 731}
+  requirement: HREQ-V-17
+  data_impact: None. Test strength and performance only.
+  root_cause: First-pass tests pinned behaviour on the shipped file, not on boundaries.
+  resolution: "Fixed in this PR: items validated; linear cycle walk (1,000-deep chain under 1 s); mutants killed; warning set pinned; one rule per plant."
+  monitor_gap: No mutation testing in the gates; the rigor-lead runs it per review.
+  regression_test:
+    - tests/health_kb_selftest.py::test_boundaries_kill_the_surviving_mutants
+    - tests/health_kb_selftest.py::test_parent_cycle_walk_is_linear
+    - tests/health_kb_selftest.py::test_every_contract_rule_fires_on_a_planted_violation
+
+- id: BUG-20261003-114
+  area: health
+  summary: k_excr_gain notes say "Log-uniform sampling" but its 20-100 range is exactly 5-fold and the sampler's rule is hi/lo > 5, so it is sampled uniformly
+  severity: S4
+  priority: P3
+  error_class: PRM
+  status: open
+  logged_at: "2026-10-03T03:58:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-safety-reviewer (passed to the rigor-lead): params.json k_excr_gain notes vs mc.js samplingMode"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/params.json, line: 1}
+  - {file: reference/metabolic-map-v1/engine/mc.js, line: 29}
+  requirement: HREQ-U-02
+  data_impact: >-
+    None on any number: the parameter is inert in every V1 scenario (no scenario varies
+    potassium). The note misdescribes the sampling.
+  root_cause: The note was written for a wider range that was later narrowed to exactly 5-fold.
+  resolution: "Planned (M1, curator): correct the note, or widen the range if log-uniform was intended; both implementations' sampling_mode already agree."
+  monitor_gap: Notes are free text; nothing compares them with the sampler.
+
+- id: BUG-20261003-115
+  area: health
+  summary: After 1 L of water the modelled plasma sodium takes 7.05 h to recover within 0.5 mmol/L, outside the registered Crowe 1987 range of 6 h, in both implementations
+  severity: S1
+  priority: P1
+  error_class: MDL
+  status: open
+  logged_at: "2026-10-03T04:00:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-physiology-modeler running the expectation harness on the Python port; confirmed on the JavaScript reference (fixture section findings): 7.05 h with default parameters; Monte Carlo n = 256 seed 1 band q05 2.83 h, q50 8.73 h, q95 +inf; in-range share 0.324"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 86}
+  - {file: src/health/engine/validate.py, line: 1}
+  requirement: HREQ-V-13
+  data_impact: >-
+    Reader-facing, published: the app lists this expectation under "What the literature
+    expects" beside a curve that does not meet it, with no status shown, so a learner
+    reads the expectation as met. The port's harness now reports it as a counted fail.
+    V1 reported its own tests passing; its test did not score this row.
+  root_cause: >-
+    Model structure or parameters: the water load is excreted on a time course slower
+    than Crowe 1987's 20 mL/kg load in young water-replete men. Whether the model, the
+    extractor's definition, or the registered range is at fault is the Operator's call
+    under WF-H-02 (a range is never widened to admit a fail).
+  resolution: >-
+    Decision for the Operator (tracker D-9): supersede the row as a known divergence with
+    the reason, or recalibrate the model through WF-H-01 with the row kept as a counted
+    fail until it passes on its own. Until then every surface showing drink_water_1L
+    must show the row's fail status (HREQ-S-07).
+  monitor_gap: >-
+    V1's test suite never scored its own expectation rows; the harness and
+    tests/health_selftest.py now do, and a passing or failing row cannot change status
+    silently (LITERATURE_FAILS is asserted).
+
+- id: BUG-20261003-116
+  area: health
+  summary: Three latent quirks in the reference engine (influence NaN only counted in a trailing run; inputs() reads mutable arrays; quantile NaN between two infinities)
+  severity: S4
+  priority: P3
+  error_class: NUM
+  status: open
+  logged_at: "2026-10-03T04:02:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-physiology-modeler while porting (index.js:223, scenarios.js:28, mc.js:52)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: reference/metabolic-map-v1/engine/index.js, line: 223}
+  - {file: reference/metabolic-map-v1/engine/scenarios.js, line: 28}
+  - {file: reference/metabolic-map-v1/engine/mc.js, line: 52}
+  requirement: HREQ-P-01
+  data_impact: None on any shipped number; none of the three conditions arises in V1 data.
+  root_cause: Edge cases outside the data the reference was tested on.
+  resolution: "Planned (M1, with the next reference change): count any NaN difference; read the frozen copies; return Inf between infinities; mirror in the port where it differs (the port already reads frozen copies and uses R's rule for the harness band)."
+  monitor_gap: The golden fixture covers shipped data only; edge-case fixtures are a 03 §9 item.
+
+- id: BUG-20261003-117
+  area: health
+  summary: The self-test pinned only status == pass for the counted expectation rows, so 7 extractor mutants that read the wrong window, unit or baseline survived
+  severity: S2
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:30:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review (harness-honesty/mutate.py). Before: E1 peak time from t=0, E2 salt window [0,h], E3 water fraction without baseline urine, E4 ΔMAP not per 100 mmol, E5 osmolality rise at peak, E6 urine peak from mL/min / 16, E7 nadir at t = 1.5 h all SURVIVED (246 passed, 0 failed). After: all 7 KILLED by test_every_extractor_value_is_pinned_and_independently_recomputed"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tests/health_selftest.py, line: 1060}
+  - {file: src/health/engine/validate.py, line: 324}
+  requirement: HREQ-V-13
+  data_impact: >-
+    None on any shipped number: every extractor was re-derived independently and agrees
+    (integrals to <= 2.6e-6 relative, point readings exactly). The risk was a future
+    extractor edit that moved a value inside its range and went unseen.
+  root_cause: >-
+    The tests asserted the status of each counted row, not its value; a status is blind to
+    any change that keeps the value in a wide literature band.
+  resolution: >-
+    Fixed: a literal pin table of all 13 extractor values at REL_TOL (printed with repr from
+    this engine), and an independent recomputation of every metric from the result's own
+    series (trapezoid integrals of urine_flow and Na_excr over the stated window, baseline
+    subtracted where the metric says so; never via the ledger), at stated tolerances.
+  monitor_gap: >-
+    No mutation testing runs in the gates; the rigor-lead's mutation set is re-run per
+    review. E8 (day-29 window) is killed by the pins; E9 and E10 (minimum and peak over a
+    truncated window) give the same value on V1 data and are killed by a planted extremum
+    at the last output point.
+  regression_test:
+    - tests/health_selftest.py::test_every_extractor_value_is_pinned_and_independently_recomputed
+
+- id: BUG-20261003-118
+  area: health
+  summary: A Monte Carlo set for another scenario, another t_end or dt, or any n was silently attached to a row as its band
+  severity: S2
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:31:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before (probe_more.py): mc for drink_water_3L_fast attached to drink_water_1L as band q50 -11.74; mc at t_end 6 h and at dt 0.1 attached; n = 2 attached with no band_reason. After: each is a ConfigurationError (test_harness_refuses_unfit_results_and_monte_carlo_sets); mutants N_H1_* KILLED"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 529}
+  requirement: HREQ-U-08
+  data_impact: >-
+    None published: no surface computes expectation bands yet; the only caller (the golden
+    equivalence test at n = 8) used the right scenario and grid.
+  root_cause: The mc argument was trusted; nothing compared its runs with the scored result.
+  resolution: >-
+    Fixed: every Monte Carlo run must have the result's scenario, t[-1] and meta.dt and the
+    set must hold n runs (ConfigurationError otherwise); n < 256 is refused unless
+    allow_small_n=True (the n = 8 equivalence test), and such a band carries a band_reason
+    naming its n.
+  monitor_gap: The n = 8 golden check was the only mc caller; planted mismatches now run.
+  regression_test:
+    - tests/health_selftest.py::test_harness_refuses_unfit_results_and_monte_carlo_sets
+    - tests/health_selftest.py::test_failing_expectation_is_pinned_to_the_reference_with_its_band
+
+- id: BUG-20261003-119
+  area: health
+  summary: Rows evaluated without Monte Carlo carried no band, in_range_share, n, seed or rejected keys, and nothing said the statuses were unbanded
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:32:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: row band keys without mc = [] and summarize() had no unbanded count; the status line printed counts with no band information. After: all six band fields always present, summarize().unbanded_counted = 10, status prints 'bands 0 of 10 counted (no Monte Carlo in this run; n ≥ 256 required for a published band)'"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 567}
+  - {file: src/health/cli.py, line: 108}
+  requirement: HREQ-V-15
+  data_impact: >-
+    Operator-facing on the status line: "counted pass 9" read as a validated count when every
+    status was a single default-parameter point estimate with no band.
+  root_cause: Band fields were added only when mc was supplied, so their absence was silent.
+  resolution: >-
+    Fixed: every row always carries band, in_range_share, n, seed, rejected and band_reason
+    ("no Monte Carlo supplied" when there is none); summarize() reports unbanded_counted and
+    the CLI prints it, never hidden.
+  monitor_gap: No test asserted the band fields on an mc-less row; one now does, and the status-line pin includes the band clause.
+  regression_test:
+    - tests/health_selftest.py::test_every_row_publishes_its_band_fields_and_versions
+    - tests/health_kb_selftest.py::test_status_expectations_line
+
+- id: BUG-20261003-120
+  area: health
+  summary: An unknown, missing or mis-cased kind, a countable row without a range, and an extractor unavailable for any reason became quiet not_checked rows
+  severity: S2
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:33:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review (invariants.py). Before: kind 'quantitive' on the recovery row -> not_checked, summary 9 pass / 0 fail; kind missing, 'Quantitative', quantitative without range, MetricUnavailable('arbitrary') -> QUIET not_checked. After: each is a ConfigurationError; only cause run_too_short gives not_checked, listed by summarize().not_checked_countable"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 497}
+  - {file: src/health/engine/validate.py, line: 150}
+  requirement: HREQ-V-13
+  data_impact: >-
+    None on shipped data (every shipped kind is registered). A one-character registry typo
+    would have turned the only counted fail into a not_checked row and the summary into
+    9 pass / 0 fail.
+  root_cause: >-
+    not_checked was used as the catch-all for anything the harness could not score,
+    including registry defects HREQ-V-13 does not allow it for.
+  resolution: >-
+    Fixed: the whole registry is validated before scoring (registered kind, numeric range
+    for countable kinds, role, non-empty calibrates for calibration rows); MetricUnavailable
+    carries a cause and only run_too_short may yield not_checked; summarize() lists every
+    countable not_checked row with its reason.
+  monitor_gap: Planted registries tested only the missing-extractor path; each defect is now planted.
+  regression_test:
+    - tests/health_selftest.py::test_harness_refuses_registry_defects_and_scores_boundaries
+
+- id: BUG-20261003-121
+  area: health
+  summary: Truncated runs were scored with substitute values; the recovery extractor returned +inf on a run that ended before the bound
+  severity: S2
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:34:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: drink_water_1L at t_end 5 h and 3.5 h -> nadir, peak time, peak flow scored pass and recovery a counted fail at +inf. After: t_end 1.8 h -> every row not_checked 'run too short: t_end 1.8 h < scenario 12 h', nothing counted; every whole-run extractor refuses with cause run_too_short"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 672}
+  - {file: src/health/engine/validate.py, line: 196}
+  requirement: HREQ-V-13
+  data_impact: None published; every shipped caller runs the full scenario.
+  root_cause: Only windowed extractors checked coverage; whole-run extractors (max, min, first-after) never did.
+  resolution: >-
+    Fixed (choice documented in validate.py): a result shorter than the scenario's t_end is
+    not scored -- every row is not_checked with the run length, so the one-row-per-expectation
+    contract holds and summarize() lists each countable row; whole-run extractors also check
+    coverage. On a full-length run +inf from the recovery extractor stays a counted fail.
+  monitor_gap: The short-run test used a window metric only; a planted t_end = 1.8 run and a never-recovering full run now test both sides.
+  regression_test:
+    - tests/health_selftest.py::test_harness_refuses_unfit_results_and_monte_carlo_sets
+
+- id: BUG-20261003-122
+  area: health
+  summary: Results from non-default parameters or a non-scenario dt were scored as the expectation status and nothing recorded it
+  severity: S2
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:35:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: a drawn parameter set and a dt = 0.5 h run were scored (recovery 7.5 h at dt 0.5) with no trace on the row. After: ConfigurationError unless params_override=True; row meta stamps params_digest, params_override, dt and t_end"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 664}
+  requirement: HREQ-V-15
+  data_impact: None published; the status line and tests use default parameters at the scenario dt.
+  root_cause: evaluate_expectations checked only the scenario id of the result.
+  resolution: >-
+    Fixed: result params must equal default_params() and meta.dt the scenario dt unless
+    params_override=True; every row's meta carries the sha256 params digest, the override
+    flag, dt and t_end.
+  monitor_gap: Nothing compared the scored result with config expectations.evaluate_on; the harness now refuses.
+  regression_test:
+    - tests/health_selftest.py::test_harness_refuses_unfit_results_and_monte_carlo_sets
+
+- id: BUG-20261003-123
+  area: health
+  summary: The duplicate-id guard checked only explicit ids, and no shipped expectation had one, so an explicit id could collide with a positional id unnoticed
+  severity: S2
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:36:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: a planted row with id 'drink_water_1L/01' next to positional row 01 -> QUIET, 7 rows, two named drink_water_1L/01. After: ConfigurationError; all 24 shipped rows carry explicit ids <scenario_id>/<NN>"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 522}
+  - {file: src/health/engine/scenarios.py, line: 45}
+  requirement: HREQ-E-13
+  data_impact: None; no shipped row had a duplicate. Stable ids now exist in the registry rather than being derived from position.
+  root_cause: The guard ran over explicit ids before positional defaults were assigned.
+  resolution: >-
+    Fixed: duplicates are checked over the FINAL ids; every shipped expectation has an
+    explicit id in the harness's <scenario_id>/<NN> format, and `id` is a Python-only key
+    (PY_ONLY_EXPECTATION_KEYS) so the JavaScript record comparison still holds.
+  monitor_gap: The planted duplicate used two explicit ids; an explicit-vs-positional collision is now planted.
+  regression_test:
+    - tests/health_selftest.py::test_harness_refuses_registry_defects_and_scores_boundaries
+
+- id: BUG-20261003-124
+  area: health
+  summary: A reversed or NaN expectation range was scored as a counted model fail
+  severity: S3
+  priority: P2
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:37:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: range [0.9, 0.35] and [nan, nan] -> counted FAIL ('0.572141 outside [0.9, 0.35]'). After: ConfigurationError for both, and for a string or three-number range; [-inf, inf] accepted by intent"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 417}
+  requirement: HREQ-V-13
+  data_impact: None on shipped data; a registry typo would have been reported as a model failure.
+  root_cause: The range was accepted as any two numbers.
+  resolution: "Fixed: ConfigurationError unless both bounds are numbers, neither NaN, and lo <= hi (±inf allowed)."
+  monitor_gap: No planted malformed range existed; four are planted now.
+  regression_test:
+    - tests/health_selftest.py::test_harness_refuses_registry_defects_and_scores_boundaries
+
+- id: BUG-20261003-125
+  area: health
+  summary: "No planted test covered the range boundaries or ±inf: a strict comparison and an inf-passes mutant survived, and an extractor returning \"0.5\" was coerced to a pass"
+  severity: S3
+  priority: P2
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:38:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: M3_strict_comparison and M4b_inf_passes SURVIVED (246 passed, 0 failed); extractor returning '0.5' -> counted PASS. After: M3 and M4b KILLED; '0.5', None and True are ConfigurationError"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 480}
+  requirement: HREQ-V-13
+  data_impact: None on shipped data.
+  root_cause: Planted extractors covered NaN only; values were converted with float().
+  resolution: >-
+    Fixed: planted extractors return exactly lo and exactly hi (pass), one ulp outside each
+    bound, +inf and -inf (counted fail); a non-number is a ConfigurationError, never float().
+  monitor_gap: Boundary plants now exist; mutation testing is still per review.
+  regression_test:
+    - tests/health_selftest.py::test_harness_refuses_registry_defects_and_scores_boundaries
+
+- id: BUG-20261003-126
+  area: health
+  summary: The not_checked reasons of the known-divergence and unverified rows were generic and did not say what diverges or what is unverified
+  severity: S3
+  priority: P2
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:39:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: chronic_high_salt_30d/04 reason 'registered known divergence between the model and the literature'. After: the reason continues with the row's target ('... Heer 2000 found plasma volume +315 mL but NO total body water gain ...'); salt_load_sweep/02 with its note (Audit F-02/F-03)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 575}
+  requirement: HREQ-V-13
+  data_impact: "Operator-facing: a reader of the rows could not tell what the divergence was without opening scenarios.py."
+  root_cause: The reason was the kind's generic text only.
+  resolution: "Fixed: the row's note (else its target) is appended to the reason of known-divergence and unverified rows."
+  monitor_gap: Reasons were asserted non-empty only.
+  regression_test:
+    - tests/health_selftest.py::test_every_row_publishes_its_band_fields_and_versions
+
+- id: BUG-20261003-127
+  area: health
+  summary: The counted row drink_water_1L/05 (minimum urine osmolality) shares its only evidence (Baylis 1986) with U_osm_min, which floors it, so its lower bound cannot fail by construction
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: open
+  logged_at: "2026-10-03T05:40:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-rigor-lead adversarial review (plausible finding, confirmed): row evidence ['ev:baylis-1986']; params.json U_osm_min = 50 mOsm/kg, range [40, 80], evidence guyton-hall-2021 + baylis-1986 (notes: 'Baylis 1986 observed 69 ± 3'); the harness value 62.76 mOsm/kg is in [40, 150]"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/scenarios.py, line: 198}
+  - {file: reference/metabolic-map-v1/engine/params.json, line: 16}
+  requirement: HREQ-V-14
+  data_impact: >-
+    Reader-facing in the counts: the row is one of the 9 counted passes. The model's urine
+    osmolality cannot go below U_osm_min, whose sampled range [40, 80] starts at the row's
+    lower bound 40, so only the upper bound (150) is a test; the lower bound is calibration
+    counted as validation (01 §6.1/§6.2).
+  root_cause: The parameter and the expectation were set from the same source.
+  resolution: >-
+    Open -- the curator's decision (row not changed; ranges are never widened): cite an
+    independent source for the row and drop Baylis 1986 from U_osm_min, or mark the row
+    structural for its lower bound. Until then the harness value 62.76 mOsm/kg tests the
+    upper bound only.
+  monitor_gap: No check compares an expectation's evidence with the evidence of the parameters that bound its metric.
+
+- id: BUG-20261003-128
+  area: health
+  summary: The registered "< 6 h" bound of the sodium recovery row has no traceable Crowe 1987 source value, and the row has no note
+  severity: S2
+  priority: P1
+  error_class: EVD
+  status: open
+  logged_at: "2026-10-03T05:41:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: "health-rigor-lead adversarial review (plausible finding, confirmed): the only Crowe 1987 quote in evidence.json is about the share excreted at 2 h ('100.7 +/- 8.8% in the water-replete young group'); no reading of the metric passes -- 7.05 h from drink start, 6.88 h from the end of drinking, 6.47 h from the nadir; JS at dt 1/30 and 0.1 gives 7.07 and 7.1"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/scenarios.py, line: 195}
+  - {file: reference/metabolic-map-v1/kb/evidence.json, line: 312}
+  requirement: HREQ-E-13
+  data_impact: >-
+    The counted FAIL (BUG-20261003-115) is honest under every reading, but the bound it
+    fails against cannot be traced to a source value, so the fail's meaning is unproven.
+  root_cause: The bound was written from the paper's narrative, not from a quoted value.
+  resolution: >-
+    Open -- curator (extends BUG-20261003-115): find and quote the source value for 6 h, or
+    record the bound as an assumption with that grade; the range is not widened.
+  monitor_gap: The KB checker verifies that evidence resolves, not that a registered range is supported by a quoted value.
+
+- id: BUG-20261003-129
+  area: health
+  summary: The D-2 "MAP time course" design target had no role, so the harness reported 3 calibrated parameters where docs/health/03 §12 lists 4 (map_auto_tau_h missing)
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:42:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: summarize().calibrated_parameters = ['aldo_vol_exp', 'map_vol_exp', 'pn_gain'], status 'calibrated params 3'. After: role calibration, calibrates ['map_auto_tau_h']; 'calibrated params 4 (aldo_vol_exp, map_auto_tau_h, map_vol_exp, pn_gain)'"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/scenarios.py, line: 271}
+  requirement: HREQ-M-12
+  data_impact: >-
+    Operator-facing on the status line: the calibrated-parameter count was one short, which
+    overstated independent validation against calibration (HREQ-M-12).
+  root_cause: The row defaulted to role validation; its note says map_auto_tau_h was chosen for it (decision D-2), but the role annotation was never added.
+  resolution: "Fixed: role calibration, calibrates [map_auto_tau_h] (the note already names D-2); the test asserts 4 calibrated parameters."
+  monitor_gap: No test compared the calibrated-parameter list with 03 §12.
+  regression_test:
+    - tests/health_selftest.py::test_calibration_and_structural_rows_are_never_counted_as_validation
+
+- id: BUG-20261003-130
+  area: health
+  summary: HREQ-U-08, M-12 and V-15 were listed as enforced by validate.py and were not (no n gate, no independent-vs-calibrated count, no registry version)
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:43:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review. Before: row meta keys ['disclaimer', 'modelVersion', 'scenario', 'validation_status']; summarize() had no independent_vs_calibrated or registry_version. After: n >= 256 gate (BUG-20261003-118), independent_vs_calibrated {10, 4} printed as 'independent 10 vs calibrated 4 (HREQ-M-12)', registry_version sha256 on every row and the summary, changed by any registry edit"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/validate.py, line: 173}
+  - {file: src/health/engine/validate.py, line: 746}
+  requirement: HREQ-V-15
+  data_impact: The traceability tables claimed enforcement that did not exist.
+  root_cause: The requirements were written ahead of the code and the table was not reconciled.
+  resolution: >-
+    Fixed: U-08 by the mc gate; M-12 by summarize().independent_vs_calibrated on the status
+    line; V-15 by registry_version (sha256 of the canonical JSON of all registered
+    expectation records) on every row meta and the summary, plus the always-present band
+    fields (BUG-20261003-119). summarize() refuses rows from two registry versions.
+  monitor_gap: No test read the traceability table against the code.
+  regression_test:
+    - tests/health_selftest.py::test_every_row_publishes_its_band_fields_and_versions
+
+- id: BUG-20261003-131
+  area: health
+  summary: The 33-object disclaimer test never checked meta.modelVersion, so a result_meta without it passed
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:30:00-05:00"
+  logged_at: "2026-10-03T05:44:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "health-rigor-lead adversarial review; probe_d10.py drops modelVersion from api.result_meta. Before: 246 passed, 0 failed. After: the 33-object check FAILS (and the registry/version check of every row)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tests/health_selftest.py, line: 1619}
+  requirement: HREQ-M-01
+  data_impact: None today; every result carries the model version. The test could not have caught its loss.
+  root_cause: The predicate checked disclaimer and validation_status only.
+  resolution: "Fixed: the predicate also requires meta.modelVersion == MODEL_VERSION."
+  monitor_gap: The result_meta probe is not part of a mutation suite; the predicate now covers it.
+  regression_test:
+    - tests/health_selftest.py::test_every_public_result_carries_disclaimer_and_validation_status
+
+- id: BUG-20261003-132
+  area: health
+  summary: No golden or invariant test exercised the potassium or sweat fluxes, so eight port mutants of model.py survived
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:50:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review of the health subsystem (finding Q0, tests:703), mutation run on a
+    copy of the worktree. BEFORE: rhs_sign_K, rhs_sign_K_osm, k_excr_sign, k_excr_dropped,
+    rhs_sign_sweat_water, rhs_sign_sweat_na, sweat_na_dropped, sweat_input_ignored all
+    SURVIVED (23 test functions, 246 passed, 0 failed). AFTER: all eight KILLED by
+    test_default_params_trajectories_match_javascript_reference and
+    test_golden_comparison_detects_a_perturbed_model_constant; the four sign flips also by
+    test_water_and_sodium_mass_balance_closes (potassium invariant no longer trivially 0).
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/model.py, line: 397}
+  - {file: src/health/engine/model.py, line: 407}
+  - {file: src/health/engine/model.py, line: 440}
+  - {file: tools/health_golden.mjs, line: 410}
+  - {file: tests/health_selftest.py, line: 556}
+  requirement: HREQ-V-09
+  data_impact: >-
+    None on any shipped number: every registered scenario holds K intake constant and
+    sweat at zero, so K_ur = kIn_h exactly and the sweat terms are 0. But a port error in
+    any of these terms would have shipped unseen, and the potassium and cell-solute
+    invariants "passed" only because every K flux was identically zero.
+  root_cause: >-
+    The fixture covered the registered scenarios only, and none of them moves K_icf or
+    sweats; k_excr_gain and sweat_na_mmolL were listed as "inert" in the perturbation test
+    instead of being given a run in which they act.
+  resolution: >-
+    Golden section solverCoverage (fixture only GAINS sections, MODEL_VERSION 1.0.1
+    unchanged): baseline for 24 h from y0 with K_icf x 1.02, and a data-described scenario
+    with sweat 0.8 L/h over [2, 4) h and K intake x6 over [1, 3) h (breakpoints 1-4), built
+    in the self-test, not registered in SCENARIOS. Both are compared in the trajectory
+    test, added to the mass-balance run list, and to the 1e-6 perturbation test, whose
+    inert set loses k_excr_gain and sweat_na_mmolL.
+  monitor_gap: >-
+    The perturbation test accepted "inert" parameters without asking whether a run could
+    make them act; the inert set is now only the two classification thresholds, caught by
+    the drawSamples golden instead.
+  regression_test:
+    - tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+    - tests/health_selftest.py::test_golden_comparison_detects_a_perturbed_model_constant
+    - tests/health_selftest.py::test_water_and_sodium_mass_balance_closes
+
+- id: BUG-20261003-133
+  area: health
+  summary: Output-thinning edge cases had no golden; dropping the final-point rule or using Python's banker's round() passed the suite
+  severity: S3
+  priority: P2
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:51:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding Q1, solver.py:121). BEFORE: thin_drop_final and
+    thin_bankers_round SURVIVED; both diverge from JS (103 vs 104 points at outEvery 7, 361
+    vs 241 at outEvery 2.5). AFTER: both KILLED by
+    test_default_params_trajectories_match_javascript_reference (grid length and values).
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/solver.py, line: 81}
+  - {file: src/health/engine/solver.py, line: 121}
+  - {file: tools/health_golden.mjs, line: 410}
+  requirement: HREQ-V-09
+  data_impact: None on any shipped number; every shipped outEvery is an integer and divides the grid.
+  root_cause: The fixture recorded only integer outEvery values (1 and 3) that divide the grid exactly.
+  resolution: >-
+    Golden trajectories of drink_water_1L at outEvery 7 (104 points, the final point always
+    recorded) and 2.5 (241 points, Math.round(2.5) = 3); the self-test compares length,
+    steps and values, and asserts 104 and 241 literally.
+  monitor_gap: Edge-case fixtures were a 03 §9 item with no owner; the solver's rounding rule had no golden.
+  regression_test: tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+
+- id: BUG-20261003-134
+  area: health
+  summary: The JavaScript non-finite semantics the port emulates (NaN-last sort, Math.max and Math.pow on NaN) had no golden; three mutants survived
+  severity: S3
+  priority: P2
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:52:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding Q2, mc.py:116). BEFORE: q_nan_sort_plain, nan_max0_python
+    and pow_nan_rule_dropped SURVIVED. AFTER: all three KILLED by
+    test_non_finite_semantics_match_javascript_reference (15 quantile values and 2 x 71
+    rhs/ledger/fluxes/derived values, 11 and 24 of them NaN, compared by position).
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/mc.py, line: 109}
+  - {file: src/health/engine/model.py, line: 132}
+  - {file: src/health/engine/model.py, line: 158}
+  - {file: tools/health_golden.mjs, line: 440}
+  requirement: HREQ-V-09
+  data_impact: None on any shipped number (no shipped run produces a NaN); the emulation was untested code.
+  root_cause: The fixture held finite data only, so the emulation of JavaScript's NaN rules could be deleted without a failing test.
+  resolution: >-
+    Golden section nonFinite: quantileBands on [[1,NaN,3],[Inf,2,-0],[-Inf,NaN,0],[5,4,Inf],[2,3,Inf]]
+    with qs [0.05,0.5,0.95,0,1]; rhs, ledger, fluxes and derived at the initial state with
+    ADH = NaN, and with aldo_vol_exp = gfr_map_exp = NaN (pow(1, NaN) at vr = 1). Compared
+    with the suite's NaN-position rule (NaN only against NaN).
+  monitor_gap: A semantic the port deliberately emulates now has a golden of its own.
+  regression_test: tests/health_selftest.py::test_non_finite_semantics_match_javascript_reference
+
+- id: BUG-20261003-135
+  area: health
+  summary: No trajectory golden put a breakpoint inside an output interval; dropping every breakpoint passed the trajectory test and unsorted breakpoints were never tested
+  severity: S4
+  priority: P3
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:53:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding Q3, solver.py:82). BEFORE: bp_drop_all killed only by
+    the influence, sweep and salt-metric tests (never by the trajectory test); bp_no_sort
+    SURVIVED. AFTER: bp_drop_all KILLED by test_default_params_trajectories_match_javascript_reference
+    (and the bolus test); bp_no_sort KILLED by the trajectory test.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/solver.py, line: 85}
+  - {file: tools/health_golden.mjs, line: 410}
+  requirement: HREQ-V-04
+  data_impact: None on any shipped number.
+  root_cause: At dt = 1/60 h every shipped breakpoint lies on the output grid, so the interval-splitting code was never reached by a trajectory golden.
+  resolution: >-
+    Golden trajectories of drink_water_1L and salt_load_10g at dt = 0.1 h (the bolus ends
+    1.1667 h and 1.25 h fall inside output intervals) and a data-described scenario with
+    breakpoints [3.05, 1.05, 2.25, 1.55] (unsorted, off the 0.1 h grid).
+  monitor_gap: The trajectory test now fails on its own when breakpoints are mishandled.
+  regression_test: tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+
+- id: BUG-20261003-136
+  area: health
+  summary: HREQ-V-07 was not enforced; simulate() returned a non-finite trajectory without raising
+  severity: S1
+  priority: P1
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:54:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D3, api.py:127). BEFORE: MAX_STEP_FRACTION_OF_TAU_MIN = 3.5
+    on chronic_high_salt_30d returned 25,841 non-finite values (outEvery 3) and no
+    exception. AFTER: simulate() raises NonFiniteTrajectoryError ("states.V_ecf is nan at
+    t = 26.25 h (output index 105); 89022 non-finite values"); the production 48 h run does
+    not raise.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/engine/api.py, line: 150}
+  - {file: src/health/engine/api.py, line: 160}
+  - {file: src/health/errors.py, line: 250}
+  requirement: HREQ-V-07
+  data_impact: >-
+    None on any shipped number (no shipped run is non-finite). Had one been, a NaN would
+    have reached quantile bands and plots, which 03 §3.6 forbids.
+  root_cause: The requirement was written as enforced, but no code checked the trajectory; the JavaScript reference returns NaN silently and the port copied it.
+  resolution: >-
+    New NonFiniteTrajectoryError(NumericalError), S3/NUM. simulate() checks every state,
+    ledger and derived value after integrate() and raises with scenario, first time, key,
+    section, count and model version. A deliberate port deviation (index.js returns the
+    NaN trajectory), documented in the api.py and model.py headers; simulate_mc/sweep
+    therefore raise, and compute_influence counts such a run as infeasible.
+  monitor_gap: The instability trap of 03 §3.3 now runs in the default suite and must raise.
+  regression_test: tests/health_selftest.py::test_simulate_refuses_a_non_finite_trajectory
+
+- id: BUG-20261003-137
+  area: health
+  summary: HREQ-V-04, V-05 and V-06 were listed as enforced but no convergence, bolus-exactness, breakpoint-trap or instability-trap test existed
+  severity: S1
+  priority: P1
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:55:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D4). BEFORE: grep found no such test; 03 §3.3-§3.4 figures
+    came from one-off scripts. AFTER: gates that fail -- convergence drink_water_1L ANP
+    7.2e-7, ADH 2.0e-5, Thirst 3.2e-4 and salt_load_10g ANP 1.1e-7 against 1e-5 / 1e-3;
+    off-grid bolus error 2.4e-15 (gate 1e-12); breakpoint trap 9.59 % misplaced (must fail);
+    instability trap raises. The maxstep_half mutant is now also killed by the convergence
+    test, and bp_inputs_at_s0 (previously surviving) by the bolus test.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 102}
+  - {file: tests/health_selftest.py, line: 1066}
+  - {file: tests/health_selftest.py, line: 1110}
+  requirement: HREQ-V-05
+  data_impact: None on any shipped number; the measured figures in 03 §3.3-§3.4 hold.
+  root_cause: The document recorded measurements as if they were gates; nothing re-ran them.
+  resolution: >-
+    test_halving_the_step_twice_converges (default suite, drink_water_1L and salt_load_10g,
+    peak-scaled, 1e-5 and 1e-3 for ADH/Thirst), test_off_grid_bolus_is_exact_and_the_breakpoint_trap_fails
+    (instrumented solver: step bound, no straddle, step count; bolus to 1e-12; without
+    breakpoints 9-10 % misplaced), test_simulate_refuses_a_non_finite_trajectory (instability
+    trap), and under --robust every scenario at default and stiff-corner parameters.
+  monitor_gap: The two traps prove the gates can see the failures they exist for.
+  regression_test:
+    - tests/health_selftest.py::test_halving_the_step_twice_converges
+    - tests/health_selftest.py::test_off_grid_bolus_is_exact_and_the_breakpoint_trap_fails
+    - tests/health_selftest.py::test_simulate_refuses_a_non_finite_trajectory
+    - tests/health_selftest.py::test_robust_convergence_on_every_scenario_and_the_stiff_corner
+
+- id: BUG-20261003-138
+  area: health
+  summary: The n = 256 steady-state drift gate of 03 §3.1 was claimed, but the test ran 3 samples for 6 h
+  severity: S1
+  priority: P1
+  error_class: NUM
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:56:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D5). BEFORE: test_baseline_is_a_steady_state drew 3 samples
+    (seed 11) for 6 h. AFTER: under --robust all 256 accepted samples of the reporting set
+    (seed 1) run 24 h; worst drift 4.1e-14 (gate 1e-6), about 39 s.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 87}
+  - {file: tests/health_selftest.py, line: 1087}
+  requirement: HREQ-V-02
+  data_impact: None; the gate passes with nine orders of margin.
+  root_cause: The full gate costs about 39 s of pure Python, so the suite ran a sample of it and the document described the full gate.
+  resolution: >-
+    The default suite keeps 3 samples x 6 h; the n = 256 x 24 h gate runs under the new
+    --robust flag, and the summary line states whether the robust gates ran.
+  monitor_gap: The summary line now says "robust gates NOT run" when they did not.
+  regression_test:
+    - tests/health_selftest.py::test_robust_steady_state_drift_over_the_reporting_set
+    - tests/health_selftest.py::test_baseline_is_a_steady_state
+
+- id: BUG-20261003-139
+  area: health
+  summary: The 03 §9 infeasible (water 1.3 L/day) and non-normal (adh_threshold 296) fixtures were in no test
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:57:00-05:00"
+  occurred_at: "2026-10-03T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D9). BEFORE: neither value appeared in any test. AFTER:
+    1.3 L/day gives U_ss 1228.57 and InfeasibleParametersError from initial_state and
+    simulate; adh_threshold 296 gives Na_ss 145.61, is accepted deterministically, and
+    draw_samples rejects all 100 draws of it (its normonatremia rule) while the same frozen
+    table at 281 is accepted with 0 rejections.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 321}
+  - {file: tests/health_selftest.py, line: 1465}
+  requirement: HREQ-V-25
+  data_impact: None on any shipped number.
+  root_cause: The §9 table was written from reference measurements; the test kept its older cases.
+  resolution: Both fixtures added to the infeasible-params test, keeping the existing cases.
+  monitor_gap: Each §9 row now names a test that holds its number.
+  regression_test: tests/health_selftest.py::test_infeasible_params_are_refused_not_silently_accepted
+
+- id: BUG-20261003-140
+  area: health
+  summary: The golden perturbation test exempted four parameters as inert; two of them were inert only for lack of a run
+  severity: S4
+  priority: P3
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:58:00-05:00"
+  occurred_at: "2026-10-01T00:00:00-05:00"
+  detected_by: >-
+    Adversarial review (finding D14, 03 §4.3). BEFORE: inert set k_excr_gain,
+    sweat_na_mmolL, na_normal_low, na_normal_high. AFTER: a 1e-6 relative change to
+    k_excr_gain or sweat_na_mmolL fails the trajectory comparison; the exempt set is
+    na_normal_low and na_normal_high, which the drawSamples golden catches.
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tests/health_selftest.py, line: 825}
+  requirement: HREQ-V-09
+  data_impact: None.
+  root_cause: Same as BUG-20261003-132 (no run moved K or sweated).
+  resolution: The inert set shrinks to the two classification thresholds; the test asserts it equals exactly that set.
+  monitor_gap: A parameter can be exempted only if it is a classification threshold caught elsewhere.
+  regression_test: tests/health_selftest.py::test_golden_comparison_detects_a_perturbed_model_constant
+
+- id: BUG-20261003-142
+  area: health
+  summary: "03 §12 process metrics quote a stale golden comparison (about 8,900 values, worst 4e-14; measured 12,822 and 1.24e-12) and call the harness counts identical on a reference that has no harness"
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:49:00-05:00"
+  occurred_at: "2026-10-03T04:21:13-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D0); re-measured on the port: python3 tests/health_selftest.py --no-skips summary line 'expectations (default params): 24 rows; counted 9 pass, 1 fail; 12 not_checked; calibration 1; structural 1', and its per-section 'N values' lines summed to 12,822 with worst 0.00124 x tolerance"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 427}
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 431}
+  requirement: HREQ-D-06
+  data_impact: >-
+    Reader-facing in the documents: the one table that sets the validation record against
+    the tuning understated the equivalence evidence by a third and its worst difference by
+    a factor of 30, and claimed a reference-side harness run that cannot exist. No number
+    the engine computes was wrong.
+  root_cause: >-
+    The figures were not taken from the final run of the suite, although §12 says its
+    metrics are computed from data, never typed; "identical on the reference" was inferred
+    from the trajectory agreement, and the reference has no harness to run.
+  resolution: >-
+    Fixed in this change: the row states model 1.0.1, default parameters, the measured
+    counts and how they were produced, the fail pinned to the reference by the fixture's
+    findings section, 12,822 compared values with worst 1.24e-12 relative, and a separate
+    row for the counts after the MAP time-course row becomes a calibration row (marked for
+    re-verification after the merge).
+  monitor_gap: No test reads the 03 §12 table; the counts are printed by the suite and by health.cli status, and the document was not compared with either.
+  regression_test:
+    - tests/health_selftest.py::test_scenario_expectations_harness_evaluates_every_quantitative_expectation
+    - tests/health_selftest.py::test_failing_expectation_is_pinned_to_the_reference_with_its_band
+
+- id: BUG-20261003-143
+  area: health
+  summary: "01 §6.3 says calibration is recorded on both sides with id chronic_high_salt_30d:0 and a parameter-side calibratedAgainst; params.json has no calibratedAgainst and the harness id is <scenario>/<NN>"
+  severity: S1
+  priority: P1
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:50:00-05:00"
+  occurred_at: "2026-10-03T03:05:42-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D2); checked: grep calibratedAgainst src/health/engine/params.json finds nothing; validate.py _evaluate_one builds the id as f'{sc.id}/{i + 1:02d}'; the shipped record has no unit or registered field"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/01_METHODOLOGY.md, line: 268}
+  - {file: src/health/engine/validate.py, line: 376}
+  requirement: HREQ-E-10
+  data_impact: >-
+    Reader-facing in the documents: the methodology presented a two-sided calibration link
+    and a knowledge-base check of it as built. Neither exists; a parameter tuned to a target
+    no calibrates list names is invisible to every gate, and the document said otherwise.
+  root_cause: The section was written to the target design and not re-read when the port shipped the Python-side half only (BUG-20261003-097).
+  resolution: >-
+    Fixed in this change: 01 §6.3 shows the record as shipped, states the <scenario>/<NN>
+    id rule, and names the parameter side (W-18) and the JavaScript mirror (W-13) as
+    planned; Appendix A marks HREQ-E-10 Planned (M1, W-18).
+  monitor_gap: The calibration-link rule is deferred by name in DEFERRED_RULES, but nothing compared the methodology's prose with the deferral.
+  regression_test:
+    - tests/health_selftest.py::test_calibration_and_structural_rows_are_never_counted_as_validation
+    - tests/health_kb_selftest.py::test_every_documented_rule_is_implemented_or_deferred
+
+- id: BUG-20261003-144
+  area: health
+  summary: 03 §4.2 lists four golden trajectories and a "Required additions" list the fixture already holds (all 7 scenarios, the stiff corner, checkpoints, rejection margins, findings)
+  severity: S4
+  priority: P3
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:51:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D11); checked: python3 -c \"import json;g=json.load(open('tests/fixtures/health/golden_v1.json'));print(list(g))\" lists trajectories, stiffCorner, checkpoints, findings and rejectionMargins; trajectories holds all 7 scenarios; stiff runs 101,184 and 2,160 steps; smallest margin 0.00125"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 157}
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 188}
+  requirement: HREQ-V-08
+  data_impact: >-
+    Reader-facing in the documents only: a reviewer reading 03 would believe the long and
+    stiff runs were not under equivalence and would not trust the port on them. The
+    fixture itself was right.
+  root_cause: The fixture was regenerated with the new sections in b810ed6 (BUG-20261003-098) after 03 was written; 03 was not updated with it.
+  resolution: >-
+    Fixed in this change: the table lists every section as built, with the sections this
+    round adds marked for re-verification; the "Required additions" list and the 03 §4.4
+    parenthesis are gone; the regeneration rule is stated (a MODEL_VERSION bump, or new
+    sections with every pre-existing section byte-identical).
+  monitor_gap: No test compares the 03 §4.2 table with the fixture's sections.
+  regression_test:
+    - tests/health_selftest.py::test_default_params_trajectories_match_javascript_reference
+    - tests/health_selftest.py::test_divergence_checkpoints_match_javascript_reference
+
+- id: BUG-20261003-145
+  area: health
+  summary: 03 §5.1 describes harness rows as metric, kind, target, range, actual, status, reason and evidence, with id, role, registered and counted as required additions the rows already carry
+  severity: S4
+  priority: P3
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:52:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D12); checked: sorted(evaluate_expectations('drink_water_1L', simulate(scenario='drink_water_1L'))[0]) on the port lists 17 keys: actual, calibrates, countable, counted, disclaimer, evidence, id, kind, meta, metric, model_version, range, reason, registered, role, status, target"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 217}
+  requirement: HREQ-V-15
+  data_impact: Reader-facing in the documents only; the row schema a surface builder would code against was out of date.
+  root_cause: The section was written before the harness gained role, calibrates and counted (BUG-20261003-097) and was not re-read.
+  resolution: >-
+    Fixed in this change: 03 §5.1 lists the 17 fields as built and, marked for
+    re-verification after the merge, the always-present band fields, band_reason and the
+    meta provenance this round adds.
+  monitor_gap: No test pins the row's key set; the qa-auditor sweep compares the section with the code.
+  regression_test: docs-only (no mechanical guard)
+
+- id: BUG-20261003-146
+  area: health
+  summary: 03 §2 gives Node timings as the cost of every layer without saying so; the Python port that runs the gates is 8 to 13 times slower per run
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:53:00-05:00"
+  occurred_at: "2026-10-03T03:05:42-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D13); re-measured: PYTHONPATH=src python3 with time.perf_counter, best of 3 after a warm-up, chronic_high_salt_30d 1.905 s, salt_load_10g 0.276 s, drink_water_1L 0.044 s, no_water_24h 0.114 s, baseline 0.096 s; 256 x 24 h baseline 34.2 s; Node v22.22.0 best of 5, 5.3-151.0 ms per run, 256 x baseline 3.0 s"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 66}
+  - {file: docs/health/01_METHODOLOGY.md, line: 222}
+  requirement: HREQ-N-04
+  data_impact: >-
+    Planning only: the literature layer at n = 256 costs about 10 minutes in Python, not
+    about a minute, so a gate sized from the table would overrun the two-minute suite
+    budget by an order of magnitude.
+  root_cause: The costs were measured on the reference before the port existed and were not relabelled when the port became the implementation the gates run.
+  resolution: >-
+    Fixed in this change: the table has a Node reference column and a Python port column,
+    both measured in this round, with the method stated; 01 §5.3 gives both per-run figures.
+  monitor_gap: Timings are machine-dependent and no test pins them; the method beside the table makes them reproducible.
+  regression_test: docs-only (no mechanical guard)
+
+- id: BUG-20261003-147
+  area: health
+  summary: 03 §4.3 says a 1e-6 change to any parameter fails the golden comparison; the test exempts four (k_excr_gain, sweat_na_mmolL, na_normal_low, na_normal_high)
+  severity: S4
+  priority: P3
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:54:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D14); checked: tests/health_selftest.py test_golden_comparison_detects_a_perturbed_model_constant names four inert parameters and asserts the undetected set equals them"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 192}
+  - {file: tests/health_selftest.py, line: 698}
+  requirement: HREQ-V-09
+  data_impact: Reader-facing in the documents only; the comparison's teeth were overstated for two parameters no V1 scenario exercises.
+  root_cause: The sentence states the design goal; the test was written afterwards with an honest exemption list the document never learned of.
+  resolution: >-
+    Fixed in this change: 03 §4.3 names the test and says that only the two classification
+    thresholds are exempt, caught by the drawSamples comparison, and that k_excr_gain and
+    sweat_na_mmolL are covered by the potassium and sweat goldens this round adds (marked
+    for re-verification after the merge).
+  monitor_gap: None now; the test asserts the exempt set equals its documented list, and the document quotes that list.
+  regression_test:
+    - tests/health_selftest.py::test_golden_comparison_detects_a_perturbed_model_constant
+
+- id: BUG-20261003-148
+  area: health
+  summary: 03 §11 and Appendix B (HREQ-V-25) attribute the planted knowledge-base fixtures to tests/health_selftest.py; they live in tests/health_kb_selftest.py, and §9 calls them one file per rule
+  severity: S4
+  priority: P3
+  error_class: VAL
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:55:00-05:00"
+  occurred_at: "2026-10-03T03:05:42-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D15); checked: grep -n PLANTS tests/health_kb_selftest.py; tests/health_selftest.py has no knowledge-base plant; the plants are in-memory mutations, not files"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 413}
+  - {file: docs/health/03_VALIDATION_AND_TESTING.md, line: 468}
+  requirement: HREQ-V-17
+  data_impact: Reader-facing in the documents only; a reviewer looking for the plants would open the wrong file.
+  root_cause: The environments table predates the split of the knowledge-base tests into their own file.
+  resolution: >-
+    Fixed in this change: §11, §9 and the HREQ-V-25 row name tests/health_kb_selftest.py
+    (PLANTS, one in-memory plant per checker code). The HREQ-V-17 row already named the
+    right file and is unchanged.
+  monitor_gap: No test reads the environments table.
+  regression_test:
+    - tests/health_kb_selftest.py::test_every_contract_rule_fires_on_a_planted_violation
+
+- id: BUG-20261003-149
+  area: health
+  summary: "config/health/base.yaml comments mis-state the code: 'no threshold lives in code' (the file mirrors code constants), MODEL_VERSION 'in __init__.py' (it is in api.py), 'water and sodium' (four invariants); 13 keys have no reader"
+  severity: S4
+  priority: P3
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:56:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D17); checked: grep for each key over src, tests and tools; test_config_agrees_with_engine_and_reference reads model.version, disclaimer, validation_status, reference_person, equivalence, numerics, monte_carlo, influence and two expectations keys; MODEL_VERSION is defined at src/health/engine/api.py:42"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/base.yaml, line: 1}
+  - {file: config/health/base.yaml, line: 19}
+  - {file: config/health/base.yaml, line: 53}
+  requirement: HREQ-N-06
+  data_impact: >-
+    None on any number. A maintainer reading the header would change a tolerance here and
+    expect the engine to follow; the agreement test fails instead, which is safe but
+    misdirected. Keys such as expectations.evaluate_on promised a mc_median path
+    (HREQ-P-06) that does not exist.
+  root_cause: The file was written as the design's single source of thresholds; the port kept its constants in code and added an agreement test, and the comments were not revised.
+  resolution: >-
+    Fixed in this change (comments only; no key or value changed, checked by comparing the
+    parsed file before and after): the header says the file is a checked mirror and lists
+    what the agreement test enforces; the MODEL_VERSION, equivalence and mass-balance
+    comments are corrected; 13 unread keys carry "# reserved: no reader yet (surface
+    layer, M1)"; display.trajectory_label is noted as the one display key with a reader
+    (equality test added this round, marked for re-verification).
+  monitor_gap: The agreement test checks the keys it reads and is silent on keys nobody reads.
+  regression_test:
+    - tests/health_selftest.py::test_config_agrees_with_engine_and_reference
+    - tests/health_kb_selftest.py::test_registry_reader_agrees_with_pyyaml
+
+- id: BUG-20261003-150
+  area: health
+  summary: ADR-0002 and HREQ-P-01 claim the port uses the same identifiers, reads its tolerances from base.yaml and raises ReferenceDivergenceError; it is snake_case outside result keys, the tolerances are test constants, and nothing raises the error
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:57:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D19); checked: grep -rn ReferenceDivergenceError src tests tools finds only its definition (src/health/errors.py:165); REL_TOL and ABS_TOL are literals at tests/health_selftest.py:103-104; health.engine exports simulate_mc, draw_samples, compute_influence"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/decisions/ADR-0002-python-port-with-javascript-reference-equivalence.md, line: 44}
+  - {file: docs/health/00_REQUIREMENTS.md, line: 186}
+  - {file: src/health/errors.py, line: 165}
+  requirement: HREQ-P-01
+  data_impact: Reader-facing in the documents only; an auditor would search the port for camelCase names and for a raise site that does not exist.
+  root_cause: The ADR recorded the intended design before the port was written; an accepted ADR is not edited, and no errata convention was in use.
+  resolution: >-
+    Fixed in this change: an Errata (2026-10-03) section appended to ADR-0002 states the
+    three corrections; HREQ-P-01 says which identifiers are shared and that functions and
+    arguments are snake_case. Raising ReferenceDivergenceError, or deleting it, is left to
+    the engine owner.
+  monitor_gap: ADRs are not compared with the code after acceptance.
+  regression_test:
+    - tests/health_selftest.py::test_results_carry_the_disclaimer_and_reproducibility_fields
+    - tests/health_selftest.py::test_config_agrees_with_engine_and_reference
+
+- id: BUG-20261003-151
+  area: health
+  summary: 06 §4 says CI runs on every push and pull request and draws ruff before the ledger check; ci.yml runs on push and pull request to main only, in the order kb-check, ledger, lint, pytest, secrets
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:58:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D20); checked: .github/workflows/ci.yml lines 2-4 (on push and pull_request, branches [main]) and its step order"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/06_ARCHITECTURE.md, line: 115}
+  - {file: docs/health/diagrams/04_validation_pipeline.mmd, line: 3}
+  requirement: HREQ-N-02
+  data_impact: >-
+    Process only: a reader would assume every push is gated by CI. A push to a branch with
+    no pull request open against main runs no CI; only tools/gates.py, run by the agent,
+    gates it.
+  root_cause: The figure was drawn from the intended pipeline, not from the workflow file.
+  resolution: >-
+    Fixed in this change: the 06 §4 figure and diagrams/04_validation_pipeline.mmd show
+    the triggers and the step order of ci.yml (including the market codec and
+    error-swallow steps); the text says a push with no pull request open against main is
+    gated only by tools/gates.py and notes the steps this round adds (marked for
+    re-verification).
+    architecture.svg does not contain this figure and is unchanged.
+  monitor_gap: tests/selftest.py checks only that the stdlib steps precede Install; nothing compares the figure with the workflow.
+  regression_test: docs-only (no mechanical guard)
+
+- id: BUG-20261003-152
+  area: health
+  summary: TRACKER W-1 (engine port, golden equivalence, harness) still reads "in progress" after b810ed6 landed it
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T04:59:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D21); re-measured: python3 tests/health_selftest.py --no-skips, 'all trajectories: 9512 values, 9311 bit-identical'; worst overall 0.00124 x tolerance at effects.strain_excretion.glucose_mgdl (1.24e-12 relative); worst trajectory 3.84e-14 relative (stiff-corner strain_concentrating at 744 h)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/logs/TRACKER.md, line: 57}
+  requirement: HREQ-D-06
+  data_impact: Process only; the Operator's open-work list showed delivered work as open.
+  root_cause: The port's commit did not touch the tracker; the tracker is updated by hand at each PR.
+  resolution: >-
+    Fixed in this change: W-1 moves to Closed with b810ed6 and the measured equivalence
+    figures; W-17 closes with this round; D-10, D-11 and W-22 are added.
+  monitor_gap: Nothing ties tracker rows to commits.
+  regression_test: docs-only (no mechanical guard)
+
+- id: BUG-20261003-153
+  area: health
+  summary: 00 §1.3, 08 M1 and TRACKER W-10 say six registered scenarios; seven carry expectations (24 rows)
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T05:10:00-05:00"
+  logged_at: "2026-10-03T05:00:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review, documents-against-code lens (finding D22); counted on the port: rows per scenario baseline 1, drink_water_1L 6, drink_water_3L_fast 2, salt_load_10g 5, salt_load_sweep 2, chronic_high_salt_30d 4, no_water_24h 4 = 24"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/00_REQUIREMENTS.md, line: 78}
+  - {file: docs/health/08_PROJECT_PLAN.md, line: 55}
+  - {file: docs/health/logs/TRACKER.md, line: 35}
+  requirement: HREQ-P-15
+  data_impact: >-
+    Planning only: the M1 narrative work (HREQ-P-15) was scoped one scenario short.
+    While in 08, its risk table's "40 contract rules" was corrected to the measured 54
+    checker codes (47 blocking), 11 of 16 documented rules enforced and 5 deferred.
+  root_cause: The count was carried from a V1 description that did not count the baseline scenario, whose one expectation is the numerical drift row.
+  resolution: "Fixed in this change: \"seven\" in all three places; 08 §6's knowledge-base row states the measured rule counts."
+  monitor_gap: No test compares a prose count of scenarios with SCENARIOS.
+  regression_test:
+    - tests/health_selftest.py::test_scenario_records_match_javascript_reference
+    - tests/health_selftest.py::test_scenario_expectations_harness_evaluates_every_quantitative_expectation
+
+- id: BUG-20261003-154
+  area: health
+  summary: Removing engine-v1 exactly as its recipe said turned the gates red, because the bug ledger requires every cited file of every bug to exist whatever its status
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:10:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review rehearsal wf-review/undo/rehearse_B.sh (cli recipe, then engine-v1 recipe, on a scratch copy): tools/gates.py stopped at 'gate failed: selftest' -- the real-ledger buglog check inside tests/selftest.py; tools/buglog.py --check alone lists 13 problems: nine locations and four regression tests under the deleted engine paths (BUG-20261003-095, 096, 097, 098, 101, 102, 115)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/buglog.py, line: 463}
+  - {file: tools/buglog.py, line: 388}
+  - {file: config/health/modules.yaml, line: 80}
+  requirement: HREQ-X-02
+  data_impact: None on any number. No module could be removed with the gates green, so the undo model (HREQ-X-02, docs/health/04 §6.5) was untested and untrue for every module whose files a ledger entry cites.
+  root_cause: The ledger is append-only and its check holds every cited file to existence; the removal recipes deleted cited files and had no ledger step, and nothing distinguished "deleted on purpose by a removal" from "a reference that rotted".
+  resolution: "tools/buglog.py accepts `removed_with_module: <id>` (or a list): for such an entry the location and regression-test existence checks are skipped and nothing else is (BUGS.md presence, a named test and resolved_at for a fixed entry); the module it names must no longer be registered. `--mark-removed <id>` adds the field after each matching entry's status line, reading the module's paths and tests from the registry, and every recipe runs it before its entry is removed. The field is a spreadsheet column."
+  monitor_gap: The removal recipes had never been run; HREQ-X-02's own proof (run the recipe, gates green) was a sentence, not a step anyone executed.
+  regression_test: tests/health_kb_selftest.py::test_buglog_removed_with_module_exempts_deleted_files
+
+- id: BUG-20261003-155
+  area: health
+  summary: The registry test hard-coded the Phase 0 module set, so removing any module failed the knowledge-base self-test
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:11:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review rehearsal wf-review/undo/rehearse_C.sh: with engine-v1 removed and the ledger patched, tools/gates.py stopped at 'gate failed: health kb selftest' -- FAIL registry: the shipped registry names the Phase 0 modules -- ['reference-v1', 'kb-v1', 'cli', 'errors', 'process']"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tests/health_kb_selftest.py, line: 1354}
+  - {file: src/health/registry.py, line: 905}
+  requirement: HREQ-X-02
+  data_impact: None on any number. A module could not be removed without editing kb-v1's test file, so every recipe was incomplete.
+  root_cause: The test asserted which modules exist instead of what every module must carry.
+  resolution: "The registry is held by structure, never by a typed id set: health.registry.validate_modules (run by the gate `python -m health.registry --check` and by the kb self-test) requires the HREQ-X-01 fields with their types, unique ids, registered and acyclic depends_on, existing paths and tests, one owner per file, import edges and recipe words; each rule fires on a planted violation. The status test reads the registry rather than naming ids."
+  monitor_gap: No rehearsal of a removal existed; the test was only ever run against the registry it was written for.
+  regression_test: tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-156
+  area: health
+  summary: "The cli recipe's first step left `import os` unused in tools/gates.py, so ruff (F401) turned the gates red"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:12:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of the cli recipe, reproduced on a scratch copy of e0b5412 (wf-review/undo-D/before.sh): the recipe's gates.py edit (wf-review/undo/edit.py gates-cli), then `ruff check tools/gates.py` -- F401 `os` imported but unused"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/gates.py, line: 71}
+  requirement: HREQ-X-02
+  data_impact: None on any number. The cli recipe could not be completed as written.
+  root_cause: The kb-check step built its own environment with `{**os.environ, ...}`, the only use of `os` in the file, so deleting the step deleted the import's last use.
+  resolution: "`run()` takes `env_extra` and merges it with os.environ itself, so no step builds an environment and removing any step leaves every import in use. A test removes each health statement of main(), and all of them with the health helpers, from the syntax tree and checks for unused imports."
+  monitor_gap: Recipes were reviewed as prose; their edits were never applied and linted.
+  regression_test: tests/health_kb_selftest.py::test_gates_health_steps_remove_cleanly
+
+- id: BUG-20261003-157
+  area: health
+  summary: "The errors recipe never set `enabled: false` or ran tools/gates.py"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:13:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of config/health/modules.yaml:100; the new gate `python -m health.registry --check` run on the reviewed registry (wf-review/undo-D/before.out) reports, among 40 problems, that the errors, reference-v1 and process recipes never say 'enabled: false' and errors and reference-v1 never say 'tools/gates.py'"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 228}
+  - {file: src/health/registry.py, line: 905}
+  requirement: HREQ-X-02
+  data_impact: None on any number. Following the recipe would have removed the module without the flag step or the proof.
+  root_cause: Recipes were free text with no shape check.
+  resolution: "Every recipe is a numbered list ending in the gates run; --check requires the words `enabled: false`, `this entry` and `tools/gates.py` in every recipe (a planted recipe missing each is reported); the errors, reference-v1 and process recipes gained the missing steps; docs/health/07 is generated from the file."
+  monitor_gap: No check read the recipes.
+  regression_test: tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-158
+  area: health
+  summary: The errors recipe and kb-v1's depends_on claimed kb-v1 and cli import health.errors; only the engine does, and 07 disagreed with the registry
+  severity: S4
+  priority: P3
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:14:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review (grep of `health.errors` / `..errors` imports: src/health/engine/api.py, model.py, validate.py and tests/health_selftest.py only); 07's depends-on column omitted errors for engine-v1"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 136}
+  - {file: src/health/registry.py, line: 1044}
+  - {file: docs/health/07_MODULE_REGISTRY.md, line: 16}
+  requirement: HREQ-X-01
+  data_impact: None on any number. The removal order was wrong (errors would have waited for kb-v1 and cli for no reason) and the page contradicted the file it renders.
+  root_cause: Dependency edges were written from memory, and 07 was a hand-kept copy.
+  resolution: "kb-v1 depends_on [reference-v1, process]; errors' recipe waits for engine-v1 only. --check reads every health.* import in src/ (with parent packages) and fails when the importing module does not list the imported file's owner; it also requires every file under src/health/ and every health test, fixture and tool to belong to exactly one module. 07's table and recipes are generated from the yaml (--write-07) and --check fails when the page's block differs."
+  monitor_gap: No check compared depends_on with the imports, or 07 with the yaml.
+  regression_test: tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-159
+  area: health
+  summary: After engine-v1's removal, reference-v1 and errors still listed tests/health_selftest.py as their test, and nothing checked that a tests or paths entry exists
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:15:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of config/health/modules.yaml:99 after the engine-v1 rehearsal (wf-review/undo/rehearse_A.sh); the registry still named the deleted file and the gates did not notice"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/registry.py, line: 973}
+  - {file: config/health/modules.yaml, line: 37}
+  - {file: tests/health_errors_selftest.py, line: 140}
+  requirement: HREQ-X-01
+  data_impact: None on any number. Two modules claimed a verification that no longer ran.
+  root_cause: The errors module had no test of its own, and reference-v1 named a file instead of the functions that verify it; the registry was never read against the disk.
+  resolution: "--check fails when a paths or tests entry does not exist, or a `file::function` test is not defined. errors has its own stdlib test, tests/health_errors_selftest.py (hierarchy, severities, halt flags for every class including later ones, context, and an AST check that SurfaceIntegrityError or a subclass is never caught without a raise, proven on a plant; 0.15 s), run by tools/gates.py and by CI's stdlib and strict steps. reference-v1 names the consumer functions that verify its bytes (two engine tests, one kb test); it gets no test file of its own because a hash manifest would duplicate the fixture's engineSha256 and need a file outside its read-only paths, while naming the consumers keeps the recipe honest -- each consumer's recipe deletes its entries, and the existence check turns a forgotten one red."
+  monitor_gap: The tests field was documentation nobody read.
+  regression_test:
+    - tests/health_errors_selftest.py::test_every_error_class_declares_its_halt_behaviour
+    - tests/health_errors_selftest.py::test_surface_integrity_error_is_never_swallowed
+    - tests/health_kb_selftest.py::test_registry_entries_are_well_formed
+
+- id: BUG-20261003-160
+  area: health
+  summary: "The enabled flag was a display label: a disabled engine-v1 was still imported and status printed `model 1.0.1` next to `modules DISABLED: engine-v1`"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:16:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review rehearsal wf-review/undo/rehearse_D.sh (flag only); reproduced on a scratch copy of e0b5412 (wf-review/undo-D/before.out): `status --fast` with engine-v1 enabled: false prints `model 1.0.1` and `modules DISABLED: engine-v1`"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/cli.py, line: 106}
+  - {file: src/health/registry.py, line: 868}
+  requirement: HREQ-X-01
+  data_impact: None on any number shipped. The two-PR enable rule (07, 04 §4) had nothing to enforce it; an "off" module's output would have reached a surface.
+  root_cause: The registry reader formatted the flags but no surface consulted them.
+  resolution: "health.registry.is_enabled / module_state (fail closed on duplicates). status prints `model unavailable (engine-v1 disabled in config/health/modules.yaml)` and `expectations: skipped (engine-v1 disabled)` and never imports the engine; an unregistered engine and an unreadable registry fail closed the same way; kb-check and kb-summary read no flag. HEALTH_MODULES_PATH (tests only, documented) lets a test show the surface with a copy of the registry. 07 and 04 §6.5 say the flag governs every surface (status today, the app at M1), the tests and the package still run, the merge is the code switch and the flag the surface switch."
+  monitor_gap: The status test checked that the flag was printed, not that it was obeyed.
+  regression_test: tests/health_kb_selftest.py::test_status_honours_the_module_flags
+
+- id: BUG-20261003-161
+  area: health
+  summary: The engine-v1 recipe left stale references in base.yaml, pyproject.toml, both READMEs, 04 and 07, and nothing checked a recipe against the files that name its module
+  severity: S4
+  priority: P3
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:17:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review (plausible): grep after the engine-v1 rehearsal found config/health/base.yaml equivalence.golden_fixture/generator, pyproject.toml 'engine/params.json', README.md:79, docs/health/README.md:65-66 and 07's rows; the new --check on the reviewed registry reports 28 such recipe gaps (wf-review/undo-D/registry_check_before.out)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/registry.py, line: 1104}
+  - {file: config/health/modules.yaml, line: 80}
+  requirement: HREQ-X-02
+  data_impact: None on any number. After a removal the READMEs would have told a reader to run files that no longer exist.
+  root_cause: Recipes listed the module's own paths and the gate steps, not the other files that name them.
+  resolution: "Every recipe names each file it edits, step by step. --check scans the live files (src, tests, tools, config, .github, pyproject.toml, the READMEs, 04, 07) and fails when one names a module's paths, will still exist when the module is removed (not its own, not a dependant's), and is not named in the recipe; whole-path matching, so README.md is not named by docs/health/README.md. Planted: a recipe forgetting base.yaml or the root README is reported by name."
+  monitor_gap: No grep for a module's paths ran when a recipe was written.
+  regression_test: tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference
+
+- id: BUG-20261003-162
+  area: health
+  summary: "The registry and 06 said process can go at any time because nothing imports it; the engine and knowledge-base self-tests read its files"
+  severity: S1
+  priority: P1
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:18:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review docs-drift probe (wf-review/docs-drift/noprocess.out): with config/health/ removed, tests/health_selftest.py fails test_config_agrees_with_engine_and_reference (FileNotFoundError config/health/base.yaml); kb-v1's test parses docs/health/03 §6, and cli reads the registry"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 78}
+  - {file: docs/health/06_ARCHITECTURE.md, line: 180}
+  requirement: HREQ-X-01
+  data_impact: None on any number. Following the registry would have removed the configuration, the documents and the registry itself while the modules that read them stayed, with red gates and no recipe to recover.
+  root_cause: '"Nothing imports it" was taken to mean "nothing depends on it"; data reads (base.yaml, the 03 §6 table, the registry) and the package root are dependencies too.'
+  resolution: "base.yaml stays in process, not engine-v1: it carries subsystem-wide rules (the disclaimer and validation-status text every surface renders, display labels, the grade headline), not only the engine's tolerances. Every module now lists process in depends_on; process owns the package root and the registry reader and goes last; the claim is gone from the yaml and from 06. The recipe-gap check proves the edge matters: with no module depending on process, process's recipe is reported as missing the engine's self-test."
+  monitor_gap: Dependencies were checked against imports by eye only.
+  regression_test: tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference
+
+- id: BUG-20261003-163
+  area: health
+  summary: No gate ran tools/health_golden.mjs --check, so a stale golden fixture passed every gate
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:19:00-05:00"
+  occurred_at: "2026-10-03T03:29:03-05:00"
+  detected_by: "adversarial review against docs/health/03 Appendix B V-08; `grep -c health_golden tools/gates.py` on e0b5412 = 0 and CI had no Node step"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/gates.py, line: 90}
+  - {file: .github/workflows/ci.yml, line: 69}
+  requirement: HREQ-X-05
+  data_impact: None today (the fixture was current, `--check` exit 0 in 6.7 s). A reference change without regeneration would have left the port held to an old fixture.
+  root_cause: The generator's --check existed but was wired into nothing.
+  resolution: "tools/gates.py runs `node tools/health_golden.mjs --check` with /opt/node22/bin/node, else `node` on PATH; without either it prints `SKIPPED (no Node binary): golden --check not run`, and any skip (this or ruff) turns the last line into `GATES GREEN, N SKIPPED: ...` -- never ALL GATES GREEN. CI sets up Node 22 with actions/setup-node@v5 (Node 24 runtime) and runs the check."
+  monitor_gap: The gates verdict could not express a gate that did not run.
+  regression_test: tests/health_kb_selftest.py::test_gates_never_reads_green_on_a_skip
+
+- id: BUG-20261003-164
+  area: health
+  summary: The engine-v1 recipe was imprecise (the strict CI step runs both suites and must be edited, not removed) and HREQ-X-02 said a module needing more steps was not finished
+  severity: S4
+  priority: P3
+  error_class: CFG
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:20:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of config/health/modules.yaml:47 and the rehearsal edit wf-review/undo/edit.py ci-engine, which had to edit a shared step"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: config/health/modules.yaml, line: 80}
+  - {file: docs/health/07_MODULE_REGISTRY.md, line: 231}
+  - {file: .github/workflows/ci.yml, line: 33}
+  requirement: HREQ-X-02
+  data_impact: None on any number. Two people following the recipe would have made different edits.
+  root_cause: CI and the gates grouped several modules' suites in one step, so no recipe could delete "its" step.
+  resolution: "CI has one step per module and mode (engine, knowledge-base, errors; stdlib and strict), the gates one HEALTH_SUITES row per module, so every recipe deletes whole steps by name. The engine-v1 recipe names every edit (gates rows and functions, four CI steps, reference-v1's tests entries, the ledger mark, base.yaml keys and comments, the pyproject glob, README, 04 and 07 rows) and 07 records engine-v1 and cli as accepted, documented exceptions to HREQ-X-02 with the reason (the gate and CI steps are the module's own tests, which X-02 did not anticipate; cli's tests live in kb-v1's file). 00 is unchanged. Rehearsed on scratch copies: gates green after each recipe."
+  monitor_gap: The recipe was never executed literally.
+  regression_test: tests/health_kb_selftest.py::test_removal_recipes_name_every_live_reference
+
+- id: BUG-20261003-165
+  area: health
+  summary: "docs/health/README.md said tools/gates.py runs all of the above; it never ran health.cli status"
+  severity: S4
+  priority: P3
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:21:00-05:00"
+  occurred_at: "2026-10-03T02:55:54-05:00"
+  detected_by: "adversarial review of docs/health/README.md:78 against tools/gates.py (no `status` step)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: docs/health/README.md, line: 89}
+  - {file: README.md, line: 83}
+  requirement: HREQ-X-02
+  data_impact: None on any number. A reader would have taken a green gates run as proof that status works.
+  root_cause: The line was written for an earlier list of commands and never re-read against gates.py.
+  resolution: "Both READMEs' gates lines say `every line above except status (a surface, not a gate), plus golden --check when Node is present`; 04 §7 says the same. A test parses each README run block naming tools/gates.py and requires every command above it to be run by gates.py or named on the gates line as not run, and forbids 'all of the above'."
+  monitor_gap: No test read the documentation's claims about the gates.
+  regression_test: tests/health_kb_selftest.py::test_docs_say_what_gates_runs
+
+- id: BUG-20261003-166
+  area: health
+  summary: "buglog.py --check rule 4 walked the whole directory tree, so in the main checkout it failed on BUG ids in the builders' git-ignored worktrees under .claude/worktrees/"
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:40:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  detected_by: "the orchestrator running `python3 tools/buglog.py --check` in the main checkout while four builder worktrees existed: 'BUG-20261003-165: referenced in .claude/worktrees/agent-.../docs/logs/BUGS.md ... but not in bugs.yaml'; reproduced with the reviewed buglog.py on a planted repository (wf-review/undo-D/rule4_before.py)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/buglog.py, line: 415}
+  - {file: tools/buglog.py, line: 520}
+  requirement: HREQ-X-02
+  data_impact: None on any number. The ledger gate was red in the main checkout for ids that exist only on unmerged branches, and an id cited only in an ignored file could equally have passed the gate.
+  root_cause: Rule 4 used ROOT.rglob("*"), which sees every file on disk -- git-ignored worktrees, untracked scratch -- not the repository's files.
+  resolution: "Rule 4 reads `git ls-files -z` from the repository root (tracked files only) and walks the tree only when git is unavailable or the root is not a checkout. Planted in a scratch git repository: an id in a tracked file is reported, an id in an ignored path or an untracked file is not, and outside a checkout the walk still reads every file."
+  monitor_gap: The gate had only ever run in checkouts with no nested worktrees.
+  regression_test: tests/health_kb_selftest.py::test_buglog_rule_4_reads_tracked_files_only
+
+- id: BUG-20261003-167
+  area: health
+  summary: "buglog.py --check rule 3 skipped any regression_test without `::`, so a fixed entry whose test was a placeholder sentence passed the gate"
+  severity: S3
+  priority: P2
+  error_class: INF
+  status: fixed
+  resolved_at: "2026-10-03T06:10:00-05:00"
+  logged_at: "2026-10-03T05:50:00-05:00"
+  occurred_at: "2026-09-09T00:00:00-05:00"
+  detected_by: "the docs builder of this round: a fixed entry whose regression_test read 'docs-only (no mechanical guard)' passed `tools/buglog.py --check`; reproduced with the reviewed buglog.py on a planted ledger with a code location (wf-review/undo-D/rule3_before.py: no problems)"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/buglog.py, line: 491}
+  - {file: tools/buglog.py, line: 333}
+  requirement: HREQ-X-02
+  data_impact: None on any number. A bug could be closed with no test at all while the gate that exists to refuse exactly that stayed green.
+  root_cause: "The check read `::` as the marker of a checkable test and silently skipped everything else, so prose, a bare file name and a placeholder were indistinguishable from \"no test to check\"."
+  resolution: "For a fixed entry every regression_test item is `file::function` (file exists, function defined) or exactly the literal `docs-only (no mechanical guard)`, and the literal holds only when every location is documentation (under docs/, a .md/.mmd/.svg file, or a comment line of a .yaml/.yml file, the line read from the file); anything else fails, naming the entry. removed_with_module skips only the existence half, never this shape rule. The four fixed entries of 2026-09-09 whose prose names a CI step (004, 019, 034, 038) are a closed, named exception list in the gate (PRE_STRICT_PROSE_TESTS), not a pattern."
+  monitor_gap: The gate's own tests planted a missing test function but never a test that is not a function at all.
+  regression_test: tests/health_kb_selftest.py::test_buglog_rule_3_refuses_placeholder_tests
+
+- id: BUG-20261003-168
+  area: health
+  summary: "CI's 'SurfaceIntegrityError is never swallowed' step flagged nothing on a planted swallow: its regular expression read a handler body as running to the next column-0 line, so any later raise in the function hid the swallow"
+  severity: S2
+  priority: P2
+  error_class: INF
+  status: fixed
+  logged_at: "2026-10-03T11:20:00-05:00"
+  resolved_at: "2026-10-03T11:40:00-05:00"
+  occurred_at: "2026-10-03T03:00:00-05:00"
+  detected_by: "Fixer D (undo, registry and gates) while giving the errors module its own test: the CI pattern flagged nothing on a three-handler plant where an AST check flags lines 4 and 17"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: .github/workflows/ci.yml, line: 138}
+  requirement: HREQ-S-01
+  data_impact: None published; the guard that was supposed to keep a surface from showing a number without its disclaimer could not fire, so a swallow in src/health would have reached a merge unnoticed by CI (the suite's own AST check catches it).
+  root_cause: >-
+    The step was a regular expression over source text; it cannot see where a handler's
+    body ends, does not match a subclass, a tuple or a qualified name, and "raise" anywhere
+    in the captured text counted as a re-raise.
+  resolution: >-
+    tools/swallow_check.py (standard library, syntax tree) replaces both inline scripts;
+    the health step runs it with --family health.errors:SurfaceIntegrityError so every
+    subclass is covered without editing CI; tests/health_errors_selftest.py proves the tool
+    fires on the plant, that its command line exits 1, and that ci.yml calls it.
+  regression_test: tests/health_errors_selftest.py::test_surface_integrity_error_is_never_swallowed
+  monitor_gap: A CI step that greps had no test of its own; every guard now has a planted case that proves it fires.
+
+- id: BUG-20261003-169
+  summary: "CI's 'DataIntegrityError is never swallowed' step had the same regular expression and the same blind spot: a later raise in the function hid a swallowing handler"
+  severity: S2
+  priority: P2
+  error_class: INF
+  status: fixed
+  logged_at: "2026-10-03T11:20:00-05:00"
+  resolved_at: "2026-10-03T11:40:00-05:00"
+  occurred_at: "2026-09-10T00:00:00-05:00"
+  detected_by: "Fixer D, by the same plant as BUG-20261003-168; the pattern is identical"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: .github/workflows/ci.yml, line: 122}
+  requirement: REQ-D-07
+  data_impact: None found; src/navanax has no swallowing handler today (the tool scans it in CI and reports ok), but the step could not have caught one.
+  root_cause: Same as BUG-20261003-168.
+  resolution: The step now runs tools/swallow_check.py --names DataIntegrityError over src; the tool's planted test covers the --names form.
+  regression_test: tests/health_errors_selftest.py::test_surface_integrity_error_is_never_swallowed
+  monitor_gap: Same as BUG-20261003-168.
+
+- id: BUG-20261003-170
+  area: health
+  summary: "health.registry --check walked LIVE_SCOPE on disk, so an ignored build artefact (src/navanax.egg-info/SOURCES.txt) counted as a live reference to module paths and the gate failed in the main checkout"
+  severity: S3
+  priority: P2
+  error_class: CFG
+  status: fixed
+  logged_at: "2026-10-03T11:25:00-05:00"
+  resolved_at: "2026-10-03T11:45:00-05:00"
+  occurred_at: "2026-10-03T10:30:00-05:00"
+  detected_by: "Fable, merging the fix round: `python -m health.registry --check` reported 6 problems, all naming src/navanax.egg-info/SOURCES.txt, a path git ignores"
+  detection_channel: agent
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: src/health/registry.py, line: 1069}
+  requirement: HREQ-X-02
+  data_impact: None; a gate was red for a file that is not part of the repository.
+  root_cause: The live-reference scan used rglob over the working tree; the ledger gate had the same defect a few hours earlier (BUG-20261003-166).
+  resolution: _live_files reads git-tracked files (`git ls-files -z`) and walks only when git is unavailable or the root is not a checkout, so a copy with no .git is still checked.
+  regression_test: tests/health_kb_selftest.py::test_registry_live_scan_reads_tracked_files_only
+  monitor_gap: Two gates learned the rule separately; a shared tracked-files helper is a W item.
+
+- id: BUG-20261003-171
+  area: health
+  summary: "CI's first run on the pull request went red at the golden check: the fixture header records the Node version that wrote it and `--check` compared whole files, so the runner's Node 22.23.3 read a value-identical fixture generated under 22.22.0 as stale"
+  severity: S3
+  priority: P1
+  error_class: INF
+  status: fixed
+  logged_at: "2026-10-03T13:15:00-05:00"
+  resolved_at: "2026-10-03T13:35:00-05:00"
+  occurred_at: "2026-10-03T13:09:30-05:00"
+  detected_by: "GitHub Actions job 'test' on spencerwon/navanax1#21 at c8bcb5e (health_golden: golden_v1.json is stale); predicted independently by the reconciliation reviewer reading the generator"
+  detection_channel: ci
+  branch: claude/health-system-architecture-i9qgip
+  locations:
+  - {file: tools/health_golden.mjs, line: 514}
+  requirement: HREQ-V-08
+  data_impact: None on any value; Node 20.20, 22.22 and 22.23 regenerate every value byte-identically. The gate was red on provenance, not on a divergence, which is the kind of false alarm that teaches people to ignore the gate.
+  root_cause: >-
+    The header's `node` field is provenance (which Node wrote the file) but the check
+    treated it as a value; the CI step pins the Node major (22) and the runner carried a
+    newer patch release than the container that generated the fixture.
+  resolution: >-
+    `--check` normalises the recorded Node version before comparing and names the first
+    differing line when the fixture is stale; HEALTH_GOLDEN_OUT lets a test plant a copy.
+    tests/health_selftest.py proves a copy differing only in the recorded version is up to
+    date and a copy with one changed value is stale (the test declares `needs_binary("node")`
+    and is a counted skip, never a silent pass, where Node is absent).
+  regression_test: tests/health_selftest.py::test_golden_check_ignores_the_recorded_node_version_but_not_a_value
+  monitor_gap: The gate had run only in this container, under the Node that generated the fixture; the first run elsewhere found it.

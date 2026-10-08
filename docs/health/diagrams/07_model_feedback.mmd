@@ -1,0 +1,39 @@
+%% docs/health/06_ARCHITECTURE.md §7 — the V1 model as a feedback diagram (13 states, blocks M1–M7)
+flowchart LR
+  subgraph IN["Inputs (piecewise constant, breakpoints)"]
+    W["water in"]; NA["Na in"]; K["K in"]
+  end
+  subgraph GUT["M2 gut"]
+    VG["V_gut_water"]; NG["Na_gut"]
+  end
+  subgraph FLUID["M1 · M3 fluid compartments"]
+    VE["V_ecf"]; VI["V_icf"]; NE["Na_ecf"]; KI["K_icf"]; SI["osm_icf_solute"]
+  end
+  subgraph HORM["M4 · M5 · M6 hormones, drive, pressure"]
+    ADH["ADH"]; TH["Thirst"]; AL["Aldo"]; AN["ANP"]; MAP["MAP"]; RA["R_auto (slow)"]
+  end
+  subgraph KID["M7 kidney"]
+    GFR["GFR"]; FE["FE_Na"]; UO["U_osm"]; UF["urine flow"]
+  end
+  W --> VG --> VE
+  NA --> NG --> NE
+  K --> KI --> SI
+  VE -- "osm_e = 2[Na] + other" --> ADH
+  VE -- "volume shifts threshold" --> ADH
+  ADH --> UO --> UF --> VE
+  VE -- "osm gradient" --> VI
+  VE -- "vr^-aldo_vol_exp" --> AL
+  VE -- "vr^anp_vol_exp" --> AN
+  VE -- "fast share" --> MAP
+  RA -- "slow share, τ ≈ 10 d" --> MAP
+  VE --> RA
+  MAP -- "pressure natriuresis" --> FE
+  AL -- "retains Na" --> FE
+  AN -- "natriuretic" --> FE
+  MAP --> GFR
+  VE --> GFR
+  GFR --> FE
+  FE -- "Na_ur" --> NE
+  NE --> VE
+  VE --> TH
+  SI -.-> VI

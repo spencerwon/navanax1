@@ -1,17 +1,31 @@
 """One command, every gate. `python3 tools/gates.py [--corpus LANDING DB]`
 
 Runs, in order, and stops at the first failure with a non-zero exit:
-  1. tests/selftest.py --no-skips  (discovery-based; count printed. Strict: a test
+  - tests/selftest.py --no-skips   (discovery-based; count printed. Strict: a test
                                     skipped for a missing dependency FAILS here,
                                     because this machine has the dependencies)
-  2. ruff check src tests tools
-  3. tools/buglog.py --check       (every fixed bug names a test that exists)
-  4. tools/secrets_check.py
-  5. optional: a real-corpus fold  (--corpus <landing root> <analytics.sqlite>)
+  - the health self-tests          (HEALTH_SUITES, below)
+  - ruff check src tests tools
+  - tools/buglog.py --check        (every fixed bug names a test that exists)
+  - tools/secrets_check.py
+  - the other health gates         (below)
+  - optional: a real-corpus fold   (--corpus <landing root> <analytics.sqlite>)
      re-folds the analytical store from the landing zone into a SCRATCH COPY
      and prints the before/after counts the tech-lead requires in every PR
      description (docs/proposals/TECHLEAD_2026-09-09_factcheck.md, R1).
      The landing zone is read only; the operator's store is never touched.
+
+The health gates, one line per module so its removal recipe (docs/health/07) deletes its
+own line here with its step below:
+  HEALTH_SUITES                   one row per module with a self-test, run --no-skips
+  health module registry          python -m health.registry --check (process)
+  health kb-check                 python -m health.cli kb-check (cli)
+  health golden fixture           the golden fixture is what the JavaScript reference writes today (engine-v1)
+`health.cli status` is not a gate: it is a surface, run by hand.
+
+The last line is `ALL GATES GREEN` only when every gate ran and passed; a gate that could
+not run here (its tool is not installed) turns it into `GATES GREEN, N SKIPPED: ...` --
+a skipped gate is never a silent green.
 
 Agents run this before claiming green. The orchestrator runs it on the
 operator's machine with --corpus before any PR is opened.
@@ -20,6 +34,7 @@ operator's machine with --corpus before any PR is opened.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -27,17 +42,34 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+NODE_CANDIDATES = ("/opt/node22/bin/node",)   # then `node` on PATH
+
+# Health subsystem suites (docs/health/03 §2): one row per module that has a self-test.
+# A module's removal recipe deletes its row (docs/health/07).
+HEALTH_SUITES: tuple[tuple[str, str], ...] = (
+    ("health selftest", "tests/health_selftest.py"),                # engine-v1
+    ("health kb selftest", "tests/health_kb_selftest.py"),          # kb-v1
+    ("health errors selftest", "tests/health_errors_selftest.py"),  # errors
+)
+
+SKIPPED: list[str] = []   # gates that could not run here; the verdict line names them
 
 
-def run(label: str, cmd: list[str], *, optional: bool = False) -> str:
+def run(label: str, cmd: list[str], *, optional: bool = False,
+        env_extra: dict[str, str] | None = None) -> str:
+    """Run one gate from the repository root; SystemExit on failure. `env_extra` is added
+    to this process's environment (a step never builds its own, so removing one leaves no
+    import behind)."""
     print(f"\n=== {label}: {' '.join(cmd)}")
     t0 = time.time()
     if shutil.which(cmd[0]) is None:
         if optional:
             print(f"--- {label}: SKIPPED ({cmd[0]} not installed here; CI runs it)")
+            SKIPPED.append(f"{label} ({cmd[0]} not installed)")
             return ""
         raise SystemExit(f"gate failed: {label} ({cmd[0]} not installed)")
-    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    env = {**os.environ, **env_extra} if env_extra else None
+    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
     out = (p.stdout + p.stderr)
     tail = "\n".join(out.strip().splitlines()[-6:])
     print(tail)
@@ -45,6 +77,35 @@ def run(label: str, cmd: list[str], *, optional: bool = False) -> str:
     if p.returncode != 0:
         raise SystemExit(f"gate failed: {label}")
     return out
+
+
+def node_binary() -> str | None:
+    """/opt/node22/bin/node, else `node` on PATH, else None."""
+    for cand in (*NODE_CANDIDATES, shutil.which("node")):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def health_golden_check() -> None:
+    """engine-v1 (docs/health/03 Appendix B V-08, HREQ-X-05): the committed golden fixture
+    is byte-for-byte what tools/health_golden.mjs writes from the JavaScript reference
+    today. Without Node the gate is SKIPPED, loudly, and counted in the verdict."""
+    node = node_binary()
+    if node is None:
+        print("\n=== health golden fixture: tools/health_golden.mjs --check")
+        print("--- health golden fixture: SKIPPED (no Node binary): golden --check not run")
+        SKIPPED.append("health golden fixture (no Node binary: golden --check not run)")
+        return
+    run("health golden fixture", [node, "tools/health_golden.mjs", "--check"])
+
+
+def verdict() -> str:
+    """`ALL GATES GREEN` only when nothing was skipped; otherwise the skips, by name."""
+    if not SKIPPED:
+        return "ALL GATES GREEN"
+    return (f"GATES GREEN, {len(SKIPPED)} SKIPPED: " + "; ".join(SKIPPED)
+            + " -- a skipped gate is not a passed gate")
 
 
 def corpus_fold(landing: Path, db: Path) -> None:
@@ -117,12 +178,27 @@ def main() -> int:
         out = run("selftest", [py, "tests/selftest.py", "--no-skips"])
         line = next((ln for ln in out.splitlines() if "test functions" in ln), "")
         print(f"    {line.strip()}")
+        # Health subsystem (docs/health/03 §2): the engine port against the JavaScript
+        # golden fixture, every knowledge-base rule against a planted violation, and the
+        # error hierarchy's halt rules.
+        for label, script in HEALTH_SUITES:
+            out = run(label, [py, script, "--no-skips"])
+            line = next((ln for ln in out.splitlines() if "test functions" in ln), "")
+            print(f"    {line.strip()}")
     run("ruff", ["ruff", "check", "src", "tests", "tools"], optional=True)   # lint; CI is the hard gate
     run("bug ledger", [py, "tools/buglog.py", "--check"])
     run("secrets", [py, "tools/secrets_check.py"])
+    # HREQ-X-01/X-02: the module registry against the repository (process). PYTHONPATH=src
+    # so the health gates run on a checkout that has not been pip-installed, as CI's do.
+    run("health module registry", [py, "-m", "health.registry", "--check"],
+        env_extra={"PYTHONPATH": str(ROOT / "src")})
+    # HREQ-D-03: the knowledge base conforms to its contract (cli).
+    run("health kb-check", [py, "-m", "health.cli", "kb-check"],
+        env_extra={"PYTHONPATH": str(ROOT / "src")})
+    health_golden_check()
     if a.corpus:
         corpus_fold(Path(a.corpus[0]), Path(a.corpus[1]))
-    print("\nALL GATES GREEN")
+    print(f"\n{verdict()}")
     return 0
 
 
