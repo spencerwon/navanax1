@@ -13091,5 +13091,221 @@ def _raises(fn) -> bool:
     return False
 
 
+
+def test_a_heavy_panel_is_computed_once_not_on_every_reload(tmp: Path) -> None:
+    """BUG-20261008-172. The page reloads the open tab every 10 s. On the
+    Operator's 58 GB store the Flow tab's survival estimate takes 40-80 s, so
+    the reloads queued behind each other and the same 1.3M-order curve was
+    recomputed back to back, forever -- the fold behind it stalled and every
+    other panel waited. A heavy answer is now computed once per window, shared
+    by every request that asks the same question meanwhile, served with the
+    time it was computed, and recomputed in the background when it expires.
+    """
+    import http.client
+    import threading as _th
+    import time as _time
+    from http.server import ThreadingHTTPServer
+
+    from navanax.dashboard import RESPONSE_TTL_SECONDS, ResponseCache, make_handler
+
+    now = [1000.0]
+    calls = {"n": 0}
+    gate = _th.Event()
+
+    def compute():
+        calls["n"] += 1
+        gate.wait(timeout=5)
+        return json.dumps({"n": calls["n"]}).encode()
+
+    rc = ResponseCache(ttl={"/x": 60.0}, stale_max={"/x": 600.0},
+                       clock=lambda: now[0], wall=lambda: 1_700_000_000.0 + now[0])
+    # single flight: three requests for one question while it is being computed
+    out: list[bytes] = []
+    ths = [_th.Thread(target=lambda: out.append(rc.get("/x", {"a": "1"}, compute)[0])) for _ in range(3)]
+    for t in ths:
+        t.start()
+    _time.sleep(0.2)
+    gate.set()
+    for t in ths:
+        t.join(timeout=5)
+    check("cache: three concurrent requests for one heavy answer compute it ONCE and all "
+          "three get it", calls["n"] == 1 and out == [b'{"n": 1}'] * 3, f"{calls['n']} {out}")
+    now[0] += 30
+    body, at, age = rc.get("/x", {"a": "1"}, compute)
+    check("cache: within its window the answer is served, with its true age",
+          calls["n"] == 1 and body == b'{"n": 1}' and abs(age - 30) < 1e-9
+          and at == 1_700_000_000.0 + 1000.0, f"{calls['n']} {age} {at}")
+    rc.get("/x", {"a": "2"}, compute)
+    check("cache: a different question is a different answer", calls["n"] == 2)
+    # expired but within stale_max: the old answer is served at once, refreshed behind
+    now[0] += 100
+    body, _at, age = rc.get("/x", {"a": "1"}, compute)
+    for _ in range(50):
+        if calls["n"] == 3 and not rc._inflight:
+            break
+        _time.sleep(0.05)
+    check("cache: an expired heavy answer is served immediately, labelled with its age, "
+          "while ONE background refresh computes the next",
+          body == b'{"n": 1}' and abs(age - 130) < 1e-9 and calls["n"] == 3
+          and rc.stats["refreshes"] == 1, f"{calls['n']} {age} {rc.stats}")
+    body, _at, age = rc.get("/x", {"a": "1"}, compute)
+    check("cache: ...and the refreshed answer replaces it", body == b'{"n": 3}' and age == 0.0,
+          f"{body} {age}")
+    # past stale_max: computed again in the request, never served that old
+    now[0] += 10_000
+    rc.get("/x", {"a": "1"}, compute)
+    check("cache: an answer older than its stale limit is never served", calls["n"] == 4)
+
+    # errors are not cached
+    boom = {"n": 0}
+    def bad():
+        boom["n"] += 1
+        raise ValueError("no")
+    check("cache: a failed computation raises to its caller", _raises(lambda: rc.get("/x", {"b": "1"}, bad)))
+    check("cache: ...and is not remembered -- the next request tries again",
+          _raises(lambda: rc.get("/x", {"b": "1"}, bad)) and boom["n"] == 2 and not rc._inflight)
+
+    # a waiter gets the OWNER's error, it does not recompute after it
+    gate2, n_bad = _th.Event(), {"n": 0}
+    def slow_bad():
+        n_bad["n"] += 1
+        gate2.wait(timeout=5)
+        raise ValueError("store locked")
+    errs: list[str] = []
+    def ask():
+        try:
+            rc.get("/x", {"c": "1"}, slow_bad)
+        except ValueError as exc:
+            errs.append(str(exc))
+    ths = [_th.Thread(target=ask) for _ in range(3)]
+    for t in ths:
+        t.start()
+    _time.sleep(0.2)
+    gate2.set()
+    for t in ths:
+        t.join(timeout=5)
+    check("cache: when the computation fails, the requests waiting on it get ITS error "
+          "instead of each recomputing in turn", n_bad["n"] == 1 and errs == ["store locked"] * 3,
+          f"{n_bad} {errs}")
+
+    # the stamp is the START of the computation: the instant the answer describes
+    def slow_clock():
+        now[0] += 50
+        return b"{}"
+    _b, at, age = rc.get("/x", {"d": "1"}, slow_clock)
+    check("cache: the computed-at stamp is taken when the computation STARTS -- an 80 s "
+          "survival curve describes the moment it began, and its age counts from there",
+          at == 1_700_000_000.0 + now[0] - 50 and abs(age - 50) < 1e-9, f"{at} {age}")
+
+    # a refresh that fails is not retried on every reload
+    t0n = now[0]
+    fl = {"n": 0}
+    def flaky():
+        fl["n"] += 1
+        if fl["n"] > 1:
+            raise RuntimeError("database is locked")
+        return b'{"ok": 1}'
+    rc.get("/x", {"e": "1"}, flaky)
+    now[0] = t0n + 100
+    rc.get("/x", {"e": "1"}, flaky)              # stale -> background refresh, which fails
+    for _ in range(50):
+        if not rc._inflight:
+            break
+        _time.sleep(0.05)
+    for _ in range(5):
+        body, _a, _g = rc.get("/x", {"e": "1"}, flaky)   # within one ttl of the failure
+    _time.sleep(0.1)
+    check("cache: a background refresh that FAILED is not retried on every reload for one "
+          "ttl, and the stale answer keeps being served meanwhile",
+          fl["n"] == 2 and body == b'{"ok": 1}' and rc.stats["refresh_skipped"] >= 5,
+          f"{fl} {rc.stats}")
+
+    # the store generation is part of the key
+    g0 = rc.get("/x", {"f": "1"}, lambda: b'{"gen": 0}', 0)[0]
+    g1 = rc.get("/x", {"f": "1"}, lambda: b'{"gen": 1}', 1)[0]
+    check("cache: an answer from a store that has since been reopened is never served "
+          "(the store generation is part of the key)",
+          g0 == b'{"gen": 0}' and g1 == b'{"gen": 1}')
+
+    # eviction: never the expensive answer because it is computed rarely
+    ev = ResponseCache(ttl={"/api/survival": 300.0, "/api/series": 15.0},
+                       stale_max={"/api/survival": 1800.0}, max_entries=4, clock=lambda: now[0])
+    ev.get("/api/survival", {"range": "24h"}, lambda: b"S")
+    for i in range(20):
+        now[0] += 10
+        ev.get("/api/series", {"i": str(i)}, lambda: b"{}")
+    check("cache: twenty cheap series answers do not evict the survival curve -- expired "
+          "answers go first, then the soonest to expire",
+          ev.key("/api/survival", {"range": "24h"}) in ev._entries and len(ev._entries) <= 4,
+          str(list(ev._entries)))
+    big = ResponseCache(ttl={"/x": 60.0}, max_body_bytes=10, max_bytes=25, clock=lambda: now[0])
+    nb = {"n": 0}
+    def huge():
+        nb["n"] += 1
+        return b"x" * 11
+    big.get("/x", {"h": "1"}, huge)
+    big.get("/x", {"h": "1"}, huge)
+    for i in range(4):
+        big.get("/x", {"m": str(i)}, lambda: b"y" * 9)
+    check("cache: an answer over the size limit is computed per request, never parked, and "
+          "the bytes kept are bounded",
+          nb["n"] == 2 and sum(len(b) for _m, _w, b in big._entries.values()) <= 25,
+          f"{nb} {len(big._entries)}")
+
+    check("cache: survival, the slow statistical panel, is cached and served stale while it "
+          "refreshes; the cheap live panels (status, book, tape, ledger) are not cached at all",
+          "/api/survival" in RESPONSE_TTL_SECONDS and "/api/trait_series" in RESPONSE_TTL_SECONDS
+          and not any(p in RESPONSE_TTL_SECONDS for p in ("/api/status", "/api/book", "/api/tape",
+                                                          "/api/ledger", "/api/health")))
+
+    # over HTTP: the headers say when the answer was computed
+    class FakeDash:
+        response_cache = None
+        def __init__(self):
+            self.n = 0
+        def degraded(self):
+            return False
+        def __getattr__(self, name):
+            if not name.startswith("api_"):
+                raise AttributeError(name)
+            def handler(*a, **k):
+                self.n += 1
+                return {"route": name, "n": self.n}
+            return handler
+    fd = FakeDash()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(fd))
+    port = httpd.server_address[1]
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        def get(path):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            hdr = {k.lower(): v for k, v in r.getheaders()}
+            c.close()
+            return r.status, json.loads(body), hdr
+        s1, b1, h1 = get("/api/survival?collection=argonauts&range=24h")
+        s2, b2, h2 = get("/api/survival?collection=argonauts&range=24h")
+        check("cache/http: the second identical survival request is the first answer, not a "
+              "second computation", s1 == s2 == 200 and b1 == b2 and fd.n == 1, f"{b1} {b2} {fd.n}")
+        check("cache/http: every cached answer carries X-Navanax-Computed-At and its age, so "
+              "the page can say how old it is",
+              h2.get("x-navanax-computed-at", "").endswith("Z")
+              and float(h2.get("x-navanax-age-seconds", "-1")) >= 0, str(h2))
+        get("/api/status")
+        get("/api/status")
+        check("cache/http: status is computed per request, never cached",
+              fd.n == 3, str(fd.n))
+        get("/api/multi?metrics=floor_ask&live=1")
+        get("/api/multi?metrics=floor_ask&live=1")
+        check("cache/http: a number shown as 'now' (live=1, the KPI cards) is computed fresh "
+              "every time", fd.n == 5, str(fd.n))
+        check("cache/http: the server's cache is reachable from the dashboard",
+              isinstance(fd.response_cache, ResponseCache))
+    finally:
+        httpd.shutdown()
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
