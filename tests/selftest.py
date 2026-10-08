@@ -5090,7 +5090,7 @@ def test_ui_trait_chart_is_the_shape_the_operator_decided() -> None:
           and body.count("mode:mode(") >= 4, f"{body.count('connectgaps:false')} vs {body.count('tr.push({')}")
     check("ui/trait chart: the hover carries value+unit, coverage, per-leg n AND which leg set "
           "the number -- a line whose population changes and does not say so is leg-mixing",
-          "cov ${(100*cov[i]).toFixed(0)}%" in script and "leg: ${b.winning_leg[i]}" in script
+          "${(100*cov[i]).toFixed(0)}% observed" in script and "leg: ${b.winning_leg[i]}" in script
           and "n item ${fmt(b.n_item[i],0)}" in script)
     check("ui/trait chart: the legend is OURS (Plotly's is off) and each row carries n tokens, "
           "observed/total buckets and the last value; the bid row also carries per-leg n",

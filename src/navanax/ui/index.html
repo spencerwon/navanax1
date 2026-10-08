@@ -411,7 +411,7 @@ const L=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{c
         hoverformat:'%b %d, %H:%M:%S '+zone()},
  yaxis:{gridcolor:C.grid,zeroline:false,linecolor:C.axis,tickfont:{color:C.tick},fixedrange:true},
  legend:{orientation:'h',y:1.1,x:0,font:{color:C.ink}},hovermode:'x unified',
- hoverlabel:{bgcolor:C.hoverBg,bordercolor:C.hoverBd,font:{color:C.ink,size:12.5,family:'ui-monospace,SF Mono,Menlo,monospace'},namelength:-1,align:'left'}});
+ hoverlabel:{bgcolor:C.hoverBg,bordercolor:C.hoverBd,font:{color:C.ink,size:13.5,family:'ui-monospace,SF Mono,Menlo,monospace'},namelength:-1,align:'left'}});
 const CFG={displayModeBar:false,displaylogo:false,responsive:true,scrollZoom:false,doubleClick:false};
 let gaps=[];
 // BUG-20260914-092. Gap shading used to draw EVERY gap in the register, so a
@@ -448,12 +448,17 @@ function bookBasis(s){const b=s.basis||{},out=[];
  return out.join('\n')}
 /* Per-point hover extras: coverage % and n where the API supplies them, appended to
    the value. The header carries the bucket time in the display timezone (xaxis.hoverformat). */
+// The hover line after the value. Operator, 2026-09-14: hover boxes must be
+// legible. So: the count of orders first ("784 orders"), coverage only when it
+// is NOT complete (100% is the normal case and says nothing), and the p10–p90
+// band only when it is a band -- in the same money format as the value, not a
+// 4-decimal raw number next to a 2-decimal price.
 const meta=s=>(s.t||[]).map((_,i)=>{const bits=[];
- if(s.coverage&&s.coverage[i]!=null)bits.push(`cov ${(100*s.coverage[i]).toFixed(0)}%`);
- if(s.n&&s.n[i]!=null)bits.push(`n=${fmt(s.n[i],0)}`);
- else if(s.n_ask&&s.n_ask[i]!=null)bits.push(`n ask ${fmt(s.n_ask[i],0)} / bid ${fmt(s.n_bid?s.n_bid[i]:null,0)}`);
- if(s.p10&&s.p10[i]!=null)bits.push(`p10–p90 ${fmt(s.p10[i],4)}–${fmt(s.p90[i],4)}`);
- return bits.length?'  ('+bits.join(' · ')+')':''});
+ if(s.n&&s.n[i]!=null)bits.push(`${fmt(s.n[i],0)} orders`);
+ else if(s.n_ask&&s.n_ask[i]!=null)bits.push(`${fmt(s.n_ask[i],0)} asks / ${fmt(s.n_bid?s.n_bid[i]:null,0)} bids`);
+ if(s.coverage&&s.coverage[i]!=null&&s.coverage[i]<0.995)bits.push(`${(100*s.coverage[i]).toFixed(0)}% of the interval observed`);
+ if(s.p10&&s.p10[i]!=null&&s.p90&&s.p90[i]!=null&&s.p90[i]-s.p10[i]>1e-9)bits.push(`p10–p90 ${money(s.p10[i])}–${money(s.p90[i])}`);
+ return bits.length?'  ·  '+bits.join(' · '):''});
 const yTitle=()=>S.transform==='ABS'?(S.denom==='USD'?'USD':'ETH'):S.transform==='PCT'?'% change vs baseline':S.transform==='LOG'?'log return vs baseline':S.transform==='DIFF'?'difference vs baseline':'bps vs baseline';
 const scale=v=>S.transform==='PCT'?v.map(x=>x==null?null:x*100):v;
 const yfmt=()=>S.transform!=='ABS'?{tickformat:',.2f'}:S.denom==='USD'?{tickprefix:'$',tickformat:',.2f'}:{ticksuffix:' Ξ',tickformat:',.3f'};
@@ -581,7 +586,7 @@ const thov=()=>S.denom==='USD'?'$%{y:,.2f}':'%{y:,.4f} Ξ';
 // number came from. A line whose population changes between buckets and does not say so
 // is the leg-mixing quant §1 metric 1 forbids.
 function hoverBits(len,parts){const out=[];for(let i=0;i<len;i++){const b=parts.map(f=>f(i)).filter(Boolean);out.push(b.length?'  ('+b.join(' · ')+')':'')}return out}
-const covBit=cov=>i=>(cov&&cov[i]!=null)?`cov ${(100*cov[i]).toFixed(0)}%`:null;
+const covBit=cov=>i=>(cov&&cov[i]!=null&&cov[i]<0.995)?`${(100*cov[i]).toFixed(0)}% observed`:null;
 const nBit=n=>i=>(n&&n[i]!=null)?`n=${fmt(n[i],0)}`:null;
 function swatch(color,width,dash){const h=Math.max(2,Math.round(width));
  return dash==='dot'
@@ -717,9 +722,12 @@ async function mix(){if(!window.Plotly)return;const p=base();const m=await J('/a
 // The first order per token is its best (the API's sort), the rest are counted.
 const perToken=rows=>{const m=new Map();for(const r of rows){const k=r.token_id==null?'collection:'+r.order_hash:r.token_id;const c=m.get(k);if(c)c.orders++;else m.set(k,{...r,orders:1})}return [...m.values()]};
 async function book(){const p=base();const b=await J('/api/book?'+qs({collection:p.collection,traits:p.traits,limit:25}));const d=S.denom==='USD'?'price_usd':'price_eth';
- const row=(r,c)=>`<tr><td class="${c}">${r.token_id?'#'+esc(r.token_id):'collection'}${r.orders>1?` <span class="badge" title="${r.orders} standing orders on this token; best shown">×${r.orders}</span>`:''}</td><td class="num ${c}">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td>${age(r.valid_at)}</td></tr>`;
- const sec=(t,rows,c,n)=>{const shown=perToken(rows).slice(0,7);return `<h2 style="margin-top:8px">${t}<em>${n!=null?n:rows.length}</em></h2>`+(shown.length?`<table><tr><th>item</th><th class="num">${S.denom}</th><th>maker</th><th>placed</th></tr>${shown.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`)};
- $('#book').innerHTML=sec('asks',b.asks,'ask',b.depth&&b.depth.asks)+sec('collection offers',b.collection_offers,'coll',b.depth&&b.depth.collection_offers)+sec('item bids',b.item_bids,'bid',b.depth&&b.depth.item_bids)}
+ // A collection offer bids on every token (its token_id is empty or "0"), so it
+ // is never grouped by token: each standing offer is its own row, labelled so.
+ const isColl=r=>r.event_type==='collection_offer'||r.token_id==null||String(r.token_id)==='0';
+ const row=(r,c)=>`<tr><td class="${c}">${isColl(r)?'collection':'#'+esc(r.token_id)}${r.orders>1?` <span class="badge" title="${r.orders} standing orders on this token; best shown">×${r.orders}</span>`:''}</td><td class="num ${c}">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td>${age(r.valid_at)}</td></tr>`;
+ const sec=(t,rows,c,n,group)=>{const shown=(group?perToken(rows):rows).slice(0,7);return `<h2 style="margin-top:8px">${t}<em>${n!=null?n:rows.length}</em></h2>`+(shown.length?`<table><tr><th>item</th><th class="num">${S.denom}</th><th>maker</th><th>placed</th></tr>${shown.map(r=>row(r,c)).join('')}</table>`:`<div class="empty">none standing</div>`)};
+ $('#book').innerHTML=sec('asks',b.asks,'ask',b.depth&&b.depth.asks,true)+sec('collection offers',b.collection_offers,'coll',b.depth&&b.depth.collection_offers,false)+sec('item bids',b.item_bids,'bid',b.depth&&b.depth.item_bids,true)}
 async function tape(){const p=base();const t=await J('/api/tape?'+qs({collection:p.collection,traits:p.traits,limit:25}));const d=S.denom==='USD'?'price_usd':'price_eth';
  $('#tape').innerHTML=t.length?`<table><tr><th>when</th><th>item</th><th class="num">${S.denom}</th><th>seller</th><th>buyer</th></tr>${t.map(r=>`<tr><td>${clock(r.valid_at)}</td><td>#${esc(r.token_id||'?')}</td><td class="num">${money(r[d])}</td><td class="mono">${esc(short(r.maker))}</td><td class="mono">${esc(short(r.taker))}</td></tr>`).join('')}</table>`:`<div class="empty">no sales in the store yet — a thin market can go hours between them</div>`}
 async function makers(){const p=base();const m=await J('/api/makers?'+qs({collection:p.collection,range:p.range}));const T=m.total_events_with_maker||1;
