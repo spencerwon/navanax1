@@ -96,6 +96,16 @@ def _iso_utc(ts: float | None) -> str | None:
     return None if ts is None else datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
 
 
+#: The wallets list can be ranked by any of its count columns; the value is the
+#: SQL alias on the events path. A key not here is ignored, never interpolated.
+WALLET_SORTS = {"events": "n", "bids": "bids", "cancels": "cancels", "listings": "listings",
+                "sales_as_maker": "sold", "collection_offers": "coll_offers", "trait_offers": "trait_offers"}
+
+#: The maker_hour rollup answers only while it is within this many events rows
+#: of the head of `events` (BUG-20260915-096); while it is being built over an
+#: existing store, panels read `events` exactly as before.
+ROLLUP_MAX_LAG = 200_000
+
 #: The bucket aggregations SQLite can do for us (BUG-20260914-089). MEDIAN is
 #: not among them: SQLite has no median and the Python path keeps the values.
 _SQL_AGG = {"MAX": "MAX", "MIN": "MIN", "SUM": "SUM", "COUNT": "COUNT"}
@@ -1076,16 +1086,69 @@ def cluster_bootstrap(obs_by_cluster: dict[str, list[tuple[float, bool, str | No
     k = len(keys)
     s_draws: list[list[float]] = [[] for _ in grid]
     c_draws: dict[str, list[list[float]]] = {c: [[] for _ in grid] for c in causes}
+    # BUG-20260915-097. Each replicate used to pool the drawn clusters' orders
+    # into one list and call km_curve on it: a sort and three dicts per
+    # replicate, 96 % of a 14 s Flow request. A replicate is the same orders
+    # with a MULTIPLICITY per cluster, so the counts at each distinct duration
+    # are sums of (multiplicity x per-cluster counts) -- integers, identical to
+    # what km_curve counts on the pooled list -- and S and every CIF follow
+    # from them with the very same arithmetic. The rng draws are unchanged, so
+    # the band is bit-for-bit the band it was (asserted in the tests).
+    durs = sorted({d for obs in obs_by_cluster.values() for d, _e, _c in obs})
+    pos = {d: i for i, d in enumerate(durs)}
+    nd = len(durs)
+    cidx = {c: j for j, c in enumerate(causes)}
+    agg: list[list[tuple[int, int, int, int]]] = []      # per cluster: (time idx, all, ended, cause idx or -1)
+    for key in keys:
+        acc: dict[tuple[int, int], list[int]] = {}
+        for d, e, c in obs_by_cluster[key]:
+            slot = acc.setdefault((pos[d], cidx.get(c, -1) if e else -1), [0, 0])
+            slot[0] += 1
+            if e:
+                slot[1] += 1
+        agg.append([(ti, a, en, cj) for (ti, cj), (a, en) in acc.items()])
+    ncause = len(causes)
     for _ in range(b):
-        sample: list[tuple[float, bool, str | None]] = []
+        mult: dict[int, int] = {}
         for _ in range(k):
-            sample.extend(obs_by_cluster[keys[rng.randrange(k)]])
-        cur = km_curve(sample, causes)
+            j = rng.randrange(k)
+            mult[j] = mult.get(j, 0) + 1
+        all_w = [0] * nd
+        end_w = [0] * nd
+        cause_w = [[0] * nd for _ in range(ncause)]
+        for j, mj in mult.items():
+            for ti, a, en, cj in agg[j]:
+                all_w[ti] += a * mj
+                if en:
+                    end_w[ti] += en * mj
+                    if cj >= 0:
+                        cause_w[cj][ti] += en * mj
+        at_risk = sum(all_w)
+        s_cur = 1.0
+        run = [0.0] * ncause
+        t_pts: list[float] = [0.0]
+        s_pts: list[float] = [1.0]
+        c_pts: list[list[float]] = [[0.0] for _ in range(ncause)]
+        for ti in range(nd):
+            d_i = end_w[ti]
+            if d_i:
+                n_i = at_risk
+                s_prev = s_cur
+                for cj in range(ncause):
+                    dc = cause_w[cj][ti]
+                    if dc:
+                        run[cj] += s_prev * dc / n_i
+                s_cur = s_prev * (1.0 - d_i / n_i)
+                t_pts.append(float(durs[ti]))
+                s_pts.append(s_cur)
+                for cj in range(ncause):
+                    c_pts[cj].append(run[cj])
+            at_risk -= all_w[ti]
         for gi, g in enumerate(grid):
-            i = bisect.bisect_right(cur["t"], g) - 1
-            s_draws[gi].append(cur["s"][i] if i >= 0 else 1.0)
-            for c in causes:
-                c_draws[c][gi].append(cur["cif"][c][i] if i >= 0 else 0.0)
+            i = bisect.bisect_right(t_pts, g) - 1
+            s_draws[gi].append(s_pts[i] if i >= 0 else 1.0)
+            for cj, c in enumerate(causes):
+                c_draws[c][gi].append(c_pts[cj][i] if i >= 0 else 0.0)
     def band(draws: list[list[float]]) -> tuple[list[float | None], list[float | None]]:
         lo: list[float | None] = []
         hi: list[float | None] = []
@@ -2165,7 +2228,89 @@ class MetricEngine:
         return [dict(zip(("valid_at", "token_id", "price_eth", "price_usd", "maker", "taker", "tx_hash"), r, strict=True))
                 for r in cur]
 
+    # -- BUG-20260915-096: maker/type counts from the hourly rollup ------------
+    def _maker_type_agg(self, collection: str | None, start: float, end: float
+                        ) -> dict[tuple[str, str], list[float]] | None:
+        """{(maker or '', event_type): [n, min_ts, max_ts]} over [start, end).
+
+        Whole hours come from `maker_hour`; the partial hours at either edge,
+        and any rows the fold appended after the rollup's watermark, come from
+        `events`. The result equals a GROUP BY over `events` for the window,
+        row for row (asserted in the tests). Returns None -- callers then
+        query `events` as before -- when the rollup cannot answer exactly: no
+        collection given, two connections (dedup applies per row), the tables
+        are absent, or the rollup is still being built (lag > ROLLUP_MAX_LAG).
+        """
+        if not collection or self.multi_connection():
+            return None
+        try:
+            row = self.conn.execute("SELECT rowid FROM rollup_state WHERE name='maker_hour'").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        wm = row[0]
+        top = self.conn.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0
+        if top - wm > ROLLUP_MAX_LAG:
+            return None
+        out: dict[tuple[str, str], list[float]] = {}
+
+        def add(mk: str, et: str, n: int, lo: float | None, hi: float | None) -> None:
+            cur = out.get((mk, et))
+            if cur is None:
+                out[(mk, et)] = [n, lo, hi]
+            else:
+                cur[0] += n
+                if lo is not None and (cur[1] is None or lo < cur[1]):
+                    cur[1] = lo
+                if hi is not None and (cur[2] is None or hi > cur[2]):
+                    cur[2] = hi
+
+        def from_events(a: float, b: float, extra: str = "", args: tuple = ()) -> None:
+            if b <= a:
+                return
+            for mk, et, n, lo, hi in self.conn.execute(
+                    "SELECT COALESCE(e.maker, ''), e.event_type, COUNT(*), MIN(e.valid_ts), MAX(e.valid_ts) "
+                    f"FROM events e{' NOT INDEXED' if extra else ''} WHERE e.collection=? AND e.valid_ts>=? "
+                    f"AND e.valid_ts<? AND e.event_type IS NOT NULL{extra} GROUP BY 1, 2",
+                    (collection, a, b, *args)):
+                add(mk, et, n, lo, hi)
+
+        h0 = math.ceil(start / 3600)
+        h1 = math.floor(end / 3600)
+        if h1 <= h0:
+            from_events(start, end)
+            return out
+        from_events(start, h0 * 3600.0)
+        from_events(h1 * 3600.0, end)
+        for mk, et, n, lo, hi in self.conn.execute(
+                "SELECT maker, event_type, SUM(n), MIN(min_ts), MAX(max_ts) FROM maker_hour "
+                "WHERE collection=? AND hour>=? AND hour<? GROUP BY 1, 2", (collection, h0, h1)):
+            add(mk, et, n, lo, hi)
+        # rows appended after the watermark, inside the whole-hour span
+        from_events(h0 * 3600.0, h1 * 3600.0, " AND e.rowid > ?", (wm,))
+        return out
+
     def makers(self, collection: str, start: float, end: float, limit: int = 10) -> dict[str, Any]:
+        agg = self._maker_type_agg(collection, start, end)
+        if agg is not None:
+            per: dict[str, dict[str, int]] = {}
+            for (mk, et), (n, _, _) in agg.items():
+                if mk == "":
+                    continue
+                d = per.setdefault(mk, {"n": 0, "bids": 0, "cancels": 0, "listings": 0})
+                d["n"] += n
+                if et == "item_received_bid":
+                    d["bids"] += n
+                elif et == "item_cancelled":
+                    d["cancels"] += n
+                elif et == "item_listed":
+                    d["listings"] += n
+            ranked = sorted(per.items(), key=lambda kv: (-kv[1]["n"], kv[0]))[:limit]
+            return {"total_events_with_maker": sum(d["n"] for d in per.values()),
+                    "top": [{"maker": mk, "events": d["n"], "bids": d["bids"], "cancels": d["cancels"],
+                             "listings": d["listings"]} for mk, d in ranked],
+                    "basis": {**self.dedup_basis(collection, start, end), "source": "maker_hour rollup + edge hours"}}
         dq = self.dedup_where("e")
         total = self.conn.execute(
             "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<? "
@@ -2950,6 +3095,12 @@ class MetricEngine:
         # reads for one day of argonauts, 38-44 s live. ix_events_coll_type
         # covers the whole question (collection, event_type, valid_ts), so the
         # count is an index walk that never touches the table.
+        agg = self._maker_type_agg(collection, start, end)
+        if agg is not None:
+            per: dict[str, int] = {}
+            for (_, et), (n, _, _) in agg.items():
+                per[et] = per.get(et, 0) + n
+            return [{"event_type": t, "n": n} for t, n in sorted(per.items(), key=lambda kv: (-kv[1], kv[0]))]
         if collection:
             where, hint = "e.collection=? AND e.valid_ts>=? AND e.valid_ts<?", " INDEXED BY ix_events_coll_type"
             args: list[Any] = [collection, start, end]
@@ -3321,7 +3472,7 @@ class MetricEngine:
 
     # -- PR-9: the Wallets view (design §8.2) ---------------------------------
     def wallets(self, collection: str, start: float, end: float, *,
-                limit: int = 50, min_events: int = 0) -> dict[str, Any]:
+                limit: int = 50, min_events: int = 0, sort: str = "events") -> dict[str, Any]:
         """Addresses ranked by event count in the window, each share with its count.
 
         Landing-zone-derived only: this is `events`, grouped. Holdings, funding and
@@ -3329,6 +3480,41 @@ class MetricEngine:
         `wallet()`'s `chain` block, which says "not collected yet" rather than
         rendering a zero.
         """
+        agg = self._maker_type_agg(collection, start, end)
+        if agg is not None:
+            cols = {"item_received_bid": "bids", "item_cancelled": "cancels", "item_listed": "listings",
+                    "item_sold": "sales_as_maker", "collection_offer": "collection_offers",
+                    "trait_offer": "trait_offers"}
+            per: dict[str, dict[str, Any]] = {}
+            total = 0
+            for (mk, et), (n, lo, hi) in agg.items():
+                total += n
+                if mk == "":
+                    continue
+                d = per.setdefault(mk, {"events": 0, "first": None, "last": None,
+                                        **{v: 0 for v in cols.values()}})
+                d["events"] += n
+                if et in cols:
+                    d[cols[et]] += n
+                if lo is not None and (d["first"] is None or lo < d["first"]):
+                    d["first"] = lo
+                if hi is not None and (d["last"] is None or hi > d["last"]):
+                    d["last"] = hi
+            with_maker = sum(d["events"] for d in per.values())
+            skey = sort if sort in WALLET_SORTS else "events"
+            ranked = sorted(((mk, d) for mk, d in per.items() if d["events"] >= max(0, int(min_events))),
+                            key=lambda kv: (-kv[1][skey], -kv[1]["events"], kv[0]))[:max(1, min(500, int(limit)))]
+            rows = [{"address": mk, "events": d["events"], "events_share": share(d["events"], with_maker),
+                     **{v: d[v] for v in cols.values()},
+                     "first_at": _iso_utc(d["first"]), "last_at": _iso_utc(d["last"])} for mk, d in ranked]
+            return {"rows": rows, "distinct_addresses": len(per),
+                    "total_events": total, "total_events_with_maker": with_maker,
+                    "basis": {**self.dedup_basis(collection, start, end),
+                              "source": "events (landing-zone derived) via the maker_hour rollup; "
+                                        "no REST, no chain read",
+                              "share_denominator": "events in this window that carry a maker address",
+                              "window": {"start_ts": start, "end_ts": end}, "wash_filter": "raw",
+                              "timezone": self.tz}}
         dq = self.dedup_where("e")
         total = self.conn.execute(
             "SELECT COUNT(*) FROM events e WHERE e.collection=? AND e.valid_ts>=? AND e.valid_ts<?"
@@ -3353,7 +3539,7 @@ class MetricEngine:
                       MIN(e.valid_ts), MAX(e.valid_ts)
                FROM events e INDEXED BY ix_events_coll_maker_type
                WHERE e.collection=? AND e.maker IS NOT NULL AND e.valid_ts>=? AND e.valid_ts<?""" + dq + """
-               GROUP BY e.maker HAVING n >= ? ORDER BY n DESC, e.maker ASC LIMIT ?""",
+               GROUP BY e.maker HAVING n >= ? ORDER BY """ + WALLET_SORTS.get(sort, "n") + """ DESC, n DESC, e.maker ASC LIMIT ?""",
             (collection, start, end, max(0, int(min_events)), max(1, min(500, int(limit)))))
         rows = []
         for (addr, n, bids, cancels, listings, sold, co, to, first, last) in cur:

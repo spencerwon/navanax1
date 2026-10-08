@@ -56,16 +56,18 @@ log = logging.getLogger("navanax.normalize")
 # length of one batch insert; a job that only writes `tokens`/`traits` (the
 # traits importer) must wait that out rather than fail spuriously.
 BUSY_TIMEOUT_MS = 30_000
-#: ANALYZE again once `events` has grown by this fraction since the last one
-#: (BUG-20260914-088); below ANALYZE_MIN_ROWS every fold that adds rows
-#: analyzes, because a tiny store's plans change with every file.
-ANALYZE_GROWTH = 0.10
+#: Below ANALYZE_MIN_ROWS every fold that adds rows analyzes, because a tiny
+#: store's plans change with every file; the store is analyzed once more when it
+#: crosses it, and never automatically after that (BUG-20260914-088, -095).
 ANALYZE_MIN_ROWS = 100_000
 #: `PRAGMA analysis_limit`: rows sampled per index. SQLite's own guidance is
 #: 100-1000; the planner needs the shape of the data, not a census of it.
 ANALYZE_SAMPLE_ROWS = 1_000
 #: A fold slower than this is logged with its phase breakdown.
 SLOW_FOLD_SECONDS = 5.0
+#: Events rows folded into `maker_hour` per fold at most (BUG-20260915-096):
+#: the first build over an existing store takes a few folds, not one long one.
+ROLLUP_CHUNK_ROWS = 500_000
 
 # errno values that mean "THIS FILESYSTEM does not implement flock", as opposed
 # to "another process holds the lock". Defined once and shared with
@@ -286,6 +288,27 @@ CREATE INDEX IF NOT EXISTS ix_events_dedupkey   ON events(dedup_key);
 CREATE INDEX IF NOT EXISTS ix_events_conn       ON events(conn);
 
 -- One row per landing file: how far we have read it. Re-runnable.
+-- BUG-20260915-096: per-hour, per-maker, per-event-type counts, maintained by
+-- the fold from the rows it appends. The makers, wallets and event-mix panels
+-- read whole hours from here and only the partial hours at the window's edges
+-- from `events`, so a 30-day window costs what a 2-hour one does. Derived like
+-- every table in this store: rebuildable from `events`, never edited by hand.
+-- `maker` is '' for a row with no maker (a PK column cannot be NULL usefully).
+CREATE TABLE IF NOT EXISTS maker_hour (
+    collection TEXT NOT NULL,
+    hour       INTEGER NOT NULL,      -- floor(valid_ts / 3600), UTC
+    maker      TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    n          INTEGER NOT NULL,
+    min_ts     REAL,
+    max_ts     REAL,
+    PRIMARY KEY (collection, hour, maker, event_type)
+) WITHOUT ROWID;
+-- How far into `events` (by rowid) the rollup has folded.
+CREATE TABLE IF NOT EXISTS rollup_state (
+    name   TEXT PRIMARY KEY,
+    rowid  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS watermarks (
     file        TEXT PRIMARY KEY,
     last_seq    INTEGER NOT NULL,
@@ -1267,9 +1290,9 @@ class Normalizer:
         # BUG-20260914-088: ANALYZE ran after EVERY fold that added a row. It
         # reads every index end to end -- minutes on the Operator's 15 GB store,
         # every 5 s -- so the fold that adds 17,000 rows took 354 s and the page
-        # was always six minutes behind the stream. Now it runs when `events`
-        # has grown by ANALYZE_GROWTH since the last one (or has no stats at
-        # all), under an analysis_limit so it samples rather than scans.
+        # was always six minutes behind the stream. Now it runs on a small store,
+        # once when the store crosses ANALYZE_MIN_ROWS, and on a store with no
+        # statistics at all -- never on its own after that (BUG-095).
         self._analyzed_rows: int | None = None
         #: Per landing file key: (byte offset just past the last complete frame
         #: folded, the watermark seq it was folded to) -- BUG-20260914-093. In
@@ -1593,6 +1616,8 @@ class Normalizer:
             # arrival (a cancel folded before its bid) is corrected, not patched.
             stats["lives_refreshed"] = refresh_order_lives(self.conn, touched, stats=stats)
         t_lives = time.monotonic()
+        stats["rollup_rows"] = self.advance_rollup()
+        t_rollup = time.monotonic()
         if stats["rows_added"]:
             stats["analyzed"] = self._maybe_analyze()
         t_end = time.monotonic()
@@ -1600,11 +1625,12 @@ class Normalizer:
         # was found by took_ms alone and then guessed at).
         stats["seconds"] = {"read_and_insert": round(t_read - t_start, 2),
                             "lives": round(t_lives - t_read, 2),
-                            "analyze": round(t_end - t_lives, 2), "total": round(t_end - t_start, 2)}
+                            "rollup": round(t_rollup - t_lives, 2),
+                            "analyze": round(t_end - t_rollup, 2), "total": round(t_end - t_start, 2)}
         if t_end - t_start >= SLOW_FOLD_SECONDS:
             log.warning("slow fold: %.1fs for %d rows from %d files (read+insert %.1fs, lives %.1fs, "
-                        "analyze %.1fs)", t_end - t_start, stats["rows_added"], stats["files_read"],
-                        t_read - t_start, t_lives - t_read, t_end - t_lives)
+                        "rollup %.1fs, analyze %.1fs)", t_end - t_start, stats["rows_added"], stats["files_read"],
+                        t_read - t_start, t_lives - t_read, t_rollup - t_lives, t_end - t_rollup)
         return stats
 
     def _maybe_analyze(self) -> bool:
@@ -1612,9 +1638,8 @@ class Normalizer:
 
         A fresh store with no ANALYZE is where the O(n^2) join plan came from,
         so a store with no `sqlite_stat1` is analyzed at once. After that the
-        statistics only need refreshing when the shape of the data has moved,
-        which "ANALYZE_GROWTH more rows than last time" approximates; a sampled
-        ANALYZE (`analysis_limit`) keeps even that to seconds.
+        statistics only need refreshing while the store is small enough for
+        its shape to move; see the comment in the body (BUG-095).
         """
         n = self.conn.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0
         if self._analyzed_rows is None:
@@ -1624,9 +1649,15 @@ class Normalizer:
                 self._analyzed_rows = n          # opened with statistics: count growth from here
                 return False
             self._analyzed_rows = 0
+        # BUG-20260915-095: the growth trigger ran a "sampled" ANALYZE that took
+        # 929 s on the Operator's 13 M-row store and held the writer for it.
+        # Statistics only have to tell the planner the SHAPE of the data, and a
+        # store of millions of rows does not change shape by growing. So: every
+        # fold while the store is small, once more when it first crosses
+        # ANALYZE_MIN_ROWS, and never again after that on its own.
         small = n < ANALYZE_MIN_ROWS                       # cheap, and plans still move
-        grown = n >= self._analyzed_rows * (1.0 + ANALYZE_GROWTH)
-        if not (small or grown):
+        crossing = self._analyzed_rows < ANALYZE_MIN_ROWS <= n
+        if not (small or crossing):
             return False
         t0 = time.monotonic()
         self.conn.execute(f"PRAGMA analysis_limit={ANALYZE_SAMPLE_ROWS}")
@@ -1635,6 +1666,41 @@ class Normalizer:
         log.info("ANALYZE (sampled, %d rows per index) over %d events in %.1fs",
                  ANALYZE_SAMPLE_ROWS, n, time.monotonic() - t0)
         return True
+
+    def advance_rollup(self, max_rows: int | None = None) -> int:
+        """Fold `events` rows past the rollup's watermark into `maker_hour`.
+
+        `events` is append-only, so its rowids only grow, and "the rows this
+        fold appended" is exactly "rowid > watermark". At most `max_rows`
+        (ROLLUP_CHUNK_ROWS) are taken per call, so the first build over an
+        existing store is spread across folds instead of blocking one; readers
+        fall back to `events` until the rollup has caught up. Returns the number
+        of events rows folded.
+        """
+        cap = ROLLUP_CHUNK_ROWS if max_rows is None else max_rows
+        row = self.conn.execute("SELECT rowid FROM rollup_state WHERE name='maker_hour'").fetchone()
+        done = row[0] if row else 0
+        top = self.conn.execute("SELECT MAX(rowid) FROM events").fetchone()[0] or 0
+        if top <= done:
+            return 0
+        upto = min(top, done + cap)
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO maker_hour (collection, hour, maker, event_type, n, min_ts, max_ts)
+                   SELECT * FROM (
+                     SELECT collection, CAST(valid_ts / 3600 AS INTEGER), COALESCE(maker, ''), event_type,
+                            COUNT(*), MIN(valid_ts), MAX(valid_ts)
+                     FROM events NOT INDEXED
+                     WHERE rowid > ? AND rowid <= ? AND collection IS NOT NULL
+                       AND valid_ts IS NOT NULL AND event_type IS NOT NULL
+                     GROUP BY 1, 2, 3, 4) WHERE true
+                   ON CONFLICT(collection, hour, maker, event_type) DO UPDATE SET
+                     n = n + excluded.n, min_ts = MIN(min_ts, excluded.min_ts),
+                     max_ts = MAX(max_ts, excluded.max_ts)""", (done, upto))
+            self.conn.execute(
+                "INSERT INTO rollup_state (name, rowid) VALUES ('maker_hour', ?) "
+                "ON CONFLICT(name) DO UPDATE SET rowid = excluded.rowid", (upto,))
+        return upto - done
 
     # -- re-folding ----------------------------------------------------------
     def refold_criteria(self) -> dict[str, Any]:
@@ -1706,7 +1772,8 @@ class Normalizer:
         self._require_writer("reset_for_refold")
         counts: dict[str, int] = {}
         with self.conn:
-            for t in ("events", "order_criteria", "order_lives", "unparsed", "watermarks"):
+            for t in ("events", "order_criteria", "order_lives", "unparsed", "watermarks",
+                      "maker_hour", "rollup_state"):
                 counts[t] = self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
                 self.conn.execute(f"DELETE FROM {t}")
         log.warning("reset_for_refold: cleared %s from the analytical store; "

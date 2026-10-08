@@ -1323,6 +1323,25 @@ orders whose expiry has passed scanned all 5.9 million lives to find the
 fourteen thousand standing ones, five times a minute. A partial index over the
 standing lives makes it a seek.
 
+## Round 27 — making it usable, 2026-10-08
+
+**BUG-20260915-095 (S2/P1).** The phase timings caught one fold stalled for
+929 s on `analyze`: the growth trigger's "sampled" ANALYZE was not cheap on a
+13 M-row store. Statistics describe the shape of the data, and a large store
+does not change shape by growing; ANALYZE now runs while the store is small,
+once when it crosses `ANALYZE_MIN_ROWS`, and never on its own after that.
+
+**BUG-20260915-096 (S2/P1).** Makers over 30 days: 398 s. Any count by maker
+over a window is a scan of the window. The fold now keeps an hourly
+per-maker, per-type rollup; makers, wallets and event mix read whole hours
+from it and only the edge hours from `events`, and every answer is asserted
+equal to the events path. Wallets can be ranked by any count column.
+
+**BUG-20260915-097 (S3/P2).** The Flow tab spent 96 % of each request in the
+bootstrap re-pooling the same orders fifty times. Replicates now sum
+per-cluster counts; the band is bit-identical, and an hour's curve went from
+14 s to 2.4 s.
+
 ## Health subsystem — 2026-10-03
 
 The health subsystem (`docs/health/`) shares this ledger; its entries carry
@@ -1655,7 +1674,7 @@ changed, and a test plants both cases on a copy.
 | BUG-20261003-127 | S1 | P1 | The counted row drink_water_1L/05 (minimum urine osmolality) shares its only evidence (Baylis 1986) with U_os… | Open -- the curator's decision (row not changed; ranges are never widened): cite an independent source for the row and drop Baylis 1986 fro… |
 | BUG-20261003-128 | S2 | P1 | The registered "< 6 h" bound of the sodium recovery row has no traceable Crowe 1987 source value, and the row… | Open -- curator (extends BUG-20261003-115): find and quote the source value for 6 h, or record the bound as an assumption with that grade;… |
 
-156 of 170 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
+159 of 173 logged bugs are fixed (the open health entries are Operator or curator decisions, or M1 work, each named in its row above).
 
 ### The lesson
 

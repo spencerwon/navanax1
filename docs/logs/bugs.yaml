@@ -3710,6 +3710,95 @@ bugs:
   monitor_gap: None new -- this is the phase timing doing its job on its first day.
   regression_test:
     - tests/selftest.py::test_expired_standing_lives_are_found_by_index_not_by_scan
+- id: BUG-20260915-095
+  summary: "One fold stalled for 929 s holding the writer: the BUG-088 growth trigger re-ran ANALYZE (sampled, analysis_limit 1000) once events grew 10 %, and on the Operator's 13 M-row store that 'sampled' pass still took over fifteen minutes"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-07T23:50:00-05:00"
+  occurred_at: "2026-10-07T22:21:30-05:00"
+  resolved_at: "2026-10-08T00:30:00-05:00"
+  detected_by: "dashboard.log: 'slow fold: 929.8s for 679 rows from 4 files (read+insert 0.5s, lives 0.2s, analyze 929.0s)' -- the BUG-093 phase timings named the phase"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 1640}
+  requirement: REQ-N-16
+  data_impact: None. Planner statistics only.
+  root_cause: >-
+    The growth trigger assumed a sampled ANALYZE is seconds. It was not, on
+    this store; and statistics do not need refreshing as a large store grows,
+    because its shape does not change.
+  fix: >-
+    ANALYZE on every fold while the store is small (< ANALYZE_MIN_ROWS), once
+    more when it crosses that size, and on a store with no statistics; never
+    automatically after that. ANALYZE_GROWTH removed.
+  monitor_gap: None new.
+  regression_test:
+    - tests/selftest.py::test_analyze_runs_on_growth_not_on_every_fold
+
+- id: BUG-20260915-096
+  summary: "The makers panel over 30 days took 398 s (and 107 s over 1 hour while competing for the disk); wallets and event mix had the same shape: every request grouped every events row in the window by maker"
+  severity: S2
+  priority: P1
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-07T23:55:00-05:00"
+  occurred_at: "2026-10-07T22:10:15-05:00"
+  resolved_at: "2026-10-08T00:45:00-05:00"
+  detected_by: "request log: 'slow request: /api/makers?collection=argonauts&range=30d took 398.1s'"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/normalize.py, line: 289}
+  - {file: src/navanax/metrics.py, line: 2168}
+  requirement: REQ-N-16
+  data_impact: None. A derived rollup; every answer is asserted equal to the events path.
+  root_cause: >-
+    A count by maker over a window is a scan of the window, and 30 days of
+    argonauts is ~80 M events. No index makes a GROUP BY over 80 M rows fast.
+  fix: >-
+    The fold maintains maker_hour (collection, hour, maker, event_type, n,
+    min_ts, max_ts) from the rows it appends (rowid past a watermark in
+    rollup_state; 500 k rows per fold while it is first built). makers,
+    wallets and event_mix read whole hours from it and only the partial
+    edge hours, plus rows appended after the watermark, from events; while
+    the rollup is still being built, or on a two-connection store, they read
+    events exactly as before. Wallets can now be ranked by any of its count
+    columns (server-side, whitelisted).
+  monitor_gap: None new.
+  regression_test:
+    - tests/selftest.py::test_maker_hour_rollup_answers_exactly_what_events_would
+
+- id: BUG-20260915-097
+  summary: "The Flow tab's survival curve took 8.5 s over one hour live (14.4 s on the VM), 96 % of it in the cluster bootstrap re-sorting and re-counting a pooled copy of every order for each of its 50 replicates"
+  severity: S3
+  priority: P2
+  error_class: PRS
+  status: fixed
+  logged_at: "2026-10-08T00:10:00-05:00"
+  occurred_at: "2026-09-10T00:00:00-05:00"
+  resolved_at: "2026-10-08T00:50:00-05:00"
+  detected_by: "cProfile on the snapshot: cluster_bootstrap 13.8 of 14.4 s, km_curve x51"
+  detection_channel: production
+  branch: tester
+  locations:
+  - {file: src/navanax/metrics.py, line: 1062}
+  requirement: REQ-F-12
+  data_impact: None. The band is bit-identical (same rng draws, same integer counts, same arithmetic) -- asserted.
+  root_cause: >-
+    A bootstrap replicate is the same orders with a multiplicity per cluster;
+    pooling them into a fresh list and refitting KM per replicate repeats the
+    sort and the counting B times.
+  fix: >-
+    Per-cluster counts at each distinct duration are aggregated once; a
+    replicate sums multiplicity x counts and walks the durations once.
+    1 h: 14.4 s -> 2.4 s; 6 h: ~15 s on the VM.
+  monitor_gap: None new.
+  regression_test:
+    - tests/selftest.py::test_cluster_bootstrap_counts_are_bit_identical_to_pooling
+
 
 # ---------------------------------------------------------------------------
 # Health subsystem (docs/health/05_BUG_TAXONOMY.md; area: health). Classes MDL PRM EVD
