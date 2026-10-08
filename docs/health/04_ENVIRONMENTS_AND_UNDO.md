@@ -156,8 +156,8 @@ before publication (WF-H-06), and why a wrong number on a surface is S0a.
 
 | Command | What it does | Spends anything? |
 |---|---|---|
-| `python3 tests/health_selftest.py` | Engine self-test with the stdlib only | No |
-| `python3 tests/health_selftest.py --no-skips` | Strict: a skipped test is a failure | No |
+| `python3 tests/health_selftest.py` | Engine self-test. The runner and the engine need only the standard library; two tests declare what they need (`@needs("yaml")` for the config mirror, `@needs_binary("node")` for the golden check) and are counted skips, by name, when it is absent | No |
+| `python3 tests/health_selftest.py --no-skips` | Strict: a skipped test is a failure, so PyYAML (`pip install -e ".[dev]"`) and a Node binary ≥ 20 must be present; this is the mode `tools/gates.py` and the CI step after install use | No |
 | `python3 tests/health_kb_selftest.py --no-skips` | Knowledge-base rules, each with a planted violation | No |
 | `python3 tests/health_errors_selftest.py --no-skips` | The error hierarchy: severities, halt flags, `SurfaceIntegrityError` never swallowed | No |
 | `PYTHONPATH=src python3 -m health.cli status` | Versions, counts, grade share, expectation statuses (about 3 s; `--fast` skips them; skipped while `engine-v1` is disabled), every module's flag, the disclaimer and the validation status last; exits 1 on any contract error | No |
@@ -169,6 +169,12 @@ before publication (WF-H-06), and why a wrong number on a surface is S0a.
 
 Nothing in the health subsystem needs a credential, a network connection, or a
 background job.
+
+Interpreters the three health suites have run green on (2026-10-03): Python 3.11.15,
+3.12.3 and 3.13.14 (Linux, `--no-skips`, PyYAML 6.0.1, Node 22.22.0); Python 3.14.8
+(macOS arm64, python.org build, `--no-skips --robust`: 34 test functions, 404 passed,
+0 skipped, 25 s, PyYAML 6.0.3, Node 22.23.3, `tools/gates.py` ALL GATES GREEN).
+`requires-python` is 3.10+; CI runs 3.12.
 
 ## 8. Configuration
 
